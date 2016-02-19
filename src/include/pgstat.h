@@ -413,14 +413,30 @@ typedef struct PgStat_MsgBgWriter
 
 	PgStat_Counter m_timed_checkpoints;
 	PgStat_Counter m_requested_checkpoints;
-	PgStat_Counter m_buf_written_checkpoints;
-	PgStat_Counter m_buf_written_clean;
-	PgStat_Counter m_maxwritten_clean;
-	PgStat_Counter m_buf_written_backend;
-	PgStat_Counter m_buf_fsync_backend;
-	PgStat_Counter m_buf_alloc;
 	PgStat_Counter m_checkpoint_write_time; /* times in milliseconds */
 	PgStat_Counter m_checkpoint_sync_time;
+
+	PgStat_Counter m_buf_written_checkpoints;
+	PgStat_Counter m_buf_written_bgwriter;
+	PgStat_Counter m_buf_written_backend;
+	PgStat_Counter m_buf_written_ring;
+
+	PgStat_Counter m_buf_fsync_checkpointer;
+	PgStat_Counter m_buf_fsync_bgwriter;
+	PgStat_Counter m_buf_fsync_backend;
+
+	PgStat_Counter m_buf_clean_bgwriter;
+
+	PgStat_Counter m_buf_alloc_preclean;
+	PgStat_Counter m_buf_alloc_free;
+	PgStat_Counter m_buf_alloc_sweep;
+	PgStat_Counter m_buf_alloc_ring;
+
+	PgStat_Counter m_buf_ticks_bgwriter;
+	PgStat_Counter m_buf_ticks_backend;
+
+	PgStat_Counter m_maxwritten_clean;
+
 } PgStat_MsgBgWriter;
 
 /* ----------
@@ -699,16 +715,33 @@ typedef struct PgStat_ArchiverStats
 typedef struct PgStat_GlobalStats
 {
 	TimestampTz stats_timestamp;	/* time of stats file update */
+
 	PgStat_Counter timed_checkpoints;
 	PgStat_Counter requested_checkpoints;
 	PgStat_Counter checkpoint_write_time;	/* times in milliseconds */
 	PgStat_Counter checkpoint_sync_time;
+
 	PgStat_Counter buf_written_checkpoints;
-	PgStat_Counter buf_written_clean;
-	PgStat_Counter maxwritten_clean;
+	PgStat_Counter buf_written_bgwriter;
 	PgStat_Counter buf_written_backend;
+	PgStat_Counter buf_written_ring;
+
+	PgStat_Counter buf_fsync_checkpointer;
+	PgStat_Counter buf_fsync_bgwriter;
 	PgStat_Counter buf_fsync_backend;
-	PgStat_Counter buf_alloc;
+
+	PgStat_Counter buf_clean_bgwriter;
+
+	PgStat_Counter buf_alloc_preclean;
+	PgStat_Counter buf_alloc_free;
+	PgStat_Counter buf_alloc_sweep;
+	PgStat_Counter buf_alloc_ring;
+
+	PgStat_Counter buf_ticks_bgwriter;
+	PgStat_Counter buf_ticks_backend;
+
+	PgStat_Counter maxwritten_clean;
+
 	TimestampTz stat_reset_timestamp;
 } PgStat_GlobalStats;
 

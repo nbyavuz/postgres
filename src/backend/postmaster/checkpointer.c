@@ -102,7 +102,7 @@
  * The requests array holds fsync requests sent by backends and not yet
  * absorbed by the checkpointer.
  *
- * Unlike the checkpoint fields, num_backend_writes, num_backend_fsync, and
+ * Unlike the checkpoint fields, num_written_*, num_fsync_*, and
  * the requests fields are protected by CheckpointerCommLock.
  *----------
  */
@@ -127,8 +127,11 @@ typedef struct
 	ConditionVariable start_cv; /* signaled when ckpt_started advances */
 	ConditionVariable done_cv;	/* signaled when ckpt_done advances */
 
-	uint32		num_backend_writes; /* counts user backend buffer writes */
-	uint32		num_backend_fsync;	/* counts user backend fsync calls */
+	uint32		num_written_backend; /* counts user backend buffer writes */
+	uint32		num_written_ring; /* counts ring buffer writes */
+
+	uint32		num_fsync_bgwriter;	/* counts bgwriter fsync calls */
+	uint32		num_fsync_backend;	/* counts user backend fsync calls */
 
 	int			num_requests;	/* current # of requests */
 	int			max_requests;	/* allocated array size */
@@ -1119,7 +1122,7 @@ ForwardSyncRequest(const FileTag *ftag, SyncRequestType type)
 
 	/* Count all backend writes regardless of if they fit in the queue */
 	if (!AmBackgroundWriterProcess())
-		CheckpointerShmem->num_backend_writes++;
+		CheckpointerShmem->num_written_backend++;
 
 	/*
 	 * If the checkpointer isn't running or the request queue is full, the
@@ -1134,8 +1137,10 @@ ForwardSyncRequest(const FileTag *ftag, SyncRequestType type)
 		 * Count the subset of writes where backends have to do their own
 		 * fsync
 		 */
-		if (!AmBackgroundWriterProcess())
-			CheckpointerShmem->num_backend_fsync++;
+		if (AmBackgroundWriterProcess())
+			CheckpointerShmem->num_fsync_backend++;
+		else
+			CheckpointerShmem->num_fsync_bgwriter++;
 		LWLockRelease(CheckpointerCommLock);
 		return false;
 	}
@@ -1295,11 +1300,15 @@ AbsorbSyncRequests(void)
 	LWLockAcquire(CheckpointerCommLock, LW_EXCLUSIVE);
 
 	/* Transfer stats counts into pending pgstats message */
-	BgWriterStats.m_buf_written_backend += CheckpointerShmem->num_backend_writes;
-	BgWriterStats.m_buf_fsync_backend += CheckpointerShmem->num_backend_fsync;
+	BgWriterStats.m_buf_written_backend += CheckpointerShmem->num_written_backend;
+	BgWriterStats.m_buf_written_ring += CheckpointerShmem->num_written_ring;
+	BgWriterStats.m_buf_fsync_backend += CheckpointerShmem->num_fsync_backend;
+	BgWriterStats.m_buf_fsync_bgwriter += CheckpointerShmem->num_fsync_bgwriter;
 
-	CheckpointerShmem->num_backend_writes = 0;
-	CheckpointerShmem->num_backend_fsync = 0;
+	CheckpointerShmem->num_written_backend = 0;
+	CheckpointerShmem->num_written_ring = 0;
+	CheckpointerShmem->num_fsync_backend = 0;
+	CheckpointerShmem->num_fsync_bgwriter = 0;
 
 	/*
 	 * We try to avoid holding the lock for a long time by copying the request
@@ -1372,4 +1381,13 @@ FirstCallSinceLastCheckpoint(void)
 	ckpt_done = new_done;
 
 	return FirstCall;
+}
+
+// FIXME: crappy API
+void
+ReportRingWrite(void)
+{
+	LWLockAcquire(CheckpointerCommLock, LW_EXCLUSIVE);
+	CheckpointerShmem->num_written_ring++;
+	LWLockRelease(CheckpointerCommLock);
 }

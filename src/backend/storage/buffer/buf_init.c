@@ -14,6 +14,7 @@
  */
 #include "postgres.h"
 
+#include "lib/ringbuf.h"
 #include "storage/bufmgr.h"
 #include "storage/buf_internals.h"
 
@@ -23,6 +24,7 @@ char	   *BufferBlocks;
 LWLockMinimallyPadded *BufferIOLWLockArray = NULL;
 WritebackContext BackendWritebackContext;
 CkptSortItem *CkptBufferIds;
+ringbuf *VictimBuffers = NULL;
 
 
 /*
@@ -70,7 +72,8 @@ InitBufferPool(void)
 	bool		foundBufs,
 				foundDescs,
 				foundIOLocks,
-				foundBufCkpt;
+				foundBufCkpt,
+				foundFreeBufs;
 
 	/* Align descriptors to a cacheline boundary. */
 	BufferDescriptors = (BufferDescPadded *)
@@ -91,6 +94,10 @@ InitBufferPool(void)
 	LWLockRegisterTranche(LWTRANCHE_BUFFER_IO_IN_PROGRESS, "buffer_io");
 	LWLockRegisterTranche(LWTRANCHE_BUFFER_CONTENT, "buffer_content");
 
+	VictimBuffers = ShmemInitStruct("Free Buffers",
+									ringbuf_size(VICTIM_BUFFER_PRECLEAN_SIZE),
+									&foundFreeBufs);
+
 	/*
 	 * The array used to sort to-be-checkpointed buffer ids is located in
 	 * shared memory, to avoid having to allocate significant amounts of
@@ -102,10 +109,11 @@ InitBufferPool(void)
 		ShmemInitStruct("Checkpoint BufferIds",
 						NBuffers * sizeof(CkptSortItem), &foundBufCkpt);
 
-	if (foundDescs || foundBufs || foundIOLocks || foundBufCkpt)
+	if (foundDescs || foundBufs || foundIOLocks || foundBufCkpt || foundFreeBufs)
 	{
 		/* should find all of these, or none of them */
-		Assert(foundDescs && foundBufs && foundIOLocks && foundBufCkpt);
+		Assert(foundDescs && foundBufs && foundIOLocks && foundBufCkpt && foundFreeBufs);
+
 		/* note: this path is only taken in EXEC_BACKEND case */
 	}
 	else
@@ -129,6 +137,7 @@ InitBufferPool(void)
 			/*
 			 * Initially link all the buffers together as unused. Subsequent
 			 * management of this list is done by freelist.c.
+			 * FIXME: remove once legacy bgwriter is removed
 			 */
 			buf->freeNext = i + 1;
 
@@ -139,8 +148,10 @@ InitBufferPool(void)
 							 LWTRANCHE_BUFFER_IO_IN_PROGRESS);
 		}
 
-		/* Correct last entry of linked list */
+		/* Correct last entry of linked list: FIXME: remove */
 		GetBufferDescriptor(NBuffers - 1)->freeNext = FREENEXT_END_OF_LIST;
+		/* FIXME: could fill the first few free buffers? */
+		VictimBuffers = ringbuf_create(VictimBuffers, VICTIM_BUFFER_PRECLEAN_SIZE);
 	}
 
 	/* Init other shared buffer-management stuff */
@@ -188,6 +199,9 @@ BufferShmemSize(void)
 
 	/* size of checkpoint sort array in bufmgr.c */
 	size = add_size(size, mul_size(NBuffers, sizeof(CkptSortItem)));
+
+	/* FIXME: better ringbuffer size */
+	size = add_size(size, ringbuf_size(VICTIM_BUFFER_PRECLEAN_SIZE));
 
 	return size;
 }

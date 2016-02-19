@@ -1604,15 +1604,45 @@ pg_stat_get_bgwriter_requested_checkpoints(PG_FUNCTION_ARGS)
 }
 
 Datum
-pg_stat_get_bgwriter_buf_written_checkpoints(PG_FUNCTION_ARGS)
+pg_stat_get_buf_written_checkpoints(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT64(pgstat_fetch_global()->buf_written_checkpoints);
 }
 
 Datum
-pg_stat_get_bgwriter_buf_written_clean(PG_FUNCTION_ARGS)
+pg_stat_get_buf_written_bgwriter(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->buf_written_clean);
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_written_bgwriter);
+}
+
+Datum
+pg_stat_get_buf_written_backend(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_written_backend);
+}
+
+Datum
+pg_stat_get_buf_written_ring(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_written_ring);
+}
+
+Datum
+pg_stat_get_buf_ticks_bgwriter(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_ticks_bgwriter);
+}
+
+Datum
+pg_stat_get_buf_ticks_backend(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_ticks_backend);
+}
+
+Datum
+pg_stat_get_buf_bgwriter_clean(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_clean_bgwriter);
 }
 
 Datum
@@ -1641,10 +1671,17 @@ pg_stat_get_bgwriter_stat_reset_time(PG_FUNCTION_ARGS)
 	PG_RETURN_TIMESTAMPTZ(pgstat_fetch_global()->stat_reset_timestamp);
 }
 
+// FIXME: name
 Datum
-pg_stat_get_buf_written_backend(PG_FUNCTION_ARGS)
+pg_stat_get_buf_fsync_checkpointer(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->buf_written_backend);
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_fsync_checkpointer);
+}
+
+Datum
+pg_stat_get_buf_fsync_bgwriter(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_fsync_backend);
 }
 
 Datum
@@ -1654,9 +1691,27 @@ pg_stat_get_buf_fsync_backend(PG_FUNCTION_ARGS)
 }
 
 Datum
-pg_stat_get_buf_alloc(PG_FUNCTION_ARGS)
+pg_stat_get_buf_alloc_preclean(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_INT64(pgstat_fetch_global()->buf_alloc);
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_alloc_preclean);
+}
+
+Datum
+pg_stat_get_buf_alloc_free(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_alloc_free);
+}
+
+Datum
+pg_stat_get_buf_alloc_sweep(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_alloc_sweep);
+}
+
+Datum
+pg_stat_get_buf_alloc_ring(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(pgstat_fetch_global()->buf_alloc_ring);
 }
 
 Datum

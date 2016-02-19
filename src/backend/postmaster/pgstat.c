@@ -6313,12 +6313,26 @@ pgstat_recv_bgwriter(PgStat_MsgBgWriter *msg, int len)
 	globalStats.requested_checkpoints += msg->m_requested_checkpoints;
 	globalStats.checkpoint_write_time += msg->m_checkpoint_write_time;
 	globalStats.checkpoint_sync_time += msg->m_checkpoint_sync_time;
+
 	globalStats.buf_written_checkpoints += msg->m_buf_written_checkpoints;
-	globalStats.buf_written_clean += msg->m_buf_written_clean;
-	globalStats.maxwritten_clean += msg->m_maxwritten_clean;
+	globalStats.buf_written_bgwriter += msg->m_buf_written_bgwriter;
 	globalStats.buf_written_backend += msg->m_buf_written_backend;
+	globalStats.buf_written_ring += msg->m_buf_written_ring;
+
+	globalStats.buf_fsync_checkpointer += msg->m_buf_fsync_checkpointer;
+	globalStats.buf_fsync_bgwriter += msg->m_buf_fsync_bgwriter;
 	globalStats.buf_fsync_backend += msg->m_buf_fsync_backend;
-	globalStats.buf_alloc += msg->m_buf_alloc;
+
+	globalStats.buf_alloc_preclean += msg->m_buf_alloc_preclean;
+	globalStats.buf_alloc_free += msg->m_buf_alloc_free;
+	globalStats.buf_alloc_sweep += msg->m_buf_alloc_sweep;
+	globalStats.buf_alloc_ring += msg->m_buf_alloc_ring;
+
+	globalStats.buf_ticks_bgwriter += msg->m_buf_ticks_bgwriter;
+	globalStats.buf_ticks_backend += msg->m_buf_ticks_backend;
+
+	globalStats.buf_clean_bgwriter += msg->m_buf_clean_bgwriter;
+	globalStats.maxwritten_clean += msg->m_maxwritten_clean;
 }
 
 /* ----------

@@ -221,7 +221,9 @@ extern bool HoldingBufferPinThatDelaysRecovery(void);
 extern void AbortBufferIO(void);
 
 extern void BufmgrCommit(void);
-extern bool BgBufferSync(struct WritebackContext *wb_context);
+
+extern bool BgBufferSyncNew(struct WritebackContext *wb_context);
+extern bool BgBufferSyncLegacy(struct WritebackContext *wb_context);
 
 extern void AtProcExit_LocalBuffers(void);
 

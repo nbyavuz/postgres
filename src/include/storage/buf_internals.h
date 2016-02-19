@@ -142,7 +142,7 @@ typedef struct buftag
  * single atomic operation, without actually acquiring and releasing spinlock;
  * for instance, increase or decrease refcount.  buf_id field never changes
  * after initialization, so does not need locking.  freeNext is protected by
- * the buffer_strategy_lock not buffer header lock.  The LWLock can take care
+ * the buffer_strategy_lock not buffer header lock (XXX: remove).  The LWLock can take care
  * of itself.  The buffer header lock is *not* used to control access to the
  * data in the buffer!
  *
@@ -184,7 +184,9 @@ typedef struct BufferDesc
 	pg_atomic_uint32 state;
 
 	int			wait_backend_pid;	/* backend PID of pin-count waiter */
-	int			freeNext;		/* link in freelist chain */
+
+	/* link in freelist chain: only used with legacy bgwriter */
+	int			freeNext;
 
 	LWLock		content_lock;	/* to lock access to buffer contents */
 } BufferDesc;
@@ -232,9 +234,17 @@ extern PGDLLIMPORT LWLockMinimallyPadded *BufferIOLWLockArray;
 /*
  * The freeNext field is either the index of the next freelist entry,
  * or one of these special values:
+ * XXX: Remove when removing legacy bgwriter
  */
 #define FREENEXT_END_OF_LIST	(-1)
 #define FREENEXT_NOT_IN_LIST	(-2)
+
+/*
+ * FIXME: Probably needs to depend on NBuffers or such.
+ */
+
+/* size of buffer free list */
+#define VICTIM_BUFFER_PRECLEAN_SIZE 4096
 
 /*
  * Functions for acquiring/releasing a shared buffer header's spinlock.  Do
@@ -274,6 +284,7 @@ typedef struct WritebackContext
 /* in buf_init.c */
 extern PGDLLIMPORT BufferDescPadded *BufferDescriptors;
 extern PGDLLIMPORT WritebackContext BackendWritebackContext;
+extern PGDLLIMPORT struct ringbuf *VictimBuffers;
 
 /* in localbuf.c */
 extern BufferDesc *LocalBufferDescriptors;
@@ -306,13 +317,24 @@ extern void IssuePendingWritebacks(WritebackContext *context);
 extern void ScheduleBufferTagForWriteback(WritebackContext *context, BufferTag *tag);
 
 /* freelist.c */
-extern BufferDesc *StrategyGetBuffer(BufferAccessStrategy strategy,
+extern BufferDesc *StrategyGetBuffer(BufferAccessStrategy strategym,
 									 uint32 *buf_state);
+extern BufferDesc *ClockSweep(BufferAccessStrategy strategy,
+							  uint32 *buf_state, uint64 *nticks);
+
 extern void StrategyFreeBuffer(BufferDesc *buf);
 extern bool StrategyRejectBuffer(BufferAccessStrategy strategy,
 								 BufferDesc *buf);
 
-extern int	StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc);
+extern void StrategyReportWrite(BufferAccessStrategy strategy,
+								BufferDesc *buf);
+
+extern int	StrategySyncStart(uint32 *complete_passes,
+							  uint32 *alloc_preclean,
+							  uint32 *alloc_free,
+							  uint32 *alloc_sweep,
+							  uint32 *alloc_ring,
+							  uint64 *ticks_backend);
 extern void StrategyNotifyBgWriter(int bgwprocno);
 
 extern Size StrategyShmemSize(void);

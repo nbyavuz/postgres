@@ -65,6 +65,7 @@
  * GUC parameters
  */
 int			BgWriterDelay = 200;
+bool		BgWriterLegacy = true;
 
 /*
  * Multiplier to apply to BgWriterDelay when we decide to hibernate.
@@ -264,7 +265,10 @@ BackgroundWriterMain(void)
 		/*
 		 * Do one cycle of dirty-buffer writing.
 		 */
-		can_hibernate = BgBufferSync(&wb_context);
+		if (BgWriterLegacy)
+			can_hibernate = BgBufferSyncLegacy(&wb_context);
+		else
+			can_hibernate = BgBufferSyncNew(&wb_context);
 
 		/*
 		 * Send off activity statistics to the stats collector
@@ -366,7 +370,8 @@ BackgroundWriterMain(void)
 							 BgWriterDelay * HIBERNATE_FACTOR,
 							 WAIT_EVENT_BGWRITER_HIBERNATE);
 			/* Reset the notification request in case we timed out */
-			StrategyNotifyBgWriter(-1);
+			if (BgWriterLegacy)
+				StrategyNotifyBgWriter(-1);
 		}
 
 		prev_hibernate = can_hibernate;

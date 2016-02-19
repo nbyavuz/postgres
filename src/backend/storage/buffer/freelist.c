@@ -15,7 +15,9 @@
  */
 #include "postgres.h"
 
+#include "lib/ringbuf.h"
 #include "port/atomics.h"
+#include "postmaster/bgwriter.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
 #include "storage/proc.h"
@@ -51,7 +53,14 @@ typedef struct
 	 * overflow during a single bgwriter cycle.
 	 */
 	uint32		completePasses; /* Complete cycles of the clock sweep */
-	pg_atomic_uint32 numBufferAllocs;	/* Buffers allocated since last reset */
+
+	/* Buffers allocated since last reset */
+	pg_atomic_uint32 numBufferAllocsPreclean;
+	pg_atomic_uint32 numBufferAllocsFree;
+	pg_atomic_uint32 numBufferAllocsSweep;
+	pg_atomic_uint32 numBufferAllocsRing;
+
+	pg_atomic_uint64 numBufferTicksBackend;
 
 	/*
 	 * Bgworker process to be notified upon activity or -1 if none. See
@@ -168,6 +177,62 @@ ClockSweepTick(void)
 	return victim;
 }
 
+BufferDesc *
+ClockSweep(BufferAccessStrategy strategy, uint32 *buf_state, uint64 *nticks)
+{
+	BufferDesc *buf;
+	int			trycounter;
+	uint32		local_buf_state;	/* to avoid repeated (de-)referencing */
+	uint64		local_nticks = 0;
+
+	trycounter = NBuffers;
+	for (;;)
+	{
+
+		buf = GetBufferDescriptor(ClockSweepTick());
+		local_nticks++;
+
+		/*
+		 * If the buffer is pinned or has a nonzero usage_count, we cannot use
+		 * it; decrement the usage_count (unless pinned) and keep scanning.
+		 */
+		local_buf_state = LockBufHdr(buf);
+
+		if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0)
+		{
+			if (BUF_STATE_GET_USAGECOUNT(local_buf_state) != 0)
+			{
+				local_buf_state -= BUF_USAGECOUNT_ONE;
+
+				trycounter = NBuffers;
+			}
+			else
+			{
+				/* Found a usable buffer */
+				if (strategy != NULL)
+					AddBufferToRing(strategy, buf);
+				*buf_state = local_buf_state;
+				*nticks = local_nticks;
+
+				return buf;
+			}
+		}
+		else if (--trycounter == 0)
+		{
+			/*
+			 * We've scanned all the buffers without making any state changes,
+			 * so all the buffers are pinned (or were when we looked at them).
+			 * We could hope that someone will free one eventually, but it's
+			 * probably better to fail than to risk getting stuck in an
+			 * infinite loop.
+			 */
+			UnlockBufHdr(buf, local_buf_state);
+			elog(ERROR, "no unpinned buffers available");
+		}
+		UnlockBufHdr(buf, local_buf_state);
+	}
+}
+
 /*
  * have_free_buffer -- a lockless check to see if there is a free buffer in
  *					   buffer pool.
@@ -202,8 +267,8 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 {
 	BufferDesc *buf;
 	int			bgwprocno;
-	int			trycounter;
 	uint32		local_buf_state;	/* to avoid repeated (de-)referencing */
+	uint64		nticks;
 
 	/*
 	 * If given a strategy object, see whether it can select a buffer. We
@@ -229,25 +294,21 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 	 * some arbitrary process.
 	 */
 	bgwprocno = INT_ACCESS_ONCE(StrategyControl->bgwprocno);
-	if (bgwprocno != -1)
+	if (BgWriterLegacy)
 	{
-		/* reset bgwprocno first, before setting the latch */
-		StrategyControl->bgwprocno = -1;
+		if (bgwprocno != -1)
+		{
+			/* reset bgwprocno first, before setting the latch */
+			StrategyControl->bgwprocno = -1;
 
-		/*
-		 * Not acquiring ProcArrayLock here which is slightly icky. It's
-		 * actually fine because procLatch isn't ever freed, so we just can
-		 * potentially set the wrong process' (or no process') latch.
-		 */
-		SetLatch(&ProcGlobal->allProcs[bgwprocno].procLatch);
+			/*
+			 * Not acquiring ProcArrayLock here which is slightly icky. It's
+			 * actually fine because procLatch isn't ever freed, so we just can
+			 * potentially set the wrong process' (or no process') latch.
+			 */
+			SetLatch(&ProcGlobal->allProcs[bgwprocno].procLatch);
+		}
 	}
-
-	/*
-	 * We count buffer allocation requests so that the bgwriter can estimate
-	 * the rate of buffer consumption.  Note that buffers recycled by a
-	 * strategy object are intentionally not counted here.
-	 */
-	pg_atomic_fetch_add_u32(&StrategyControl->numBufferAllocs, 1);
 
 	/*
 	 * First check, without acquiring the lock, whether there's buffers in the
@@ -302,6 +363,9 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 			if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0
 				&& BUF_STATE_GET_USAGECOUNT(local_buf_state) == 0)
 			{
+				// FIXME: possible to do outside of lock?
+				pg_atomic_fetch_add_u32(&StrategyControl->numBufferAllocsFree, 1);
+
 				if (strategy != NULL)
 					AddBufferToRing(strategy, buf);
 				*buf_state = local_buf_state;
@@ -312,50 +376,80 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state)
 		}
 	}
 
-	/* Nothing on the freelist, so run the "clock sweep" algorithm */
-	trycounter = NBuffers;
-	for (;;)
+	if (!BgWriterLegacy)
 	{
-		buf = GetBufferDescriptor(ClockSweepTick());
+		int i = 0;
 
 		/*
-		 * If the buffer is pinned or has a nonzero usage_count, we cannot use
-		 * it; decrement the usage_count (unless pinned) and keep scanning.
+		 * Try to get a buffer from the clean buffer list.
 		 */
-		local_buf_state = LockBufHdr(buf);
-
-		if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0)
+		while (!ringbuf_empty(VictimBuffers))
 		{
-			if (BUF_STATE_GET_USAGECOUNT(local_buf_state) != 0)
-			{
-				local_buf_state -= BUF_USAGECOUNT_ONE;
+			BufferDesc *buf;
+			bool found;
+			uint32 elements;
 
-				trycounter = NBuffers;
+			found = ringbuf_pop(VictimBuffers, (void *)&buf);
+
+			/* If the ringbuffer is sufficiently depleted, wakeup the bgwriter. */
+			if (bgwprocno != -1 &&
+				(!found ||
+				 (elements = ringbuf_elements(VictimBuffers)) < VICTIM_BUFFER_PRECLEAN_SIZE / 4))
+			{
+#if 0
+				if (!found)
+					elog(LOG, "signalling bgwriter: empty");
+				else
+					elog(LOG, "signalling bgwriter: watermark: %u %u/%u",
+						 elements, VICTIM_BUFFER_PRECLEAN_SIZE / 4, VICTIM_BUFFER_PRECLEAN_SIZE);
+#endif
+				SetLatch(&ProcGlobal->allProcs[bgwprocno].procLatch);
+			}
+
+			if (!found)
+				break;
+
+			/* check if the buffer is still unused, done if so */
+			local_buf_state = LockBufHdr(buf);
+			if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0
+				&& BUF_STATE_GET_USAGECOUNT(local_buf_state) == 0)
+			{
+				// FIXME: possible to do outside of lock?
+				pg_atomic_fetch_add_u32(&StrategyControl->numBufferAllocsPreclean, 1);
+
+				if (strategy != NULL)
+					AddBufferToRing(strategy, buf);
+				*buf_state = local_buf_state;
+				return buf;
 			}
 			else
 			{
-				/* Found a usable buffer */
-				if (strategy != NULL)
-					AddBufferToRing(strategy, buf);
-				*buf_state = local_buf_state;
-				return buf;
+				UnlockBufHdr(buf, local_buf_state);
+				//ereport(LOG, (errmsg("buffer %u since reused (hand at %u)",
+				//					 buf->buf_id,
+				//					 pg_atomic_read_u32(&StrategyControl->nextVictimBuffer) % NBuffers),
+				//			  errhidestmt(true)));
 			}
+
+			i++;
 		}
-		else if (--trycounter == 0)
-		{
-			/*
-			 * We've scanned all the buffers without making any state changes,
-			 * so all the buffers are pinned (or were when we looked at them).
-			 * We could hope that someone will free one eventually, but it's
-			 * probably better to fail than to risk getting stuck in an
-			 * infinite loop.
-			 */
-			UnlockBufHdr(buf, local_buf_state);
-			elog(ERROR, "no unpinned buffers available");
-		}
-		UnlockBufHdr(buf, local_buf_state);
+
+#if 0
+		ereport(LOG, (errmsg("ringbuf empty after %u cycles", i),
+					  errhidestmt(true)));
+#endif
+
 	}
+
+	/* Nothing on the freelist, so run the "clock sweep" algorithm */
+	buf = ClockSweep(strategy, buf_state, &nticks);
+
+	pg_atomic_fetch_add_u32(&StrategyControl->numBufferAllocsSweep, 1);
+	pg_atomic_fetch_add_u64(&StrategyControl->numBufferTicksBackend, nticks);
+
+	return buf;
 }
+
 
 /*
  * StrategyFreeBuffer: put a buffer on the freelist
@@ -381,18 +475,22 @@ StrategyFreeBuffer(BufferDesc *buf)
 }
 
 /*
- * StrategySyncStart -- tell BufferSync where to start syncing
+ * StrategySyncStart -- tell BgBufferSync where to start syncing
  *
- * The result is the buffer index of the best buffer to sync first.
- * BufferSync() will proceed circularly around the buffer array from there.
+ * The result is the buffer index below the current clock-hand. BgBufferSync()
+ * will proceed circularly around the buffer array from there.
  *
- * In addition, we return the completed-pass count (which is effectively
- * the higher-order bits of nextVictimBuffer) and the count of recent buffer
- * allocs if non-NULL pointers are passed.  The alloc count is reset after
- * being read.
+ * In addition, we return the completed-pass count (which is effectively the
+ * higher-order bits of nextVictimBuffer) and the counts of recent buffer
+ * allocations.  The allocation counts are reset after being read.
  */
 int
-StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc)
+StrategySyncStart(uint32 *complete_passes,
+				  uint32 *alloc_preclean,
+				  uint32 *alloc_free,
+				  uint32 *alloc_sweep,
+				  uint32 *alloc_ring,
+				  uint64 *ticks_backend)
 {
 	uint32		nextVictimBuffer;
 	int			result;
@@ -410,13 +508,16 @@ StrategySyncStart(uint32 *complete_passes, uint32 *num_buf_alloc)
 		 * completePasses could be incremented. C.f. ClockSweepTick().
 		 */
 		*complete_passes += nextVictimBuffer / NBuffers;
-	}
 
-	if (num_buf_alloc)
-	{
-		*num_buf_alloc = pg_atomic_exchange_u32(&StrategyControl->numBufferAllocs, 0);
 	}
 	SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+
+	*alloc_preclean = pg_atomic_exchange_u32(&StrategyControl->numBufferAllocsPreclean, 0);
+	*alloc_free = pg_atomic_exchange_u32(&StrategyControl->numBufferAllocsFree, 0);
+	*alloc_sweep = pg_atomic_exchange_u32(&StrategyControl->numBufferAllocsSweep, 0);
+	*alloc_ring = pg_atomic_exchange_u32(&StrategyControl->numBufferAllocsRing, 0);
+	*ticks_backend = pg_atomic_exchange_u64(&StrategyControl->numBufferTicksBackend, 0);
+
 	return result;
 }
 
@@ -517,7 +618,11 @@ StrategyInitialize(bool init)
 
 		/* Clear statistics */
 		StrategyControl->completePasses = 0;
-		pg_atomic_init_u32(&StrategyControl->numBufferAllocs, 0);
+		pg_atomic_init_u32(&StrategyControl->numBufferAllocsPreclean, 0);
+		pg_atomic_init_u32(&StrategyControl->numBufferAllocsFree, 0);
+		pg_atomic_init_u32(&StrategyControl->numBufferAllocsSweep, 0);
+		pg_atomic_init_u32(&StrategyControl->numBufferAllocsRing, 0);
+		pg_atomic_init_u64(&StrategyControl->numBufferTicksBackend, 0);
 
 		/* No pending notification */
 		StrategyControl->bgwprocno = -1;
@@ -645,6 +750,9 @@ GetBufferFromRing(BufferAccessStrategy strategy, uint32 *buf_state)
 	if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0
 		&& BUF_STATE_GET_USAGECOUNT(local_buf_state) <= 1)
 	{
+		// FIXME: possible to do outside of lock?
+		pg_atomic_fetch_add_u32(&StrategyControl->numBufferAllocsRing, 1);
+
 		strategy->current_was_in_ring = true;
 		*buf_state = local_buf_state;
 		return buf;
@@ -701,4 +809,12 @@ StrategyRejectBuffer(BufferAccessStrategy strategy, BufferDesc *buf)
 	strategy->buffers[strategy->current] = InvalidBuffer;
 
 	return true;
+}
+
+void
+StrategyReportWrite(BufferAccessStrategy strategy,
+					BufferDesc *buf)
+{
+	if (strategy->current_was_in_ring)
+		ReportRingWrite();
 }

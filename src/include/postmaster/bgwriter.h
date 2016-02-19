@@ -26,6 +26,7 @@ extern int	BgWriterDelay;
 extern int	CheckPointTimeout;
 extern int	CheckPointWarning;
 extern double CheckPointCompletionTarget;
+extern bool	BgWriterLegacy;
 
 extern void BackgroundWriterMain(void) pg_attribute_noreturn();
 extern void CheckpointerMain(void) pg_attribute_noreturn();
@@ -39,6 +40,8 @@ extern void AbsorbSyncRequests(void);
 
 extern Size CheckpointerShmemSize(void);
 extern void CheckpointerShmemInit(void);
+
+extern void ReportRingWrite(void);
 
 extern bool FirstCallSinceLastCheckpoint(void);
 

@@ -39,6 +39,7 @@
 #include "catalog/storage.h"
 #include "executor/instrument.h"
 #include "lib/binaryheap.h"
+#include "lib/ringbuf.h"
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "pgstat.h"
@@ -101,7 +102,7 @@ typedef struct CkptTsStatus
 	/* already processed pages in this tablespace */
 	int			num_scanned;
 
-	/* current offset in CkptBufferIds for this tablespace */
+	/* currentCheckpointerShmem->num_written_ring offset in CkptBufferIds for this tablespace */
 	int			index;
 } CkptTsStatus;
 
@@ -866,10 +867,28 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	if (isExtend)
 	{
+		instr_time	io_start,
+			io_time;
+
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
+
 		/* new buffers are zero-filled */
 		MemSet((char *) bufBlock, 0, BLCKSZ);
+
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
+
 		/* don't set checksum for all-zero page */
 		smgrextend(smgr, forkNum, blockNum, (char *) bufBlock, false);
+
+		if (track_io_timing)
+		{
+			INSTR_TIME_SET_CURRENT(io_time);
+			INSTR_TIME_SUBTRACT(io_time, io_start);
+			pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
+			INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
+		}
 
 		/*
 		 * NB: we're *not* doing a ScheduleBufferTagForWriteback here;
@@ -1136,6 +1155,9 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 						UnpinBuffer(buf, true);
 						continue;
 					}
+
+					// FIXME: crappy API
+					StrategyReportWrite(strategy, buf);
 				}
 
 				/* OK, do the I/O */
@@ -1351,6 +1373,8 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
  * so the only reason the buffer might be pinned is if someone else is
  * trying to write it out.  We have to let them finish before we can
  * reclaim the buffer.
+ *
+ * FIXME: ^^^
  *
  * The buffer could get reclaimed by someone else while we are waiting
  * to acquire the necessary locks; if so, don't mess it up.
@@ -2038,7 +2062,119 @@ BufferSync(int flags)
 }
 
 /*
- * BgBufferSync -- Write out some dirty buffers in the pool.
+ * BgBufferSyncNew -- Write out some dirty buffers in the pool.
+ *
+ * This is called periodically by the background writer process.
+ *
+ * Returns true if it's appropriate for the bgwriter process to go into
+ * low-power hibernation mode.
+ */
+bool
+BgBufferSyncNew(WritebackContext *wb_context)
+{
+	uint32      recent_alloc_preclean;
+	uint32      recent_alloc_free;
+	uint32      recent_alloc_sweep;
+	uint32      recent_alloc_ring;
+	uint32      strategy_passes;
+	uint64		nticks;
+	uint64		nticks_sum = 0;
+
+	/* Make sure we can handle the pin inside SyncOneBuffer */
+	ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
+
+	/* Know where to start, and report buffer alloc counts to pgstat */
+	StrategySyncStart(&strategy_passes,
+					  &recent_alloc_preclean,
+					  &recent_alloc_free,
+					  &recent_alloc_sweep,
+					  &recent_alloc_ring,
+					  &nticks);
+
+	/* Report buffer alloc counts to pgstat */
+	BgWriterStats.m_buf_alloc_preclean += recent_alloc_preclean;
+	BgWriterStats.m_buf_alloc_free += recent_alloc_free;
+	BgWriterStats.m_buf_alloc_sweep += recent_alloc_sweep;
+	BgWriterStats.m_buf_alloc_ring += recent_alloc_ring;
+	BgWriterStats.m_buf_ticks_backend += nticks;
+
+	/* go and populate freelist */
+	while (!ringbuf_full(VictimBuffers))
+	{
+		BufferDesc *bufHdr;
+		bool pushed;
+		bool dirty;
+		uint32		buf_state;
+
+		ReservePrivateRefCountEntry();
+
+		bufHdr = ClockSweep(NULL, &buf_state, &nticks);
+		nticks_sum += nticks;
+
+		dirty = buf_state & BM_DIRTY;
+
+		if (dirty)
+		{
+			SMgrRelation reln;
+			BufferTag tag;
+			LWLock *content_lock;
+
+
+			/*
+			 * Pin it, share-lock it, write it.  (FlushBuffer will do nothing if the
+			 * buffer is clean by the time we've locked it.)
+			 */
+			PinBuffer_Locked(bufHdr);
+
+			/* open relation before locking the page */
+			reln = smgropen(bufHdr->tag.rnode, InvalidBackendId);
+
+			content_lock = BufferDescriptorGetContentLock(bufHdr);
+
+			LWLockAcquire(content_lock, LW_SHARED);
+			FlushBuffer(bufHdr, reln);
+			LWLockRelease(content_lock);
+
+			/* copy tag before releasing pin */
+			tag = bufHdr->tag;
+
+			UnpinBuffer(bufHdr, true);
+
+			pushed = ringbuf_push(VictimBuffers, bufHdr);
+
+			Assert(wb_context);
+			ScheduleBufferTagForWriteback(wb_context, &tag);
+
+			BgWriterStats.m_buf_written_bgwriter++;
+		}
+		else
+		{
+			UnlockBufHdr(bufHdr, buf_state);
+			pushed = ringbuf_push(VictimBuffers, bufHdr);
+
+			BgWriterStats.m_buf_clean_bgwriter++;
+		}
+
+		/* full, shouldn't normally happen, we're the only writer  */
+		if (!pushed)
+			break;
+
+		/* so we occasionally sleep, even if continually busy */
+		if (BgWriterStats.m_buf_written_bgwriter >= bgwriter_lru_maxpages)
+		{
+			BgWriterStats.m_maxwritten_clean++;
+			break;
+		}
+	}
+
+	BgWriterStats.m_buf_ticks_bgwriter += nticks_sum;
+
+	return BgWriterStats.m_buf_written_bgwriter == 0 &&
+		BgWriterStats.m_buf_clean_bgwriter == 0;
+}
+
+/*
+ * BgBufferSyncLegacy -- Write out some dirty buffers in the pool.
  *
  * This is called periodically by the background writer process.
  *
@@ -2049,12 +2185,16 @@ BufferSync(int flags)
  * bgwriter_lru_maxpages to 0.)
  */
 bool
-BgBufferSync(WritebackContext *wb_context)
+BgBufferSyncLegacy(WritebackContext *wb_context)
 {
 	/* info obtained from freelist.c */
 	int			strategy_buf_id;
 	uint32		strategy_passes;
-	uint32		recent_alloc;
+	uint32      recent_alloc_preclean;
+	uint32      recent_alloc_free;
+	uint32      recent_alloc_sweep;
+	uint32      recent_alloc_ring;
+	uint64		recent_ticks;
 
 	/*
 	 * Information saved between calls so we can determine the strategy
@@ -2090,16 +2230,25 @@ BgBufferSync(WritebackContext *wb_context)
 
 	/* Variables for final smoothed_density update */
 	long		new_strategy_delta;
-	uint32		new_recent_alloc;
+	uint32		new_recent_alloc_sweep;
 
 	/*
 	 * Find out where the freelist clock sweep currently is, and how many
 	 * buffer allocations have happened since our last call.
 	 */
-	strategy_buf_id = StrategySyncStart(&strategy_passes, &recent_alloc);
+	strategy_buf_id = StrategySyncStart(&strategy_passes,
+										&recent_alloc_preclean,
+										&recent_alloc_free,
+										&recent_alloc_sweep,
+										&recent_alloc_ring,
+										&recent_ticks);
 
 	/* Report buffer alloc counts to pgstat */
-	BgWriterStats.m_buf_alloc += recent_alloc;
+	BgWriterStats.m_buf_alloc_preclean += recent_alloc_preclean;
+	BgWriterStats.m_buf_alloc_free += recent_alloc_free;
+	BgWriterStats.m_buf_alloc_sweep += recent_alloc_sweep;
+	BgWriterStats.m_buf_alloc_ring += recent_alloc_ring;
+	BgWriterStats.m_buf_ticks_backend += recent_ticks;
 
 	/*
 	 * If we're not running the LRU scan, just stop after doing the stats
@@ -2196,9 +2345,9 @@ BgBufferSync(WritebackContext *wb_context)
 	 *
 	 * If the strategy point didn't move, we don't update the density estimate
 	 */
-	if (strategy_delta > 0 && recent_alloc > 0)
+	if (strategy_delta > 0 && recent_alloc_sweep > 0)
 	{
-		scans_per_alloc = (float) strategy_delta / (float) recent_alloc;
+		scans_per_alloc = (float) strategy_delta / (float) recent_alloc_sweep;
 		smoothed_density += (scans_per_alloc - smoothed_density) /
 			smoothing_samples;
 	}
@@ -2216,10 +2365,10 @@ BgBufferSync(WritebackContext *wb_context)
 	 * a true average we want a fast-attack, slow-decline behavior: we
 	 * immediately follow any increase.
 	 */
-	if (smoothed_alloc <= (float) recent_alloc)
-		smoothed_alloc = recent_alloc;
+	if (smoothed_alloc <= (float) recent_alloc_sweep)
+		smoothed_alloc = recent_alloc_sweep;
 	else
-		smoothed_alloc += ((float) recent_alloc - smoothed_alloc) /
+		smoothed_alloc += ((float) recent_alloc_sweep - smoothed_alloc) /
 			smoothing_samples;
 
 	/* Scale the estimate by a GUC to allow more aggressive tuning. */
@@ -2297,7 +2446,7 @@ BgBufferSync(WritebackContext *wb_context)
 			reusable_buffers++;
 	}
 
-	BgWriterStats.m_buf_written_clean += num_written;
+	BgWriterStats.m_buf_written_bgwriter += num_written;
 
 #ifdef BGW_DEBUG
 	elog(DEBUG1, "bgwriter: recent_alloc=%u smoothed=%.2f delta=%ld ahead=%d density=%.2f reusable_est=%d upcoming_est=%d scanned=%d wrote=%d reusable=%d",
@@ -2317,22 +2466,22 @@ BgBufferSync(WritebackContext *wb_context)
 	 * density estimates.
 	 */
 	new_strategy_delta = bufs_to_lap - num_to_scan;
-	new_recent_alloc = reusable_buffers - reusable_buffers_est;
-	if (new_strategy_delta > 0 && new_recent_alloc > 0)
+	new_recent_alloc_sweep = reusable_buffers - reusable_buffers_est;
+	if (new_strategy_delta > 0 && new_recent_alloc_sweep > 0)
 	{
-		scans_per_alloc = (float) new_strategy_delta / (float) new_recent_alloc;
+		scans_per_alloc = (float) new_strategy_delta / (float) new_recent_alloc_sweep;
 		smoothed_density += (scans_per_alloc - smoothed_density) /
 			smoothing_samples;
 
 #ifdef BGW_DEBUG
 		elog(DEBUG2, "bgwriter: cleaner density alloc=%u scan=%ld density=%.2f new smoothed=%.2f",
-			 new_recent_alloc, new_strategy_delta,
+			 new_recent_alloc_sweep, new_strategy_delta,
 			 scans_per_alloc, smoothed_density);
 #endif
 	}
 
 	/* Return true if OK to hibernate */
-	return (bufs_to_lap == 0 && recent_alloc == 0);
+	return (bufs_to_lap == 0 && new_recent_alloc_sweep == 0);
 }
 
 /*
@@ -4321,6 +4470,8 @@ void
 IssuePendingWritebacks(WritebackContext *context)
 {
 	int			i;
+	instr_time	io_start,
+				io_time;
 
 	if (context->nr_pending == 0)
 		return;
@@ -4331,6 +4482,9 @@ IssuePendingWritebacks(WritebackContext *context)
 	 */
 	qsort(&context->pending_writebacks, context->nr_pending,
 		  sizeof(PendingWriteback), buffertag_comparator);
+
+	if (track_io_timing)
+		INSTR_TIME_SET_CURRENT(io_start);
 
 	/*
 	 * Coalesce neighbouring writes, but nothing else. For that we iterate
@@ -4379,6 +4533,14 @@ IssuePendingWritebacks(WritebackContext *context)
 		/* and finally tell the kernel to write the data to storage */
 		reln = smgropen(tag.rnode, InvalidBackendId);
 		smgrwriteback(reln, tag.forkNum, tag.blockNum, nblocks);
+	}
+
+	if (track_io_timing)
+	{
+		INSTR_TIME_SET_CURRENT(io_time);
+		INSTR_TIME_SUBTRACT(io_time, io_start);
+		pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
+		INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
 	}
 
 	context->nr_pending = 0;

@@ -1435,6 +1435,17 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"bgwriter_legacy", PGC_SIGHUP, RESOURCES_BGWRITER,
+			gettext_noop("Use legacy bgwriter algorithm."),
+			NULL,
+			GUC_UNIT_MS
+		},
+		&BgWriterLegacy,
+		true,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"trace_notify", PGC_USERSET, DEVELOPER_OPTIONS,
 			gettext_noop("Generates debugging output for LISTEN and NOTIFY."),
 			NULL,
@@ -2734,7 +2745,7 @@ static struct config_int ConfigureNamesInt[] =
 			GUC_UNIT_MS
 		},
 		&BgWriterDelay,
-		200, 10, 10000,
+		200, 1, 10000,
 		NULL, NULL, NULL
 	},
 

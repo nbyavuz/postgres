@@ -8376,6 +8376,8 @@ LogCheckpointEnd(bool restartpoint)
 	BgWriterStats.m_checkpoint_sync_time +=
 		sync_secs * 1000 + sync_usecs / 1000;
 
+	BgWriterStats.m_buf_fsync_checkpointer += CheckpointStats.ckpt_sync_rels;
+
 	/*
 	 * All of the published timing statistics are accounted for.  Only
 	 * continue if a log message is to be written.
