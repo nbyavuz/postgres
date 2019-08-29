@@ -4733,15 +4733,8 @@ _copyForeignKeyCacheInfo(const ForeignKeyCacheInfo *from)
 	return newnode;
 }
 
-
-/*
- * copyObjectImpl -- implementation of copyObject(); see nodes/nodes.h
- *
- * Create a copy of a Node tree or list.  This is a "deep" copy: all
- * substructure is copied too, recursively.
- */
 void *
-copyObjectImpl(const void *from)
+copyObjectImplOld(const void *from)
 {
 	void	   *retval;
 

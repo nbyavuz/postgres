@@ -199,13 +199,13 @@ typedef struct Const
 	int32		consttypmod;	/* typmod value, if any */
 	Oid			constcollid;	/* OID of collation, or InvalidOid if none */
 	int			constlen;		/* typlen of the constant's datatype */
-	Datum		constvalue;		/* the constant's value */
 	bool		constisnull;	/* whether the constant is null (if true,
 								 * constvalue is undefined) */
 	bool		constbyval;		/* whether this datatype is passed by value.
 								 * If true, then all the information is stored
 								 * in the Datum. If false, then the Datum
 								 * contains a pointer to the information. */
+	Datum		constvalue;		/* the constant's value */
 	Location	location;		/* token location, or -1 if unknown */
 } Const;
 

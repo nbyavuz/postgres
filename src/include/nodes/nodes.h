@@ -92,6 +92,7 @@ typedef enum NodeTag
 	T_PlanRowMark,
 	T_PartitionPruneInfo,
 	T_PartitionedRelPruneInfo,
+	T_PartitionPruneStep,
 	T_PartitionPruneStepOp,
 	T_PartitionPruneStepCombine,
 	T_PlanInvalItem,
@@ -616,14 +617,20 @@ extern void outBitmapset(struct StringInfoData *str,
 extern void outDatum(struct StringInfoData *str, uintptr_t value,
 					 int typlen, bool typbyval);
 extern char *nodeToString(const void *obj);
+extern char *nodeToStringOld(const void *obj);
+extern char *nodeToStringNew(const void *obj);
 extern char *bmsToString(const struct Bitmapset *bms);
 
 /*
  * nodes/{readfuncs.c,read.c}
  */
 extern void *stringToNode(const char *str);
+extern void *stringToNodeNew(const char *str);
+extern void *stringToNodeOld(const char *str);
 #ifdef WRITE_READ_PARSE_PLAN_TREES
 extern void *stringToNodeWithLocations(const char *str);
+extern void *stringToNodeWithLocationsOld(const char *str);
+extern void *stringToNodeWithLocationsNew(const char *str);
 #endif
 extern struct Bitmapset *readBitmapset(void);
 extern uintptr_t readDatum(bool typbyval);
@@ -636,6 +643,8 @@ extern PGARR(AttrNumber) *readAttrNumberCols(void);
  * nodes/copyfuncs.c
  */
 extern void *copyObjectImpl(const void *obj);
+extern void *copyObjectImplOld(const void *obj);
+extern void *copyObjectImplNew(const void *obj);
 
 /* cast result back to argument type, if supported by compiler */
 #ifdef HAVE_TYPEOF
@@ -648,6 +657,8 @@ extern void *copyObjectImpl(const void *obj);
  * nodes/equalfuncs.c
  */
 extern bool equal(const void *a, const void *b);
+extern bool nodes_equal_new(const void *a, const void *b);
+extern bool nodes_equal_old(const void *a, const void *b);
 
 
 /*

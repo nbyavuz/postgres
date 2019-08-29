@@ -53,7 +53,7 @@ endif
 
 ##########################################################################
 
-all: submake-libpgport submake-catalog-headers submake-utils-headers postgres $(POSTGRES_IMP)
+all: submake-libpgport submake-catalog-headers submake-utils-headers submake-node-data postgres $(POSTGRES_IMP)
 
 ifneq ($(PORTNAME), cygwin)
 ifneq ($(PORTNAME), win32)
@@ -144,7 +144,11 @@ submake-catalog-headers:
 submake-utils-headers:
 	$(MAKE) -C utils distprep generated-header-symlinks
 
-.PHONY: submake-catalog-headers submake-utils-headers
+# run this unconditionally to avoid needing to know its dependencies here:
+submake-node-data:
+	$(MAKE) -C nodes distprep generated-node-data
+
+.PHONY: submake-catalog-headers submake-utils-headers submake-node-data
 
 # Make symlinks for these headers in the include directory. That way
 # we can cut down on the -I options. Also, a symlink is automatically
@@ -159,7 +163,7 @@ submake-utils-headers:
 
 .PHONY: generated-headers
 
-generated-headers: $(top_builddir)/src/include/parser/gram.h $(top_builddir)/src/include/storage/lwlocknames.h submake-catalog-headers submake-utils-headers
+generated-headers: $(top_builddir)/src/include/parser/gram.h $(top_builddir)/src/include/storage/lwlocknames.h submake-catalog-headers submake-utils-headers submake-node-data
 
 $(top_builddir)/src/include/parser/gram.h: parser/gram.h
 	prereqdir=`cd '$(dir $<)' >/dev/null && pwd` && \

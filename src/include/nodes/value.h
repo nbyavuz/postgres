@@ -49,6 +49,12 @@ typedef struct Value
 	}			val;
 } Value;
 
+typedef Value Integer;
+typedef Value Float;
+typedef Value String;
+typedef Value BitString;
+typedef Value Null;
+
 #define intVal(v)		(((Value *)(v))->val.ival)
 #define floatVal(v)		atof(((Value *)(v))->val.str)
 #define strVal(v)		(((Value *)(v))->val.str)
@@ -58,4 +64,12 @@ extern Value *makeFloat(char *numericStr);
 extern Value *makeString(char *str);
 extern Value *makeBitString(char *str);
 
+static inline bool
+IsAValue(const void *ptr)
+{
+	NodeTag tag = nodeTag(ptr);
+
+	return tag == T_Integer || tag == T_Float || tag == T_String ||
+		tag == T_BitString || tag == T_Null;
+}
 #endif							/* VALUE_H */

@@ -4347,7 +4347,7 @@ outNode(StringInfo str, const void *obj)
  *	   returns the ascii representation of the Node as a palloc'd string
  */
 char *
-nodeToString(const void *obj)
+nodeToStringOld(const void *obj)
 {
 	StringInfoData str;
 

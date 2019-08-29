@@ -1386,7 +1386,7 @@ CREATE TABLE coll_t (c) AS VALUES ('bar'::text);
 CREATE POLICY coll_p ON coll_t USING (c < ('foo'::text COLLATE "C"));
 ALTER TABLE coll_t ENABLE ROW LEVEL SECURITY;
 GRANT SELECT ON coll_t TO regress_rls_alice;
-SELECT (string_to_array(polqual, ':'))[7] AS inputcollid FROM pg_policy WHERE polrelid = 'coll_t'::regclass;
+SELECT (regexp_match(polqual, ':(inputcollid[^:]*)'))[1] AS inputcollid FROM pg_policy WHERE polrelid = 'coll_t'::regclass;
 SET SESSION AUTHORIZATION regress_rls_alice;
 SELECT * FROM coll_t;
 ROLLBACK;

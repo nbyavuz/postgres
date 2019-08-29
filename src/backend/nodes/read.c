@@ -45,7 +45,7 @@ bool		restore_location_fields = false;
  * in builds with the WRITE_READ_PARSE_PLAN_TREES debugging flag set.
  */
 static void *
-stringToNodeInternal(const char *str, bool restore_loc_fields)
+stringToNodeInternalOld(const char *str, bool restore_loc_fields)
 {
 	void	   *retval;
 	const char *save_strtok;
@@ -86,17 +86,17 @@ stringToNodeInternal(const char *str, bool restore_loc_fields)
  * Externally visible entry points
  */
 void *
-stringToNode(const char *str)
+stringToNodeOld(const char *str)
 {
-	return stringToNodeInternal(str, false);
+	return stringToNodeInternalOld(str, false);
 }
 
 #ifdef WRITE_READ_PARSE_PLAN_TREES
 
 void *
-stringToNodeWithLocations(const char *str)
+stringToNodeWithLocationsOld(const char *str)
 {
-	return stringToNodeInternal(str, true);
+	return stringToNodeInternalOld(str, true);
 }
 
 #endif

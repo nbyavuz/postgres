@@ -52,7 +52,7 @@
 /* Compare a field that is a pointer to some kind of Node or Node tree */
 #define COMPARE_NODE_FIELD(fldname) \
 	do { \
-		if (!equal(a->fldname, b->fldname)) \
+		if (!nodes_equal_old(a->fldname, b->fldname)) \
 			return false; \
 	} while (0)
 
@@ -2336,7 +2336,7 @@ _equalParamRef(const ParamRef *a, const ParamRef *b)
 static bool
 _equalAConst(const A_Const *a, const A_Const *b)
 {
-	if (!equal(&a->val, &b->val))	/* hack for in-line Value field */
+	if (!nodes_equal_old(&a->val, &b->val))	/* hack for in-line Value field */
 		return false;
 	COMPARE_LOCATION_FIELD(location);
 
@@ -2930,7 +2930,7 @@ _equalList(const List *a, const List *b)
 		case T_List:
 			forboth(item_a, a, item_b, b)
 			{
-				if (!equal(lfirst(item_a), lfirst(item_b)))
+				if (!nodes_equal_old(lfirst(item_a), lfirst(item_b)))
 					return false;
 			}
 			break;
@@ -2993,12 +2993,8 @@ _equalValue(const Value *a, const Value *b)
 	return true;
 }
 
-/*
- * equal
- *	  returns whether two nodes are equal
- */
 bool
-equal(const void *a, const void *b)
+nodes_equal_old(const void *a, const void *b)
 {
 	bool		retval;
 
