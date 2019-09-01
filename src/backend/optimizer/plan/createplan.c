@@ -234,43 +234,43 @@ static Hash *make_hash(Plan *lefttree,
 static MergeJoin *make_mergejoin(List *tlist,
 								 List *joinclauses, List *otherclauses,
 								 List *mergeclauses,
-								 Oid *mergefamilies,
-								 Oid *mergecollations,
-								 int *mergestrategies,
-								 bool *mergenullsfirst,
+								 PGARR(Oid) *mergefamilies,
+								 PGARR(Oid) *mergecollations,
+								 PGARR(int) *mergestrategies,
+								 PGARR(bool) *mergenullsfirst,
 								 Plan *lefttree, Plan *righttree,
 								 JoinType jointype, bool inner_unique,
 								 bool skip_mark_restore);
 static Sort *make_sort(Plan *lefttree, int numCols,
-					   AttrNumber *sortColIdx, Oid *sortOperators,
-					   Oid *collations, bool *nullsFirst);
+					   PGARR(AttrNumber) *sortColIdx, PGARR(Oid) *sortOperators,
+					   PGARR(Oid) *collations, PGARR(bool) *nullsFirst);
 static Plan *prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 										Relids relids,
-										const AttrNumber *reqColIdx,
+										const PGARR(AttrNumber) *reqColIdx,
 										bool adjust_tlist_in_place,
 										int *p_numsortkeys,
-										AttrNumber **p_sortColIdx,
-										Oid **p_sortOperators,
-										Oid **p_collations,
-										bool **p_nullsFirst);
+										PGARR(AttrNumber) **p_sortColIdx,
+										PGARR(Oid) **p_sortOperators,
+										PGARR(Oid) **p_collations,
+										PGARR(bool) **p_nullsFirst);
 static EquivalenceMember *find_ec_member_for_tle(EquivalenceClass *ec,
 												 TargetEntry *tle,
 												 Relids relids);
 static Sort *make_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 									 Relids relids);
 static Sort *make_sort_from_groupcols(List *groupcls,
-									  AttrNumber *grpColIdx,
+									  PGARR(AttrNumber) *grpColIdx,
 									  Plan *lefttree);
 static Material *make_material(Plan *lefttree);
 static WindowAgg *make_windowagg(List *tlist, Index winref,
-								 int partNumCols, AttrNumber *partColIdx, Oid *partOperators, Oid *partCollations,
-								 int ordNumCols, AttrNumber *ordColIdx, Oid *ordOperators, Oid *ordCollations,
+								 int partNumCols, PGARR(AttrNumber) *partColIdx, PGARR(Oid) *partOperators, PGARR(Oid) *partCollations,
+								 int ordNumCols, PGARR(AttrNumber) *ordColIdx, PGARR(Oid) *ordOperators, PGARR(Oid) *ordCollations,
 								 int frameOptions, Node *startOffset, Node *endOffset,
 								 Oid startInRangeFunc, Oid endInRangeFunc,
 								 Oid inRangeColl, bool inRangeAsc, bool inRangeNullsFirst,
 								 Plan *lefttree);
 static Group *make_group(List *tlist, List *qual, int numGroupCols,
-						 AttrNumber *grpColIdx, Oid *grpOperators, Oid *grpCollations,
+						 PGARR(AttrNumber) *grpColIdx, PGARR(Oid) *grpOperators, PGARR(Oid) *grpCollations,
 						 Plan *lefttree);
 static Unique *make_unique_from_sortclauses(Plan *lefttree, List *distinctList);
 static Unique *make_unique_from_pathkeys(Plan *lefttree,
@@ -1073,10 +1073,10 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 	RelOptInfo *rel = best_path->path.parent;
 	PartitionPruneInfo *partpruneinfo = NULL;
 	int			nodenumsortkeys = 0;
-	AttrNumber *nodeSortColIdx = NULL;
-	Oid		   *nodeSortOperators = NULL;
-	Oid		   *nodeCollations = NULL;
-	bool	   *nodeNullsFirst = NULL;
+	PGARR(AttrNumber) *nodeSortColIdx = NULL;
+	PGARR(Oid)  *nodeSortOperators = NULL;
+	PGARR(Oid)  *nodeCollations = NULL;
+	PGARR(bool) *nodeNullsFirst = NULL;
 
 	/*
 	 * The subpaths list could be empty, if every child was proven empty by
@@ -1155,10 +1155,10 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 		if (pathkeys != NIL)
 		{
 			int			numsortkeys;
-			AttrNumber *sortColIdx;
-			Oid		   *sortOperators;
-			Oid		   *collations;
-			bool	   *nullsFirst;
+			PGARR(AttrNumber) *sortColIdx;
+			PGARR(Oid)		   *sortOperators;
+			PGARR(Oid)		   *collations;
+			PGARR(bool)	   *nullsFirst;
 
 			/*
 			 * Compute sort column info, and adjust subplan's tlist as needed.
@@ -1186,11 +1186,11 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 			if (memcmp(sortColIdx, nodeSortColIdx,
 					   numsortkeys * sizeof(AttrNumber)) != 0)
 				elog(ERROR, "Append child's targetlist doesn't match Append");
-			Assert(memcmp(sortOperators, nodeSortOperators,
+			Assert(memcmp(pgarr_data(sortOperators), pgarr_data(nodeSortOperators),
 						  numsortkeys * sizeof(Oid)) == 0);
-			Assert(memcmp(collations, nodeCollations,
+			Assert(memcmp(pgarr_data(collations), pgarr_data(nodeCollations),
 						  numsortkeys * sizeof(Oid)) == 0);
-			Assert(memcmp(nullsFirst, nodeNullsFirst,
+			Assert(memcmp(pgarr_data(nullsFirst), pgarr_data(nodeNullsFirst),
 						  numsortkeys * sizeof(bool)) == 0);
 
 			/* Now, insert a Sort node if subplan isn't sufficiently ordered */
@@ -1323,10 +1323,10 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 		Path	   *subpath = (Path *) lfirst(subpaths);
 		Plan	   *subplan;
 		int			numsortkeys;
-		AttrNumber *sortColIdx;
-		Oid		   *sortOperators;
-		Oid		   *collations;
-		bool	   *nullsFirst;
+		PGARR(AttrNumber) *sortColIdx;
+		PGARR(Oid)		   *sortOperators;
+		PGARR(Oid)		   *collations;
+		PGARR(bool)	   *nullsFirst;
 
 		/* Build the child plan */
 		/* Must insist that all children return the same tlist */
@@ -1353,11 +1353,11 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 		if (memcmp(sortColIdx, node->sortColIdx,
 				   numsortkeys * sizeof(AttrNumber)) != 0)
 			elog(ERROR, "MergeAppend child's targetlist doesn't match MergeAppend");
-		Assert(memcmp(sortOperators, node->sortOperators,
+		Assert(memcmp(pgarr_data(sortOperators), pgarr_data(node->sortOperators),
 					  numsortkeys * sizeof(Oid)) == 0);
-		Assert(memcmp(collations, node->collations,
+		Assert(memcmp(pgarr_data(collations), pgarr_data(node->collations),
 					  numsortkeys * sizeof(Oid)) == 0);
-		Assert(memcmp(nullsFirst, node->nullsFirst,
+		Assert(memcmp(pgarr_data(nullsFirst), pgarr_data(node->nullsFirst),
 					  numsortkeys * sizeof(bool)) == 0);
 
 		/* Now, insert a Sort node if subplan isn't sufficiently ordered */
@@ -1519,8 +1519,8 @@ create_unique_plan(PlannerInfo *root, UniquePath *best_path, int flags)
 	int			nextresno;
 	bool		newitems;
 	int			numGroupCols;
-	AttrNumber *groupColIdx;
-	Oid		   *groupCollations;
+	PGARR(AttrNumber) *groupColIdx;
+	PGARR(Oid)		   *groupCollations;
 	int			groupColPos;
 	ListCell   *l;
 
@@ -1586,8 +1586,8 @@ create_unique_plan(PlannerInfo *root, UniquePath *best_path, int flags)
 	 */
 	newtlist = subplan->targetlist;
 	numGroupCols = list_length(uniq_exprs);
-	groupColIdx = (AttrNumber *) palloc(numGroupCols * sizeof(AttrNumber));
-	groupCollations = (Oid *) palloc(numGroupCols * sizeof(Oid));
+	groupColIdx = pgarr_alloc_capacity(AttrNumber, numGroupCols);
+	groupCollations= pgarr_alloc_capacity(Oid, numGroupCols);
 
 	groupColPos = 0;
 	foreach(l, uniq_exprs)
@@ -1598,14 +1598,15 @@ create_unique_plan(PlannerInfo *root, UniquePath *best_path, int flags)
 		tle = tlist_member(uniqexpr, newtlist);
 		if (!tle)				/* shouldn't happen */
 			elog(ERROR, "failed to find unique expression in subplan tlist");
-		groupColIdx[groupColPos] = tle->resno;
-		groupCollations[groupColPos] = exprCollation((Node *) tle->expr);
+
+		pgarr_append_reserved(AttrNumber, groupColIdx, tle->resno);
+		pgarr_append_reserved(Oid, groupCollations, exprCollation((Node *) tle->expr));
 		groupColPos++;
 	}
 
 	if (best_path->umethod == UNIQUE_PATH_HASH)
 	{
-		Oid		   *groupOperators;
+		PGARR(Oid)		   *groupOperators;
 
 		/*
 		 * Get the hashable equality operators for the Agg node to use.
@@ -1613,7 +1614,7 @@ create_unique_plan(PlannerInfo *root, UniquePath *best_path, int flags)
 		 * those are cross-type operators then the equality operators are the
 		 * ones for the IN clause operators' RHS datatype.
 		 */
-		groupOperators = (Oid *) palloc(numGroupCols * sizeof(Oid));
+		groupOperators = pgarr_alloc_capacity(Oid, numGroupCols);
 		groupColPos = 0;
 		foreach(l, in_operators)
 		{
@@ -1623,7 +1624,8 @@ create_unique_plan(PlannerInfo *root, UniquePath *best_path, int flags)
 			if (!get_compatible_hash_operators(in_oper, NULL, &eq_oper))
 				elog(ERROR, "could not find compatible hash operator for operator %u",
 					 in_oper);
-			groupOperators[groupColPos++] = eq_oper;
+			pgarr_append_reserved(Oid, groupOperators, eq_oper);
+			groupColPos++;
 		}
 
 		/*
@@ -1676,7 +1678,7 @@ create_unique_plan(PlannerInfo *root, UniquePath *best_path, int flags)
 					 sortop);
 
 			tle = get_tle_by_resno(subplan->targetlist,
-								   groupColIdx[groupColPos]);
+								   *pgarr_at(groupColIdx, groupColPos));
 			Assert(tle != NULL);
 
 			sortcl = makeNode(SortGroupClause);
@@ -2109,24 +2111,22 @@ create_agg_plan(PlannerInfo *root, AggPath *best_path)
  * the input tuple. So we get the ref from the entries in the groupclause and
  * look them up there.
  */
-static AttrNumber *
+static PGARR(AttrNumber) *
 remap_groupColIdx(PlannerInfo *root, List *groupClause)
 {
 	AttrNumber *grouping_map = root->grouping_map;
-	AttrNumber *new_grpColIdx;
+	PGARR(AttrNumber) *new_grpColIdx;
 	ListCell   *lc;
-	int			i;
 
 	Assert(grouping_map);
 
-	new_grpColIdx = palloc0(sizeof(AttrNumber) * list_length(groupClause));
+	new_grpColIdx = pgarr_alloc_capacity(AttrNumber,list_length(groupClause));
 
-	i = 0;
 	foreach(lc, groupClause)
 	{
 		SortGroupClause *clause = lfirst(lc);
 
-		new_grpColIdx[i++] = grouping_map[clause->tleSortGroupRef];
+		pgarr_append(AttrNumber, new_grpColIdx, grouping_map[clause->tleSortGroupRef]);
 	}
 
 	return new_grpColIdx;
@@ -2219,7 +2219,7 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 		for_each_cell(lc, rollups, list_second_cell(rollups))
 		{
 			RollupData *rollup = lfirst(lc);
-			AttrNumber *new_grpColIdx;
+			PGARR(AttrNumber) *new_grpColIdx;
 			Plan	   *sort_plan = NULL;
 			Plan	   *agg_plan;
 			AggStrategy strat;
@@ -2275,7 +2275,7 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 	 */
 	{
 		RollupData *rollup = linitial(rollups);
-		AttrNumber *top_grpColIdx;
+		PGARR(AttrNumber) *top_grpColIdx;
 		int			numGroupCols;
 
 		top_grpColIdx = remap_groupColIdx(root, rollup->groupClause);
@@ -2387,13 +2387,13 @@ create_windowagg_plan(PlannerInfo *root, WindowAggPath *best_path)
 	Plan	   *subplan;
 	List	   *tlist;
 	int			partNumCols;
-	AttrNumber *partColIdx;
-	Oid		   *partOperators;
-	Oid		   *partCollations;
+	PGARR(AttrNumber) *partColIdx;
+	PGARR(Oid)		   *partOperators;
+	PGARR(Oid)		   *partCollations;
 	int			ordNumCols;
-	AttrNumber *ordColIdx;
-	Oid		   *ordOperators;
-	Oid		   *ordCollations;
+	PGARR(AttrNumber) *ordColIdx;
+	PGARR(Oid)		   *ordOperators;
+	PGARR(Oid)		   *ordCollations;
 	ListCell   *lc;
 
 	/*
@@ -2413,9 +2413,9 @@ create_windowagg_plan(PlannerInfo *root, WindowAggPath *best_path)
 	 * column for RANGE OFFSET cases, as the executor needs that for in_range
 	 * tests even if it's known to be equal to some partitioning column.)
 	 */
-	partColIdx = (AttrNumber *) palloc(sizeof(AttrNumber) * numPart);
-	partOperators = (Oid *) palloc(sizeof(Oid) * numPart);
-	partCollations = (Oid *) palloc(sizeof(Oid) * numPart);
+	partColIdx = pgarr_alloc_capacity(AttrNumber, numPart);
+	partOperators = pgarr_alloc_capacity(Oid, numPart);
+	partCollations = pgarr_alloc_capacity(Oid, numPart);
 
 	partNumCols = 0;
 	foreach(lc, wc->partitionClause)
@@ -2424,15 +2424,15 @@ create_windowagg_plan(PlannerInfo *root, WindowAggPath *best_path)
 		TargetEntry *tle = get_sortgroupclause_tle(sgc, subplan->targetlist);
 
 		Assert(OidIsValid(sgc->eqop));
-		partColIdx[partNumCols] = tle->resno;
-		partOperators[partNumCols] = sgc->eqop;
-		partCollations[partNumCols] = exprCollation((Node *) tle->expr);
+		pgarr_append_reserved(AttrNumber, partColIdx, tle->resno);
+		pgarr_append_reserved(Oid, partOperators, sgc->eqop);
+		pgarr_append_reserved(Oid, partCollations, exprCollation((Node *) tle->expr));
 		partNumCols++;
 	}
 
-	ordColIdx = (AttrNumber *) palloc(sizeof(AttrNumber) * numOrder);
-	ordOperators = (Oid *) palloc(sizeof(Oid) * numOrder);
-	ordCollations = (Oid *) palloc(sizeof(Oid) * numOrder);
+	ordColIdx = pgarr_alloc_capacity(AttrNumber, numOrder);
+	ordOperators = pgarr_alloc_capacity(Oid, numOrder);
+	ordCollations = pgarr_alloc_capacity(Oid, numOrder);
 
 	ordNumCols = 0;
 	foreach(lc, wc->orderClause)
@@ -2441,9 +2441,9 @@ create_windowagg_plan(PlannerInfo *root, WindowAggPath *best_path)
 		TargetEntry *tle = get_sortgroupclause_tle(sgc, subplan->targetlist);
 
 		Assert(OidIsValid(sgc->eqop));
-		ordColIdx[ordNumCols] = tle->resno;
-		ordOperators[ordNumCols] = sgc->eqop;
-		ordCollations[ordNumCols] = exprCollation((Node *) tle->expr);
+		pgarr_append_reserved(AttrNumber, ordColIdx, tle->resno);
+		pgarr_append_reserved(Oid, ordOperators, sgc->eqop);
+		pgarr_append_reserved(Oid, ordCollations, exprCollation((Node *) tle->expr));
 		ordNumCols++;
 	}
 
@@ -4078,10 +4078,10 @@ create_mergejoin_plan(PlannerInfo *root,
 	List	   *outerpathkeys;
 	List	   *innerpathkeys;
 	int			nClauses;
-	Oid		   *mergefamilies;
-	Oid		   *mergecollations;
-	int		   *mergestrategies;
-	bool	   *mergenullsfirst;
+	PGARR(Oid) *mergefamilies;
+	PGARR(Oid) *mergecollations;
+	PGARR(int) *mergestrategies;
+	PGARR(bool) *mergenullsfirst;
 	PathKey    *opathkey;
 	EquivalenceClass *opeclass;
 	int			i;
@@ -4208,10 +4208,10 @@ create_mergejoin_plan(PlannerInfo *root,
 	 */
 	nClauses = list_length(mergeclauses);
 	Assert(nClauses == list_length(best_path->path_mergeclauses));
-	mergefamilies = (Oid *) palloc(nClauses * sizeof(Oid));
-	mergecollations = (Oid *) palloc(nClauses * sizeof(Oid));
-	mergestrategies = (int *) palloc(nClauses * sizeof(int));
-	mergenullsfirst = (bool *) palloc(nClauses * sizeof(bool));
+	mergefamilies = pgarr_alloc_capacity(Oid, nClauses);
+	mergecollations = pgarr_alloc_capacity(Oid, nClauses);
+	mergestrategies = pgarr_alloc_capacity(int, nClauses);
+	mergenullsfirst = pgarr_alloc_capacity(bool, nClauses);
 
 	opathkey = NULL;
 	opeclass = NULL;
@@ -4335,10 +4335,10 @@ create_mergejoin_plan(PlannerInfo *root,
 			elog(ERROR, "left and right pathkeys do not match in mergejoin");
 
 		/* OK, save info for executor */
-		mergefamilies[i] = opathkey->pk_opfamily;
-		mergecollations[i] = opathkey->pk_eclass->ec_collation;
-		mergestrategies[i] = opathkey->pk_strategy;
-		mergenullsfirst[i] = opathkey->pk_nulls_first;
+		pgarr_append_reserved(Oid, mergefamilies, opathkey->pk_opfamily);
+		pgarr_append_reserved(Oid, mergecollations, opathkey->pk_eclass->ec_collation);
+		pgarr_append_reserved(int, mergestrategies, opathkey->pk_strategy);
+		pgarr_append_reserved(bool, mergenullsfirst, opathkey->pk_nulls_first);
 		i++;
 	}
 
@@ -5485,25 +5485,24 @@ make_recursive_union(List *tlist,
 	if (numCols > 0)
 	{
 		int			keyno = 0;
-		AttrNumber *dupColIdx;
-		Oid		   *dupOperators;
-		Oid		   *dupCollations;
+		PGARR(AttrNumber) *dupColIdx;
+		PGARR(Oid)		   *dupOperators;
+		PGARR(Oid)		   *dupCollations;
 		ListCell   *slitem;
 
-		dupColIdx = (AttrNumber *) palloc(sizeof(AttrNumber) * numCols);
-		dupOperators = (Oid *) palloc(sizeof(Oid) * numCols);
-		dupCollations = (Oid *) palloc(sizeof(Oid) * numCols);
+		dupColIdx = pgarr_alloc_capacity(AttrNumber, numCols);
+		dupOperators = pgarr_alloc_capacity(Oid, numCols);
+		dupCollations = pgarr_alloc_capacity(Oid, numCols);
 
 		foreach(slitem, distinctList)
 		{
 			SortGroupClause *sortcl = (SortGroupClause *) lfirst(slitem);
 			TargetEntry *tle = get_sortgroupclause_tle(sortcl,
 													   plan->targetlist);
-
-			dupColIdx[keyno] = tle->resno;
-			dupOperators[keyno] = sortcl->eqop;
-			dupCollations[keyno] = exprCollation((Node *) tle->expr);
-			Assert(OidIsValid(dupOperators[keyno]));
+			pgarr_append_reserved(AttrNumber, dupColIdx, tle->resno);
+			pgarr_append_reserved(Oid, dupOperators, sortcl->eqop);
+			pgarr_append_reserved(Oid, dupCollations, exprCollation((Node *) tle->expr));
+			Assert(OidIsValid(*pgarr_at(dupOperators, keyno)));
 			keyno++;
 		}
 		node->dupColIdx = dupColIdx;
@@ -5629,10 +5628,10 @@ make_mergejoin(List *tlist,
 			   List *joinclauses,
 			   List *otherclauses,
 			   List *mergeclauses,
-			   Oid *mergefamilies,
-			   Oid *mergecollations,
-			   int *mergestrategies,
-			   bool *mergenullsfirst,
+			   PGARR(Oid) *mergefamilies,
+			   PGARR(Oid) *mergecollations,
+			   PGARR(int) *mergestrategies,
+			   PGARR(bool) *mergenullsfirst,
 			   Plan *lefttree,
 			   Plan *righttree,
 			   JoinType jointype,
@@ -5667,8 +5666,8 @@ make_mergejoin(List *tlist,
  */
 static Sort *
 make_sort(Plan *lefttree, int numCols,
-		  AttrNumber *sortColIdx, Oid *sortOperators,
-		  Oid *collations, bool *nullsFirst)
+		  PGARR(AttrNumber) *sortColIdx, PGARR(Oid) *sortOperators,
+		  PGARR(Oid) *collations, PGARR(bool) *nullsFirst)
 {
 	Sort	   *node = makeNode(Sort);
 	Plan	   *plan = &node->plan;
@@ -5730,30 +5729,30 @@ make_sort(Plan *lefttree, int numCols,
 static Plan *
 prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 						   Relids relids,
-						   const AttrNumber *reqColIdx,
+						   const PGARR(AttrNumber) *reqColIdx,
 						   bool adjust_tlist_in_place,
 						   int *p_numsortkeys,
-						   AttrNumber **p_sortColIdx,
-						   Oid **p_sortOperators,
-						   Oid **p_collations,
-						   bool **p_nullsFirst)
+						   PGARR(AttrNumber) **p_sortColIdx,
+						   PGARR(Oid) **p_sortOperators,
+						   PGARR(Oid) **p_collations,
+						   PGARR(bool) **p_nullsFirst)
 {
 	List	   *tlist = lefttree->targetlist;
 	ListCell   *i;
 	int			numsortkeys;
-	AttrNumber *sortColIdx;
-	Oid		   *sortOperators;
-	Oid		   *collations;
-	bool	   *nullsFirst;
+	PGARR(AttrNumber) *sortColIdx;
+	PGARR(Oid)		   *sortOperators;
+	PGARR(Oid)		   *collations;
+	PGARR(bool)	   *nullsFirst;
 
 	/*
 	 * We will need at most list_length(pathkeys) sort columns; possibly less
 	 */
 	numsortkeys = list_length(pathkeys);
-	sortColIdx = (AttrNumber *) palloc(numsortkeys * sizeof(AttrNumber));
-	sortOperators = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	collations = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	nullsFirst = (bool *) palloc(numsortkeys * sizeof(bool));
+	sortColIdx = pgarr_alloc_capacity(AttrNumber, numsortkeys);
+	sortOperators = pgarr_alloc_capacity(Oid, numsortkeys);
+	collations = pgarr_alloc_capacity(Oid, numsortkeys);
+	nullsFirst = pgarr_alloc_capacity(bool, numsortkeys);
 
 	numsortkeys = 0;
 
@@ -5792,7 +5791,7 @@ prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 			 * pathkey's EC, we do the same, which is probably the wrong thing
 			 * but we'll leave it to caller to complain about the mismatch.
 			 */
-			tle = get_tle_by_resno(tlist, reqColIdx[numsortkeys]);
+			tle = get_tle_by_resno(tlist, *pgarr_at(reqColIdx, numsortkeys));
 			if (tle)
 			{
 				em = find_ec_member_for_tle(ec, tle, relids);
@@ -5931,10 +5930,10 @@ prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 				 pathkey->pk_opfamily);
 
 		/* Add the column to the sort arrays */
-		sortColIdx[numsortkeys] = tle->resno;
-		sortOperators[numsortkeys] = sortop;
-		collations[numsortkeys] = ec->ec_collation;
-		nullsFirst[numsortkeys] = pathkey->pk_nulls_first;
+		pgarr_append_reserved(AttrNumber, sortColIdx, tle->resno);
+		pgarr_append_reserved(Oid, sortOperators, sortop);
+		pgarr_append_reserved(Oid, collations, ec->ec_collation);
+		pgarr_append_reserved(bool, nullsFirst, pathkey->pk_nulls_first);
 		numsortkeys++;
 	}
 
@@ -6010,10 +6009,10 @@ static Sort *
 make_sort_from_pathkeys(Plan *lefttree, List *pathkeys, Relids relids)
 {
 	int			numsortkeys;
-	AttrNumber *sortColIdx;
-	Oid		   *sortOperators;
-	Oid		   *collations;
-	bool	   *nullsFirst;
+	PGARR(AttrNumber) *sortColIdx;
+	PGARR(Oid)		   *sortOperators;
+	PGARR(Oid)		   *collations;
+	PGARR(bool)	   *nullsFirst;
 
 	/* Compute sort column info, and adjust lefttree as needed */
 	lefttree = prepare_sort_from_pathkeys(lefttree, pathkeys,
@@ -6045,17 +6044,17 @@ make_sort_from_sortclauses(List *sortcls, Plan *lefttree)
 	List	   *sub_tlist = lefttree->targetlist;
 	ListCell   *l;
 	int			numsortkeys;
-	AttrNumber *sortColIdx;
-	Oid		   *sortOperators;
-	Oid		   *collations;
-	bool	   *nullsFirst;
+	PGARR(AttrNumber) *sortColIdx;
+	PGARR(Oid)		   *sortOperators;
+	PGARR(Oid)		   *collations;
+	PGARR(bool)	   *nullsFirst;
 
 	/* Convert list-ish representation to arrays wanted by executor */
 	numsortkeys = list_length(sortcls);
-	sortColIdx = (AttrNumber *) palloc(numsortkeys * sizeof(AttrNumber));
-	sortOperators = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	collations = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	nullsFirst = (bool *) palloc(numsortkeys * sizeof(bool));
+	sortColIdx = pgarr_alloc_capacity(AttrNumber, numsortkeys);
+	sortOperators = pgarr_alloc_capacity(Oid, numsortkeys);
+	collations = pgarr_alloc_capacity(Oid, numsortkeys);
+	nullsFirst = pgarr_alloc_capacity(bool, numsortkeys);
 
 	numsortkeys = 0;
 	foreach(l, sortcls)
@@ -6063,10 +6062,10 @@ make_sort_from_sortclauses(List *sortcls, Plan *lefttree)
 		SortGroupClause *sortcl = (SortGroupClause *) lfirst(l);
 		TargetEntry *tle = get_sortgroupclause_tle(sortcl, sub_tlist);
 
-		sortColIdx[numsortkeys] = tle->resno;
-		sortOperators[numsortkeys] = sortcl->sortop;
-		collations[numsortkeys] = exprCollation((Node *) tle->expr);
-		nullsFirst[numsortkeys] = sortcl->nulls_first;
+		pgarr_append_reserved(AttrNumber, sortColIdx, tle->resno);
+		pgarr_append_reserved(Oid, sortOperators, sortcl->sortop);
+		pgarr_append_reserved(Oid, collations, exprCollation((Node *) tle->expr));
+		pgarr_append_reserved(bool, nullsFirst, sortcl->nulls_first);
 		numsortkeys++;
 	}
 
@@ -6090,37 +6089,37 @@ make_sort_from_sortclauses(List *sortcls, Plan *lefttree)
  */
 static Sort *
 make_sort_from_groupcols(List *groupcls,
-						 AttrNumber *grpColIdx,
+						 PGARR(AttrNumber) *grpColIdx,
 						 Plan *lefttree)
 {
 	List	   *sub_tlist = lefttree->targetlist;
 	ListCell   *l;
 	int			numsortkeys;
-	AttrNumber *sortColIdx;
-	Oid		   *sortOperators;
-	Oid		   *collations;
-	bool	   *nullsFirst;
+	PGARR(AttrNumber) *sortColIdx;
+	PGARR(Oid)		   *sortOperators;
+	PGARR(Oid)		   *collations;
+	PGARR(bool)	   *nullsFirst;
 
 	/* Convert list-ish representation to arrays wanted by executor */
 	numsortkeys = list_length(groupcls);
-	sortColIdx = (AttrNumber *) palloc(numsortkeys * sizeof(AttrNumber));
-	sortOperators = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	collations = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	nullsFirst = (bool *) palloc(numsortkeys * sizeof(bool));
+	sortColIdx = pgarr_alloc_capacity(AttrNumber, numsortkeys);
+	sortOperators = pgarr_alloc_capacity(Oid, numsortkeys);
+	collations = pgarr_alloc_capacity(Oid, numsortkeys);
+	nullsFirst = pgarr_alloc_capacity(bool, numsortkeys);
 
 	numsortkeys = 0;
 	foreach(l, groupcls)
 	{
 		SortGroupClause *grpcl = (SortGroupClause *) lfirst(l);
-		TargetEntry *tle = get_tle_by_resno(sub_tlist, grpColIdx[numsortkeys]);
+		TargetEntry *tle = get_tle_by_resno(sub_tlist, *pgarr_at(grpColIdx, numsortkeys));
 
 		if (!tle)
 			elog(ERROR, "could not retrieve tle for sort-from-groupcols");
 
-		sortColIdx[numsortkeys] = tle->resno;
-		sortOperators[numsortkeys] = grpcl->sortop;
-		collations[numsortkeys] = exprCollation((Node *) tle->expr);
-		nullsFirst[numsortkeys] = grpcl->nulls_first;
+		pgarr_append_reserved(AttrNumber, sortColIdx, tle->resno);
+		pgarr_append_reserved(Oid, sortOperators, grpcl->sortop);
+		pgarr_append_reserved(Oid, collations, exprCollation((Node *) tle->expr));
+		pgarr_append_reserved(bool, nullsFirst, grpcl->nulls_first);
 		numsortkeys++;
 	}
 
@@ -6188,7 +6187,7 @@ materialize_finished_plan(Plan *subplan)
 Agg *
 make_agg(List *tlist, List *qual,
 		 AggStrategy aggstrategy, AggSplit aggsplit,
-		 int numGroupCols, AttrNumber *grpColIdx, Oid *grpOperators, Oid *grpCollations,
+		 int numGroupCols, PGARR(AttrNumber) *grpColIdx, PGARR(Oid) *grpOperators, PGARR(Oid) *grpCollations,
 		 List *groupingSets, List *chain,
 		 double dNumGroups, Plan *lefttree)
 {
@@ -6220,8 +6219,10 @@ make_agg(List *tlist, List *qual,
 
 static WindowAgg *
 make_windowagg(List *tlist, Index winref,
-			   int partNumCols, AttrNumber *partColIdx, Oid *partOperators, Oid *partCollations,
-			   int ordNumCols, AttrNumber *ordColIdx, Oid *ordOperators, Oid *ordCollations,
+			   int partNumCols,
+			   PGARR(AttrNumber) *partColIdx, PGARR(Oid) *partOperators, PGARR(Oid) *partCollations,
+			   int ordNumCols,
+			   PGARR(AttrNumber) *ordColIdx, PGARR(Oid) *ordOperators, PGARR(Oid) *ordCollations,
 			   int frameOptions, Node *startOffset, Node *endOffset,
 			   Oid startInRangeFunc, Oid endInRangeFunc,
 			   Oid inRangeColl, bool inRangeAsc, bool inRangeNullsFirst,
@@ -6261,9 +6262,9 @@ static Group *
 make_group(List *tlist,
 		   List *qual,
 		   int numGroupCols,
-		   AttrNumber *grpColIdx,
-		   Oid *grpOperators,
-		   Oid *grpCollations,
+		   PGARR(AttrNumber) *grpColIdx,
+		   PGARR(Oid) *grpOperators,
+		   PGARR(Oid) *grpCollations,
 		   Plan *lefttree)
 {
 	Group	   *node = makeNode(Group);
@@ -6294,9 +6295,9 @@ make_unique_from_sortclauses(Plan *lefttree, List *distinctList)
 	Plan	   *plan = &node->plan;
 	int			numCols = list_length(distinctList);
 	int			keyno = 0;
-	AttrNumber *uniqColIdx;
-	Oid		   *uniqOperators;
-	Oid		   *uniqCollations;
+	PGARR(AttrNumber) *uniqColIdx;
+	PGARR(Oid)		   *uniqOperators;
+	PGARR(Oid)		   *uniqCollations;
 	ListCell   *slitem;
 
 	plan->targetlist = lefttree->targetlist;
@@ -6309,19 +6310,19 @@ make_unique_from_sortclauses(Plan *lefttree, List *distinctList)
 	 * operators, as wanted by executor
 	 */
 	Assert(numCols > 0);
-	uniqColIdx = (AttrNumber *) palloc(sizeof(AttrNumber) * numCols);
-	uniqOperators = (Oid *) palloc(sizeof(Oid) * numCols);
-	uniqCollations = (Oid *) palloc(sizeof(Oid) * numCols);
+	uniqColIdx = pgarr_alloc_capacity(AttrNumber, numCols);
+	uniqOperators = pgarr_alloc_capacity(Oid, numCols);
+	uniqCollations = pgarr_alloc_capacity(Oid, numCols);
 
 	foreach(slitem, distinctList)
 	{
 		SortGroupClause *sortcl = (SortGroupClause *) lfirst(slitem);
 		TargetEntry *tle = get_sortgroupclause_tle(sortcl, plan->targetlist);
 
-		uniqColIdx[keyno] = tle->resno;
-		uniqOperators[keyno] = sortcl->eqop;
-		uniqCollations[keyno] = exprCollation((Node *) tle->expr);
-		Assert(OidIsValid(uniqOperators[keyno]));
+		pgarr_append_reserved(AttrNumber, uniqColIdx, tle->resno);
+		pgarr_append_reserved(Oid, uniqOperators, sortcl->eqop);
+		pgarr_append_reserved(Oid, uniqCollations, exprCollation((Node *) tle->expr));
+		Assert(OidIsValid(*pgarr_at(uniqOperators, keyno)));
 		keyno++;
 	}
 
@@ -6342,9 +6343,9 @@ make_unique_from_pathkeys(Plan *lefttree, List *pathkeys, int numCols)
 	Unique	   *node = makeNode(Unique);
 	Plan	   *plan = &node->plan;
 	int			keyno = 0;
-	AttrNumber *uniqColIdx;
-	Oid		   *uniqOperators;
-	Oid		   *uniqCollations;
+	PGARR(AttrNumber) *uniqColIdx;
+	PGARR(Oid)		   *uniqOperators;
+	PGARR(Oid)		   *uniqCollations;
 	ListCell   *lc;
 
 	plan->targetlist = lefttree->targetlist;
@@ -6358,9 +6359,9 @@ make_unique_from_pathkeys(Plan *lefttree, List *pathkeys, int numCols)
 	 * prepare_sort_from_pathkeys ... maybe unify sometime?
 	 */
 	Assert(numCols >= 0 && numCols <= list_length(pathkeys));
-	uniqColIdx = (AttrNumber *) palloc(sizeof(AttrNumber) * numCols);
-	uniqOperators = (Oid *) palloc(sizeof(Oid) * numCols);
-	uniqCollations = (Oid *) palloc(sizeof(Oid) * numCols);
+	uniqColIdx = pgarr_alloc_capacity(AttrNumber, numCols);
+	uniqOperators = pgarr_alloc_capacity(Oid, numCols);
+	uniqCollations = pgarr_alloc_capacity(Oid, numCols);
 
 	foreach(lc, pathkeys)
 	{
@@ -6427,9 +6428,9 @@ make_unique_from_pathkeys(Plan *lefttree, List *pathkeys, int numCols)
 				 BTEqualStrategyNumber, pk_datatype, pk_datatype,
 				 pathkey->pk_opfamily);
 
-		uniqColIdx[keyno] = tle->resno;
-		uniqOperators[keyno] = eqop;
-		uniqCollations[keyno] = ec->ec_collation;
+		pgarr_append_reserved(AttrNumber, uniqColIdx, tle->resno);
+		pgarr_append_reserved(Oid, uniqOperators, eqop);
+		pgarr_append_reserved(Oid, uniqCollations, ec->ec_collation);
 
 		keyno++;
 	}
@@ -6480,9 +6481,9 @@ make_setop(SetOpCmd cmd, SetOpStrategy strategy, Plan *lefttree,
 	Plan	   *plan = &node->plan;
 	int			numCols = list_length(distinctList);
 	int			keyno = 0;
-	AttrNumber *dupColIdx;
-	Oid		   *dupOperators;
-	Oid		   *dupCollations;
+	PGARR(AttrNumber) *dupColIdx;
+	PGARR(Oid)	   *dupOperators;
+	PGARR(Oid)	   *dupCollations;
 	ListCell   *slitem;
 
 	plan->targetlist = lefttree->targetlist;
@@ -6494,19 +6495,19 @@ make_setop(SetOpCmd cmd, SetOpStrategy strategy, Plan *lefttree,
 	 * convert SortGroupClause list into arrays of attr indexes and equality
 	 * operators, as wanted by executor
 	 */
-	dupColIdx = (AttrNumber *) palloc(sizeof(AttrNumber) * numCols);
-	dupOperators = (Oid *) palloc(sizeof(Oid) * numCols);
-	dupCollations = (Oid *) palloc(sizeof(Oid) * numCols);
+	dupColIdx = pgarr_alloc_capacity(AttrNumber, numCols);
+	dupOperators = pgarr_alloc_capacity(Oid, numCols);
+	dupCollations = pgarr_alloc_capacity(Oid, numCols);
 
 	foreach(slitem, distinctList)
 	{
 		SortGroupClause *sortcl = (SortGroupClause *) lfirst(slitem);
 		TargetEntry *tle = get_sortgroupclause_tle(sortcl, plan->targetlist);
 
-		dupColIdx[keyno] = tle->resno;
-		dupOperators[keyno] = sortcl->eqop;
-		dupCollations[keyno] = exprCollation((Node *) tle->expr);
-		Assert(OidIsValid(dupOperators[keyno]));
+		pgarr_append_reserved(AttrNumber, dupColIdx, tle->resno);
+		pgarr_append_reserved(Oid, dupOperators, sortcl->eqop);
+		pgarr_append_reserved(Oid, dupCollations, exprCollation((Node *) tle->expr));
+		Assert(OidIsValid(*pgarr_at(dupOperators, keyno)));
 		keyno++;
 	}
 

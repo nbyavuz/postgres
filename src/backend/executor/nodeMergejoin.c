@@ -174,10 +174,10 @@ typedef enum
  */
 static MergeJoinClause
 MJExamineQuals(List *mergeclauses,
-			   Oid *mergefamilies,
-			   Oid *mergecollations,
-			   int *mergestrategies,
-			   bool *mergenullsfirst,
+			   PGARR(Oid) *mergefamilies,
+			   PGARR(Oid) *mergecollations,
+			   PGARR(int) *mergestrategies,
+			   PGARR(bool) *mergenullsfirst,
 			   PlanState *parent)
 {
 	MergeJoinClause clauses;
@@ -192,10 +192,10 @@ MJExamineQuals(List *mergeclauses,
 	{
 		OpExpr	   *qual = (OpExpr *) lfirst(cl);
 		MergeJoinClause clause = &clauses[iClause];
-		Oid			opfamily = mergefamilies[iClause];
-		Oid			collation = mergecollations[iClause];
-		StrategyNumber opstrategy = mergestrategies[iClause];
-		bool		nulls_first = mergenullsfirst[iClause];
+		Oid			opfamily = *pgarr_at(mergefamilies, iClause);
+		Oid			collation = *pgarr_at(mergecollations, iClause);
+		StrategyNumber opstrategy = *pgarr_at(mergestrategies, iClause);
+		bool		nulls_first = *pgarr_at(mergenullsfirst, iClause);
 		int			op_strategy;
 		Oid			op_lefttype;
 		Oid			op_righttype;

@@ -74,13 +74,6 @@
 #define equalstr(a, b)	\
 	(((a) != NULL && (b) != NULL) ? (strcmp(a, b) == 0) : (a) == (b))
 
-/* Compare a field that is a pointer to a simple palloc'd object of size sz */
-#define COMPARE_POINTER_FIELD(fldname, sz) \
-	do { \
-		if (memcmp(a->fldname, b->fldname, (sz)) != 0) \
-			return false; \
-	} while (0)
-
 /* Compare a parse location field (this is a no-op, per note above) */
 #define COMPARE_LOCATION_FIELD(fldname) \
 	((void) 0)

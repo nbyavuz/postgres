@@ -129,10 +129,10 @@ build_hash_table(SetOpState *setopstate)
 	setopstate->hashtable = BuildTupleHashTableExt(&setopstate->ps,
 												   desc,
 												   node->numCols,
-												   node->dupColIdx,
+												   pgarr_data(node->dupColIdx),
 												   setopstate->eqfuncoids,
 												   setopstate->hashfunctions,
-												   node->dupCollations,
+												   pgarr_data(node->dupCollations),
 												   node->numGroups,
 												   0,
 												   setopstate->ps.state->es_query_cxt,
@@ -546,16 +546,16 @@ ExecInitSetOp(SetOp *node, EState *estate, int eflags)
 	 */
 	if (node->strategy == SETOP_HASHED)
 		execTuplesHashPrepare(node->numCols,
-							  node->dupOperators,
+							  pgarr_data(node->dupOperators),
 							  &setopstate->eqfuncoids,
 							  &setopstate->hashfunctions);
 	else
 		setopstate->eqfunction =
 			execTuplesMatchPrepare(outerDesc,
 								   node->numCols,
-								   node->dupColIdx,
-								   node->dupOperators,
-								   node->dupCollations,
+								   pgarr_data(node->dupColIdx),
+								   pgarr_data(node->dupOperators),
+								   pgarr_data(node->dupCollations),
 								   &setopstate->ps);
 
 	if (node->strategy == SETOP_HASHED)

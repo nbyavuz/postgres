@@ -54,6 +54,10 @@
 	(newnode->fldname = from->fldname ? pstrdup(from->fldname) : (char *) NULL)
 
 /* Copy a field that is a pointer to a simple palloc'd object of size sz */
+#define COPY_ARRAY_FIELD(fldname) \
+	(newnode->fldname = from->fldname == NULL ? NULL : pgarr_clone_raw(from->fldname))
+
+/* Copy a field that is a pointer to a simple palloc'd object of size sz */
 #define COPY_POINTER_FIELD(fldname, sz) \
 	do { \
 		Size	_size = (sz); \
@@ -266,10 +270,10 @@ _copyMergeAppend(const MergeAppend *from)
 	 */
 	COPY_NODE_FIELD(mergeplans);
 	COPY_SCALAR_FIELD(numCols);
-	COPY_POINTER_FIELD(sortColIdx, from->numCols * sizeof(AttrNumber));
-	COPY_POINTER_FIELD(sortOperators, from->numCols * sizeof(Oid));
-	COPY_POINTER_FIELD(collations, from->numCols * sizeof(Oid));
-	COPY_POINTER_FIELD(nullsFirst, from->numCols * sizeof(bool));
+	COPY_ARRAY_FIELD(sortColIdx);
+	COPY_ARRAY_FIELD(sortOperators);
+	COPY_ARRAY_FIELD(collations);
+	COPY_ARRAY_FIELD(nullsFirst);
 	COPY_NODE_FIELD(part_prune_info);
 
 	return newnode;
@@ -293,12 +297,9 @@ _copyRecursiveUnion(const RecursiveUnion *from)
 	 */
 	COPY_SCALAR_FIELD(wtParam);
 	COPY_SCALAR_FIELD(numCols);
-	if (from->numCols > 0)
-	{
-		COPY_POINTER_FIELD(dupColIdx, from->numCols * sizeof(AttrNumber));
-		COPY_POINTER_FIELD(dupOperators, from->numCols * sizeof(Oid));
-		COPY_POINTER_FIELD(dupCollations, from->numCols * sizeof(Oid));
-	}
+	COPY_ARRAY_FIELD(dupColIdx);
+	COPY_ARRAY_FIELD(dupOperators);
+	COPY_ARRAY_FIELD(dupCollations);
 	COPY_SCALAR_FIELD(numGroups);
 
 	return newnode;
@@ -391,10 +392,10 @@ _copyGatherMerge(const GatherMerge *from)
 	COPY_SCALAR_FIELD(num_workers);
 	COPY_SCALAR_FIELD(rescan_param);
 	COPY_SCALAR_FIELD(numCols);
-	COPY_POINTER_FIELD(sortColIdx, from->numCols * sizeof(AttrNumber));
-	COPY_POINTER_FIELD(sortOperators, from->numCols * sizeof(Oid));
-	COPY_POINTER_FIELD(collations, from->numCols * sizeof(Oid));
-	COPY_POINTER_FIELD(nullsFirst, from->numCols * sizeof(bool));
+	COPY_ARRAY_FIELD(sortColIdx);
+	COPY_ARRAY_FIELD(sortOperators);
+	COPY_ARRAY_FIELD(collations);
+	COPY_ARRAY_FIELD(nullsFirst);
 	COPY_BITMAPSET_FIELD(initParam);
 
 	return newnode;
@@ -858,7 +859,6 @@ static MergeJoin *
 _copyMergeJoin(const MergeJoin *from)
 {
 	MergeJoin  *newnode = makeNode(MergeJoin);
-	int			numCols;
 
 	/*
 	 * copy node superclass fields
@@ -870,14 +870,10 @@ _copyMergeJoin(const MergeJoin *from)
 	 */
 	COPY_SCALAR_FIELD(skip_mark_restore);
 	COPY_NODE_FIELD(mergeclauses);
-	numCols = list_length(from->mergeclauses);
-	if (numCols > 0)
-	{
-		COPY_POINTER_FIELD(mergeFamilies, numCols * sizeof(Oid));
-		COPY_POINTER_FIELD(mergeCollations, numCols * sizeof(Oid));
-		COPY_POINTER_FIELD(mergeStrategies, numCols * sizeof(int));
-		COPY_POINTER_FIELD(mergeNullsFirst, numCols * sizeof(bool));
-	}
+	COPY_ARRAY_FIELD(mergeFamilies);
+	COPY_ARRAY_FIELD(mergeCollations);
+	COPY_ARRAY_FIELD(mergeStrategies);
+	COPY_ARRAY_FIELD(mergeNullsFirst);
 
 	return newnode;
 }
@@ -938,10 +934,10 @@ _copySort(const Sort *from)
 	CopyPlanFields((const Plan *) from, (Plan *) newnode);
 
 	COPY_SCALAR_FIELD(numCols);
-	COPY_POINTER_FIELD(sortColIdx, from->numCols * sizeof(AttrNumber));
-	COPY_POINTER_FIELD(sortOperators, from->numCols * sizeof(Oid));
-	COPY_POINTER_FIELD(collations, from->numCols * sizeof(Oid));
-	COPY_POINTER_FIELD(nullsFirst, from->numCols * sizeof(bool));
+	COPY_ARRAY_FIELD(sortColIdx);
+	COPY_ARRAY_FIELD(sortOperators);
+	COPY_ARRAY_FIELD(collations);
+	COPY_ARRAY_FIELD(nullsFirst);
 
 	return newnode;
 }
@@ -958,9 +954,9 @@ _copyGroup(const Group *from)
 	CopyPlanFields((const Plan *) from, (Plan *) newnode);
 
 	COPY_SCALAR_FIELD(numCols);
-	COPY_POINTER_FIELD(grpColIdx, from->numCols * sizeof(AttrNumber));
-	COPY_POINTER_FIELD(grpOperators, from->numCols * sizeof(Oid));
-	COPY_POINTER_FIELD(grpCollations, from->numCols * sizeof(Oid));
+	COPY_ARRAY_FIELD(grpColIdx);
+	COPY_ARRAY_FIELD(grpOperators);
+	COPY_ARRAY_FIELD(grpCollations);
 
 	return newnode;
 }
@@ -978,12 +974,9 @@ _copyAgg(const Agg *from)
 	COPY_SCALAR_FIELD(aggstrategy);
 	COPY_SCALAR_FIELD(aggsplit);
 	COPY_SCALAR_FIELD(numCols);
-	if (from->numCols > 0)
-	{
-		COPY_POINTER_FIELD(grpColIdx, from->numCols * sizeof(AttrNumber));
-		COPY_POINTER_FIELD(grpOperators, from->numCols * sizeof(Oid));
-		COPY_POINTER_FIELD(grpCollations, from->numCols * sizeof(Oid));
-	}
+	COPY_ARRAY_FIELD(grpColIdx);
+	COPY_ARRAY_FIELD(grpOperators);
+	COPY_ARRAY_FIELD(grpCollations);
 	COPY_SCALAR_FIELD(numGroups);
 	COPY_BITMAPSET_FIELD(aggParams);
 	COPY_NODE_FIELD(groupingSets);
@@ -1004,19 +997,13 @@ _copyWindowAgg(const WindowAgg *from)
 
 	COPY_SCALAR_FIELD(winref);
 	COPY_SCALAR_FIELD(partNumCols);
-	if (from->partNumCols > 0)
-	{
-		COPY_POINTER_FIELD(partColIdx, from->partNumCols * sizeof(AttrNumber));
-		COPY_POINTER_FIELD(partOperators, from->partNumCols * sizeof(Oid));
-		COPY_POINTER_FIELD(partCollations, from->partNumCols * sizeof(Oid));
-	}
+	COPY_ARRAY_FIELD(partColIdx);
+	COPY_ARRAY_FIELD(partOperators);
+	COPY_ARRAY_FIELD(partCollations);
 	COPY_SCALAR_FIELD(ordNumCols);
-	if (from->ordNumCols > 0)
-	{
-		COPY_POINTER_FIELD(ordColIdx, from->ordNumCols * sizeof(AttrNumber));
-		COPY_POINTER_FIELD(ordOperators, from->ordNumCols * sizeof(Oid));
-		COPY_POINTER_FIELD(ordCollations, from->ordNumCols * sizeof(Oid));
-	}
+	COPY_ARRAY_FIELD(ordColIdx);
+	COPY_ARRAY_FIELD(ordOperators);
+	COPY_ARRAY_FIELD(ordCollations);
 	COPY_SCALAR_FIELD(frameOptions);
 	COPY_NODE_FIELD(startOffset);
 	COPY_NODE_FIELD(endOffset);
@@ -1046,9 +1033,9 @@ _copyUnique(const Unique *from)
 	 * copy remainder of node
 	 */
 	COPY_SCALAR_FIELD(numCols);
-	COPY_POINTER_FIELD(uniqColIdx, from->numCols * sizeof(AttrNumber));
-	COPY_POINTER_FIELD(uniqOperators, from->numCols * sizeof(Oid));
-	COPY_POINTER_FIELD(uniqCollations, from->numCols * sizeof(Oid));
+	COPY_ARRAY_FIELD(uniqColIdx);
+	COPY_ARRAY_FIELD(uniqOperators);
+	COPY_ARRAY_FIELD(uniqCollations);
 
 	return newnode;
 }
@@ -1097,9 +1084,9 @@ _copySetOp(const SetOp *from)
 	COPY_SCALAR_FIELD(cmd);
 	COPY_SCALAR_FIELD(strategy);
 	COPY_SCALAR_FIELD(numCols);
-	COPY_POINTER_FIELD(dupColIdx, from->numCols * sizeof(AttrNumber));
-	COPY_POINTER_FIELD(dupOperators, from->numCols * sizeof(Oid));
-	COPY_POINTER_FIELD(dupCollations, from->numCols * sizeof(Oid));
+	COPY_ARRAY_FIELD(dupColIdx);
+	COPY_ARRAY_FIELD(dupOperators);
+	COPY_ARRAY_FIELD(dupCollations);
 	COPY_SCALAR_FIELD(flagColIdx);
 	COPY_SCALAR_FIELD(firstFlag);
 	COPY_SCALAR_FIELD(numGroups);
@@ -1204,9 +1191,9 @@ _copyPartitionedRelPruneInfo(const PartitionedRelPruneInfo *from)
 	COPY_SCALAR_FIELD(rtindex);
 	COPY_BITMAPSET_FIELD(present_parts);
 	COPY_SCALAR_FIELD(nparts);
-	COPY_POINTER_FIELD(subplan_map, from->nparts * sizeof(int));
-	COPY_POINTER_FIELD(subpart_map, from->nparts * sizeof(int));
-	COPY_POINTER_FIELD(relid_map, from->nparts * sizeof(Oid));
+	COPY_ARRAY_FIELD(subplan_map);
+	COPY_ARRAY_FIELD(subpart_map);
+	COPY_ARRAY_FIELD(relid_map);
 	COPY_NODE_FIELD(initial_pruning_steps);
 	COPY_NODE_FIELD(exec_pruning_steps);
 	COPY_BITMAPSET_FIELD(execparamids);

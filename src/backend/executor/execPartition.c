@@ -1636,7 +1636,7 @@ ExecCreatePartitionPruneState(PlanState *planstate,
 			 */
 			Assert(partdesc->nparts >= pinfo->nparts);
 			pprune->nparts = partdesc->nparts;
-			pprune->subplan_map = palloc(sizeof(int) * partdesc->nparts);
+			pprune->subplan_map = pgarr_alloc_capacity(int, partdesc->nparts);
 			if (partdesc->nparts == pinfo->nparts)
 			{
 				/*
@@ -1645,8 +1645,8 @@ ExecCreatePartitionPruneState(PlanState *planstate,
 				 * copy the subplan_map since we may change it later.
 				 */
 				pprune->subpart_map = pinfo->subpart_map;
-				memcpy(pprune->subplan_map, pinfo->subplan_map,
-					   sizeof(int) * pinfo->nparts);
+				Assert(pgarr_size(pinfo->subplan_map) == pinfo->nparts);
+				pgarr_copy(int, pprune->subplan_map, pinfo->subplan_map);
 
 				/*
 				 * Double-check that the list of unpruned relations has not
@@ -1655,8 +1655,8 @@ ExecCreatePartitionPruneState(PlanState *planstate,
 #ifdef USE_ASSERT_CHECKING
 				for (int k = 0; k < pinfo->nparts; k++)
 				{
-					Assert(partdesc->oids[k] == pinfo->relid_map[k] ||
-						   pinfo->subplan_map[k] == -1);
+					Assert(partdesc->oids[k] == *pgarr_at(pinfo->relid_map, k) ||
+						   *pgarr_at(pinfo->subplan_map, k) == -1);
 				}
 #endif
 			}
@@ -1674,20 +1674,25 @@ ExecCreatePartitionPruneState(PlanState *planstate,
 				 * the same place, and any added indexes map to -1, as if the
 				 * new partitions had been pruned.
 				 */
-				pprune->subpart_map = palloc(sizeof(int) * partdesc->nparts);
+				pprune->subpart_map = pgarr_alloc_capacity(int, partdesc->nparts);
+				// FIXME
+				pgarr_set_all(pprune->subpart_map, partdesc->nparts, 0);
+				//pp
+				//palloc(sizeof(int) * partdesc->nparts);
 				for (pp_idx = 0; pp_idx < partdesc->nparts; ++pp_idx)
 				{
-					if (pinfo->relid_map[pd_idx] != partdesc->oids[pp_idx])
+					if (*pgarr_at(pinfo->relid_map, pd_idx) != partdesc->oids[pp_idx])
 					{
-						pprune->subplan_map[pp_idx] = -1;
-						pprune->subpart_map[pp_idx] = -1;
+						*pgarr_at(pprune->subplan_map, pp_idx) = -1;
+						*pgarr_at(pprune->subpart_map, pp_idx) = -1;
 					}
 					else
 					{
-						pprune->subplan_map[pp_idx] =
-							pinfo->subplan_map[pd_idx];
-						pprune->subpart_map[pp_idx] =
-							pinfo->subpart_map[pd_idx++];
+						*pgarr_at(pprune->subplan_map, pp_idx) =
+							*pgarr_at(pinfo->subplan_map, pp_idx);
+						*pgarr_at(pprune->subpart_map, pp_idx) =
+							*pgarr_at(pinfo->subpart_map, pp_idx);
+						pd_idx++;
 					}
 				}
 				Assert(pd_idx == pinfo->nparts);
@@ -1920,7 +1925,7 @@ ExecFindInitialMatchingSubPlans(PartitionPruneState *prunestate, int nsubplans)
 
 				for (k = 0; k < nparts; k++)
 				{
-					int			oldidx = pprune->subplan_map[k];
+					int			oldidx = *pgarr_at(pprune->subplan_map, k);
 					int			subidx;
 
 					/*
@@ -1935,13 +1940,13 @@ ExecFindInitialMatchingSubPlans(PartitionPruneState *prunestate, int nsubplans)
 					if (oldidx >= 0)
 					{
 						Assert(oldidx < nsubplans);
-						pprune->subplan_map[k] = new_subplan_indexes[oldidx] - 1;
+						*pgarr_at(pprune->subplan_map, k) = new_subplan_indexes[oldidx] - 1;
 
 						if (new_subplan_indexes[oldidx] > 0)
 							pprune->present_parts =
 								bms_add_member(pprune->present_parts, k);
 					}
-					else if ((subidx = pprune->subpart_map[k]) >= 0)
+					else if ((subidx = *pgarr_at(pprune->subpart_map, k)) >= 0)
 					{
 						PartitionedRelPruningData *subprune;
 
@@ -2076,12 +2081,12 @@ find_matching_subplans_recurse(PartitionPruningData *prunedata,
 	i = -1;
 	while ((i = bms_next_member(partset, i)) >= 0)
 	{
-		if (pprune->subplan_map[i] >= 0)
+		if (*pgarr_at(pprune->subplan_map, i) >= 0)
 			*validsubplans = bms_add_member(*validsubplans,
-											pprune->subplan_map[i]);
+											*pgarr_at(pprune->subplan_map, i));
 		else
 		{
-			int			partidx = pprune->subpart_map[i];
+			int			partidx = *pgarr_at(pprune->subpart_map, i);
 
 			if (partidx >= 0)
 				find_matching_subplans_recurse(prunedata,

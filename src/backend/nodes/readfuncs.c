@@ -152,24 +152,24 @@
 	local_node->fldname = _readBitmapset()
 
 /* Read an attribute number array */
-#define READ_ATTRNUMBER_ARRAY(fldname, len) \
+#define READ_ATTRNUMBER_ARRAY(fldname) \
 	token = pg_strtok(&length);		/* skip :fldname */ \
-	local_node->fldname = readAttrNumberCols(len);
+	local_node->fldname = readAttrNumberCols();
 
 /* Read an oid array */
-#define READ_OID_ARRAY(fldname, len) \
+#define READ_OID_ARRAY(fldname) \
 	token = pg_strtok(&length);		/* skip :fldname */ \
-	local_node->fldname = readOidCols(len);
+	local_node->fldname = readOidCols();
 
 /* Read an int array */
-#define READ_INT_ARRAY(fldname, len) \
+#define READ_INT_ARRAY(fldname) \
 	token = pg_strtok(&length);		/* skip :fldname */ \
-	local_node->fldname = readIntCols(len);
+	local_node->fldname = readIntCols();
 
 /* Read a bool array */
-#define READ_BOOL_ARRAY(fldname, len) \
+#define READ_BOOL_ARRAY(fldname) \
 	token = pg_strtok(&length);		/* skip :fldname */ \
-	local_node->fldname = readBoolCols(len);
+	local_node->fldname = readBoolCols();
 
 /* Routine exit */
 #define READ_DONE() \
@@ -1655,10 +1655,10 @@ _readMergeAppend(void)
 
 	READ_NODE_FIELD(mergeplans);
 	READ_INT_FIELD(numCols);
-	READ_ATTRNUMBER_ARRAY(sortColIdx, local_node->numCols);
-	READ_OID_ARRAY(sortOperators, local_node->numCols);
-	READ_OID_ARRAY(collations, local_node->numCols);
-	READ_BOOL_ARRAY(nullsFirst, local_node->numCols);
+	READ_ATTRNUMBER_ARRAY(sortColIdx);
+	READ_OID_ARRAY(sortOperators);
+	READ_OID_ARRAY(collations);
+	READ_BOOL_ARRAY(nullsFirst);
 	READ_NODE_FIELD(part_prune_info);
 
 	READ_DONE();
@@ -1676,9 +1676,9 @@ _readRecursiveUnion(void)
 
 	READ_INT_FIELD(wtParam);
 	READ_INT_FIELD(numCols);
-	READ_ATTRNUMBER_ARRAY(dupColIdx, local_node->numCols);
-	READ_OID_ARRAY(dupOperators, local_node->numCols);
-	READ_OID_ARRAY(dupCollations, local_node->numCols);
+	READ_ATTRNUMBER_ARRAY(dupColIdx);
+	READ_OID_ARRAY(dupOperators);
+	READ_OID_ARRAY(dupCollations);
 	READ_LONG_FIELD(numGroups);
 
 	READ_DONE();
@@ -2066,8 +2066,6 @@ _readNestLoop(void)
 static MergeJoin *
 _readMergeJoin(void)
 {
-	int			numCols;
-
 	READ_LOCALS(MergeJoin);
 
 	ReadCommonJoin(&local_node->join);
@@ -2075,12 +2073,10 @@ _readMergeJoin(void)
 	READ_BOOL_FIELD(skip_mark_restore);
 	READ_NODE_FIELD(mergeclauses);
 
-	numCols = list_length(local_node->mergeclauses);
-
-	READ_OID_ARRAY(mergeFamilies, numCols);
-	READ_OID_ARRAY(mergeCollations, numCols);
-	READ_INT_ARRAY(mergeStrategies, numCols);
-	READ_BOOL_ARRAY(mergeNullsFirst, numCols);
+	READ_OID_ARRAY(mergeFamilies);
+	READ_OID_ARRAY(mergeCollations);
+	READ_INT_ARRAY(mergeStrategies);
+	READ_BOOL_ARRAY(mergeNullsFirst);
 
 	READ_DONE();
 }
@@ -2127,10 +2123,10 @@ _readSort(void)
 	ReadCommonPlan(&local_node->plan);
 
 	READ_INT_FIELD(numCols);
-	READ_ATTRNUMBER_ARRAY(sortColIdx, local_node->numCols);
-	READ_OID_ARRAY(sortOperators, local_node->numCols);
-	READ_OID_ARRAY(collations, local_node->numCols);
-	READ_BOOL_ARRAY(nullsFirst, local_node->numCols);
+	READ_ATTRNUMBER_ARRAY(sortColIdx);
+	READ_OID_ARRAY(sortOperators);
+	READ_OID_ARRAY(collations);
+	READ_BOOL_ARRAY(nullsFirst);
 
 	READ_DONE();
 }
@@ -2146,9 +2142,9 @@ _readGroup(void)
 	ReadCommonPlan(&local_node->plan);
 
 	READ_INT_FIELD(numCols);
-	READ_ATTRNUMBER_ARRAY(grpColIdx, local_node->numCols);
-	READ_OID_ARRAY(grpOperators, local_node->numCols);
-	READ_OID_ARRAY(grpCollations, local_node->numCols);
+	READ_ATTRNUMBER_ARRAY(grpColIdx);
+	READ_OID_ARRAY(grpOperators);
+	READ_OID_ARRAY(grpCollations);
 
 	READ_DONE();
 }
@@ -2166,9 +2162,9 @@ _readAgg(void)
 	READ_ENUM_FIELD(aggstrategy, AggStrategy);
 	READ_ENUM_FIELD(aggsplit, AggSplit);
 	READ_INT_FIELD(numCols);
-	READ_ATTRNUMBER_ARRAY(grpColIdx, local_node->numCols);
-	READ_OID_ARRAY(grpOperators, local_node->numCols);
-	READ_OID_ARRAY(grpCollations, local_node->numCols);
+	READ_ATTRNUMBER_ARRAY(grpColIdx);
+	READ_OID_ARRAY(grpOperators);
+	READ_OID_ARRAY(grpCollations);
 	READ_LONG_FIELD(numGroups);
 	READ_BITMAPSET_FIELD(aggParams);
 	READ_NODE_FIELD(groupingSets);
@@ -2189,13 +2185,13 @@ _readWindowAgg(void)
 
 	READ_UINT_FIELD(winref);
 	READ_INT_FIELD(partNumCols);
-	READ_ATTRNUMBER_ARRAY(partColIdx, local_node->partNumCols);
-	READ_OID_ARRAY(partOperators, local_node->partNumCols);
-	READ_OID_ARRAY(partCollations, local_node->partNumCols);
+	READ_ATTRNUMBER_ARRAY(partColIdx);
+	READ_OID_ARRAY(partOperators);
+	READ_OID_ARRAY(partCollations);
 	READ_INT_FIELD(ordNumCols);
-	READ_ATTRNUMBER_ARRAY(ordColIdx, local_node->ordNumCols);
-	READ_OID_ARRAY(ordOperators, local_node->ordNumCols);
-	READ_OID_ARRAY(ordCollations, local_node->ordNumCols);
+	READ_ATTRNUMBER_ARRAY(ordColIdx);
+	READ_OID_ARRAY(ordOperators);
+	READ_OID_ARRAY(ordCollations);
 	READ_INT_FIELD(frameOptions);
 	READ_NODE_FIELD(startOffset);
 	READ_NODE_FIELD(endOffset);
@@ -2219,9 +2215,9 @@ _readUnique(void)
 	ReadCommonPlan(&local_node->plan);
 
 	READ_INT_FIELD(numCols);
-	READ_ATTRNUMBER_ARRAY(uniqColIdx, local_node->numCols);
-	READ_OID_ARRAY(uniqOperators, local_node->numCols);
-	READ_OID_ARRAY(uniqCollations, local_node->numCols);
+	READ_ATTRNUMBER_ARRAY(uniqColIdx);
+	READ_OID_ARRAY(uniqOperators);
+	READ_OID_ARRAY(uniqCollations);
 
 	READ_DONE();
 }
@@ -2258,10 +2254,10 @@ _readGatherMerge(void)
 	READ_INT_FIELD(num_workers);
 	READ_INT_FIELD(rescan_param);
 	READ_INT_FIELD(numCols);
-	READ_ATTRNUMBER_ARRAY(sortColIdx, local_node->numCols);
-	READ_OID_ARRAY(sortOperators, local_node->numCols);
-	READ_OID_ARRAY(collations, local_node->numCols);
-	READ_BOOL_ARRAY(nullsFirst, local_node->numCols);
+	READ_ATTRNUMBER_ARRAY(sortColIdx);
+	READ_OID_ARRAY(sortOperators);
+	READ_OID_ARRAY(collations);
+	READ_BOOL_ARRAY(nullsFirst);
 	READ_BITMAPSET_FIELD(initParam);
 
 	READ_DONE();
@@ -2299,9 +2295,9 @@ _readSetOp(void)
 	READ_ENUM_FIELD(cmd, SetOpCmd);
 	READ_ENUM_FIELD(strategy, SetOpStrategy);
 	READ_INT_FIELD(numCols);
-	READ_ATTRNUMBER_ARRAY(dupColIdx, local_node->numCols);
-	READ_OID_ARRAY(dupOperators, local_node->numCols);
-	READ_OID_ARRAY(dupCollations, local_node->numCols);
+	READ_ATTRNUMBER_ARRAY(dupColIdx);
+	READ_OID_ARRAY(dupOperators);
+	READ_OID_ARRAY(dupCollations);
 	READ_INT_FIELD(flagColIdx);
 	READ_INT_FIELD(firstFlag);
 	READ_LONG_FIELD(numGroups);
@@ -2394,9 +2390,9 @@ _readPartitionedRelPruneInfo(void)
 	READ_UINT_FIELD(rtindex);
 	READ_BITMAPSET_FIELD(present_parts);
 	READ_INT_FIELD(nparts);
-	READ_INT_ARRAY(subplan_map, local_node->nparts);
-	READ_INT_ARRAY(subpart_map, local_node->nparts);
-	READ_OID_ARRAY(relid_map, local_node->nparts);
+	READ_INT_ARRAY(subplan_map);
+	READ_INT_ARRAY(subpart_map);
+	READ_OID_ARRAY(relid_map);
 	READ_NODE_FIELD(initial_pruning_steps);
 	READ_NODE_FIELD(exec_pruning_steps);
 	READ_BITMAPSET_FIELD(execparamids);
@@ -2883,22 +2879,20 @@ readDatum(bool typbyval)
 /*
  * readAttrNumberCols
  */
-AttrNumber *
-readAttrNumberCols(int numCols)
+PGARR(AttrNumber) *
+readAttrNumberCols(void)
 {
 	int			tokenLength,
 				i;
 	const char *token;
-	AttrNumber *attr_vals;
+	PGARR(AttrNumber) *attr_vals;
+	int numCols = atooid(pg_strtok(&tokenLength));
 
-	if (numCols <= 0)
-		return NULL;
-
-	attr_vals = (AttrNumber *) palloc(numCols * sizeof(AttrNumber));
+	attr_vals = pgarr_alloc_capacity(AttrNumber, numCols);
 	for (i = 0; i < numCols; i++)
 	{
 		token = pg_strtok(&tokenLength);
-		attr_vals[i] = atoi(token);
+		pgarr_append_reserved(AttrNumber, attr_vals, atoi(token));
 	}
 
 	return attr_vals;
@@ -2907,22 +2901,20 @@ readAttrNumberCols(int numCols)
 /*
  * readOidCols
  */
-Oid *
-readOidCols(int numCols)
+PGARR(Oid) *
+readOidCols(void)
 {
 	int			tokenLength,
 				i;
 	const char *token;
-	Oid		   *oid_vals;
+	PGARR(Oid) *oid_vals;
+	int numCols = atooid(pg_strtok(&tokenLength));
 
-	if (numCols <= 0)
-		return NULL;
-
-	oid_vals = (Oid *) palloc(numCols * sizeof(Oid));
+	oid_vals = pgarr_alloc_capacity(Oid, numCols);
 	for (i = 0; i < numCols; i++)
 	{
 		token = pg_strtok(&tokenLength);
-		oid_vals[i] = atooid(token);
+		pgarr_append_reserved(Oid, oid_vals, atooid(token));
 	}
 
 	return oid_vals;
@@ -2931,22 +2923,20 @@ readOidCols(int numCols)
 /*
  * readIntCols
  */
-int *
-readIntCols(int numCols)
+PGARR(int) *
+readIntCols(void)
 {
 	int			tokenLength,
 				i;
 	const char *token;
-	int		   *int_vals;
+	PGARR(int) *int_vals;
+	int numCols = atooid(pg_strtok(&tokenLength));
 
-	if (numCols <= 0)
-		return NULL;
-
-	int_vals = (int *) palloc(numCols * sizeof(int));
+	int_vals = pgarr_alloc_capacity(int, numCols);
 	for (i = 0; i < numCols; i++)
 	{
 		token = pg_strtok(&tokenLength);
-		int_vals[i] = atoi(token);
+		pgarr_append_reserved(int, int_vals, atoi(token));
 	}
 
 	return int_vals;
@@ -2955,22 +2945,20 @@ readIntCols(int numCols)
 /*
  * readBoolCols
  */
-bool *
-readBoolCols(int numCols)
+PGARR(bool) *
+readBoolCols(void)
 {
 	int			tokenLength,
 				i;
 	const char *token;
-	bool	   *bool_vals;
+	PGARR(bool) *bool_vals;
+	int numCols = atooid(pg_strtok(&tokenLength));
 
-	if (numCols <= 0)
-		return NULL;
-
-	bool_vals = (bool *) palloc(numCols * sizeof(bool));
+	bool_vals = pgarr_alloc_capacity(bool, numCols);
 	for (i = 0; i < numCols; i++)
 	{
 		token = pg_strtok(&tokenLength);
-		bool_vals[i] = strtobool(token);
+		pgarr_append_reserved(bool, bool_vals, strtobool(token));
 	}
 
 	return bool_vals;

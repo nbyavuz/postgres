@@ -210,9 +210,9 @@ ExecInitGroup(Group *node, EState *estate, int eflags)
 	grpstate->eqfunction =
 		execTuplesMatchPrepare(ExecGetResultType(outerPlanState(grpstate)),
 							   node->numCols,
-							   node->grpColIdx,
-							   node->grpOperators,
-							   node->grpCollations,
+							   pgarr_data(node->grpColIdx),
+							   pgarr_data(node->grpOperators),
+							   pgarr_data(node->grpCollations),
 							   &grpstate->ss.ps);
 
 	return grpstate;

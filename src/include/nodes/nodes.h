@@ -14,6 +14,9 @@
 #ifndef NODES_H
 #define NODES_H
 
+#include "lib/pgarr.h"
+#include "access/attnum.h"
+
 /*
  * The first field of every node is NodeTag. Each node created (with makeNode)
  * will have one of the following tags as the value of its first field.
@@ -624,10 +627,10 @@ extern void *stringToNodeWithLocations(const char *str);
 #endif
 extern struct Bitmapset *readBitmapset(void);
 extern uintptr_t readDatum(bool typbyval);
-extern bool *readBoolCols(int numCols);
-extern int *readIntCols(int numCols);
-extern Oid *readOidCols(int numCols);
-extern int16 *readAttrNumberCols(int numCols);
+extern PGARR(bool) *readBoolCols(void);
+extern PGARR(int) *readIntCols(void);
+extern PGARR(Oid) *readOidCols(void);
+extern PGARR(AttrNumber) *readAttrNumberCols(void);
 
 /*
  * nodes/copyfuncs.c

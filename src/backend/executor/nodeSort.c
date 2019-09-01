@@ -88,10 +88,10 @@ ExecSort(PlanState *pstate)
 
 		tuplesortstate = tuplesort_begin_heap(tupDesc,
 											  plannode->numCols,
-											  plannode->sortColIdx,
-											  plannode->sortOperators,
-											  plannode->collations,
-											  plannode->nullsFirst,
+											  pgarr_data(plannode->sortColIdx),
+											  pgarr_data(plannode->sortOperators),
+											  pgarr_data(plannode->collations),
+											  pgarr_data(plannode->nullsFirst),
 											  work_mem,
 											  NULL, node->randomAccess);
 		if (node->bounded)

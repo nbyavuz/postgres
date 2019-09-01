@@ -40,10 +40,10 @@ build_hash_table(RecursiveUnionState *rustate)
 	rustate->hashtable = BuildTupleHashTableExt(&rustate->ps,
 												desc,
 												node->numCols,
-												node->dupColIdx,
+												pgarr_data(node->dupColIdx),
 												rustate->eqfuncoids,
 												rustate->hashfunctions,
-												node->dupCollations,
+												pgarr_data(node->dupCollations),
 												node->numGroups,
 												0,
 												rustate->ps.state->es_query_cxt,
@@ -253,7 +253,7 @@ ExecInitRecursiveUnion(RecursiveUnion *node, EState *estate, int eflags)
 	if (node->numCols > 0)
 	{
 		execTuplesHashPrepare(node->numCols,
-							  node->dupOperators,
+							  pgarr_data(node->dupOperators),
 							  &rustate->eqfuncoids,
 							  &rustate->hashfunctions);
 		build_hash_table(rustate);

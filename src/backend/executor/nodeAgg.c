@@ -368,10 +368,10 @@ initialize_phase(AggState *aggstate, int newphase)
 
 		aggstate->sort_out = tuplesort_begin_heap(tupDesc,
 												  sortnode->numCols,
-												  sortnode->sortColIdx,
-												  sortnode->sortOperators,
-												  sortnode->collations,
-												  sortnode->nullsFirst,
+												  pgarr_data(sortnode->sortColIdx),
+												  pgarr_data(sortnode->sortOperators),
+												  pgarr_data(sortnode->collations),
+												  pgarr_data(sortnode->nullsFirst),
 												  work_mem,
 												  NULL, false);
 	}
@@ -1287,7 +1287,7 @@ build_hash_table(AggState *aggstate)
 														perhash->hashGrpColIdxHash,
 														perhash->eqfuncoids,
 														perhash->hashfunctions,
-														perhash->aggnode->grpCollations,
+														pgarr_data(perhash->aggnode->grpCollations),
 														perhash->aggnode->numGroups,
 														additionalsize,
 														aggstate->ss.ps.state->es_query_cxt,
@@ -1338,7 +1338,7 @@ find_hash_columns(AggState *aggstate)
 	{
 		AggStatePerHash perhash = &aggstate->perhash[j];
 		Bitmapset  *colnos = bms_copy(base_colnos);
-		AttrNumber *grpColIdx = perhash->aggnode->grpColIdx;
+		PGARR(AttrNumber) *grpColIdx = perhash->aggnode->grpColIdx;
 		List	   *hashTlist = NIL;
 		TupleDesc	hashDesc;
 		int			maxCols;
@@ -1382,7 +1382,7 @@ find_hash_columns(AggState *aggstate)
 
 		/* Add all the grouping columns to colnos */
 		for (i = 0; i < perhash->numCols; i++)
-			colnos = bms_add_member(colnos, grpColIdx[i]);
+			colnos = bms_add_member(colnos, *pgarr_at(grpColIdx, i));
 
 		/*
 		 * First build mapping for columns directly hashed. These are the
@@ -1393,11 +1393,11 @@ find_hash_columns(AggState *aggstate)
 		 */
 		for (i = 0; i < perhash->numCols; i++)
 		{
-			perhash->hashGrpColIdxInput[i] = grpColIdx[i];
+			perhash->hashGrpColIdxInput[i] = *pgarr_at(grpColIdx, i);
 			perhash->hashGrpColIdxHash[i] = i + 1;
 			perhash->numhashGrpCols++;
 			/* delete already mapped columns */
-			bms_del_member(colnos, grpColIdx[i]);
+			bms_del_member(colnos, *pgarr_at(grpColIdx, i));
 		}
 
 		/* and add the remaining columns */
@@ -1420,7 +1420,7 @@ find_hash_columns(AggState *aggstate)
 		hashDesc = ExecTypeFromTL(hashTlist);
 
 		execTuplesHashPrepare(perhash->numCols,
-							  perhash->aggnode->grpOperators,
+							  pgarr_data(perhash->aggnode->grpOperators),
 							  &perhash->eqfuncoids,
 							  &perhash->hashfunctions);
 		perhash->hashslot =
@@ -2352,7 +2352,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 			phasedata->gset_lengths[i] = perhash->numCols = aggnode->numCols;
 
 			for (j = 0; j < aggnode->numCols; ++j)
-				cols = bms_add_member(cols, aggnode->grpColIdx[j]);
+				cols = bms_add_member(cols, *pgarr_at(aggnode->grpColIdx, j));
 
 			phasedata->grouped_cols[i] = cols;
 
@@ -2379,7 +2379,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 
 					/* planner forces this to be correct */
 					for (j = 0; j < current_length; ++j)
-						cols = bms_add_member(cols, aggnode->grpColIdx[j]);
+						cols = bms_add_member(cols, *pgarr_at(aggnode->grpColIdx, j));
 
 					phasedata->grouped_cols[i] = cols;
 					phasedata->gset_lengths[i] = current_length;
@@ -2425,9 +2425,9 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 					phasedata->eqfunctions[length - 1] =
 						execTuplesMatchPrepare(scanDesc,
 											   length,
-											   aggnode->grpColIdx,
-											   aggnode->grpOperators,
-											   aggnode->grpCollations,
+											   pgarr_data(aggnode->grpColIdx),
+											   pgarr_data(aggnode->grpOperators),
+											   pgarr_data(aggnode->grpCollations),
 											   (PlanState *) aggstate);
 				}
 
@@ -2437,9 +2437,9 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 					phasedata->eqfunctions[aggnode->numCols - 1] =
 						execTuplesMatchPrepare(scanDesc,
 											   aggnode->numCols,
-											   aggnode->grpColIdx,
-											   aggnode->grpOperators,
-											   aggnode->grpCollations,
+											   pgarr_data(aggnode->grpColIdx),
+											   pgarr_data(aggnode->grpOperators),
+											   pgarr_data(aggnode->grpCollations),
 											   (PlanState *) aggstate);
 				}
 			}

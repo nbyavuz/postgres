@@ -541,9 +541,9 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		RelOptInfo *subpart = find_base_rel(root, pinfo->rtindex);
 		Bitmapset  *present_parts;
 		int			nparts = subpart->nparts;
-		int		   *subplan_map;
-		int		   *subpart_map;
-		Oid		   *relid_map;
+		PGARR(int) *subplan_map;
+		PGARR(int) *subpart_map;
+		PGARR(Oid) *relid_map;
 
 		/*
 		 * Construct the subplan and subpart maps for this partitioning level.
@@ -551,11 +551,12 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		 * Also construct a Bitmapset of all partitions that are present (that
 		 * is, not pruned already).
 		 */
-		subplan_map = (int *) palloc(nparts * sizeof(int));
-		memset(subplan_map, -1, nparts * sizeof(int));
-		subpart_map = (int *) palloc(nparts * sizeof(int));
-		memset(subpart_map, -1, nparts * sizeof(int));
-		relid_map = (Oid *) palloc0(nparts * sizeof(Oid));
+		subplan_map = pgarr_alloc_capacity(int, nparts);
+		pgarr_set_all(subplan_map, nparts, -1);
+		subpart_map = pgarr_alloc_capacity(int, nparts);
+		pgarr_set_all(subpart_map, nparts, -1);
+		relid_map = pgarr_alloc_capacity(Oid, nparts);
+		pgarr_set_all(relid_map, nparts, 0);
 		present_parts = NULL;
 
 		for (i = 0; i < nparts; i++)
@@ -568,9 +569,9 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 			if (partrel == NULL)
 				continue;
 
-			subplan_map[i] = subplanidx = relid_subplan_map[partrel->relid] - 1;
-			subpart_map[i] = subpartidx = relid_subpart_map[partrel->relid] - 1;
-			relid_map[i] = planner_rt_fetch(partrel->relid, root)->relid;
+			*pgarr_at(subplan_map, i) = subplanidx = relid_subplan_map[partrel->relid] - 1;
+			*pgarr_at(subpart_map, i) = subpartidx = relid_subpart_map[partrel->relid] - 1;
+			*pgarr_at(relid_map, i) = planner_rt_fetch(partrel->relid, root)->relid;
 			if (subplanidx >= 0)
 			{
 				present_parts = bms_add_member(present_parts, i);

@@ -150,9 +150,9 @@ ExecInitUnique(Unique *node, EState *estate, int eflags)
 	uniquestate->eqfunction =
 		execTuplesMatchPrepare(ExecGetResultType(outerPlanState(uniquestate)),
 							   node->numCols,
-							   node->uniqColIdx,
-							   node->uniqOperators,
-							   node->uniqCollations,
+							   pgarr_data(node->uniqColIdx),
+							   pgarr_data(node->uniqOperators),
+							   pgarr_data(node->uniqCollations),
 							   &uniquestate->ps);
 
 	return uniquestate;

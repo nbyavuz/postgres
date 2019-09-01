@@ -93,8 +93,8 @@ static void show_grouping_set_keys(PlanState *planstate,
 static void show_group_keys(GroupState *gstate, List *ancestors,
 							ExplainState *es);
 static void show_sort_group_keys(PlanState *planstate, const char *qlabel,
-								 int nkeys, AttrNumber *keycols,
-								 Oid *sortOperators, Oid *collations, bool *nullsFirst,
+								 int nkeys, PGARR(AttrNumber) *keycols,
+								 PGARR(Oid) *sortOperators, PGARR(Oid) *collations, PGARR(bool) *nullsFirst,
 								 List *ancestors, ExplainState *es);
 static void show_sortorder_options(StringInfo buf, Node *sortexpr,
 								   Oid sortOperator, Oid collation, bool nullsFirst);
@@ -2264,7 +2264,7 @@ show_grouping_set_keys(PlanState *planstate,
 	char	   *exprstr;
 	ListCell   *lc;
 	List	   *gsets = aggnode->groupingSets;
-	AttrNumber *keycols = aggnode->grpColIdx;
+	PGARR(AttrNumber) *keycols = aggnode->grpColIdx;
 	const char *keyname;
 	const char *keysetname;
 
@@ -2302,7 +2302,7 @@ show_grouping_set_keys(PlanState *planstate,
 		foreach(lc2, (List *) lfirst(lc))
 		{
 			Index		i = lfirst_int(lc2);
-			AttrNumber	keyresno = keycols[i];
+			AttrNumber	keyresno = *pgarr_at(keycols, i);
 			TargetEntry *target = get_tle_by_resno(plan->targetlist,
 												   keyresno);
 
@@ -2354,8 +2354,8 @@ show_group_keys(GroupState *gstate, List *ancestors,
  */
 static void
 show_sort_group_keys(PlanState *planstate, const char *qlabel,
-					 int nkeys, AttrNumber *keycols,
-					 Oid *sortOperators, Oid *collations, bool *nullsFirst,
+					 int nkeys, PGARR(AttrNumber) *keycols,
+					 PGARR(Oid) *sortOperators, PGARR(Oid) *collations, PGARR(bool) *nullsFirst,
 					 List *ancestors, ExplainState *es)
 {
 	Plan	   *plan = planstate->plan;
@@ -2379,7 +2379,7 @@ show_sort_group_keys(PlanState *planstate, const char *qlabel,
 	for (keyno = 0; keyno < nkeys; keyno++)
 	{
 		/* find key expression in tlist */
-		AttrNumber	keyresno = keycols[keyno];
+		AttrNumber	keyresno = *pgarr_at(keycols, keyno);
 		TargetEntry *target = get_tle_by_resno(plan->targetlist,
 											   keyresno);
 		char	   *exprstr;
@@ -2395,9 +2395,9 @@ show_sort_group_keys(PlanState *planstate, const char *qlabel,
 		if (sortOperators != NULL)
 			show_sortorder_options(&sortkeybuf,
 								   (Node *) target->expr,
-								   sortOperators[keyno],
-								   collations[keyno],
-								   nullsFirst[keyno]);
+								   *pgarr_at(sortOperators, keyno),
+								   *pgarr_at(collations, keyno),
+								   *pgarr_at(nullsFirst, keyno));
 		/* Emit one property-list item per sort key */
 		result = lappend(result, pstrdup(sortkeybuf.data));
 	}

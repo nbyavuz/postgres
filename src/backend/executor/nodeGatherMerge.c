@@ -157,9 +157,9 @@ ExecInitGatherMerge(GatherMerge *node, EState *estate, int eflags)
 			SortSupport sortKey = gm_state->gm_sortkeys + i;
 
 			sortKey->ssup_cxt = CurrentMemoryContext;
-			sortKey->ssup_collation = node->collations[i];
-			sortKey->ssup_nulls_first = node->nullsFirst[i];
-			sortKey->ssup_attno = node->sortColIdx[i];
+			sortKey->ssup_collation = *pgarr_at(node->collations, i);
+			sortKey->ssup_nulls_first = *pgarr_at(node->nullsFirst, i);
+			sortKey->ssup_attno = *pgarr_at(node->sortColIdx, i);
 
 			/*
 			 * We don't perform abbreviated key conversion here, for the same
@@ -167,7 +167,7 @@ ExecInitGatherMerge(GatherMerge *node, EState *estate, int eflags)
 			 */
 			sortKey->abbreviate = false;
 
-			PrepareSortSupportFromOrderingOp(node->sortOperators[i], sortKey);
+			PrepareSortSupportFromOrderingOp(*pgarr_at(node->sortOperators, i), sortKey);
 		}
 	}
 

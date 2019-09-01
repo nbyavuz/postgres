@@ -198,9 +198,9 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 		SortSupport sortKey = mergestate->ms_sortkeys + i;
 
 		sortKey->ssup_cxt = CurrentMemoryContext;
-		sortKey->ssup_collation = node->collations[i];
-		sortKey->ssup_nulls_first = node->nullsFirst[i];
-		sortKey->ssup_attno = node->sortColIdx[i];
+		sortKey->ssup_collation = *pgarr_at(node->collations, i);
+		sortKey->ssup_nulls_first = *pgarr_at(node->nullsFirst, i);
+		sortKey->ssup_attno = *pgarr_at(node->sortColIdx, i);
 
 		/*
 		 * It isn't feasible to perform abbreviated key conversion, since
@@ -211,7 +211,7 @@ ExecInitMergeAppend(MergeAppend *node, EState *estate, int eflags)
 		 */
 		sortKey->abbreviate = false;
 
-		PrepareSortSupportFromOrderingOp(node->sortOperators[i], sortKey);
+		PrepareSortSupportFromOrderingOp(*pgarr_at(node->sortOperators, i), sortKey);
 	}
 
 	/*

@@ -21,6 +21,7 @@
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
 
+#include "lib/pgarr.h"
 
 /* ----------------------------------------------------------------
  *						node definitions
@@ -272,10 +273,10 @@ typedef struct MergeAppend
 	List	   *mergeplans;
 	/* these fields are just like the sort-key info in struct Sort: */
 	int			numCols;		/* number of sort-key columns */
-	AttrNumber *sortColIdx;		/* their indexes in the target list */
-	Oid		   *sortOperators;	/* OIDs of operators to sort them by */
-	Oid		   *collations;		/* OIDs of collations */
-	bool	   *nullsFirst;		/* NULLS FIRST/LAST directions */
+	PGARR(AttrNumber) *sortColIdx; /* their indexes in the target list */
+	PGARR(Oid) *sortOperators; /* OIDs of operators to sort them by */
+	PGARR(Oid) *collations;	/* OIDs of collations */
+	PGARR(bool) *nullsFirst;	/* NULLS FIRST/LAST directions */
 	/* Info for run-time subplan pruning; NULL if we're not doing that */
 	struct PartitionPruneInfo *part_prune_info;
 } MergeAppend;
@@ -295,9 +296,9 @@ typedef struct RecursiveUnion
 	/* Remaining fields are zero/null in UNION ALL case */
 	int			numCols;		/* number of columns to check for
 								 * duplicate-ness */
-	AttrNumber *dupColIdx;		/* their indexes in the target list */
-	Oid		   *dupOperators;	/* equality operators to compare with */
-	Oid		   *dupCollations;
+	PGARR(AttrNumber) *dupColIdx;		/* their indexes in the target list */
+	PGARR(Oid)		   *dupOperators;	/* equality operators to compare with */
+	PGARR(Oid)		   *dupCollations;
 	long		numGroups;		/* estimated number of groups in input */
 } RecursiveUnion;
 
@@ -723,10 +724,10 @@ typedef struct MergeJoin
 	bool		skip_mark_restore;	/* Can we skip mark/restore calls? */
 	List	   *mergeclauses;	/* mergeclauses as expression trees */
 	/* these are arrays, but have the same length as the mergeclauses list: */
-	Oid		   *mergeFamilies;	/* per-clause OIDs of btree opfamilies */
-	Oid		   *mergeCollations;	/* per-clause OIDs of collations */
-	int		   *mergeStrategies;	/* per-clause ordering (ASC or DESC) */
-	bool	   *mergeNullsFirst;	/* per-clause nulls ordering */
+	PGARR(Oid) *mergeFamilies;	/* per-clause OIDs of btree opfamilies */
+	PGARR(Oid) *mergeCollations;	/* per-clause OIDs of collations */
+	PGARR(int) *mergeStrategies;	/* per-clause ordering (ASC or DESC) */
+	PGARR(bool) *mergeNullsFirst;	/* per-clause nulls ordering */
 } MergeJoin;
 
 /* ----------------
@@ -764,11 +765,39 @@ typedef struct Sort
 {
 	Plan		plan;
 	int			numCols;		/* number of sort-key columns */
-	AttrNumber *sortColIdx;		/* their indexes in the target list */
-	Oid		   *sortOperators;	/* OIDs of operators to sort them by */
-	Oid		   *collations;		/* OIDs of collations */
-	bool	   *nullsFirst;		/* NULLS FIRST/LAST directions */
+	PGARR(AttrNumber) *sortColIdx; /* their indexes in the target list */
+	PGARR(Oid) *sortOperators; /* OIDs of operators to sort them by */
+	PGARR(Oid) *collations;	/* OIDs of collations */
+	PGARR(bool) *nullsFirst;	/* NULLS FIRST/LAST directions */
 } Sort;
+
+#if 0
+static inline AttrNumber
+test(Sort *s)
+{
+	AttrNumber attno = *pgarr_at(s->sortColIdx, 1);
+	PGARR_TYPE(AttrNumber) *foo = pgarr_alloc(AttrNumber);
+	AttrNumber att = 8;
+	PGARR_UNNAMED_TYPE(Sort) ao = {0};
+	PGARR_TYPE(Sort) *ao2 = {0};
+	PGARR_TYPE(Sort) ao3 = {0};
+	PGARR_TYPE(Sort) ao4 = {0};
+
+	pgarr_append(AttrNumber, foo, 8);
+	pgarr_append(AttrNumber, foo, att);
+
+	Assert(*pgarr_at(s->sortOperators, 5) == 3);
+
+	pgarr_append(Sort, &ao, (Sort){0});
+
+	ao3 = ao4;
+
+	//sizeof(char[(char*)s->sortColIdx->elems - (char*)s->sortColIdx]);
+
+	//typeof(&(arr)->elems[i]) array_at_helper((arr), offsetof(typeof(*(arr)), elems), sizeof(*(arr)->elems), at)
+	return attno;
+}
+#endif
 
 /* ---------------
  *	 group node -
@@ -780,9 +809,9 @@ typedef struct Group
 {
 	Plan		plan;
 	int			numCols;		/* number of grouping columns */
-	AttrNumber *grpColIdx;		/* their indexes in the target list */
-	Oid		   *grpOperators;	/* equality operators to compare with */
-	Oid		   *grpCollations;
+	PGARR(AttrNumber) *grpColIdx;		/* their indexes in the target list */
+	PGARR(Oid)		   *grpOperators;	/* equality operators to compare with */
+	PGARR(Oid)		   *grpCollations;
 } Group;
 
 /* ---------------
@@ -805,9 +834,9 @@ typedef struct Agg
 	AggStrategy aggstrategy;	/* basic strategy, see nodes.h */
 	AggSplit	aggsplit;		/* agg-splitting mode, see nodes.h */
 	int			numCols;		/* number of grouping columns */
-	AttrNumber *grpColIdx;		/* their indexes in the target list */
-	Oid		   *grpOperators;	/* equality operators to compare with */
-	Oid		   *grpCollations;
+	PGARR(AttrNumber) *grpColIdx;		/* their indexes in the target list */
+	PGARR(Oid)		   *grpOperators;	/* equality operators to compare with */
+	PGARR(Oid)		   *grpCollations;
 	long		numGroups;		/* estimated number of groups in input */
 	Bitmapset  *aggParams;		/* IDs of Params used in Aggref inputs */
 	/* Note: planner provides numGroups & aggParams only in HASHED/MIXED case */
@@ -824,13 +853,13 @@ typedef struct WindowAgg
 	Plan		plan;
 	Index		winref;			/* ID referenced by window functions */
 	int			partNumCols;	/* number of columns in partition clause */
-	AttrNumber *partColIdx;		/* their indexes in the target list */
-	Oid		   *partOperators;	/* equality operators for partition columns */
-	Oid		   *partCollations; /* collations for partition columns */
+	PGARR(AttrNumber) *partColIdx;		/* their indexes in the target list */
+	PGARR(Oid)		   *partOperators;	/* equality operators for partition columns */
+	PGARR(Oid)		   *partCollations; /* collations for partition columns */
 	int			ordNumCols;		/* number of columns in ordering clause */
-	AttrNumber *ordColIdx;		/* their indexes in the target list */
-	Oid		   *ordOperators;	/* equality operators for ordering columns */
-	Oid		   *ordCollations;	/* collations for ordering columns */
+	PGARR(AttrNumber) *ordColIdx;		/* their indexes in the target list */
+	PGARR(Oid)		   *ordOperators;	/* equality operators for ordering columns */
+	PGARR(Oid)		   *ordCollations;	/* collations for ordering columns */
 	int			frameOptions;	/* frame_clause options, see WindowDef */
 	Node	   *startOffset;	/* expression for starting bound, if any */
 	Node	   *endOffset;		/* expression for ending bound, if any */
@@ -850,9 +879,9 @@ typedef struct Unique
 {
 	Plan		plan;
 	int			numCols;		/* number of columns to check for uniqueness */
-	AttrNumber *uniqColIdx;		/* their indexes in the target list */
-	Oid		   *uniqOperators;	/* equality operators to compare with */
-	Oid		   *uniqCollations; /* collations for equality comparisons */
+	PGARR(AttrNumber) *uniqColIdx;		/* their indexes in the target list */
+	PGARR(Oid)		   *uniqOperators;	/* equality operators to compare with */
+	PGARR(Oid)		   *uniqCollations; /* collations for equality comparisons */
 } Unique;
 
 /* ------------
@@ -888,10 +917,10 @@ typedef struct GatherMerge
 	int			rescan_param;	/* ID of Param that signals a rescan, or -1 */
 	/* remaining fields are just like the sort-key info in struct Sort */
 	int			numCols;		/* number of sort-key columns */
-	AttrNumber *sortColIdx;		/* their indexes in the target list */
-	Oid		   *sortOperators;	/* OIDs of operators to sort them by */
-	Oid		   *collations;		/* OIDs of collations */
-	bool	   *nullsFirst;		/* NULLS FIRST/LAST directions */
+	PGARR(AttrNumber) *sortColIdx; /* their indexes in the target list */
+	PGARR(Oid) *sortOperators; /* OIDs of operators to sort them by */
+	PGARR(Oid) *collations;	/* OIDs of collations */
+	PGARR(bool) *nullsFirst;	/* NULLS FIRST/LAST directions */
 	Bitmapset  *initParam;		/* param id's of initplans which are referred
 								 * at gather merge or one of it's child node */
 } GatherMerge;
@@ -931,9 +960,9 @@ typedef struct SetOp
 	SetOpStrategy strategy;		/* how to do it, see nodes.h */
 	int			numCols;		/* number of columns to check for
 								 * duplicate-ness */
-	AttrNumber *dupColIdx;		/* their indexes in the target list */
-	Oid		   *dupOperators;	/* equality operators to compare with */
-	Oid		   *dupCollations;
+	PGARR(AttrNumber) *dupColIdx;		/* their indexes in the target list */
+	PGARR(Oid) *dupOperators;	/* equality operators to compare with */
+	PGARR(Oid) *dupCollations;
 	AttrNumber	flagColIdx;		/* where is the flag column, if any */
 	int			firstFlag;		/* flag value for first input relation */
 	long		numGroups;		/* estimated number of groups in input */
@@ -1126,9 +1155,9 @@ typedef struct PartitionedRelPruneInfo
 	Bitmapset  *present_parts;	/* Indexes of all partitions which subplans or
 								 * subparts are present for */
 	int			nparts;			/* Length of the following arrays: */
-	int		   *subplan_map;	/* subplan index by partition index, or -1 */
-	int		   *subpart_map;	/* subpart index by partition index, or -1 */
-	Oid		   *relid_map;		/* relation OID by partition index, or 0 */
+	PGARR(int)		   *subplan_map;	/* subplan index by partition index, or -1 */
+	PGARR(int)		   *subpart_map;	/* subpart index by partition index, or -1 */
+	PGARR(Oid)		   *relid_map;		/* relation OID by partition index, or 0 */
 
 	/*
 	 * initial_pruning_steps shows how to prune during executor startup (i.e.,

@@ -110,28 +110,62 @@ static void outChar(StringInfo str, char c);
 	(appendStringInfoString(str, " :" CppAsString(fldname) " "), \
 	 outBitmapset(str, node->fldname))
 
-#define WRITE_ATTRNUMBER_ARRAY(fldname, len) \
+
+#define WRITE_ATTRNUMBER_ARRAY(fldname) \
+	do { \
+		appendStringInfoString(str, " :" CppAsString(fldname) " "); \
+		appendStringInfo(str, "%u ", pgarr_size(node->fldname)); \
+		for (int i = 0; i < pgarr_size(node->fldname); i++) \
+			appendStringInfo(str, " %d", *pgarr_at(node->fldname, i)); \
+	} while(0)
+
+#define WRITE_OID_ARRAY(fldname) \
+	do { \
+		appendStringInfoString(str, " :" CppAsString(fldname) " "); \
+		appendStringInfo(str, "%u ", pgarr_size(node->fldname)); \
+		for (int i = 0; i < pgarr_size(node->fldname); i++) \
+			appendStringInfo(str, " %u", *pgarr_at(node->fldname, i)); \
+	} while(0)
+
+#define WRITE_INT_ARRAY(fldname) \
+	do { \
+		appendStringInfoString(str, " :" CppAsString(fldname) " "); \
+		appendStringInfo(str, "%u ", pgarr_size(node->fldname)); \
+		for (int i = 0; i < pgarr_size(node->fldname); i++) \
+			appendStringInfo(str, " %d", *pgarr_at(node->fldname, i)); \
+	} while(0)
+
+#define WRITE_BOOL_ARRAY(fldname) \
+	do { \
+		appendStringInfoString(str, " :" CppAsString(fldname) " "); \
+		appendStringInfo(str, "%u ", pgarr_size(node->fldname)); \
+		for (int i = 0; i < pgarr_size(node->fldname); i++) \
+			appendStringInfo(str, " %s", booltostr(*pgarr_at(node->fldname, i))); \
+	} while(0)
+
+
+#define WRITE_ATTRNUMBER_ARRAY_O(fldname, len) \
 	do { \
 		appendStringInfoString(str, " :" CppAsString(fldname) " "); \
 		for (int i = 0; i < len; i++) \
 			appendStringInfo(str, " %d", node->fldname[i]); \
 	} while(0)
 
-#define WRITE_OID_ARRAY(fldname, len) \
+#define WRITE_OID_ARRAY_O(fldname, len) \
 	do { \
 		appendStringInfoString(str, " :" CppAsString(fldname) " "); \
 		for (int i = 0; i < len; i++) \
 			appendStringInfo(str, " %u", node->fldname[i]); \
 	} while(0)
 
-#define WRITE_INT_ARRAY(fldname, len) \
+#define WRITE_INT_ARRAY_O(fldname, len) \
 	do { \
 		appendStringInfoString(str, " :" CppAsString(fldname) " "); \
 		for (int i = 0; i < len; i++) \
 			appendStringInfo(str, " %d", node->fldname[i]); \
 	} while(0)
 
-#define WRITE_BOOL_ARRAY(fldname, len) \
+#define WRITE_BOOL_ARRAY_O(fldname, len) \
 	do { \
 		appendStringInfoString(str, " :" CppAsString(fldname) " "); \
 		for (int i = 0; i < len; i++) \
@@ -445,10 +479,10 @@ _outMergeAppend(StringInfo str, const MergeAppend *node)
 
 	WRITE_NODE_FIELD(mergeplans);
 	WRITE_INT_FIELD(numCols);
-	WRITE_ATTRNUMBER_ARRAY(sortColIdx, node->numCols);
-	WRITE_OID_ARRAY(sortOperators, node->numCols);
-	WRITE_OID_ARRAY(collations, node->numCols);
-	WRITE_BOOL_ARRAY(nullsFirst, node->numCols);
+	WRITE_ATTRNUMBER_ARRAY(sortColIdx);
+	WRITE_OID_ARRAY(sortOperators);
+	WRITE_OID_ARRAY(collations);
+	WRITE_BOOL_ARRAY(nullsFirst);
 	WRITE_NODE_FIELD(part_prune_info);
 }
 
@@ -461,9 +495,9 @@ _outRecursiveUnion(StringInfo str, const RecursiveUnion *node)
 
 	WRITE_INT_FIELD(wtParam);
 	WRITE_INT_FIELD(numCols);
-	WRITE_ATTRNUMBER_ARRAY(dupColIdx, node->numCols);
-	WRITE_OID_ARRAY(dupOperators, node->numCols);
-	WRITE_OID_ARRAY(dupCollations, node->numCols);
+	WRITE_ATTRNUMBER_ARRAY(dupColIdx);
+	WRITE_OID_ARRAY(dupOperators);
+	WRITE_OID_ARRAY(dupCollations);
 	WRITE_LONG_FIELD(numGroups);
 }
 
@@ -512,10 +546,10 @@ _outGatherMerge(StringInfo str, const GatherMerge *node)
 	WRITE_INT_FIELD(num_workers);
 	WRITE_INT_FIELD(rescan_param);
 	WRITE_INT_FIELD(numCols);
-	WRITE_ATTRNUMBER_ARRAY(sortColIdx, node->numCols);
-	WRITE_OID_ARRAY(sortOperators, node->numCols);
-	WRITE_OID_ARRAY(collations, node->numCols);
-	WRITE_BOOL_ARRAY(nullsFirst, node->numCols);
+	WRITE_ATTRNUMBER_ARRAY(sortColIdx);
+	WRITE_OID_ARRAY(sortOperators);
+	WRITE_OID_ARRAY(collations);
+	WRITE_BOOL_ARRAY(nullsFirst);
 	WRITE_BITMAPSET_FIELD(initParam);
 }
 
@@ -736,8 +770,6 @@ _outNestLoop(StringInfo str, const NestLoop *node)
 static void
 _outMergeJoin(StringInfo str, const MergeJoin *node)
 {
-	int			numCols;
-
 	WRITE_NODE_TYPE("MERGEJOIN");
 
 	_outJoinPlanInfo(str, (const Join *) node);
@@ -745,12 +777,10 @@ _outMergeJoin(StringInfo str, const MergeJoin *node)
 	WRITE_BOOL_FIELD(skip_mark_restore);
 	WRITE_NODE_FIELD(mergeclauses);
 
-	numCols = list_length(node->mergeclauses);
-
-	WRITE_OID_ARRAY(mergeFamilies, numCols);
-	WRITE_OID_ARRAY(mergeCollations, numCols);
-	WRITE_INT_ARRAY(mergeStrategies, numCols);
-	WRITE_BOOL_ARRAY(mergeNullsFirst, numCols);
+	WRITE_OID_ARRAY(mergeFamilies);
+	WRITE_OID_ARRAY(mergeCollations);
+	WRITE_INT_ARRAY(mergeStrategies);
+	WRITE_BOOL_ARRAY(mergeNullsFirst);
 }
 
 static void
@@ -776,9 +806,9 @@ _outAgg(StringInfo str, const Agg *node)
 	WRITE_ENUM_FIELD(aggstrategy, AggStrategy);
 	WRITE_ENUM_FIELD(aggsplit, AggSplit);
 	WRITE_INT_FIELD(numCols);
-	WRITE_ATTRNUMBER_ARRAY(grpColIdx, node->numCols);
-	WRITE_OID_ARRAY(grpOperators, node->numCols);
-	WRITE_OID_ARRAY(grpCollations, node->numCols);
+	WRITE_ATTRNUMBER_ARRAY(grpColIdx);
+	WRITE_OID_ARRAY(grpOperators);
+	WRITE_OID_ARRAY(grpCollations);
 	WRITE_LONG_FIELD(numGroups);
 	WRITE_BITMAPSET_FIELD(aggParams);
 	WRITE_NODE_FIELD(groupingSets);
@@ -794,13 +824,13 @@ _outWindowAgg(StringInfo str, const WindowAgg *node)
 
 	WRITE_UINT_FIELD(winref);
 	WRITE_INT_FIELD(partNumCols);
-	WRITE_ATTRNUMBER_ARRAY(partColIdx, node->partNumCols);
-	WRITE_OID_ARRAY(partOperators, node->partNumCols);
-	WRITE_OID_ARRAY(partCollations, node->partNumCols);
+	WRITE_ATTRNUMBER_ARRAY(partColIdx);
+	WRITE_OID_ARRAY(partOperators);
+	WRITE_OID_ARRAY(partCollations);
 	WRITE_INT_FIELD(ordNumCols);
-	WRITE_ATTRNUMBER_ARRAY(ordColIdx, node->ordNumCols);
-	WRITE_OID_ARRAY(ordOperators, node->ordNumCols);
-	WRITE_OID_ARRAY(ordCollations, node->ordNumCols);
+	WRITE_ATTRNUMBER_ARRAY(ordColIdx);
+	WRITE_OID_ARRAY(ordOperators);
+	WRITE_OID_ARRAY(ordCollations);
 	WRITE_INT_FIELD(frameOptions);
 	WRITE_NODE_FIELD(startOffset);
 	WRITE_NODE_FIELD(endOffset);
@@ -819,9 +849,9 @@ _outGroup(StringInfo str, const Group *node)
 	_outPlanInfo(str, (const Plan *) node);
 
 	WRITE_INT_FIELD(numCols);
-	WRITE_ATTRNUMBER_ARRAY(grpColIdx, node->numCols);
-	WRITE_OID_ARRAY(grpOperators, node->numCols);
-	WRITE_OID_ARRAY(grpCollations, node->numCols);
+	WRITE_ATTRNUMBER_ARRAY(grpColIdx);
+	WRITE_OID_ARRAY(grpOperators);
+	WRITE_OID_ARRAY(grpCollations);
 }
 
 static void
@@ -840,10 +870,10 @@ _outSort(StringInfo str, const Sort *node)
 	_outPlanInfo(str, (const Plan *) node);
 
 	WRITE_INT_FIELD(numCols);
-	WRITE_ATTRNUMBER_ARRAY(sortColIdx, node->numCols);
-	WRITE_OID_ARRAY(sortOperators, node->numCols);
-	WRITE_OID_ARRAY(collations, node->numCols);
-	WRITE_BOOL_ARRAY(nullsFirst, node->numCols);
+	WRITE_ATTRNUMBER_ARRAY(sortColIdx);
+	WRITE_OID_ARRAY(sortOperators);
+	WRITE_OID_ARRAY(collations);
+	WRITE_BOOL_ARRAY(nullsFirst);
 }
 
 static void
@@ -854,9 +884,9 @@ _outUnique(StringInfo str, const Unique *node)
 	_outPlanInfo(str, (const Plan *) node);
 
 	WRITE_INT_FIELD(numCols);
-	WRITE_ATTRNUMBER_ARRAY(uniqColIdx, node->numCols);
-	WRITE_OID_ARRAY(uniqOperators, node->numCols);
-	WRITE_OID_ARRAY(uniqCollations, node->numCols);
+	WRITE_ATTRNUMBER_ARRAY(uniqColIdx);
+	WRITE_OID_ARRAY(uniqOperators);
+	WRITE_OID_ARRAY(uniqCollations);
 }
 
 static void
@@ -883,9 +913,9 @@ _outSetOp(StringInfo str, const SetOp *node)
 	WRITE_ENUM_FIELD(cmd, SetOpCmd);
 	WRITE_ENUM_FIELD(strategy, SetOpStrategy);
 	WRITE_INT_FIELD(numCols);
-	WRITE_ATTRNUMBER_ARRAY(dupColIdx, node->numCols);
-	WRITE_OID_ARRAY(dupOperators, node->numCols);
-	WRITE_OID_ARRAY(dupCollations, node->numCols);
+	WRITE_ATTRNUMBER_ARRAY(dupColIdx);
+	WRITE_OID_ARRAY(dupOperators);
+	WRITE_OID_ARRAY(dupCollations);
 	WRITE_INT_FIELD(flagColIdx);
 	WRITE_INT_FIELD(firstFlag);
 	WRITE_LONG_FIELD(numGroups);
@@ -954,9 +984,9 @@ _outPartitionedRelPruneInfo(StringInfo str, const PartitionedRelPruneInfo *node)
 	WRITE_UINT_FIELD(rtindex);
 	WRITE_BITMAPSET_FIELD(present_parts);
 	WRITE_INT_FIELD(nparts);
-	WRITE_INT_ARRAY(subplan_map, node->nparts);
-	WRITE_INT_ARRAY(subpart_map, node->nparts);
-	WRITE_OID_ARRAY(relid_map, node->nparts);
+	WRITE_INT_ARRAY(subplan_map);
+	WRITE_INT_ARRAY(subpart_map);
+	WRITE_OID_ARRAY(relid_map);
 	WRITE_NODE_FIELD(initial_pruning_steps);
 	WRITE_NODE_FIELD(exec_pruning_steps);
 	WRITE_BITMAPSET_FIELD(execparamids);
@@ -2319,9 +2349,9 @@ _outForeignKeyOptInfo(StringInfo str, const ForeignKeyOptInfo *node)
 	WRITE_UINT_FIELD(con_relid);
 	WRITE_UINT_FIELD(ref_relid);
 	WRITE_INT_FIELD(nkeys);
-	WRITE_ATTRNUMBER_ARRAY(conkey, node->nkeys);
-	WRITE_ATTRNUMBER_ARRAY(confkey, node->nkeys);
-	WRITE_OID_ARRAY(conpfeqop, node->nkeys);
+	WRITE_ATTRNUMBER_ARRAY_O(conkey, node->nkeys);
+	WRITE_ATTRNUMBER_ARRAY_O(confkey, node->nkeys);
+	WRITE_OID_ARRAY_O(conpfeqop, node->nkeys);
 	WRITE_INT_FIELD(nmatched_ec);
 	WRITE_INT_FIELD(nmatched_rcols);
 	WRITE_INT_FIELD(nmatched_ri);
@@ -3578,9 +3608,9 @@ _outForeignKeyCacheInfo(StringInfo str, const ForeignKeyCacheInfo *node)
 	WRITE_OID_FIELD(conrelid);
 	WRITE_OID_FIELD(confrelid);
 	WRITE_INT_FIELD(nkeys);
-	WRITE_ATTRNUMBER_ARRAY(conkey, node->nkeys);
-	WRITE_ATTRNUMBER_ARRAY(confkey, node->nkeys);
-	WRITE_OID_ARRAY(conpfeqop, node->nkeys);
+	WRITE_ATTRNUMBER_ARRAY_O(conkey, node->nkeys);
+	WRITE_ATTRNUMBER_ARRAY_O(confkey, node->nkeys);
+	WRITE_OID_ARRAY_O(conpfeqop, node->nkeys);
 }
 
 static void

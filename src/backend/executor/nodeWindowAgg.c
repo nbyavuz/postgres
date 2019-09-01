@@ -1564,7 +1564,7 @@ update_frameheadpos(WindowAggState *winstate)
 			 * reach end of partition, we will leave frameheadpos = end+1 and
 			 * framehead_slot empty.
 			 */
-			int			sortCol = node->ordColIdx[0];
+			int			sortCol = *pgarr_at(node->ordColIdx, 0);
 			bool		sub,
 						less;
 
@@ -1818,7 +1818,7 @@ update_frametailpos(WindowAggState *winstate)
 			 * necessary.  Note that if we reach end of partition, we will
 			 * leave frametailpos = end+1 and frametail_slot empty.
 			 */
-			int			sortCol = node->ordColIdx[0];
+			int			sortCol = *pgarr_at(node->ordColIdx, 0);
 			bool		sub,
 						less;
 
@@ -2369,18 +2369,18 @@ ExecInitWindowAgg(WindowAgg *node, EState *estate, int eflags)
 		winstate->partEqfunction =
 			execTuplesMatchPrepare(scanDesc,
 								   node->partNumCols,
-								   node->partColIdx,
-								   node->partOperators,
-								   node->partCollations,
+								   pgarr_data(node->partColIdx),
+								   pgarr_data(node->partOperators),
+								   pgarr_data(node->partCollations),
 								   &winstate->ss.ps);
 
 	if (node->ordNumCols > 0)
 		winstate->ordEqfunction =
 			execTuplesMatchPrepare(scanDesc,
 								   node->ordNumCols,
-								   node->ordColIdx,
-								   node->ordOperators,
-								   node->ordCollations,
+								   pgarr_data(node->ordColIdx),
+								   pgarr_data(node->ordOperators),
+								   pgarr_data(node->ordCollations),
 								   &winstate->ss.ps);
 
 	/*

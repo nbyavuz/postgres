@@ -481,22 +481,22 @@ get_sortgroupref_clause_noerr(Index sortref, List *clauses)
  * extract_grouping_ops - make an array of the equality operator OIDs
  *		for a SortGroupClause list
  */
-Oid *
+PGARR(Oid) *
 extract_grouping_ops(List *groupClause)
 {
 	int			numCols = list_length(groupClause);
 	int			colno = 0;
-	Oid		   *groupOperators;
+	PGARR(Oid)  *groupOperators;
 	ListCell   *glitem;
 
-	groupOperators = (Oid *) palloc(sizeof(Oid) * numCols);
+	groupOperators = pgarr_alloc_capacity(Oid, numCols);
 
 	foreach(glitem, groupClause)
 	{
 		SortGroupClause *groupcl = (SortGroupClause *) lfirst(glitem);
 
-		groupOperators[colno] = groupcl->eqop;
-		Assert(OidIsValid(groupOperators[colno]));
+		pgarr_append_reserved(Oid, groupOperators, groupcl->eqop);
+		Assert(OidIsValid(*pgarr_at(groupOperators, colno)));
 		colno++;
 	}
 
@@ -507,22 +507,21 @@ extract_grouping_ops(List *groupClause)
  * extract_grouping_collations - make an array of the grouping column collations
  *		for a SortGroupClause list
  */
-Oid *
+PGARR(Oid) *
 extract_grouping_collations(List *groupClause, List *tlist)
 {
 	int			numCols = list_length(groupClause);
-	int			colno = 0;
-	Oid		   *grpCollations;
+	PGARR(Oid)  *grpCollations;
 	ListCell   *glitem;
 
-	grpCollations = (Oid *) palloc(sizeof(Oid) * numCols);
+	grpCollations = pgarr_alloc_capacity(Oid, numCols);
 
 	foreach(glitem, groupClause)
 	{
 		SortGroupClause *groupcl = (SortGroupClause *) lfirst(glitem);
 		TargetEntry *tle = get_sortgroupclause_tle(groupcl, tlist);
 
-		grpCollations[colno++] = exprCollation((Node *) tle->expr);
+		pgarr_append_reserved(Oid, grpCollations, exprCollation((Node *) tle->expr));
 	}
 
 	return grpCollations;
@@ -532,22 +531,21 @@ extract_grouping_collations(List *groupClause, List *tlist)
  * extract_grouping_cols - make an array of the grouping column resnos
  *		for a SortGroupClause list
  */
-AttrNumber *
+PGARR(AttrNumber) *
 extract_grouping_cols(List *groupClause, List *tlist)
 {
-	AttrNumber *grpColIdx;
+	PGARR(AttrNumber) *grpColIdx;
 	int			numCols = list_length(groupClause);
-	int			colno = 0;
 	ListCell   *glitem;
 
-	grpColIdx = (AttrNumber *) palloc(sizeof(AttrNumber) * numCols);
+	grpColIdx = pgarr_alloc_capacity(AttrNumber, numCols);
 
 	foreach(glitem, groupClause)
 	{
 		SortGroupClause *groupcl = (SortGroupClause *) lfirst(glitem);
 		TargetEntry *tle = get_sortgroupclause_tle(groupcl, tlist);
 
-		grpColIdx[colno++] = tle->resno;
+		pgarr_append_reserved(AttrNumber, grpColIdx, tle->resno);
 	}
 
 	return grpColIdx;

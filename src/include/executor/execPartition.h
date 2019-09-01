@@ -75,8 +75,8 @@ typedef struct PartitionRoutingInfo
 typedef struct PartitionedRelPruningData
 {
 	int			nparts;
-	int		   *subplan_map;
-	int		   *subpart_map;
+	PGARR(int)		   *subplan_map;
+	PGARR(int)		   *subpart_map;
 	Bitmapset  *present_parts;
 	List	   *initial_pruning_steps;
 	List	   *exec_pruning_steps;
