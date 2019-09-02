@@ -27,6 +27,8 @@
  * ----------------------------------------------------------------
  */
 
+typedef int Location;
+
 /*
  * Alias -
  *	  specifies an alias for a range variable; the alias might also
@@ -70,7 +72,7 @@ typedef struct RangeVar
 								 * on children? */
 	char		relpersistence; /* see RELPERSISTENCE_* in pg_class.h */
 	Alias	   *alias;			/* table alias & optional column aliases */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } RangeVar;
 
 /*
@@ -94,7 +96,7 @@ typedef struct TableFunc
 	List	   *coldefexprs;	/* list of column default expressions */
 	Bitmapset  *notnulls;		/* nullability flag for each output column */
 	int			ordinalitycol;	/* counts from 0; -1 if none specified */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } TableFunc;
 
 /*
@@ -179,7 +181,7 @@ typedef struct Var
 								 * levels up */
 	Index		varnoold;		/* original value of varno, for debugging */
 	AttrNumber	varoattno;		/* original value of varattno */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } Var;
 
 /*
@@ -204,7 +206,7 @@ typedef struct Const
 								 * If true, then all the information is stored
 								 * in the Datum. If false, then the Datum
 								 * contains a pointer to the information. */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } Const;
 
 /*
@@ -250,7 +252,7 @@ typedef struct Param
 	Oid			paramtype;		/* pg_type OID of parameter's datatype */
 	int32		paramtypmod;	/* typmod value, if known */
 	Oid			paramcollid;	/* OID of collation, or InvalidOid if none */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } Param;
 
 /*
@@ -312,7 +314,7 @@ typedef struct Aggref
 	char		aggkind;		/* aggregate kind (see pg_aggregate.h) */
 	Index		agglevelsup;	/* > 0 if agg belongs to outer query */
 	AggSplit	aggsplit;		/* expected agg-splitting mode of parent Agg */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } Aggref;
 
 /*
@@ -347,7 +349,7 @@ typedef struct GroupingFunc
 	List	   *refs;			/* ressortgrouprefs of arguments */
 	List	   *cols;			/* actual column positions set by planner */
 	Index		agglevelsup;	/* same as Aggref.agglevelsup */
-	int			location;		/* token location */
+	Location	location;		/* token location */
 } GroupingFunc;
 
 /*
@@ -365,7 +367,7 @@ typedef struct WindowFunc
 	Index		winref;			/* index of associated WindowClause */
 	bool		winstar;		/* true if argument list was really '*' */
 	bool		winagg;			/* is function a simple aggregate? */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } WindowFunc;
 
 /* ----------------
@@ -461,7 +463,7 @@ typedef struct FuncExpr
 	Oid			funccollid;		/* OID of collation of result */
 	Oid			inputcollid;	/* OID of collation that function should use */
 	List	   *args;			/* arguments to the function */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } FuncExpr;
 
 /*
@@ -484,7 +486,7 @@ typedef struct NamedArgExpr
 	Expr	   *arg;			/* the argument expression */
 	char	   *name;			/* the name */
 	int			argnumber;		/* argument's number in positional notation */
-	int			location;		/* argument name location, or -1 if unknown */
+	Location	location;		/* argument name location, or -1 if unknown */
 } NamedArgExpr;
 
 /*
@@ -506,7 +508,7 @@ typedef struct OpExpr
 	Oid			opcollid;		/* OID of collation of result */
 	Oid			inputcollid;	/* OID of collation that operator should use */
 	List	   *args;			/* arguments to the operator (1 or 2) */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } OpExpr;
 
 /*
@@ -547,7 +549,7 @@ typedef struct ScalarArrayOpExpr
 	bool		useOr;			/* true for ANY, false for ALL */
 	Oid			inputcollid;	/* OID of collation that operator should use */
 	List	   *args;			/* the scalar and array operands */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } ScalarArrayOpExpr;
 
 /*
@@ -567,7 +569,7 @@ typedef struct BoolExpr
 	Expr		xpr;
 	BoolExprType boolop;
 	List	   *args;			/* arguments to this expression */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } BoolExpr;
 
 /*
@@ -642,7 +644,7 @@ typedef struct SubLink
 	Node	   *testexpr;		/* outer-query test for ALL/ANY/ROWCOMPARE */
 	List	   *operName;		/* originally specified operator name */
 	Node	   *subselect;		/* subselect as Query* or raw parsetree */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } SubLink;
 
 /*
@@ -802,7 +804,7 @@ typedef struct RelabelType
 	int32		resulttypmod;	/* output typmod (usually -1) */
 	Oid			resultcollid;	/* OID of collation, or InvalidOid if none */
 	CoercionForm relabelformat; /* how to display this node */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } RelabelType;
 
 /* ----------------
@@ -822,7 +824,7 @@ typedef struct CoerceViaIO
 	/* output typmod is not stored, but is presumed -1 */
 	Oid			resultcollid;	/* OID of collation, or InvalidOid if none */
 	CoercionForm coerceformat;	/* how to display this node */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } CoerceViaIO;
 
 /* ----------------
@@ -847,7 +849,7 @@ typedef struct ArrayCoerceExpr
 	int32		resulttypmod;	/* output typmod (also element typmod) */
 	Oid			resultcollid;	/* OID of collation, or InvalidOid if none */
 	CoercionForm coerceformat;	/* how to display this node */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } ArrayCoerceExpr;
 
 /* ----------------
@@ -870,7 +872,7 @@ typedef struct ConvertRowtypeExpr
 	Oid			resulttype;		/* output type (always a composite type) */
 	/* Like RowExpr, we deliberately omit a typmod and collation here */
 	CoercionForm convertformat; /* how to display this node */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } ConvertRowtypeExpr;
 
 /*----------
@@ -885,7 +887,7 @@ typedef struct CollateExpr
 	Expr		xpr;
 	Expr	   *arg;			/* input expression */
 	Oid			collOid;		/* collation's OID */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } CollateExpr;
 
 /*----------
@@ -918,7 +920,7 @@ typedef struct CaseExpr
 	Expr	   *arg;			/* implicit equality comparison argument */
 	List	   *args;			/* the arguments (list of WHEN clauses) */
 	Expr	   *defresult;		/* the default result (ELSE clause) */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } CaseExpr;
 
 /*
@@ -929,7 +931,7 @@ typedef struct CaseWhen
 	Expr		xpr;
 	Expr	   *expr;			/* condition expression */
 	Expr	   *result;			/* substitution result */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } CaseWhen;
 
 /*
@@ -976,7 +978,7 @@ typedef struct ArrayExpr
 	Oid			element_typeid; /* common type of array elements */
 	List	   *elements;		/* the array elements or sub-arrays */
 	bool		multidims;		/* true if elements are sub-arrays */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } ArrayExpr;
 
 /*
@@ -1022,7 +1024,7 @@ typedef struct RowExpr
 	 */
 	CoercionForm row_format;	/* how to display this node */
 	List	   *colnames;		/* list of String, or NIL */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } RowExpr;
 
 /*
@@ -1070,7 +1072,7 @@ typedef struct CoalesceExpr
 	Oid			coalescetype;	/* type of expression result */
 	Oid			coalescecollid; /* OID of collation, or InvalidOid if none */
 	List	   *args;			/* the arguments */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } CoalesceExpr;
 
 /*
@@ -1090,7 +1092,7 @@ typedef struct MinMaxExpr
 	Oid			inputcollid;	/* OID of collation that function should use */
 	MinMaxOp	op;				/* function to execute */
 	List	   *args;			/* the arguments */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } MinMaxExpr;
 
 /*
@@ -1129,7 +1131,7 @@ typedef struct SQLValueFunction
 	SQLValueFunctionOp op;		/* which function this is */
 	Oid			type;			/* result type/typmod */
 	int32		typmod;
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } SQLValueFunction;
 
 /*
@@ -1172,7 +1174,7 @@ typedef struct XmlExpr
 	XmlOptionType xmloption;	/* DOCUMENT or CONTENT */
 	Oid			type;			/* target type/typmod for XMLSERIALIZE */
 	int32		typmod;
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } XmlExpr;
 
 /* ----------------
@@ -1205,7 +1207,7 @@ typedef struct NullTest
 	Expr	   *arg;			/* input expression */
 	NullTestType nulltesttype;	/* IS NULL, IS NOT NULL */
 	bool		argisrow;		/* T to perform field-by-field null checks */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } NullTest;
 
 /*
@@ -1227,7 +1229,7 @@ typedef struct BooleanTest
 	Expr		xpr;
 	Expr	   *arg;			/* input expression */
 	BoolTestType booltesttype;	/* test type */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } BooleanTest;
 
 /*
@@ -1247,7 +1249,7 @@ typedef struct CoerceToDomain
 	int32		resulttypmod;	/* output typmod (currently always -1) */
 	Oid			resultcollid;	/* OID of collation, or InvalidOid if none */
 	CoercionForm coercionformat;	/* how to display this node */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } CoerceToDomain;
 
 /*
@@ -1265,7 +1267,7 @@ typedef struct CoerceToDomainValue
 	Oid			typeId;			/* type for substituted value */
 	int32		typeMod;		/* typemod for substituted value */
 	Oid			collation;		/* collation for the substituted value */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } CoerceToDomainValue;
 
 /*
@@ -1281,7 +1283,7 @@ typedef struct SetToDefault
 	Oid			typeId;			/* type for substituted value */
 	int32		typeMod;		/* typemod for substituted value */
 	Oid			collation;		/* collation for the substituted value */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } SetToDefault;
 
 /*

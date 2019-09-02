@@ -177,8 +177,8 @@ typedef struct Query
 	 * Queries, not in sub-queries.  When not set, they might both be zero, or
 	 * both be -1 meaning "unknown".
 	 */
-	int			stmt_location;	/* start location, or -1 if unknown */
-	int			stmt_len;		/* length in bytes; 0 means "rest of string" */
+	Location	stmt_location;	/* start location, or -1 if unknown */
+	Location	stmt_len;		/* length in bytes; 0 means "rest of string" */
 } Query;
 
 
@@ -213,7 +213,7 @@ typedef struct TypeName
 	List	   *typmods;		/* type modifier expression(s) */
 	int32		typemod;		/* prespecified type modifier */
 	List	   *arrayBounds;	/* array bounds */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } TypeName;
 
 /*
@@ -233,7 +233,7 @@ typedef struct ColumnRef
 {
 	NodeTag		type;
 	List	   *fields;			/* field names (Value strings) or A_Star */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } ColumnRef;
 
 /*
@@ -243,7 +243,7 @@ typedef struct ParamRef
 {
 	NodeTag		type;
 	int			number;			/* the number of the parameter */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } ParamRef;
 
 /*
@@ -276,7 +276,7 @@ typedef struct A_Expr
 	List	   *name;			/* possibly-qualified name of operator */
 	Node	   *lexpr;			/* left argument, or NULL if none */
 	Node	   *rexpr;			/* right argument, or NULL if none */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } A_Expr;
 
 /*
@@ -286,7 +286,7 @@ typedef struct A_Const
 {
 	NodeTag		type;
 	Value		val;			/* value (includes type info, see value.h) */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } A_Const;
 
 /*
@@ -297,7 +297,7 @@ typedef struct TypeCast
 	NodeTag		type;
 	Node	   *arg;			/* the expression being casted */
 	TypeName   *typeName;		/* the target type */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } TypeCast;
 
 /*
@@ -308,7 +308,7 @@ typedef struct CollateClause
 	NodeTag		type;
 	Node	   *arg;			/* input expression */
 	List	   *collname;		/* possibly-qualified collation name */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } CollateClause;
 
 /*
@@ -327,7 +327,7 @@ typedef struct RoleSpec
 	NodeTag		type;
 	RoleSpecType roletype;		/* Type of this rolespec */
 	char	   *rolename;		/* filled only for ROLESPEC_CSTRING */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } RoleSpec;
 
 /*
@@ -356,7 +356,7 @@ typedef struct FuncCall
 	bool		agg_distinct;	/* arguments were labeled DISTINCT */
 	bool		func_variadic;	/* last argument was labeled VARIADIC */
 	struct WindowDef *over;		/* OVER clause, if any */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } FuncCall;
 
 /*
@@ -413,7 +413,7 @@ typedef struct A_ArrayExpr
 {
 	NodeTag		type;
 	List	   *elements;		/* array element expressions */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } A_ArrayExpr;
 
 /*
@@ -440,7 +440,7 @@ typedef struct ResTarget
 	char	   *name;			/* column name or NULL */
 	List	   *indirection;	/* subscripts, field names, and '*', or NIL */
 	Node	   *val;			/* the value expression to compute or assign */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } ResTarget;
 
 /*
@@ -470,7 +470,7 @@ typedef struct SortBy
 	SortByDir	sortby_dir;		/* ASC/DESC/USING/default */
 	SortByNulls sortby_nulls;	/* NULLS FIRST/LAST */
 	List	   *useOp;			/* name of op to use, if SORTBY_USING */
-	int			location;		/* operator location, or -1 if none/unknown */
+	Location	location;		/* operator location, or -1 if none/unknown */
 } SortBy;
 
 /*
@@ -491,7 +491,7 @@ typedef struct WindowDef
 	int			frameOptions;	/* frame_clause options, see below */
 	Node	   *startOffset;	/* expression for starting bound, if any */
 	Node	   *endOffset;		/* expression for ending bound, if any */
-	int			location;		/* parse location, or -1 if none/unknown */
+	Location	location;		/* parse location, or -1 if none/unknown */
 } WindowDef;
 
 /*
@@ -581,7 +581,7 @@ typedef struct RangeTableFunc
 	List	   *namespaces;		/* list of namespaces as ResTarget */
 	List	   *columns;		/* list of RangeTableFuncCol */
 	Alias	   *alias;			/* table alias & optional column aliases */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } RangeTableFunc;
 
 /*
@@ -599,7 +599,7 @@ typedef struct RangeTableFuncCol
 	bool		is_not_null;	/* does it have NOT NULL? */
 	Node	   *colexpr;		/* column filter expression */
 	Node	   *coldefexpr;		/* column default value expression */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } RangeTableFuncCol;
 
 /*
@@ -619,7 +619,7 @@ typedef struct RangeTableSample
 	List	   *method;			/* sampling method name (possibly qualified) */
 	List	   *args;			/* argument(s) for sampling method */
 	Node	   *repeatable;		/* REPEATABLE expression, or NULL if none */
-	int			location;		/* method name location, or -1 if unknown */
+	Location	location;		/* method name location, or -1 if unknown */
 } RangeTableSample;
 
 /*
@@ -660,7 +660,7 @@ typedef struct ColumnDef
 	Oid			collOid;		/* collation OID (InvalidOid if not set) */
 	List	   *constraints;	/* other constraints on column */
 	List	   *fdwoptions;		/* per-column FDW options */
-	int			location;		/* parse location, or -1 if none/unknown */
+	Location	location;		/* parse location, or -1 if none/unknown */
 } ColumnDef;
 
 /*
@@ -730,7 +730,7 @@ typedef struct DefElem
 	char	   *defname;
 	Node	   *arg;			/* a (Value *) or a (TypeName *) */
 	DefElemAction defaction;	/* unspecified action, or SET/ADD/DROP */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } DefElem;
 
 /*
@@ -759,7 +759,7 @@ typedef struct XmlSerialize
 	XmlOptionType xmloption;	/* DOCUMENT or CONTENT */
 	Node	   *expr;
 	TypeName   *typeName;
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } XmlSerialize;
 
 /* Partitioning related definitions */
@@ -777,7 +777,7 @@ typedef struct PartitionElem
 	Node	   *expr;			/* expression to partition on, or NULL */
 	List	   *collation;		/* name of collation; NIL = default */
 	List	   *opclass;		/* name of desired opclass; NIL = default */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } PartitionElem;
 
 /*
@@ -791,7 +791,7 @@ typedef struct PartitionSpec
 	char	   *strategy;		/* partitioning strategy ('hash', 'list' or
 								 * 'range') */
 	List	   *partParams;		/* List of PartitionElems */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } PartitionSpec;
 
 /* Internal codes for partitioning strategies */
@@ -823,7 +823,7 @@ struct PartitionBoundSpec
 	List	   *lowerdatums;	/* List of PartitionRangeDatums */
 	List	   *upperdatums;	/* List of PartitionRangeDatums */
 
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 };
 
 /*
@@ -846,7 +846,7 @@ typedef struct PartitionRangeDatum
 	Node	   *value;			/* Const (or A_Const in raw tree), if kind is
 								 * PARTITION_RANGE_DATUM_VALUE, else NULL */
 
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } PartitionRangeDatum;
 
 /*
@@ -1302,7 +1302,7 @@ typedef struct GroupingSet
 	NodeTag		type;
 	GroupingSetKind kind;
 	List	   *content;
-	int			location;
+	Location	location;
 } GroupingSet;
 
 /*
@@ -1374,7 +1374,7 @@ typedef struct WithClause
 	NodeTag		type;
 	List	   *ctes;			/* list of CommonTableExprs */
 	bool		recursive;		/* true = WITH RECURSIVE */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } WithClause;
 
 /*
@@ -1389,7 +1389,7 @@ typedef struct InferClause
 	List	   *indexElems;		/* IndexElems to infer unique index */
 	Node	   *whereClause;	/* qualification (partial-index predicate) */
 	char	   *conname;		/* Constraint name, or NULL if unnamed */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } InferClause;
 
 /*
@@ -1405,7 +1405,7 @@ typedef struct OnConflictClause
 	InferClause *infer;			/* Optional index inference clause */
 	List	   *targetList;		/* the target list (of ResTarget) */
 	Node	   *whereClause;	/* qualifications */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 } OnConflictClause;
 
 /*
@@ -1429,7 +1429,7 @@ typedef struct CommonTableExpr
 	CTEMaterialize ctematerialized; /* is this an optimization fence? */
 	/* SelectStmt/InsertStmt/etc before parse analysis, Query afterwards: */
 	Node	   *ctequery;		/* the CTE's subquery */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 	/* These fields are set during parse analysis: */
 	bool		cterecursive;	/* is this CTE actually recursive? */
 	int			cterefcount;	/* number of RTEs referencing this CTE
@@ -1483,8 +1483,8 @@ typedef struct RawStmt
 {
 	NodeTag		type;
 	Node	   *stmt;			/* raw parse tree */
-	int			stmt_location;	/* start location, or -1 if unknown */
-	int			stmt_len;		/* length in bytes; 0 means "rest of string" */
+	Location	stmt_location;	/* start location, or -1 if unknown */
+	Location	stmt_len;		/* length in bytes; 0 means "rest of string" */
 } RawStmt;
 
 /*****************************************************************************
@@ -2132,7 +2132,7 @@ typedef struct Constraint
 	char	   *conname;		/* Constraint name, or NULL if unnamed */
 	bool		deferrable;		/* DEFERRABLE? */
 	bool		initdeferred;	/* INITIALLY DEFERRED? */
-	int			location;		/* token location, or -1 if unknown */
+	Location	location;		/* token location, or -1 if unknown */
 
 	/* Fields used for constraints with expressions (CHECK and DEFAULT): */
 	bool		is_no_inherit;	/* is constraint non-inheritable? */
