@@ -111,7 +111,8 @@
 #define READ_FLOAT_FIELD(fldname) \
 	token = pg_strtok(&length);		/* skip :fldname */ \
 	token = pg_strtok(&length);		/* get field value */ \
-	local_node->fldname = atof(token)
+	local_node->fldname = sizeof(local_node->fldname) == sizeof(float) ? \
+		strtof(token, NULL) : strtod(token, NULL)
 
 /* Read a boolean field */
 #define READ_BOOL_FIELD(fldname) \
