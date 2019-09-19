@@ -656,11 +656,23 @@ pg_parse_query(const char *query_string)
 	}
 #endif
 
-	/*
-	 * Currently, outfuncs/readfuncs support is missing for many raw parse
-	 * tree nodes, so we don't try to implement WRITE_READ_PARSE_PLAN_TREES
-	 * here.
-	 */
+#ifdef WRITE_READ_PARSE_PLAN_TREES
+	/* Optional debugging check: pass raw parsetree through outfuncs/readfuncs */
+	{
+		char	   *str;
+		List	   *new_list;
+
+		str = nodeToString(raw_parsetree_list);
+		new_list = stringToNodeWithLocations(str);
+		pfree(str);
+
+		/* This checks both outfuncs/readfuncs and the equal() routines... */
+		if (!equal(new_list, raw_parsetree_list))
+			elog(WARNING, "outfuncs/readfuncs failed to produce an equal plan tree");
+		else
+			raw_parsetree_list = new_list;
+	}
+#endif
 
 	TRACE_POSTGRESQL_QUERY_PARSE_DONE(query_string);
 
@@ -885,16 +897,10 @@ pg_plan_query(Query *querytree, int cursorOptions, ParamListInfo boundParams)
 	{
 		PlannedStmt *new_plan = copyObject(plan);
 
-		/*
-		 * equal() currently does not have routines to compare Plan nodes, so
-		 * don't try to test equality here.  Perhaps fix someday?
-		 */
-#ifdef NOT_USED
 		/* This checks both copyObject() and the equal() routines... */
 		if (!equal(new_plan, plan))
 			elog(WARNING, "copyObject() failed to produce an equal plan tree");
 		else
-#endif
 			plan = new_plan;
 	}
 #endif
@@ -909,16 +915,10 @@ pg_plan_query(Query *querytree, int cursorOptions, ParamListInfo boundParams)
 		new_plan = stringToNodeWithLocations(str);
 		pfree(str);
 
-		/*
-		 * equal() currently does not have routines to compare Plan nodes, so
-		 * don't try to test equality here.  Perhaps fix someday?
-		 */
-#ifdef NOT_USED
 		/* This checks both outfuncs/readfuncs and the equal() routines... */
 		if (!equal(new_plan, plan))
 			elog(WARNING, "outfuncs/readfuncs failed to produce an equal plan tree");
 		else
-#endif
 			plan = new_plan;
 	}
 #endif
