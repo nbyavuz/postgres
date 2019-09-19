@@ -497,7 +497,7 @@ JsonbToCStringWorker(StringInfo out, JsonbContainer *in, int estimated_len, bool
 				if (!v.val.array.rawScalar)
 				{
 					add_indent(out, use_indent && !last_was_key, level);
-					appendStringInfoCharMacro(out, '[');
+					appendStringInfoChar(out, '[');
 				}
 				else
 					raw_scalar = true;
@@ -510,7 +510,7 @@ JsonbToCStringWorker(StringInfo out, JsonbContainer *in, int estimated_len, bool
 					appendBinaryStringInfo(out, ", ", ispaces);
 
 				add_indent(out, use_indent && !last_was_key, level);
-				appendStringInfoCharMacro(out, '{');
+				appendStringInfoChar(out, '{');
 
 				first = true;
 				level++;
@@ -558,14 +558,14 @@ JsonbToCStringWorker(StringInfo out, JsonbContainer *in, int estimated_len, bool
 				if (!raw_scalar)
 				{
 					add_indent(out, use_indent, level);
-					appendStringInfoCharMacro(out, ']');
+					appendStringInfoChar(out, ']');
 				}
 				first = false;
 				break;
 			case WJB_END_OBJECT:
 				level--;
 				add_indent(out, use_indent, level);
-				appendStringInfoCharMacro(out, '}');
+				appendStringInfoChar(out, '}');
 				first = false;
 				break;
 			default:
@@ -587,7 +587,7 @@ add_indent(StringInfo out, bool indent, int level)
 	{
 		int			i;
 
-		appendStringInfoCharMacro(out, '\n');
+		appendStringInfoChar(out, '\n');
 		for (i = 0; i < level; i++)
 			appendBinaryStringInfo(out, "    ", 4);
 	}

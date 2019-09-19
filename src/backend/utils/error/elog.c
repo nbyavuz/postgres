@@ -2616,14 +2616,14 @@ appendCSVLiteral(StringInfo buf, const char *data)
 	if (p == NULL)
 		return;
 
-	appendStringInfoCharMacro(buf, '"');
+	appendStringInfoChar(buf, '"');
 	while ((c = *p++) != '\0')
 	{
 		if (c == '"')
-			appendStringInfoCharMacro(buf, '"');
-		appendStringInfoCharMacro(buf, c);
+			appendStringInfoChar(buf, '"');
+		appendStringInfoChar(buf, c);
 	}
-	appendStringInfoCharMacro(buf, '"');
+	appendStringInfoChar(buf, '"');
 }
 
 /*
@@ -3376,9 +3376,9 @@ append_with_tabs(StringInfo buf, const char *str)
 
 	while ((ch = *str++) != '\0')
 	{
-		appendStringInfoCharMacro(buf, ch);
+		appendStringInfoChar(buf, ch);
 		if (ch == '\n')
-			appendStringInfoCharMacro(buf, '\t');
+			appendStringInfoChar(buf, '\t');
 	}
 }
 

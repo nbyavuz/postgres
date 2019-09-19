@@ -168,37 +168,6 @@ appendStringInfoVA(StringInfo str, const char *fmt, va_list args)
 }
 
 /*
- * appendStringInfoString
- *
- * Append a null-terminated string to str.
- * Like appendStringInfo(str, "%s", s) but faster.
- */
-void
-appendStringInfoString(StringInfo str, const char *s)
-{
-	appendBinaryStringInfo(str, s, strlen(s));
-}
-
-/*
- * appendStringInfoChar
- *
- * Append a single byte to str.
- * Like appendStringInfo(str, "%c", ch) but much faster.
- */
-void
-appendStringInfoChar(StringInfo str, char ch)
-{
-	/* Make more room if needed */
-	if (str->len + 1 >= str->maxlen)
-		enlargeStringInfo(str, 1);
-
-	/* OK, append the character */
-	str->data[str->len] = ch;
-	str->len++;
-	str->data[str->len] = '\0';
-}
-
-/*
  * appendStringInfoSpaces
  *
  * Append the specified number of spaces to a buffer.
@@ -216,32 +185,6 @@ appendStringInfoSpaces(StringInfo str, int count)
 			str->data[str->len++] = ' ';
 		str->data[str->len] = '\0';
 	}
-}
-
-/*
- * appendBinaryStringInfo
- *
- * Append arbitrary binary data to a StringInfo, allocating more space
- * if necessary. Ensures that a trailing null byte is present.
- */
-void
-appendBinaryStringInfo(StringInfo str, const char *data, int datalen)
-{
-	Assert(str != NULL);
-
-	/* Make more room if needed */
-	enlargeStringInfo(str, datalen);
-
-	/* OK, append the data */
-	memcpy(str->data + str->len, data, datalen);
-	str->len += datalen;
-
-	/*
-	 * Keep a trailing null in place, even though it's probably useless for
-	 * binary data.  (Some callers are dealing with text but call this because
-	 * their input isn't null-terminated.)
-	 */
-	str->data[str->len] = '\0';
 }
 
 /*
@@ -264,24 +207,18 @@ appendBinaryStringInfoNT(StringInfo str, const char *data, int datalen)
 }
 
 /*
- * enlargeStringInfo
+ * enlargeStringInfoImpl
  *
- * Make sure there is enough space for 'needed' more bytes
- * ('needed' does not include the terminating null).
+ * Make enough space for 'needed' more bytes ('needed' does not include the
+ * terminating null). This is not for external consumption, it's only to be
+ * called by enlargeStringInfo() when more space is actually needed (including
+ * when we'd overflow the maximum size).
  *
- * External callers usually need not concern themselves with this, since
- * all stringinfo.c routines do it automatically.  However, if a caller
- * knows that a StringInfo will eventually become X bytes large, it
- * can save some palloc overhead by enlarging the buffer before starting
- * to store data in it.
- *
- * NB: because we use repalloc() to enlarge the buffer, the string buffer
- * will remain allocated in the same memory context that was current when
- * initStringInfo was called, even if another context is now current.
- * This is the desired and indeed critical behavior!
+ * As this normally shouldn't be the common case, mark as noinline, to avoid
+ * including the function into the fastpath.
  */
-void
-enlargeStringInfo(StringInfo str, int needed)
+pg_noinline void
+enlargeStringInfoImpl(StringInfo str, int needed)
 {
 	int			newlen;
 
@@ -317,8 +254,8 @@ enlargeStringInfo(StringInfo str, int needed)
 
 	/* Because of the above test, we now have needed <= MaxAllocSize */
 
-	if (needed <= str->maxlen)
-		return;					/* got enough space already */
+	/* should only be called when needed */
+	Assert(needed > str->maxlen);
 
 	/*
 	 * We don't want to allocate just a little more space with each append;

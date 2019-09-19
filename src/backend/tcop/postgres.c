@@ -2342,14 +2342,14 @@ errdetail_params(ParamListInfo params)
 
 			pstring = OidOutputFunctionCall(typoutput, prm->value);
 
-			appendStringInfoCharMacro(&param_str, '\'');
+			appendStringInfoChar(&param_str, '\'');
 			for (p = pstring; *p; p++)
 			{
 				if (*p == '\'') /* double single quotes */
-					appendStringInfoCharMacro(&param_str, *p);
-				appendStringInfoCharMacro(&param_str, *p);
+					appendStringInfoChar(&param_str, *p);
+				appendStringInfoChar(&param_str, *p);
 			}
-			appendStringInfoCharMacro(&param_str, '\'');
+			appendStringInfoChar(&param_str, '\'');
 
 			pfree(pstring);
 		}

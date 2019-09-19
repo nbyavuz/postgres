@@ -3940,7 +3940,7 @@ sn_object_start(void *state)
 {
 	StripnullState *_state = (StripnullState *) state;
 
-	appendStringInfoCharMacro(_state->strval, '{');
+	appendStringInfoChar(_state->strval, '{');
 }
 
 static void
@@ -3948,7 +3948,7 @@ sn_object_end(void *state)
 {
 	StripnullState *_state = (StripnullState *) state;
 
-	appendStringInfoCharMacro(_state->strval, '}');
+	appendStringInfoChar(_state->strval, '}');
 }
 
 static void
@@ -3956,7 +3956,7 @@ sn_array_start(void *state)
 {
 	StripnullState *_state = (StripnullState *) state;
 
-	appendStringInfoCharMacro(_state->strval, '[');
+	appendStringInfoChar(_state->strval, '[');
 }
 
 static void
@@ -3964,7 +3964,7 @@ sn_array_end(void *state)
 {
 	StripnullState *_state = (StripnullState *) state;
 
-	appendStringInfoCharMacro(_state->strval, ']');
+	appendStringInfoChar(_state->strval, ']');
 }
 
 static void
@@ -3984,7 +3984,7 @@ sn_object_field_start(void *state, char *fname, bool isnull)
 	}
 
 	if (_state->strval->data[_state->strval->len - 1] != '{')
-		appendStringInfoCharMacro(_state->strval, ',');
+		appendStringInfoChar(_state->strval, ',');
 
 	/*
 	 * Unfortunately we don't have the quoted and escaped string any more, so
@@ -3992,7 +3992,7 @@ sn_object_field_start(void *state, char *fname, bool isnull)
 	 */
 	escape_json(_state->strval, fname);
 
-	appendStringInfoCharMacro(_state->strval, ':');
+	appendStringInfoChar(_state->strval, ':');
 }
 
 static void
@@ -4001,7 +4001,7 @@ sn_array_element_start(void *state, bool isnull)
 	StripnullState *_state = (StripnullState *) state;
 
 	if (_state->strval->data[_state->strval->len - 1] != '[')
-		appendStringInfoCharMacro(_state->strval, ',');
+		appendStringInfoChar(_state->strval, ',');
 }
 
 static void
@@ -5260,7 +5260,7 @@ transform_string_values_object_start(void *state)
 {
 	TransformJsonStringValuesState *_state = (TransformJsonStringValuesState *) state;
 
-	appendStringInfoCharMacro(_state->strval, '{');
+	appendStringInfoChar(_state->strval, '{');
 }
 
 static void
@@ -5268,7 +5268,7 @@ transform_string_values_object_end(void *state)
 {
 	TransformJsonStringValuesState *_state = (TransformJsonStringValuesState *) state;
 
-	appendStringInfoCharMacro(_state->strval, '}');
+	appendStringInfoChar(_state->strval, '}');
 }
 
 static void
@@ -5276,7 +5276,7 @@ transform_string_values_array_start(void *state)
 {
 	TransformJsonStringValuesState *_state = (TransformJsonStringValuesState *) state;
 
-	appendStringInfoCharMacro(_state->strval, '[');
+	appendStringInfoChar(_state->strval, '[');
 }
 
 static void
@@ -5284,7 +5284,7 @@ transform_string_values_array_end(void *state)
 {
 	TransformJsonStringValuesState *_state = (TransformJsonStringValuesState *) state;
 
-	appendStringInfoCharMacro(_state->strval, ']');
+	appendStringInfoChar(_state->strval, ']');
 }
 
 static void
@@ -5293,14 +5293,14 @@ transform_string_values_object_field_start(void *state, char *fname, bool isnull
 	TransformJsonStringValuesState *_state = (TransformJsonStringValuesState *) state;
 
 	if (_state->strval->data[_state->strval->len - 1] != '{')
-		appendStringInfoCharMacro(_state->strval, ',');
+		appendStringInfoChar(_state->strval, ',');
 
 	/*
 	 * Unfortunately we don't have the quoted and escaped string any more, so
 	 * we have to re-escape it.
 	 */
 	escape_json(_state->strval, fname);
-	appendStringInfoCharMacro(_state->strval, ':');
+	appendStringInfoChar(_state->strval, ':');
 }
 
 static void
@@ -5309,7 +5309,7 @@ transform_string_values_array_element_start(void *state, bool isnull)
 	TransformJsonStringValuesState *_state = (TransformJsonStringValuesState *) state;
 
 	if (_state->strval->data[_state->strval->len - 1] != '[')
-		appendStringInfoCharMacro(_state->strval, ',');
+		appendStringInfoChar(_state->strval, ',');
 }
 
 static void

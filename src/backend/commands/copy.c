@@ -511,7 +511,7 @@ CopySendString(CopyState cstate, const char *str)
 static void
 CopySendChar(CopyState cstate, char c)
 {
-	appendStringInfoCharMacro(cstate->fe_msgbuf, c);
+	appendStringInfoChar(cstate->fe_msgbuf, c);
 }
 
 static void

@@ -2464,7 +2464,7 @@ escape_json(StringInfo buf, const char *str)
 {
 	const char *p;
 
-	appendStringInfoCharMacro(buf, '"');
+	appendStringInfoChar(buf, '"');
 	for (p = str; *p; p++)
 	{
 		switch (*p)
@@ -2494,11 +2494,11 @@ escape_json(StringInfo buf, const char *str)
 				if ((unsigned char) *p < ' ')
 					appendStringInfo(buf, "\\u%04x", (int) *p);
 				else
-					appendStringInfoCharMacro(buf, *p);
+					appendStringInfoChar(buf, *p);
 				break;
 		}
 	}
-	appendStringInfoCharMacro(buf, '"');
+	appendStringInfoChar(buf, '"');
 }
 
 /*

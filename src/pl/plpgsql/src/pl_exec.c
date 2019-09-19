@@ -8609,14 +8609,14 @@ format_expr_params(PLpgSQL_execstate *estate,
 			char	   *value = convert_value_to_string(estate, paramdatum, paramtypeid);
 			char	   *p;
 
-			appendStringInfoCharMacro(&paramstr, '\'');
+			appendStringInfoChar(&paramstr, '\'');
 			for (p = value; *p; p++)
 			{
 				if (*p == '\'') /* double single quotes */
-					appendStringInfoCharMacro(&paramstr, *p);
-				appendStringInfoCharMacro(&paramstr, *p);
+					appendStringInfoChar(&paramstr, *p);
+				appendStringInfoChar(&paramstr, *p);
 			}
-			appendStringInfoCharMacro(&paramstr, '\'');
+			appendStringInfoChar(&paramstr, '\'');
 		}
 
 		paramno++;
@@ -8659,14 +8659,14 @@ format_preparedparamsdata(PLpgSQL_execstate *estate,
 			char	   *value = convert_value_to_string(estate, ppd->values[paramno], ppd->types[paramno]);
 			char	   *p;
 
-			appendStringInfoCharMacro(&paramstr, '\'');
+			appendStringInfoChar(&paramstr, '\'');
 			for (p = value; *p; p++)
 			{
 				if (*p == '\'') /* double single quotes */
-					appendStringInfoCharMacro(&paramstr, *p);
-				appendStringInfoCharMacro(&paramstr, *p);
+					appendStringInfoChar(&paramstr, *p);
+				appendStringInfoChar(&paramstr, *p);
 			}
-			appendStringInfoCharMacro(&paramstr, '\'');
+			appendStringInfoChar(&paramstr, '\'');
 		}
 	}
 

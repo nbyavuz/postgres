@@ -17,6 +17,12 @@
 #ifndef STRINGINFO_H
 #define STRINGINFO_H
 
+
+#include "common/int.h"
+#include "common/string.h"
+#include "common/shortest_dec.h"
+
+
 /*-------------------------
  * StringInfoData holds information about an extensible string.
  *		data	is the current buffer for the string (allocated with palloc).
@@ -86,6 +92,71 @@ extern void initStringInfo(StringInfo str);
 extern void resetStringInfo(StringInfo str);
 
 /*------------------------
+ * resetStringInfo
+ *
+ * Actually enlarge the string, only to be called by enlargeStringInfo().
+ */
+extern void enlargeStringInfoImpl(StringInfo str, int needed);
+
+/*------------------------
+ * enlargeStringInfo
+ * Make sure a StringInfo's buffer can hold at least 'needed' more bytes.
+ *
+ * External callers usually need not concern themselves with this, since
+ * all stringinfo.c routines do it automatically.  However, if a caller
+ * knows that a StringInfo will eventually become X bytes large, it
+ * can save some palloc overhead by enlarging the buffer before starting
+ * to store data in it.
+ *
+ * NB: because we use repalloc() to enlarge the buffer, the string buffer
+ * will remain allocated in the same memory context that was current when
+ * initStringInfo was called, even if another context is now current.
+ * This is the desired and indeed critical behavior!
+ */
+static inline void
+enlargeStringInfo(StringInfo str, int datalen)
+{
+	int res;
+
+	if (unlikely(pg_add_s32_overflow(str->len, datalen, &res)) ||
+		unlikely(res >= str->maxlen))
+		enlargeStringInfoImpl(str, datalen);
+}
+
+/*------------------------
+ * appendBinaryStringInfo
+ * Append arbitrary binary data to a StringInfo, allocating more space
+ * if necessary. Ensures that a trailing null byte is present.
+ */
+static inline void
+appendBinaryStringInfo(StringInfo str, const char *data, int datalen)
+{
+	Assert(str != NULL);
+
+	/* Make more room if needed */
+	enlargeStringInfo(str, datalen);
+
+	/* OK, append the data */
+	memcpy(str->data + str->len, data, datalen);
+	str->len += datalen;
+
+	/*
+	 * Keep a trailing null in place, even though it's probably useless for
+	 * binary data.  (Some callers are dealing with text but call this because
+	 * their input isn't null-terminated.)
+	 */
+	str->data[str->len] = '\0';
+}
+
+/*------------------------
+ * appendBinaryStringInfoNT
+ * Append arbitrary binary data to a StringInfo, allocating more space
+ * if necessary. Does not ensure a trailing null-byte exists.
+ */
+extern void appendBinaryStringInfoNT(StringInfo str,
+									 const char *data, int datalen);
+
+/*------------------------
  * appendStringInfo
  * Format text data under the control of fmt (an sprintf-style format string)
  * and append it to whatever is already in str.  More space is allocated
@@ -110,24 +181,30 @@ extern int	appendStringInfoVA(StringInfo str, const char *fmt, va_list args) pg_
  * Append a null-terminated string to str.
  * Like appendStringInfo(str, "%s", s) but faster.
  */
-extern void appendStringInfoString(StringInfo str, const char *s);
+static inline void
+appendStringInfoString(StringInfo str, const char *s)
+{
+	appendBinaryStringInfo(str, s, strlen(s));
+}
 
 /*------------------------
  * appendStringInfoChar
  * Append a single byte to str.
  * Like appendStringInfo(str, "%c", ch) but much faster.
  */
-extern void appendStringInfoChar(StringInfo str, char ch);
+static inline void
+appendStringInfoChar(StringInfo str, char ch)
+{
+	/* Make more room if needed */
+	enlargeStringInfo(str, 1);
 
-/*------------------------
- * appendStringInfoCharMacro
- * As above, but a macro for even more speed where it matters.
- * Caution: str argument will be evaluated multiple times.
- */
-#define appendStringInfoCharMacro(str,ch) \
-	(((str)->len + 1 >= (str)->maxlen) ? \
-	 appendStringInfoChar(str, ch) : \
-	 (void)((str)->data[(str)->len] = (ch), (str)->data[++(str)->len] = '\0'))
+	/* OK, append the character */
+	str->data[str->len] = ch;
+	str->len++;
+	str->data[str->len] = '\0';
+}
+/* backward compat for external code */
+#define appendStringInfoCharMacro appendStringInfoChar
 
 /*------------------------
  * appendStringInfoSpaces
@@ -135,26 +212,84 @@ extern void appendStringInfoChar(StringInfo str, char ch);
  */
 extern void appendStringInfoSpaces(StringInfo str, int count);
 
-/*------------------------
- * appendBinaryStringInfo
- * Append arbitrary binary data to a StringInfo, allocating more space
- * if necessary.
- */
-extern void appendBinaryStringInfo(StringInfo str,
-								   const char *data, int datalen);
 
-/*------------------------
- * appendBinaryStringInfoNT
- * Append arbitrary binary data to a StringInfo, allocating more space
- * if necessary. Does not ensure a trailing null-byte exists.
- */
-extern void appendBinaryStringInfoNT(StringInfo str,
-									 const char *data, int datalen);
+static inline void
+appendStringInfoInt32(StringInfo str, int32 val)
+{
+	char *after;
 
-/*------------------------
- * enlargeStringInfo
- * Make sure a StringInfo's buffer can hold at least 'needed' more bytes.
- */
-extern void enlargeStringInfo(StringInfo str, int needed);
+	/* Make more room if needed */
+	enlargeStringInfo(str, MAXINT32LEN);
+
+	after = pg_int32tostr_nn(str->data + str->len, val);
+	str->len = after - str->data;
+	str->data[str->len] = '\0';
+}
+
+static inline void
+appendStringInfoInt64(StringInfo str, uint64 val)
+{
+	char *after;
+
+	/* Make more room if needed */
+	enlargeStringInfo(str, MAXINT64LEN);
+
+	after = pg_int64tostr_nn(str->data + str->len, val);
+	str->len = after - str->data;
+	str->data[str->len] = '\0';
+}
+
+static inline void
+appendStringInfoUInt32(StringInfo str, uint32 val)
+{
+	char *after;
+
+	/* Make more room if needed */
+	enlargeStringInfo(str, MAXINT32LEN);
+
+	after = pg_uint32tostr_nn(str->data + str->len, val);
+	str->len = after - str->data;
+	str->data[str->len] = '\0';
+}
+
+static inline void
+appendStringInfoUInt64(StringInfo str, uint64 val)
+{
+	char *after;
+
+	/* Make more room if needed */
+	enlargeStringInfo(str, MAXINT64LEN);
+
+	after = pg_uint64tostr_nn(str->data + str->len, val);
+	str->len = after - str->data;
+	str->data[str->len] = '\0';
+}
+
+static inline void
+appendStringInfoFloat(StringInfo str, float val)
+{
+	int len;
+
+	/* Make more room if needed */
+	enlargeStringInfo(str, FLOAT_SHORTEST_DECIMAL_LEN);
+
+	len = float_to_shortest_decimal_buf(val, str->data + str->len);
+	str->len += len;
+	Assert(str->data[str->len] == '\0');
+}
+
+static inline void
+appendStringInfoDouble(StringInfo str, double val)
+{
+	int len;
+
+	/* Make more room if needed */
+	enlargeStringInfo(str, DOUBLE_SHORTEST_DECIMAL_LEN);
+
+	len = double_to_shortest_decimal_buf(val, str->data + str->len);
+	str->len += len;
+	Assert(str->data[str->len] == '\0');
+}
+
 
 #endif							/* STRINGINFO_H */
