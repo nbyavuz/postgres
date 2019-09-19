@@ -76,7 +76,7 @@ int2out(PG_FUNCTION_ARGS)
 	int16		arg1 = PG_GETARG_INT16(0);
 	char	   *result = (char *) palloc(7);	/* sign, 5 digits, '\0' */
 
-	pg_itoa(arg1, result);
+	pg_int16tostr(result, arg1);
 	PG_RETURN_CSTRING(result);
 }
 
@@ -191,7 +191,7 @@ int2vectorout(PG_FUNCTION_ARGS)
 	{
 		if (num != 0)
 			*rp++ = ' ';
-		pg_itoa(int2Array->values[num], rp);
+		pg_int16tostr(rp, int2Array->values[num]);
 		while (*++rp != '\0')
 			;
 	}
@@ -281,7 +281,7 @@ int4out(PG_FUNCTION_ARGS)
 	int32		arg1 = PG_GETARG_INT32(0);
 	char	   *result = (char *) palloc(12);	/* sign, 10 digits, '\0' */
 
-	pg_ltoa(arg1, result);
+	pg_int32tostr(result, arg1);
 	PG_RETURN_CSTRING(result);
 }
 

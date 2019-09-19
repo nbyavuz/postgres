@@ -18,6 +18,7 @@
 #include <math.h>
 
 #include "common/int.h"
+#include "common/string.h"
 #include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "nodes/nodeFuncs.h"
@@ -26,8 +27,6 @@
 #include "utils/int8.h"
 #include "utils/builtins.h"
 
-
-#define MAXINT8LEN		25
 
 typedef struct
 {
@@ -149,10 +148,10 @@ Datum
 int8out(PG_FUNCTION_ARGS)
 {
 	int64		val = PG_GETARG_INT64(0);
-	char		buf[MAXINT8LEN + 1];
+	char		buf[MAXINT64LEN + 1];
 	char	   *result;
 
-	pg_lltoa(val, buf);
+	pg_int64tostr(buf, val);
 	result = pstrdup(buf);
 	PG_RETURN_CSTRING(result);
 }

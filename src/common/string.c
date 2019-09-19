@@ -112,3 +112,305 @@ pg_strip_crlf(char *str)
 
 	return len;
 }
+
+/* see pg_int32tostr_nn */
+char *
+pg_int16tostr_nn(char *str, int16 value)
+{
+	/* It doesn't seem worth implementing this separately. */
+	return pg_int32tostr_nn(str, (int32) value);
+}
+
+/*
+ * pg_int32tostr_nn
+ *		Converts 'value' into a decimal string representation stored at 'str'.
+ *
+ * Returns the ending address of the string result (the last character written
+ * plus 1).  Note that no NUL terminator is written.
+ *
+ * The intended use-case for this function is to build strings that contain
+ * multiple individual numbers, for example:
+ *
+ *	str = pg_int32tostr_nn(str, a);
+ *	*str++ = ' ';
+ *	str = pg_int32tostr_nn(str, b);
+ *	*str = '\0';
+ *
+ * Note: Caller must ensure that 'str' points to enough memory to hold the
+ * result.
+ */
+char *
+pg_int32tostr_nn(char *str, int32 value)
+{
+	char	   *start;
+	char	   *end;
+
+	/*
+	 * Handle negative numbers in a special way.  We can't just write a '-'
+	 * prefix and reverse the sign as that would overflow for INT32_MIN.
+	 */
+	if (value < 0)
+	{
+		*str++ = '-';
+
+		/* Mark the position we must reverse the string from. */
+		start = str;
+
+		/* Compute the result string backwards. */
+		do
+		{
+			int32		oldval = value;
+			int32		remainder;
+
+			value /= 10;
+			remainder = oldval - value * 10;
+			/* As above, we expect remainder to be negative. */
+			*str++ = '0' - remainder;
+		} while (value != 0);
+	}
+	else
+	{
+		/* Mark the position we must reverse the string from. */
+		start = str;
+
+		/* Compute the result string backwards. */
+		do
+		{
+			int32		oldval = value;
+			int32		remainder;
+
+			value /= 10;
+			remainder = oldval - value * 10;
+			*str++ = '0' + remainder;
+		} while (value != 0);
+	}
+
+	/* Remember the end+1 and back up 'str' to the last character. */
+	end = str--;
+
+	/* Reverse string. */
+	while (start < str)
+	{
+		char		swap = *start;
+
+		*start++ = *str;
+		*str-- = swap;
+	}
+
+	return end;
+}
+
+/* see pg_int32tostr_nn, except for unsigned */
+char *
+pg_uint32tostr_nn(char *str, uint32 value)
+{
+	char	   *start;
+	char	   *end;
+
+	/* Mark the position we must reverse the string from. */
+	start = str;
+
+	/* Compute the result string backwards. */
+	do
+	{
+		uint32		oldval = value;
+		uint32		remainder;
+
+		value /= 10;
+		remainder = oldval - value * 10;
+		*str++ = '0' + remainder;
+	} while (value != 0);
+
+	/* Remember the end+1 and back up 'str' to the last character. */
+	end = str--;
+
+	/* Reverse string. */
+	while (start < str)
+	{
+		char		swap = *start;
+
+		*start++ = *str;
+		*str-- = swap;
+	}
+
+	return end;
+}
+
+/* see pg_int32tostr_nn */
+char *
+pg_int64tostr_nn(char *str, int64 value)
+{
+	char	   *start;
+	char	   *end;
+
+	/*
+	 * Handle negative numbers in a special way.  We can't just write a '-'
+	 * prefix and reverse the sign as that would overflow for INT64_MIN.
+	 */
+	if (value < 0)
+	{
+		*str++ = '-';
+
+		/* Mark the position we must reverse the string from. */
+		start = str;
+
+		/* Compute the result string backwards. */
+		do
+		{
+			int64		oldval = value;
+			int64		remainder;
+
+			value /= 10;
+			remainder = oldval - value * 10;
+			/* As above, we expect remainder to be negative. */
+			*str++ = '0' - remainder;
+		} while (value != 0);
+	}
+	else
+	{
+		/* Mark the position we must reverse the string from. */
+		start = str;
+
+		/* Compute the result string backwards. */
+		do
+		{
+			int64		oldval = value;
+			int64		remainder;
+
+			value /= 10;
+			remainder = oldval - value * 10;
+			*str++ = '0' + remainder;
+		} while (value != 0);
+	}
+
+	/* Remember the end+1 and back up 'str' to the last character. */
+	end = str--;
+
+	/* Reverse string. */
+	while (start < str)
+	{
+		char		swap = *start;
+
+		*start++ = *str;
+		*str-- = swap;
+	}
+
+	return end;
+}
+
+/* see pg_int64tostr_nn, except for unsigned */
+char *
+pg_uint64tostr_nn(char *str, uint64 value)
+{
+	char	   *start;
+	char	   *end;
+
+	/* Mark the position we must reverse the string from. */
+	start = str;
+
+	/* Compute the result string backwards. */
+	do
+	{
+		uint64		oldval = value;
+		uint64		remainder;
+
+		value /= 10;
+		remainder = oldval - value * 10;
+		*str++ = '0' + remainder;
+	} while (value != 0);
+
+	/* Remember the end+1 and back up 'str' to the last character. */
+	end = str--;
+
+	/* Reverse string. */
+	while (start < str)
+	{
+		char		swap = *start;
+
+		*start++ = *str;
+		*str-- = swap;
+	}
+
+	return end;
+}
+
+/*
+ * pg_int32tostr_nn_zeropad
+ *		Converts 'value' into a decimal string representation stored at 'str'.
+ *		'minwidth' specifies the minimum width of the result; any extra space
+ *		is filled up by prefixing the number with zeros.
+ *
+ * Returns the ending address of the string result (the last character written
+ * plus 1).  Note that no NUL terminator is written.
+ *
+ * The intended use-case for this function is to build strings that contain
+ * multiple individual numbers, for example:
+ *
+ *	str = pg_int32tostr_nn_zeropad(str, hours, 2);
+ *	*str++ = ':';
+ *	str = pg_int32tostr_nn_zeropad(str, mins, 2);
+ *	*str++ = ':';
+ *	str = pg_int32tostr_nn_zeropad(str, secs, 2);
+ *	*str = '\0';
+ *
+ * Note: Caller must ensure that 'str' points to enough memory to hold the
+ * result.
+ */
+char *
+pg_int32tostr_nn_zeropad(char *str, int32 value, int32 minwidth)
+{
+	char	   *start = str;
+	char	   *end = &str[minwidth];
+	int32		num = value;
+
+	Assert(minwidth > 0);
+
+	/*
+	 * Handle negative numbers in a special way.  We can't just write a '-'
+	 * prefix and reverse the sign as that would overflow for INT32_MIN.
+	 */
+	if (num < 0)
+	{
+		*start++ = '-';
+		minwidth--;
+
+		/*
+		 * Build the number starting at the last digit.  Here remainder will
+		 * be a negative number, so we must reverse the sign before adding '0'
+		 * in order to get the correct ASCII digit.
+		 */
+		while (minwidth--)
+		{
+			int32		oldval = num;
+			int32		remainder;
+
+			num /= 10;
+			remainder = oldval - num * 10;
+			start[minwidth] = '0' - remainder;
+		}
+	}
+	else
+	{
+		/* Build the number starting at the last digit */
+		while (minwidth--)
+		{
+			int32		oldval = num;
+			int32		remainder;
+
+			num /= 10;
+			remainder = oldval - num * 10;
+			start[minwidth] = '0' + remainder;
+		}
+	}
+
+	/*
+	 * If minwidth was not high enough to fit the number then num won't have
+	 * been divided down to zero.  We punt the problem to pg_int32tostr_nn(), which
+	 * will generate a correct answer in the minimum valid width.
+	 */
+	if (num != 0)
+		return pg_int32tostr_nn(str, value);
+
+	/* Otherwise, return last output character + 1 */
+	return end;
+}

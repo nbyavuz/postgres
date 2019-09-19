@@ -82,6 +82,7 @@
 
 #include "postgres.h"
 
+#include "common/string.h"
 #include "storage/buffile.h"
 #include "utils/builtins.h"
 #include "utils/logtape.h"
@@ -430,7 +431,7 @@ ltsConcatWorkerTapes(LogicalTapeSet *lts, TapeShare *shared,
 
 		lt = &lts->tapes[i];
 
-		pg_itoa(i, filename);
+		pg_int16tostr(filename, i);
 		file = BufFileOpenShared(fileset, filename);
 		filesize = BufFileSize(file);
 
@@ -568,7 +569,7 @@ LogicalTapeSetCreate(int ntapes, TapeShare *shared, SharedFileSet *fileset,
 	{
 		char		filename[MAXPGPATH];
 
-		pg_itoa(worker, filename);
+		pg_int16tostr(filename, worker);
 		lts->pfile = BufFileCreateShared(fileset, filename);
 	}
 	else
