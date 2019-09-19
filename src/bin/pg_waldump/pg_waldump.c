@@ -530,6 +530,9 @@ XLogDumpDisplayRecord(XLogDumpConfig *config, XLogReaderState *record)
 	int			block_id;
 	uint8		info = XLogRecGetInfo(record);
 	XLogRecPtr	xl_prev = XLogRecGetPrev(record);
+	StringInfoData str;
+
+	initStringInfo(&str);
 
 	XLogDumpRecordLen(record, &rec_len, &fpi_len);
 
@@ -537,16 +540,16 @@ XLogDumpDisplayRecord(XLogDumpConfig *config, XLogReaderState *record)
 	if (id == NULL)
 		id = psprintf("UNKNOWN (%x)", info & ~XLR_INFO_MASK);
 
-	printf("rmgr: %-11s len (rec/tot): %6u/%6u, tx: %10u, lsn: %X/%08X, prev %X/%08X, ",
-		   desc->rm_name,
-		   rec_len, XLogRecGetTotalLen(record),
-		   XLogRecGetXid(record),
-		   (uint32) (record->ReadRecPtr >> 32), (uint32) record->ReadRecPtr,
-		   (uint32) (xl_prev >> 32), (uint32) xl_prev);
-	printf("desc: %s ", id);
+	appendStringInfo(&str,
+					 "rmgr: %-11s len (rec/tot): %6u/%6u, tx: %10u, lsn: %X/%08X, prev %X/%08X, ",
+					 desc->rm_name,
+					 rec_len, XLogRecGetTotalLen(record),
+					 XLogRecGetXid(record),
+					 (uint32) (record->ReadRecPtr >> 32), (uint32) record->ReadRecPtr,
+					 (uint32) (xl_prev >> 32), (uint32) xl_prev);
+	appendStringInfo(&str, "desc: %s ", id);
 
-	/* the desc routine will printf the description directly to stdout */
-	desc->rm_desc(NULL, record);
+	desc->rm_desc(&str, record);
 
 	if (!config->bkp_details)
 	{
@@ -558,68 +561,75 @@ XLogDumpDisplayRecord(XLogDumpConfig *config, XLogReaderState *record)
 
 			XLogRecGetBlockTag(record, block_id, &rnode, &forknum, &blk);
 			if (forknum != MAIN_FORKNUM)
-				printf(", blkref #%u: rel %u/%u/%u fork %s blk %u",
-					   block_id,
-					   rnode.spcNode, rnode.dbNode, rnode.relNode,
-					   forkNames[forknum],
-					   blk);
+				appendStringInfo(&str,
+								 ", blkref #%u: rel %u/%u/%u fork %s blk %u",
+								 block_id,
+								 rnode.spcNode, rnode.dbNode, rnode.relNode,
+								 forkNames[forknum],
+								 blk);
 			else
-				printf(", blkref #%u: rel %u/%u/%u blk %u",
-					   block_id,
-					   rnode.spcNode, rnode.dbNode, rnode.relNode,
-					   blk);
+				appendStringInfo(&str,
+								 ", blkref #%u: rel %u/%u/%u blk %u",
+								 block_id,
+								 rnode.spcNode, rnode.dbNode, rnode.relNode,
+								 blk);
 			if (XLogRecHasBlockImage(record, block_id))
 			{
 				if (XLogRecBlockImageApply(record, block_id))
-					printf(" FPW");
+					appendStringInfoString(&str, " FPW");
 				else
-					printf(" FPW for WAL verification");
+					appendStringInfoString(&str, " FPW for WAL verification");
 			}
 		}
-		putchar('\n');
+		appendStringInfoChar(&str, '\n');
 	}
 	else
 	{
 		/* print block references (detailed format) */
-		putchar('\n');
+		appendStringInfoChar(&str, '\n');
 		for (block_id = 0; block_id <= record->max_block_id; block_id++)
 		{
 			if (!XLogRecHasBlockRef(record, block_id))
 				continue;
 
 			XLogRecGetBlockTag(record, block_id, &rnode, &forknum, &blk);
-			printf("\tblkref #%u: rel %u/%u/%u fork %s blk %u",
-				   block_id,
-				   rnode.spcNode, rnode.dbNode, rnode.relNode,
-				   forkNames[forknum],
-				   blk);
+			appendStringInfo(&str,
+							 "\tblkref #%u: rel %u/%u/%u fork %s blk %u",
+							 block_id,
+							 rnode.spcNode, rnode.dbNode, rnode.relNode,
+							 forkNames[forknum],
+							 blk);
 			if (XLogRecHasBlockImage(record, block_id))
 			{
 				if (record->blocks[block_id].bimg_info &
 					BKPIMAGE_IS_COMPRESSED)
 				{
-					printf(" (FPW%s); hole: offset: %u, length: %u, "
-						   "compression saved: %u\n",
-						   XLogRecBlockImageApply(record, block_id) ?
-						   "" : " for WAL verification",
-						   record->blocks[block_id].hole_offset,
-						   record->blocks[block_id].hole_length,
-						   BLCKSZ -
-						   record->blocks[block_id].hole_length -
-						   record->blocks[block_id].bimg_len);
+					appendStringInfo(&str,
+									 " (FPW%s); hole: offset: %u, length: %u, "
+									 "compression saved: %u\n",
+									 XLogRecBlockImageApply(record, block_id) ?
+									 "" : " for WAL verification",
+									 record->blocks[block_id].hole_offset,
+									 record->blocks[block_id].hole_length,
+									 BLCKSZ -
+									 record->blocks[block_id].hole_length -
+									 record->blocks[block_id].bimg_len);
 				}
 				else
 				{
-					printf(" (FPW%s); hole: offset: %u, length: %u\n",
-						   XLogRecBlockImageApply(record, block_id) ?
-						   "" : " for WAL verification",
-						   record->blocks[block_id].hole_offset,
-						   record->blocks[block_id].hole_length);
+					appendStringInfo(&str,
+									 " (FPW%s); hole: offset: %u, length: %u\n",
+									 XLogRecBlockImageApply(record, block_id) ?
+									 "" : " for WAL verification",
+									 record->blocks[block_id].hole_offset,
+									 record->blocks[block_id].hole_length);
 				}
 			}
-			putchar('\n');
 		}
 	}
+
+	printf("%s", str.data);
+	free(str.data);
 }
 
 /*

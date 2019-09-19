@@ -2,21 +2,35 @@
  *
  * stringinfo.c
  *
- * StringInfo provides an indefinitely-extensible string data type.
- * It can be used to buffer either ordinary C strings (null-terminated text)
- * or arbitrary binary data.  All storage is allocated with palloc().
+ * StringInfo provides an indefinitely-extensible string data type.  It can be
+ * used to buffer either ordinary C strings (null-terminated text) or
+ * arbitrary binary data.  All storage is allocated with palloc() (falling
+ * back to malloc in frontend code).
  *
  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- *	  src/backend/lib/stringinfo.c
+ *	  src/common/stringinfo.c
  *
  *-------------------------------------------------------------------------
  */
+
+
+#ifndef FRONTEND
+
 #include "postgres.h"
+#include "utils/memutils.h"
+
+#else
+
+#include "postgres_fe.h"
+
+/* It's possible we could use a different value for this in frontend code */
+#define MaxAllocSize	((Size) 0x3fffffff) /* 1 gigabyte - 1 */
+
+#endif
 
 #include "lib/stringinfo.h"
-#include "utils/memutils.h"
 
 
 /*
@@ -275,14 +289,29 @@ enlargeStringInfo(StringInfo str, int needed)
 	 * Guard against out-of-range "needed" values.  Without this, we can get
 	 * an overflow or infinite loop in the following.
 	 */
-	if (needed < 0)				/* should not happen */
+#ifndef FRONTEND
+	if (unlikely(needed < 0))				/* should not happen */
 		elog(ERROR, "invalid string enlargement request size: %d", needed);
-	if (((Size) needed) >= (MaxAllocSize - (Size) str->len))
+	if (unlikely(((Size) needed) >= (MaxAllocSize - (Size) str->len)))
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("out of memory"),
 				 errdetail("Cannot enlarge string buffer containing %d bytes by %d more bytes.",
 						   str->len, needed)));
+#else
+	if (unlikely(needed < 0))				/* should not happen */
+	{
+		fprintf(stderr, "invalid string enlargement request size: %d", needed);
+		exit(EXIT_FAILURE);
+	}
+	if (unlikely(((Size) needed) >= (MaxAllocSize - (Size) str->len)))
+	{
+		fprintf(stderr,
+				_("out of memory\n\nCannot enlarge string buffer containing %d bytes by %d more bytes."),
+				str->len, needed);
+		exit(EXIT_FAILURE);
+	}
+#endif
 
 	needed += str->len + 1;		/* total space required now */
 
