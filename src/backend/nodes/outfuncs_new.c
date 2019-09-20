@@ -35,16 +35,6 @@ static void nodeout_token(NodeOutContext *context, const char *s);
 char *
 nodeToString(const void *obj)
 {
-#ifdef USE_NEW_NODE_FUNCS
-	return nodeToStringNew(obj);
-#else
-	return nodeToStringOld(obj);
-#endif
-}
-
-char *
-nodeToStringNew(const void *obj)
-{
 	NodeOutContext context = {0};
 
 	/* see stringinfo.h for an explanation of this maneuver */
@@ -509,5 +499,40 @@ nodeout_token(NodeOutContext *context, const char *s)
 			*s == '\\')
 			appendStringInfoChar(&context->str, '\\');
 		appendStringInfoChar(&context->str, *s++);
+	}
+}
+
+/*
+ * Print the value of a Datum given its type.
+ */
+void
+outDatum(StringInfo str, Datum value, int typlen, bool typbyval)
+{
+	Size		length,
+				i;
+	char	   *s;
+
+	length = datumGetSize(value, typbyval, typlen);
+
+	if (typbyval)
+	{
+		s = (char *) (&value);
+		appendStringInfo(str, "%u [ ", (unsigned int) length);
+		for (i = 0; i < (Size) sizeof(Datum); i++)
+			appendStringInfo(str, "%d ", (int) (s[i]));
+		appendStringInfoChar(str, ']');
+	}
+	else
+	{
+		s = (char *) DatumGetPointer(value);
+		if (!PointerIsValid(s))
+			appendStringInfoString(str, "0 [ ]");
+		else
+		{
+			appendStringInfo(str, "%u [ ", (unsigned int) length);
+			for (i = 0; i < length; i++)
+				appendStringInfo(str, "%d ", (int) (s[i]));
+			appendStringInfoChar(str, ']');
+		}
 	}
 }

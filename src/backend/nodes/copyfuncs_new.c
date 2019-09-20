@@ -35,19 +35,9 @@ static void nodecopy_value_union(CopyNodeContext *context, Value *dst, const Val
 void *
 copyObjectImpl(const void *from)
 {
-#ifdef USE_NEW_NODE_FUNCS
-	return copyObjectImplNew(from);
-#else
-	return copyObjectImplOld(from);
-#endif
-}
-
-void * __attribute__((flatten))
-copyObjectImplNew(const void *obj)
-{
 	CopyNodeContext context = {0};
 
-	return nodecopy_new_rec(&context, obj);
+	return nodecopy_new_rec(&context, from);
 }
 
 static inline void*

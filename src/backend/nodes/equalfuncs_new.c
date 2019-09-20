@@ -9,8 +9,7 @@
 #include "utils/datum.h"
 
 
-static bool nodes_equal_new_rec(const Node *a, const Node *b);
-static bool nodes_equal_new_rec_real(const Node *a, const Node *b);
+static bool nodes_equal(const void *a, const void *b);
 static bool nodes_equal_list(const List *a, const List *b, NodeTag tag);
 static bool nodes_equal_value_union(const Value *a, const Value *b, NodeTag tag);
 static bool nodes_equal_fields(const Node *a, const Node *b, const TINodeType *type_info);
@@ -23,56 +22,11 @@ static bool nodes_equal_fields(const Node *a, const Node *b, const TINodeType *t
 bool
 equal(const void *a, const void *b)
 {
-#ifdef USE_NEW_NODE_FUNCS
-	return nodes_equal_new(a, b);
-#else
-	return nodes_equal_old(a, b);
-#endif
+	return nodes_equal(a, b);
 }
 
-bool
-nodes_equal_new(const void *a, const void *b)
-{
-	bool retval;
-
-	retval = nodes_equal_new_rec(a, b);
-#ifdef CHEAPER_PER_NODE_COMPARE_ASSERT
-	Assert(retval == nodes_equal_old(a, b));
-#endif
-
-	return retval;
-}
-
-/*
- * Recurse into comparing the two nodes.
- */
 static bool
-nodes_equal_new_rec(const Node *a, const Node *b)
-{
-	/*
-	 * During development it can be helpful to compare old/new equal
-	 * comparisons on a per-field basis, making it easier to pinpoint the node
-	 * with differing behaviour - but it's quite expensive (because we'll
-	 * compare nodes over and over while recursing down).
-	 */
-#ifdef EXPENSIVE_PER_NODE_COMPARE_ASSERT
-	bool newretval;
-	bool oldretval;
-
-	newretval = nodes_equal_new_rec_real(a, b);
-	oldretval = nodes_equal_old(a, b);
-
-	Assert(newretval == oldretval);
-
-	return newretval;
-#else
-	return nodes_equal_new_rec_real(a, b);
-#endif
-}
-
-/* temporary helper for nodes_equal_new_rec */
-static bool
-nodes_equal_new_rec_real(const Node *a, const Node *b)
+nodes_equal(const void *a, const void *b)
 {
 	const TINodeType *type_info;
 	NodeTag tag;
@@ -291,7 +245,7 @@ nodes_equal_fields(const Node *a, const Node *b, const TINodeType *type_info)
 					*(const void **) b_field_ptr == NULL)
 					return false;
 				else
-					if (!nodes_equal_new_rec(*(const Node **) a_field_ptr, *(const Node **) b_field_ptr))
+					if (!nodes_equal(*(const Node **) a_field_ptr, *(const Node **) b_field_ptr))
 						return false;
 				break;
 
@@ -346,7 +300,7 @@ nodes_equal_list(const List *a, const List *b, NodeTag tag)
 		case T_List:
 			forboth(lc_a, a, lc_b, b)
 			{
-				if (!nodes_equal_new_rec(lfirst(lc_a), lfirst(lc_b)))
+				if (!nodes_equal(lfirst(lc_a), lfirst(lc_b)))
 					return false;
 			}
 			break;

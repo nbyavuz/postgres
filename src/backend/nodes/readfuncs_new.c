@@ -37,31 +37,25 @@ static Bitmapset *nodein_bitmapset(NodeInContext *context, const char *token, in
 static void nodein_value_union(NodeInContext *context, Value *dst, const char *token, int token_length);
 static void nodein_enum(NodeInContext *context, uint16 type_id, void *ptr_dst, const char *token, int token_length);
 
+static void *stringToNodeInternal(const char *str, bool restore_locations);
+
 
 void *
 stringToNode(const char *str)
 {
-#ifdef USE_NEW_NODE_FUNCS
-	return stringToNodeNew(str);
-#else
-	return stringToNodeOld(str);
-#endif
+	return stringToNodeInternal(str, false);
 }
 
 #ifdef WRITE_READ_PARSE_PLAN_TREES
 void *
 stringToNodeWithLocations(const char *str)
 {
-#ifdef USE_NEW_NODE_FUNCS
-	return stringToNodeWithLocationsNew(str);
-#else
-	return stringToNodeWithLocationsOld(str);
-#endif
+	return stringToNodeInternal(str, true);
 }
 #endif
 
 static void *
-stringToNodeNewInternal(const char *str, bool restore_locations)
+stringToNodeInternal(const char *str, bool restore_locations)
 {
 	NodeInContext context = {.str = str,
 							 .cur = str,
@@ -69,20 +63,6 @@ stringToNodeNewInternal(const char *str, bool restore_locations)
 
 	return nodein_read(&context, NULL, 0);
 }
-
-void *
-stringToNodeNew(const char *str)
-{
-	return stringToNodeNewInternal(str, false);
-}
-
-#ifdef WRITE_READ_PARSE_PLAN_TREES
-void *
-stringToNodeWithLocationsNew(const char *str)
-{
-	return stringToNodeNewInternal(str, true);
-}
-#endif
 
 static void *
 nodein_read(NodeInContext *context, const char *token, int token_length)

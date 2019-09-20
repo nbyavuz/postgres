@@ -13,9 +13,9 @@ top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
 OBJS = nodeFuncs.o nodes.o list.o bitmapset.o tidbitmap.o \
-       copyfuncs.o copyfuncs_new.o equalfuncs.o equalfuncs_new.o extensible.o \
-       makefuncs.o nodeinfo_data.o outfuncs.o outfuncs_new.o readfuncs.o \
-       readfuncs_new.o print.o read.o params.o value.o
+       copyfuncs_new.o equalfuncs_new.o extensible.o \
+       makefuncs.o nodeinfo_data.o outfuncs_new.o \
+       readfuncs_new.o print.o params.o value.o
 
 # node metadata generation
 GENNODE_FILES = nodes/primnodes.h \
