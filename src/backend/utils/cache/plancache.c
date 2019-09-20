@@ -190,7 +190,7 @@ CreateCachedPlan(RawStmt *raw_parse_tree,
 
 	plansource = (CachedPlanSource *) palloc0(sizeof(CachedPlanSource));
 	plansource->magic = CACHEDPLANSOURCE_MAGIC;
-	plansource->raw_parse_tree = copyObject(raw_parse_tree);
+	plansource->raw_parse_tree = copyObjectRo(raw_parse_tree);
 	plansource->query_string = pstrdup(query_string);
 	MemoryContextSetIdentifier(source_context, plansource->query_string);
 	plansource->commandTag = commandTag;
@@ -373,7 +373,7 @@ CompleteCachedPlan(CachedPlanSource *plansource,
 												  "CachedPlanQuery",
 												  ALLOCSET_START_SMALL_SIZES);
 		MemoryContextSwitchTo(querytree_context);
-		querytree_list = copyObject(querytree_list);
+		querytree_list = copyObjectRo(querytree_list);
 	}
 
 	plansource->query_context = querytree_context;
@@ -954,7 +954,7 @@ BuildCachedPlan(CachedPlanSource *plansource, List *qlist,
 		 */
 		MemoryContextSwitchTo(plan_context);
 
-		plist = copyObject(plist);
+		plist = copyObjectRo(plist);
 	}
 	else
 		plan_context = CurrentMemoryContext;
@@ -1347,7 +1347,7 @@ CopyCachedPlan(CachedPlanSource *plansource)
 
 	newsource = (CachedPlanSource *) palloc0(sizeof(CachedPlanSource));
 	newsource->magic = CACHEDPLANSOURCE_MAGIC;
-	newsource->raw_parse_tree = copyObject(plansource->raw_parse_tree);
+	newsource->raw_parse_tree = copyObjectRo(plansource->raw_parse_tree);
 	newsource->query_string = pstrdup(plansource->query_string);
 	MemoryContextSetIdentifier(source_context, newsource->query_string);
 	newsource->commandTag = plansource->commandTag;

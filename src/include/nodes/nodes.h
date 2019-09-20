@@ -634,12 +634,15 @@ extern uintptr_t readDatum(bool typbyval);
  * nodes/copyfuncs.c
  */
 extern void *copyObjectImpl(const void *obj);
+extern void *copyObjectRoImpl(const void *obj);
 
 /* cast result back to argument type, if supported by compiler */
 #ifdef HAVE_TYPEOF
 #define copyObject(obj) ((typeof(obj)) copyObjectImpl(obj))
+#define copyObjectRo(obj) ((typeof(obj)) copyObjectRoImpl(obj))
 #else
 #define copyObject(obj) copyObjectImpl(obj)
+#define copyObjectRo(obj) copyObjectRoImpl(obj)
 #endif
 
 /*

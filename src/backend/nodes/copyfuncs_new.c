@@ -22,6 +22,12 @@ static void nodecopy_fields(CopyNodeContext *context, Node *dst, const Node *src
 static List* nodecopy_list(CopyNodeContext *context, const List *obj, NodeTag tag);
 static void nodecopy_value_union(CopyNodeContext *context, Value *dst, const Value *src);
 
+static void nodesize_rec(CopyNodeContext *context, const Node *obj);
+static void nodesize_fields(CopyNodeContext *context, const Node *obj, const TINodeType *type_info);
+static void nodesize_list(CopyNodeContext *context, const List *obj, NodeTag tag);
+static void nodesize_value_union(CopyNodeContext *context, const Value *src);
+static void nodesize_count(CopyNodeContext *context, size_t size, size_t align);
+
 
 #define BITMAPSET_SIZE(nwords)	\
 	(offsetof(Bitmapset, words) + (nwords) * sizeof(bitmapword))
@@ -40,16 +46,280 @@ copyObjectImpl(const void *from)
 	return nodecopy_new_rec(&context, from);
 }
 
+void *
+copyObjectRoImpl(const void *obj)
+{
+#if 0
+	CopyNodeContext context = {0};
+
+	/* count space */
+	nodesize_rec(&context, obj);
+
+	/* allocate memory in one go */
+	context.space = palloc_extended(context.required_space,
+									MCXT_ALLOC_HUGE);
+
+	return nodecopy_new_rec(&context, obj);
+#else
+	return copyObjectImpl(obj);
+#endif
+}
+
+static void
+nodesize_rec(CopyNodeContext *context, const Node *obj)
+{
+	const TINodeType *type_info;
+	NodeTag tag;
+
+	if (obj == NULL)
+		return;
+
+	tag = nodeTag(obj);
+
+	/* Guard against stack overflow due to overly complex expressions */
+	check_stack_depth();
+
+	switch (tag)
+	{
+		case T_List:
+		case T_OidList:
+		case T_IntList:
+			nodesize_list(context, (List *) obj, tag);
+			return;
+
+		default:
+			break;
+	}
+
+	type_info = &ti_node_types[tag];
+
+	Assert(type_info->size != TYPE_SIZE_UNKNOWN);
+
+	nodesize_count(context, type_info->size, MAXIMUM_ALIGNOF);
+	nodesize_fields(context, obj, type_info);
+}
+
+static void
+nodesize_count(CopyNodeContext *context, size_t size, size_t align)
+{
+	size_t alignup;
+
+	alignup = TYPEALIGN(align, context->required_space) - context->required_space;
+	Assert(alignup < MAXIMUM_ALIGNOF);
+	context->required_space += alignup;
+	context->required_space += size;
+}
+
+static void
+nodesize_fields(CopyNodeContext *context, const Node *obj, const TINodeType *type_info)
+{
+	const TIStructField *field_info = &ti_struct_fields[type_info->first_field_at];
+
+	for (int i = 0; i < type_info->num_fields; i++, field_info++)
+	{
+		const void *field_ptr;
+
+		// FIXME: ExtensibleNode needs to call callbacks, or be reimplemented
+
+		if (field_info->flags & TYPE_COPY_IGNORE)
+			continue;
+
+		field_ptr = ((char *) obj + field_info->offset);
+
+		switch (field_info->known_type_id)
+		{
+			case KNOWN_TYPE_NODE:
+				{
+					NodeTag sub_tag;
+					const TINodeType *sub_type_info;
+
+					Assert(field_info->type_id != TYPE_ID_UNKNOWN);
+
+					if (field_info->offset == 0)
+						sub_tag = field_info->type_id;
+					else
+					{
+						sub_tag = nodeTag(field_ptr);
+
+						Assert(ti_node_types[sub_tag].size ==
+							   ti_node_types[field_info->type_id].size);
+					}
+
+					sub_type_info = &ti_node_types[sub_tag];
+
+					nodesize_fields(context,
+									(const Node *) field_ptr,
+									sub_type_info);
+
+					break;
+				}
+
+			case KNOWN_TYPE_DATUM:
+				{
+					const Const *cptr = castNode(Const, (Node *) obj);
+
+					if (!cptr->constbyval && cptr->constisnull)
+					{
+						/* passed by reference, account for space */
+						// FIXME: could reduce alignment, but would require additional information
+						nodesize_count(context,
+									   datumGetSize(cptr->constvalue,
+													cptr->constbyval,
+													cptr->constlen),
+									   MAXIMUM_ALIGNOF);
+					}
+				}
+
+				break;
+
+			case KNOWN_TYPE_VALUE_UNION:
+				Assert(IsA(obj, Integer) || IsA(obj, Float) ||
+					   IsA(obj, String) || IsA(obj, BitString) ||
+					   IsA(obj, Null));
+
+				nodesize_value_union(context, (const Value *) obj);
+				break;
+
+			case KNOWN_TYPE_P_PGARR:
+				if (*(PgArrBase **) field_ptr == NULL)
+					break;
+
+				Assert(field_info->elem_size > 0);
+				Assert(field_info->elem_known_type_id > 0);
+
+				nodesize_count(context,
+							   MAXALIGN(sizeof(PgArrBase)) +
+							   field_info->elem_size * (*(PgArrBase **) field_ptr)->size,
+							   MAXIMUM_ALIGNOF);
+				break;
+
+			case KNOWN_TYPE_P_NODE:
+				if (*(Node **) field_ptr == NULL)
+					break;
+				nodesize_rec(context, *(Node **) field_ptr);
+				break;
+
+			case KNOWN_TYPE_P_CHAR:
+				if (*(char **) field_ptr == NULL)
+					break;
+				nodesize_count(context,
+							   strlen(*(char **) field_ptr) + 1,
+							   1);
+				break;
+
+			case KNOWN_TYPE_P_BITMAPSET:
+				if (*(const Bitmapset **) field_ptr == NULL)
+					break;
+
+				nodesize_count(context,
+							   BITMAPSET_SIZE((*(const Bitmapset **) field_ptr)->nwords),
+							   MAXIMUM_ALIGNOF);
+				break;
+
+			default:
+				if (field_info->flags & (TYPE_COPY_FORCE_SCALAR ||
+										 TYPE_CAT_SCALAR))
+					Assert(field_info->size != TYPE_SIZE_UNKNOWN);
+				else
+					elog(ERROR, "don't know how to copy field %s %s->%s",
+						 ti_strings[field_info->type].string,
+						 ti_strings[type_info->name].string,
+						 ti_strings[field_info->name].string);
+		}
+	}
+}
+
+static void
+nodesize_list(CopyNodeContext *context, const List *obj, NodeTag tag)
+{
+	/* XXX: this is copying implementation details from new_list. */
+	nodesize_count(context,
+				   offsetof(List, initial_elements) +
+				   obj->length * sizeof(ListCell),
+				   MAXIMUM_ALIGNOF);
+
+	switch (tag)
+	{
+		case T_List:
+			for (int i = 0; i < obj->length; i++)
+			{
+				nodesize_rec(context, lfirst(&obj->elements[i]));
+			}
+			break;
+
+		case T_OidList:
+		case T_IntList:
+			/* already accounted for */
+			break;
+
+		default:
+			pg_unreachable();
+	}
+}
+
+static void
+nodesize_value_union(CopyNodeContext *context, const Value *obj)
+{
+	switch (nodeTag(obj))
+	{
+		case T_Null:
+		case T_Integer:
+			/* part of struct Value itself */
+			break;
+
+		case T_Float:
+		case T_String:
+		case T_BitString:
+			if (obj->val.str != NULL)
+				nodesize_count(context,
+							   strlen(obj->val.str) + 1,
+							   1);
+			break;
+
+		default:
+			pg_unreachable();
+			break;
+	}
+}
+
 static inline void*
 nodecopy_alloc(CopyNodeContext *context, size_t size, size_t align)
 {
-	return palloc(size);
+	if (context->space == NULL)
+		return palloc(size);
+	else
+	{
+		void *ret;
+		size_t alignup;
+
+		alignup = TYPEALIGN(align, context->used_space) - context->used_space;
+		Assert(alignup < MAXIMUM_ALIGNOF);
+
+		Assert(context->used_space + alignup <= context->required_space);
+		context->used_space += alignup;
+
+		ret = context->space + context->used_space;
+
+		Assert(context->used_space + size <= context->required_space);
+		context->used_space += size;
+
+		return ret;
+	}
 }
 
 static inline void*
 nodecopy_alloc0(CopyNodeContext *context, size_t size, size_t align)
 {
-	return palloc0(size);
+	if (context->space == NULL)
+		return palloc0(size);
+	else
+	{
+		void *alloc = nodecopy_alloc(context, size, align);
+
+		memset(alloc, 0, size);
+
+		return alloc;
+	}
 }
 
 static Node*
