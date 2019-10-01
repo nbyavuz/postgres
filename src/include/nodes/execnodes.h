@@ -83,6 +83,7 @@ typedef struct ExprState
 	/*
 	 * Instructions to compute expression's return value.
 	 */
+#define FIELDNO_EXPRSTATE_STEPS 5
 	struct ExprEvalStep *steps;
 
 	/*
