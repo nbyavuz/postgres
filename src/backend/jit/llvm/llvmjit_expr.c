@@ -2009,8 +2009,8 @@ llvm_compile_expr(ExprState *state)
 					break;
 				}
 
-			case EEOP_AGG_STRICT_INPUT_CHECK_NULLS:
 			case EEOP_AGG_STRICT_INPUT_CHECK_ARGS:
+			case EEOP_AGG_STRICT_INPUT_CHECK_NULLS:
 				{
 					int			nargs = op->d.agg_strict_input_check.nargs;
 					NullableDatum *args = op->d.agg_strict_input_check.args;
