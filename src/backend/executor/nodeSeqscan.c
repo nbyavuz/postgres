@@ -14,7 +14,6 @@
  */
 /*
  * INTERFACE ROUTINES
- *		ExecSeqScan				sequentially scans a relation.
  *		ExecSeqNext				retrieve next tuple in sequential order.
  *		ExecInitSeqScan			creates and initializes a seqscan node.
  *		ExecEndSeqScan			releases any storage allocated.
@@ -30,6 +29,7 @@
 #include "access/relscan.h"
 #include "access/tableam.h"
 #include "executor/execdebug.h"
+#include "executor/execScan.h"
 #include "executor/nodeSeqscan.h"
 #include "utils/rel.h"
 
@@ -39,6 +39,22 @@ static TupleTableSlot *SeqNext(SeqScanState *node);
  *						Scan Support
  * ----------------------------------------------------------------
  */
+
+static void
+SeqPrepare(SeqScanState *node)
+{
+	if (node->ss.ss_currentScanDesc == NULL)
+	{
+		/*
+		 * We reach here if the scan is not parallel, or if we're serially
+		 * executing a scan that was planned to be parallel.
+		 */
+		node->ss.ss_currentScanDesc =
+			table_beginscan(node->ss.ss_currentRelation,
+							node->ss.ps.state->es_snapshot,
+							0, NULL);
+	}
+}
 
 /* ----------------------------------------------------------------
  *		SeqNext
@@ -62,17 +78,7 @@ SeqNext(SeqScanState *node)
 	direction = estate->es_direction;
 	slot = node->ss.ss_ScanTupleSlot;
 
-	if (scandesc == NULL)
-	{
-		/*
-		 * We reach here if the scan is not parallel, or if we're serially
-		 * executing a scan that was planned to be parallel.
-		 */
-		scandesc = table_beginscan(node->ss.ss_currentRelation,
-								   estate->es_snapshot,
-								   0, NULL);
-		node->ss.ss_currentScanDesc = scandesc;
-	}
+	Assert(scandesc != NULL);
 
 	/*
 	 * get the next tuple from the table
@@ -95,24 +101,8 @@ SeqRecheck(SeqScanState *node, TupleTableSlot *slot)
 	return true;
 }
 
-/* ----------------------------------------------------------------
- *		ExecSeqScan(node)
- *
- *		Scans the relation sequentially and returns the next qualifying
- *		tuple.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecSeqScan(PlanState *pstate)
-{
-	SeqScanState *node = castNode(SeqScanState, pstate);
 
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) SeqNext,
-					(ExecScanRecheckMtd) SeqRecheck);
-}
+INSTANTIATE_SCAN_FUNCTIONS(ExecSeqScan, SeqPrepare, SeqNext, SeqRecheck);
 
 
 /* ----------------------------------------------------------------
@@ -137,7 +127,6 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	scanstate = makeNode(SeqScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
-	scanstate->ss.ps.ExecProcNode = ExecSeqScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -170,6 +159,8 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	 */
 	scanstate->ss.ps.qual =
 		ExecInitQual(node->plan.qual, (PlanState *) scanstate);
+
+	CHOOSE_SCAN_FUNCTION(&scanstate->ss, estate, ExecSeqScan);
 
 	return scanstate;
 }

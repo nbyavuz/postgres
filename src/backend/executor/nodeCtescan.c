@@ -16,6 +16,7 @@
 #include "postgres.h"
 
 #include "executor/execdebug.h"
+#include "executor/execScan.h"
 #include "executor/nodeCtescan.h"
 #include "miscadmin.h"
 
@@ -148,23 +149,7 @@ CteScanRecheck(CteScanState *node, TupleTableSlot *slot)
 	return true;
 }
 
-/* ----------------------------------------------------------------
- *		ExecCteScan(node)
- *
- *		Scans the CTE sequentially and returns the next qualifying tuple.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecCteScan(PlanState *pstate)
-{
-	CteScanState *node = castNode(CteScanState, pstate);
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) CteScanNext,
-					(ExecScanRecheckMtd) CteScanRecheck);
-}
+INSTANTIATE_SCAN_FUNCTIONS(ExecCteScan, NULL, CteScanNext, CteScanRecheck);
 
 
 /* ----------------------------------------------------------------
@@ -206,7 +191,6 @@ ExecInitCteScan(CteScan *node, EState *estate, int eflags)
 	scanstate = makeNode(CteScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
-	scanstate->ss.ps.ExecProcNode = ExecCteScan;
 	scanstate->eflags = eflags;
 	scanstate->cte_table = NULL;
 	scanstate->eof_cte = false;
@@ -274,6 +258,8 @@ ExecInitCteScan(CteScan *node, EState *estate, int eflags)
 	 */
 	scanstate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, (PlanState *) scanstate);
+
+	CHOOSE_SCAN_FUNCTION(&scanstate->ss, estate, ExecCteScan);
 
 	return scanstate;
 }

@@ -19,149 +19,139 @@
 #include "postgres.h"
 
 #include "executor/executor.h"
+#include "executor/execScan.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
 
 
 
 /*
- * ExecScanFetch -- check interrupts & fetch next potential tuple
+ * ExecScanFetchEPQ -- check interrupts & fetch next potential tuple
  *
  * This routine is concerned with substituting a test tuple if we are
- * inside an EvalPlanQual recheck.  If we aren't, just execute
- * the access method's next-tuple routine.
+ * inside an EvalPlanQual recheck.
  */
 static inline TupleTableSlot *
-ExecScanFetch(ScanState *node,
-			  ExecScanAccessMtd accessMtd,
-			  ExecScanRecheckMtd recheckMtd)
+ExecScanFetchEPQ(ScanState *node,
+				 ExecScanAccessMtd accessMtd,
+				 ExecScanRecheckMtd recheckMtd)
 {
 	EState	   *estate = node->ps.state;
+	EPQState   *epqstate = estate->es_epq_active;
+	Index		scanrelid = ((Scan *) node->ps.plan)->scanrelid;
 
 	CHECK_FOR_INTERRUPTS();
 
-	if (estate->es_epq_active != NULL)
-	{
-		EPQState   *epqstate = estate->es_epq_active;
-
-		/*
-		 * We are inside an EvalPlanQual recheck.  Return the test tuple if
-		 * one is available, after rechecking any access-method-specific
-		 * conditions.
-		 */
-		Index		scanrelid = ((Scan *) node->ps.plan)->scanrelid;
-
-		if (scanrelid == 0)
-		{
-			/*
-			 * This is a ForeignScan or CustomScan which has pushed down a
-			 * join to the remote side.  The recheck method is responsible not
-			 * only for rechecking the scan/join quals but also for storing
-			 * the correct tuple in the slot.
-			 */
-
-			TupleTableSlot *slot = node->ss_ScanTupleSlot;
-
-			if (!(*recheckMtd) (node, slot))
-				ExecClearTuple(slot);	/* would not be returned by scan */
-			return slot;
-		}
-		else if (epqstate->relsubs_done[scanrelid - 1])
-		{
-			/*
-			 * Return empty slot, as we already performed an EPQ substitution
-			 * for this relation.
-			 */
-
-			TupleTableSlot *slot = node->ss_ScanTupleSlot;
-
-			/* Return empty slot, as we already returned a tuple */
-			return ExecClearTuple(slot);
-		}
-		else if (epqstate->relsubs_slot[scanrelid - 1] != NULL)
-		{
-			/*
-			 * Return replacement tuple provided by the EPQ caller.
-			 */
-
-			TupleTableSlot *slot = epqstate->relsubs_slot[scanrelid - 1];
-
-			Assert(epqstate->relsubs_rowmark[scanrelid - 1] == NULL);
-
-			/* Mark to remember that we shouldn't return more */
-			epqstate->relsubs_done[scanrelid - 1] = true;
-
-			/* Return empty slot if we haven't got a test tuple */
-			if (TupIsNull(slot))
-				return NULL;
-
-			/* Check if it meets the access-method conditions */
-			if (!(*recheckMtd) (node, slot))
-				return ExecClearTuple(slot);	/* would not be returned by
-												 * scan */
-			return slot;
-		}
-		else if (epqstate->relsubs_rowmark[scanrelid - 1] != NULL)
-		{
-			/*
-			 * Fetch and return replacement tuple using a non-locking rowmark.
-			 */
-
-			TupleTableSlot *slot = node->ss_ScanTupleSlot;
-
-			/* Mark to remember that we shouldn't return more */
-			epqstate->relsubs_done[scanrelid - 1] = true;
-
-			if (!EvalPlanQualFetchRowMark(epqstate, scanrelid, slot))
-				return NULL;
-
-			/* Return empty slot if we haven't got a test tuple */
-			if (TupIsNull(slot))
-				return NULL;
-
-			/* Check if it meets the access-method conditions */
-			if (!(*recheckMtd) (node, slot))
-				return ExecClearTuple(slot);	/* would not be returned by
-												 * scan */
-			return slot;
-		}
-	}
-
 	/*
-	 * Run the node-type-specific access method function to get the next tuple
+	 * We are inside an EvalPlanQual recheck.  Return the test tuple if
+	 * one is available, after rechecking any access-method-specific
+	 * conditions.
 	 */
-	return (*accessMtd) (node);
+
+	if (scanrelid == 0)
+	{
+		/*
+		 * This is a ForeignScan or CustomScan which has pushed down a
+		 * join to the remote side.  The recheck method is responsible not
+		 * only for rechecking the scan/join quals but also for storing
+		 * the correct tuple in the slot.
+		 */
+
+		TupleTableSlot *slot = node->ss_ScanTupleSlot;
+
+		if (!(*recheckMtd) (node, slot))
+			ExecClearTuple(slot);	/* would not be returned by scan */
+		return slot;
+	}
+	else if (epqstate->relsubs_done[scanrelid - 1])
+	{
+		/*
+		 * Return empty slot, as we already performed an EPQ substitution
+		 * for this relation.
+		 */
+
+		TupleTableSlot *slot = node->ss_ScanTupleSlot;
+
+		/* Return empty slot, as we already returned a tuple */
+		return ExecClearTuple(slot);
+	}
+	else if (epqstate->relsubs_slot[scanrelid - 1] != NULL)
+	{
+		/*
+		 * Return replacement tuple provided by the EPQ caller.
+		 */
+
+		TupleTableSlot *slot = epqstate->relsubs_slot[scanrelid - 1];
+
+		Assert(epqstate->relsubs_rowmark[scanrelid - 1] == NULL);
+
+		/* Mark to remember that we shouldn't return more */
+		epqstate->relsubs_done[scanrelid - 1] = true;
+
+		/* Return empty slot if we haven't got a test tuple */
+		if (TupIsNull(slot))
+			return NULL;
+
+		/* Check if it meets the access-method conditions */
+		if (!(*recheckMtd) (node, slot))
+			return ExecClearTuple(slot);	/* would not be returned by
+											 * scan */
+		return slot;
+	}
+	else if (epqstate->relsubs_rowmark[scanrelid - 1] != NULL)
+	{
+		/*
+		 * Fetch and return replacement tuple using a non-locking rowmark.
+		 */
+
+		TupleTableSlot *slot = node->ss_ScanTupleSlot;
+
+		/* Mark to remember that we shouldn't return more */
+		epqstate->relsubs_done[scanrelid - 1] = true;
+
+		if (!EvalPlanQualFetchRowMark(epqstate, scanrelid, slot))
+			return NULL;
+
+		/* Return empty slot if we haven't got a test tuple */
+		if (TupIsNull(slot))
+			return NULL;
+
+		/* Check if it meets the access-method conditions */
+		if (!(*recheckMtd) (node, slot))
+			return ExecClearTuple(slot);	/* would not be returned by
+											 * scan */
+		return slot;
+	}
+	else
+	{
+		/*
+		 * Run the node-type-specific access method function to get the next tuple
+		 */
+		return (*accessMtd) (node);
+	}
 }
 
 /* ----------------------------------------------------------------
- *		ExecScan
+ *		ExecScanEPQ
  *
- *		Scans the relation using the 'access method' indicated and
- *		returns the next qualifying tuple.
- *		The access method returns the next tuple and ExecScan() is
- *		responsible for checking the tuple returned against the qual-clause.
+ *		Perform scan while EPQ is in use.
  *
- *		A 'recheck method' must also be provided that can check an
- *		arbitrary tuple of the relation against any qual conditions
- *		that are implemented internal to the access method.
- *
- *		Conditions:
- *		  -- the "cursor" maintained by the AMI is positioned at the tuple
- *			 returned previously.
- *
- *		Initial States:
- *		  -- the relation indicated is opened for scanning so that the
- *			 "cursor" is positioned before the first qualifying tuple.
  * ----------------------------------------------------------------
  */
 TupleTableSlot *
-ExecScan(ScanState *node,
-		 ExecScanAccessMtd accessMtd,	/* function returning a tuple */
-		 ExecScanRecheckMtd recheckMtd)
+ExecScanEPQ(ScanState *node,
+			ExecScanInitMtd initMtd,
+			ExecScanAccessMtd accessMtd,	/* function returning a tuple */
+			ExecScanRecheckMtd recheckMtd)
 {
 	ExprContext *econtext;
 	ExprState  *qual;
 	ProjectionInfo *projInfo;
+
+	Assert(node->ps.state->es_epq_active != NULL);
+
+	if (initMtd)
+		(*initMtd)(node);
 
 	/*
 	 * Fetch data from node
@@ -170,8 +160,8 @@ ExecScan(ScanState *node,
 	projInfo = node->ps.ps_ProjInfo;
 	econtext = node->ps.ps_ExprContext;
 
-	/* interrupt checks are in ExecScanFetch */
 
+	/* interrupt checks are in ExecScanFetchEPQ */
 	/*
 	 * If we have neither a qual to check nor a projection to do, just skip
 	 * all the overhead and return the raw scan tuple.
@@ -179,7 +169,7 @@ ExecScan(ScanState *node,
 	if (!qual && !projInfo)
 	{
 		ResetExprContext(econtext);
-		return ExecScanFetch(node, accessMtd, recheckMtd);
+		return ExecScanFetchEPQ(node, accessMtd, recheckMtd);
 	}
 
 	/*
@@ -196,7 +186,7 @@ ExecScan(ScanState *node,
 	{
 		TupleTableSlot *slot;
 
-		slot = ExecScanFetch(node, accessMtd, recheckMtd);
+		slot = ExecScanFetchEPQ(node, accessMtd, recheckMtd);
 
 		/*
 		 * if the slot returned by the accessMtd contains NULL, then it means

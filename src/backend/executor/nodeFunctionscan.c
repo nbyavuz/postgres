@@ -14,7 +14,6 @@
  */
 /*
  * INTERFACE ROUTINES
- *		ExecFunctionScan		scans a function.
  *		ExecFunctionNext		retrieve next tuple in sequential order.
  *		ExecInitFunctionScan	creates and initializes a functionscan node.
  *		ExecEndFunctionScan		releases any storage allocated.
@@ -23,6 +22,7 @@
 #include "postgres.h"
 
 #include "catalog/pg_type.h"
+#include "executor/execScan.h"
 #include "executor/nodeFunctionscan.h"
 #include "funcapi.h"
 #include "nodes/nodeFuncs.h"
@@ -251,24 +251,7 @@ FunctionRecheck(FunctionScanState *node, TupleTableSlot *slot)
 	return true;
 }
 
-/* ----------------------------------------------------------------
- *		ExecFunctionScan(node)
- *
- *		Scans the function sequentially and returns the next qualifying
- *		tuple.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecFunctionScan(PlanState *pstate)
-{
-	FunctionScanState *node = castNode(FunctionScanState, pstate);
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) FunctionNext,
-					(ExecScanRecheckMtd) FunctionRecheck);
-}
+INSTANTIATE_SCAN_FUNCTIONS(ExecFunctionScan, NULL, FunctionNext, FunctionRecheck);
 
 /* ----------------------------------------------------------------
  *		ExecInitFunctionScan
@@ -299,7 +282,6 @@ ExecInitFunctionScan(FunctionScan *node, EState *estate, int eflags)
 	scanstate = makeNode(FunctionScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
-	scanstate->ss.ps.ExecProcNode = ExecFunctionScan;
 	scanstate->eflags = eflags;
 
 	/*
@@ -495,6 +477,8 @@ ExecInitFunctionScan(FunctionScan *node, EState *estate, int eflags)
 	 */
 	scanstate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, (PlanState *) scanstate);
+
+	CHOOSE_SCAN_FUNCTION(&scanstate->ss, estate, ExecFunctionScan);
 
 	/*
 	 * Create a memory context that ExecMakeTableFunctionResult can use to

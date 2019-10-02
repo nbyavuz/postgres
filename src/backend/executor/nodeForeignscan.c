@@ -15,7 +15,6 @@
 /*
  * INTERFACE ROUTINES
  *
- *		ExecForeignScan			scans a foreign table.
  *		ExecInitForeignScan		creates and initializes state info.
  *		ExecReScanForeignScan	rescans the foreign relation.
  *		ExecEndForeignScan		releases any resources allocated.
@@ -23,6 +22,7 @@
 #include "postgres.h"
 
 #include "executor/executor.h"
+#include "executor/execScan.h"
 #include "executor/nodeForeignscan.h"
 #include "foreign/fdwapi.h"
 #include "utils/memutils.h"
@@ -98,25 +98,7 @@ ForeignRecheck(ForeignScanState *node, TupleTableSlot *slot)
 	return ExecQual(node->fdw_recheck_quals, econtext);
 }
 
-/* ----------------------------------------------------------------
- *		ExecForeignScan(node)
- *
- *		Fetches the next tuple from the FDW, checks local quals, and
- *		returns it.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecForeignScan(PlanState *pstate)
-{
-	ForeignScanState *node = castNode(ForeignScanState, pstate);
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) ForeignNext,
-					(ExecScanRecheckMtd) ForeignRecheck);
-}
-
+INSTANTIATE_SCAN_FUNCTIONS(ExecForeignScan, NULL, ForeignNext, ForeignRecheck);
 
 /* ----------------------------------------------------------------
  *		ExecInitForeignScan
@@ -140,7 +122,6 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 	scanstate = makeNode(ForeignScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
-	scanstate->ss.ps.ExecProcNode = ExecForeignScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -219,6 +200,8 @@ ExecInitForeignScan(ForeignScan *node, EState *estate, int eflags)
 	if (outerPlan(node))
 		outerPlanState(scanstate) =
 			ExecInitNode(outerPlan(node), estate, eflags);
+
+	CHOOSE_SCAN_FUNCTION(&scanstate->ss, estate, ExecForeignScan);
 
 	/*
 	 * Tell the FDW to initialize the scan.

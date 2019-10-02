@@ -16,6 +16,7 @@
 #include "postgres.h"
 
 #include "executor/execdebug.h"
+#include "executor/execScan.h"
 #include "executor/nodeNamedtuplestorescan.h"
 #include "miscadmin.h"
 #include "utils/queryenvironment.h"
@@ -56,23 +57,7 @@ NamedTuplestoreScanRecheck(NamedTuplestoreScanState *node, TupleTableSlot *slot)
 	return true;
 }
 
-/* ----------------------------------------------------------------
- *		ExecNamedTuplestoreScan(node)
- *
- *		Scans the CTE sequentially and returns the next qualifying tuple.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecNamedTuplestoreScan(PlanState *pstate)
-{
-	NamedTuplestoreScanState *node = castNode(NamedTuplestoreScanState, pstate);
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) NamedTuplestoreScanNext,
-					(ExecScanRecheckMtd) NamedTuplestoreScanRecheck);
-}
+INSTANTIATE_SCAN_FUNCTIONS(ExecNamedTuplestoreScan, NULL, NamedTuplestoreScanNext, NamedTuplestoreScanRecheck);
 
 
 /* ----------------------------------------------------------------
@@ -100,7 +85,6 @@ ExecInitNamedTuplestoreScan(NamedTuplestoreScan *node, EState *estate, int eflag
 	scanstate = makeNode(NamedTuplestoreScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
-	scanstate->ss.ps.ExecProcNode = ExecNamedTuplestoreScan;
 
 	enr = get_ENR(estate->es_queryEnv, node->enrname);
 	if (!enr)
@@ -151,6 +135,8 @@ ExecInitNamedTuplestoreScan(NamedTuplestoreScan *node, EState *estate, int eflag
 	 */
 	scanstate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, (PlanState *) scanstate);
+
+	CHOOSE_SCAN_FUNCTION(&scanstate->ss, estate, ExecNamedTuplestoreScan);
 
 	return scanstate;
 }

@@ -27,8 +27,7 @@
  */
 /*
  * INTERFACE ROUTINES
- *		ExecBitmapHeapScan			scans a relation using bitmap info
- *		ExecBitmapHeapNext			workhorse for above
+ *		ExecBitmapHeapNext			retrieve next tuple
  *		ExecInitBitmapHeapScan		creates and initializes state info.
  *		ExecReScanBitmapHeapScan	prepares to rescan the plan.
  *		ExecEndBitmapHeapScan		releases all storage.
@@ -42,6 +41,7 @@
 #include "access/transam.h"
 #include "access/visibilitymap.h"
 #include "executor/execdebug.h"
+#include "executor/execScan.h"
 #include "executor/nodeBitmapHeapscan.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -581,19 +581,7 @@ BitmapHeapRecheck(BitmapHeapScanState *node, TupleTableSlot *slot)
 	return ExecQualAndReset(node->bitmapqualorig, econtext);
 }
 
-/* ----------------------------------------------------------------
- *		ExecBitmapHeapScan(node)
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecBitmapHeapScan(PlanState *pstate)
-{
-	BitmapHeapScanState *node = castNode(BitmapHeapScanState, pstate);
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) BitmapHeapNext,
-					(ExecScanRecheckMtd) BitmapHeapRecheck);
-}
+INSTANTIATE_SCAN_FUNCTIONS(ExecBitmapHeapScan, NULL, BitmapHeapNext, BitmapHeapRecheck);
 
 /* ----------------------------------------------------------------
  *		ExecReScanBitmapHeapScan(node)
@@ -725,7 +713,6 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 	scanstate = makeNode(BitmapHeapScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
-	scanstate->ss.ps.ExecProcNode = ExecBitmapHeapScan;
 
 	scanstate->tbm = NULL;
 	scanstate->tbmiterator = NULL;
@@ -793,6 +780,8 @@ ExecInitBitmapHeapScan(BitmapHeapScan *node, EState *estate, int eflags)
 		ExecInitQual(node->scan.plan.qual, (PlanState *) scanstate);
 	scanstate->bitmapqualorig =
 		ExecInitQual(node->bitmapqualorig, (PlanState *) scanstate);
+
+	CHOOSE_SCAN_FUNCTION(&scanstate->ss, estate, ExecBitmapHeapScan);
 
 	/*
 	 * Determine the maximum for prefetch_target.  If the tablespace has a

@@ -15,7 +15,6 @@
  */
 /*
  * INTERFACE ROUTINES
- *		ExecValuesScan			scans a values list.
  *		ExecValuesNext			retrieve next tuple in sequential order.
  *		ExecInitValuesScan		creates and initializes a valuesscan node.
  *		ExecEndValuesScan		releases any storage allocated.
@@ -24,6 +23,7 @@
 #include "postgres.h"
 
 #include "executor/executor.h"
+#include "executor/execScan.h"
 #include "executor/nodeValuesscan.h"
 #include "jit/jit.h"
 #include "utils/expandeddatum.h"
@@ -196,24 +196,7 @@ ValuesRecheck(ValuesScanState *node, TupleTableSlot *slot)
 	return true;
 }
 
-/* ----------------------------------------------------------------
- *		ExecValuesScan(node)
- *
- *		Scans the values lists sequentially and returns the next qualifying
- *		tuple.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecValuesScan(PlanState *pstate)
-{
-	ValuesScanState *node = castNode(ValuesScanState, pstate);
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) ValuesNext,
-					(ExecScanRecheckMtd) ValuesRecheck);
-}
+INSTANTIATE_SCAN_FUNCTIONS(ExecValuesScan, NULL, ValuesNext, ValuesRecheck);
 
 /* ----------------------------------------------------------------
  *		ExecInitValuesScan
@@ -240,7 +223,6 @@ ExecInitValuesScan(ValuesScan *node, EState *estate, int eflags)
 	scanstate = makeNode(ValuesScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
-	scanstate->ss.ps.ExecProcNode = ExecValuesScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -288,6 +270,8 @@ ExecInitValuesScan(ValuesScan *node, EState *estate, int eflags)
 	{
 		scanstate->exprlists[i++] = (List *) lfirst(vtl);
 	}
+
+	CHOOSE_SCAN_FUNCTION(&scanstate->ss, estate, ExecValuesScan);
 
 	return scanstate;
 }

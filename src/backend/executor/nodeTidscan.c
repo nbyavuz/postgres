@@ -15,7 +15,6 @@
 /*
  * INTERFACE ROUTINES
  *
- *		ExecTidScan			scans a relation using tids
  *		ExecInitTidScan		creates and initializes state info.
  *		ExecReScanTidScan	rescans the tid relation.
  *		ExecEndTidScan		releases all storage.
@@ -26,6 +25,7 @@
 #include "access/tableam.h"
 #include "catalog/pg_type.h"
 #include "executor/execdebug.h"
+#include "executor/execScan.h"
 #include "executor/nodeTidscan.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
@@ -312,6 +312,14 @@ itemptr_comparator(const void *a, const void *b)
  *		Retrieve a tuple from the TidScan node's currentRelation
  *		using the tids in the TidScanState information.
  *
+ *		Conditions:
+ *		  -- the "cursor" maintained by the AMI is positioned at the tuple
+ *			 returned previously.
+ *
+ *		Initial States:
+ *		  -- the relation indicated is opened for scanning so that the
+ *			 "cursor" is positioned before the first qualifying tuple.
+ *		  -- tss_TidPtr is -1.
  * ----------------------------------------------------------------
  */
 static TupleTableSlot *
@@ -416,34 +424,7 @@ TidRecheck(TidScanState *node, TupleTableSlot *slot)
 	return true;
 }
 
-
-/* ----------------------------------------------------------------
- *		ExecTidScan(node)
- *
- *		Scans the relation using tids and returns
- *		   the next qualifying tuple in the direction specified.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
- *
- *		Conditions:
- *		  -- the "cursor" maintained by the AMI is positioned at the tuple
- *			 returned previously.
- *
- *		Initial States:
- *		  -- the relation indicated is opened for scanning so that the
- *			 "cursor" is positioned before the first qualifying tuple.
- *		  -- tss_TidPtr is -1.
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecTidScan(PlanState *pstate)
-{
-	TidScanState *node = castNode(TidScanState, pstate);
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) TidNext,
-					(ExecScanRecheckMtd) TidRecheck);
-}
+INSTANTIATE_SCAN_FUNCTIONS(ExecTidScan, NULL, TidNext, TidRecheck);
 
 /* ----------------------------------------------------------------
  *		ExecReScanTidScan(node)
@@ -514,7 +495,6 @@ ExecInitTidScan(TidScan *node, EState *estate, int eflags)
 	tidstate = makeNode(TidScanState);
 	tidstate->ss.ps.plan = (Plan *) node;
 	tidstate->ss.ps.state = estate;
-	tidstate->ss.ps.ExecProcNode = ExecTidScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -556,6 +536,8 @@ ExecInitTidScan(TidScan *node, EState *estate, int eflags)
 	 */
 	tidstate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, (PlanState *) tidstate);
+
+	CHOOSE_SCAN_FUNCTION(&tidstate->ss, estate, ExecTidScan);
 
 	TidExprListCreate(tidstate);
 

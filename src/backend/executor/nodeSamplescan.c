@@ -18,6 +18,7 @@
 #include "access/tableam.h"
 #include "access/tsmapi.h"
 #include "executor/executor.h"
+#include "executor/execScan.h"
 #include "executor/nodeSamplescan.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -69,24 +70,7 @@ SampleRecheck(SampleScanState *node, TupleTableSlot *slot)
 	return true;
 }
 
-/* ----------------------------------------------------------------
- *		ExecSampleScan(node)
- *
- *		Scans the relation using the sampling method and returns
- *		the next qualifying tuple.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecSampleScan(PlanState *pstate)
-{
-	SampleScanState *node = castNode(SampleScanState, pstate);
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) SampleNext,
-					(ExecScanRecheckMtd) SampleRecheck);
-}
+INSTANTIATE_SCAN_FUNCTIONS(ExecSampleScan, NULL, SampleNext, SampleRecheck);
 
 /* ----------------------------------------------------------------
  *		ExecInitSampleScan
@@ -108,7 +92,6 @@ ExecInitSampleScan(SampleScan *node, EState *estate, int eflags)
 	scanstate = makeNode(SampleScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
-	scanstate->ss.ps.ExecProcNode = ExecSampleScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -148,6 +131,9 @@ ExecInitSampleScan(SampleScan *node, EState *estate, int eflags)
 	scanstate->args = ExecInitExprList(tsc->args, (PlanState *) scanstate);
 	scanstate->repeatable =
 		ExecInitExpr(tsc->repeatable, (PlanState *) scanstate);
+
+
+	CHOOSE_SCAN_FUNCTION(&scanstate->ss, estate, ExecSampleScan);
 
 	/*
 	 * If we don't have a REPEATABLE clause, select a random seed.  We want to

@@ -14,7 +14,6 @@
  */
 /*
  * INTERFACE ROUTINES
- *		ExecIndexScan			scans a relation using an index
  *		IndexNext				retrieve next tuple using index
  *		IndexNextWithReorder	same, but recheck ORDER BY expressions
  *		ExecInitIndexScan		creates and initializes state info.
@@ -34,6 +33,7 @@
 #include "access/tableam.h"
 #include "catalog/pg_am.h"
 #include "executor/execdebug.h"
+#include "executor/execScan.h"
 #include "executor/nodeIndexscan.h"
 #include "lib/pairingheap.h"
 #include "miscadmin.h"
@@ -513,31 +513,20 @@ reorderqueue_pop(IndexScanState *node)
 	return result;
 }
 
-
-/* ----------------------------------------------------------------
- *		ExecIndexScan(node)
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecIndexScan(PlanState *pstate)
+static void
+ExecIndexPrepareScan(ScanState *scanstate)
 {
-	IndexScanState *node = castNode(IndexScanState, pstate);
+	IndexScanState *node = castNode(IndexScanState, scanstate);
 
 	/*
 	 * If we have runtime keys and they've not already been set up, do it now.
 	 */
 	if (node->iss_NumRuntimeKeys != 0 && !node->iss_RuntimeKeysReady)
 		ExecReScan((PlanState *) node);
-
-	if (node->iss_NumOrderByKeys > 0)
-		return ExecScan(&node->ss,
-						(ExecScanAccessMtd) IndexNextWithReorder,
-						(ExecScanRecheckMtd) IndexRecheck);
-	else
-		return ExecScan(&node->ss,
-						(ExecScanAccessMtd) IndexNext,
-						(ExecScanRecheckMtd) IndexRecheck);
 }
+
+INSTANTIATE_SCAN_FUNCTIONS(ExecIndexScan, ExecIndexPrepareScan, IndexNext, IndexRecheck);
+INSTANTIATE_SCAN_FUNCTIONS(ExecIndexScanWithReorder, ExecIndexPrepareScan, IndexNextWithReorder, IndexRecheck);
 
 /* ----------------------------------------------------------------
  *		ExecReScanIndexScan(node)
@@ -909,7 +898,6 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 	indexstate = makeNode(IndexScanState);
 	indexstate->ss.ps.plan = (Plan *) node;
 	indexstate->ss.ps.state = estate;
-	indexstate->ss.ps.ExecProcNode = ExecIndexScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -1078,6 +1066,11 @@ ExecInitIndexScan(IndexScan *node, EState *estate, int eflags)
 	{
 		indexstate->iss_RuntimeContext = NULL;
 	}
+
+	if (indexstate->iss_NumOrderByKeys > 0)
+		CHOOSE_SCAN_FUNCTION(&indexstate->ss, estate, ExecIndexScanWithReorder);
+	else
+		CHOOSE_SCAN_FUNCTION(&indexstate->ss, estate, ExecIndexScan);
 
 	/*
 	 * all done.

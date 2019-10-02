@@ -16,6 +16,7 @@
 #include "postgres.h"
 
 #include "executor/execdebug.h"
+#include "executor/execScan.h"
 #include "executor/nodeWorktablescan.h"
 
 static TupleTableSlot *WorkTableScanNext(WorkTableScanState *node);
@@ -69,56 +70,49 @@ WorkTableScanRecheck(WorkTableScanState *node, TupleTableSlot *slot)
 	return true;
 }
 
-/* ----------------------------------------------------------------
- *		ExecWorkTableScan(node)
- *
- *		Scans the worktable sequentially and returns the next qualifying tuple.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
- * ----------------------------------------------------------------
+INSTANTIATE_SCAN_FUNCTIONS(ExecWorkTableScan, NULL, WorkTableScanNext, WorkTableScanRecheck);
+
+/*
+ * On the first call, find the ancestor RecursiveUnion's state via the
+ * Param slot reserved for it.  (We can't do this during node init because
+ * there are corner cases where we'll get the init call before the
+ * RecursiveUnion does.)
  */
 static TupleTableSlot *
-ExecWorkTableScan(PlanState *pstate)
+ExecWorkTableFirst(PlanState *pstate)
 {
 	WorkTableScanState *node = castNode(WorkTableScanState, pstate);
+	WorkTableScan *plan = (WorkTableScan *) node->ss.ps.plan;
+	EState	   *estate = node->ss.ps.state;
+	ParamExecData *param;
+
+	/* should not get called again */
+	Assert(node->rustate == NULL);
+
+	param = &(estate->es_param_exec_vals[plan->wtParam]);
+	Assert(param->execPlan == NULL);
+	Assert(!param->isnull);
+	node->rustate = castNode(RecursiveUnionState, DatumGetPointer(param->value));
+	Assert(node->rustate);
 
 	/*
-	 * On the first call, find the ancestor RecursiveUnion's state via the
-	 * Param slot reserved for it.  (We can't do this during node init because
-	 * there are corner cases where we'll get the init call before the
-	 * RecursiveUnion does.)
+	 * The scan tuple type (ie, the rowtype we expect to find in the work
+	 * table) is the same as the result rowtype of the ancestor
+	 * RecursiveUnion node.  Note this depends on the assumption that
+	 * RecursiveUnion doesn't allow projection.
 	 */
-	if (node->rustate == NULL)
-	{
-		WorkTableScan *plan = (WorkTableScan *) node->ss.ps.plan;
-		EState	   *estate = node->ss.ps.state;
-		ParamExecData *param;
+	ExecAssignScanType(&node->ss,
+					   ExecGetResultType(&node->rustate->ps));
 
-		param = &(estate->es_param_exec_vals[plan->wtParam]);
-		Assert(param->execPlan == NULL);
-		Assert(!param->isnull);
-		node->rustate = castNode(RecursiveUnionState, DatumGetPointer(param->value));
-		Assert(node->rustate);
+	/*
+	 * Now we can initialize the projection info.  This must be completed
+	 * before we can call ExecScan().
+	 */
+	ExecAssignScanProjectionInfo(&node->ss);
 
-		/*
-		 * The scan tuple type (ie, the rowtype we expect to find in the work
-		 * table) is the same as the result rowtype of the ancestor
-		 * RecursiveUnion node.  Note this depends on the assumption that
-		 * RecursiveUnion doesn't allow projection.
-		 */
-		ExecAssignScanType(&node->ss,
-						   ExecGetResultType(&node->rustate->ps));
+	CHOOSE_SCAN_FUNCTION(&node->ss, estate, ExecWorkTableScan);
 
-		/*
-		 * Now we can initialize the projection info.  This must be completed
-		 * before we can call ExecScan().
-		 */
-		ExecAssignScanProjectionInfo(&node->ss);
-	}
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) WorkTableScanNext,
-					(ExecScanRecheckMtd) WorkTableScanRecheck);
+	return node->ss.ps.ExecProcNode(pstate);
 }
 
 
@@ -146,7 +140,7 @@ ExecInitWorkTableScan(WorkTableScan *node, EState *estate, int eflags)
 	scanstate = makeNode(WorkTableScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
-	scanstate->ss.ps.ExecProcNode = ExecWorkTableScan;
+	scanstate->ss.ps.ExecProcNode = ExecWorkTableFirst;
 	scanstate->rustate = NULL;	/* we'll set this later */
 
 	/*
@@ -176,6 +170,11 @@ ExecInitWorkTableScan(WorkTableScan *node, EState *estate, int eflags)
 	/*
 	 * Do not yet initialize projection info, see ExecWorkTableScan() for
 	 * details.
+	 *
+	 * XXX: Note that we do thus don't use CHOOSE_SCAN_FUNCTION here, like
+	 * normally, for choosing the appropriate executor function. Instead we
+	 * ss.ps.ExecProcNode is set to ExecWorkTableFirst, which replaces itself
+	 * with the appropriate implementation on the first call.
 	 */
 
 	return scanstate;

@@ -14,7 +14,6 @@
  */
 /*
  * INTERFACE ROUTINES
- *		ExecTableFuncscan		scans a function.
  *		ExecFunctionNext		retrieve next tuple in sequential order.
  *		ExecInitTableFuncscan	creates and initializes a TableFuncscan node.
  *		ExecEndTableFuncscan		releases any storage allocated.
@@ -24,6 +23,7 @@
 
 #include "nodes/execnodes.h"
 #include "executor/executor.h"
+#include "executor/execScan.h"
 #include "executor/nodeTableFuncscan.h"
 #include "executor/tablefunc.h"
 #include "miscadmin.h"
@@ -84,24 +84,7 @@ TableFuncRecheck(TableFuncScanState *node, TupleTableSlot *slot)
 	return true;
 }
 
-/* ----------------------------------------------------------------
- *		ExecTableFuncscan(node)
- *
- *		Scans the function sequentially and returns the next qualifying
- *		tuple.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecTableFuncScan(PlanState *pstate)
-{
-	TableFuncScanState *node = castNode(TableFuncScanState, pstate);
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) TableFuncNext,
-					(ExecScanRecheckMtd) TableFuncRecheck);
-}
+INSTANTIATE_SCAN_FUNCTIONS(ExecTableFuncScan, NULL, TableFuncNext, TableFuncRecheck);
 
 /* ----------------------------------------------------------------
  *		ExecInitTableFuncscan
@@ -130,7 +113,6 @@ ExecInitTableFuncScan(TableFuncScan *node, EState *estate, int eflags)
 	scanstate = makeNode(TableFuncScanState);
 	scanstate->ss.ps.plan = (Plan *) node;
 	scanstate->ss.ps.state = estate;
-	scanstate->ss.ps.ExecProcNode = ExecTableFuncScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -201,6 +183,8 @@ ExecInitTableFuncScan(TableFuncScan *node, EState *estate, int eflags)
 						 &in_funcid, &scanstate->typioparams[i]);
 		fmgr_info(in_funcid, &scanstate->in_functions[i]);
 	}
+
+	CHOOSE_SCAN_FUNCTION(&scanstate->ss, estate, ExecTableFuncScan);
 
 	return scanstate;
 }

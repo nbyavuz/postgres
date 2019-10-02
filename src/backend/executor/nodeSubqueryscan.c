@@ -18,7 +18,6 @@
  */
 /*
  * INTERFACE ROUTINES
- *		ExecSubqueryScan			scans a subquery.
  *		ExecSubqueryNext			retrieve next tuple in sequential order.
  *		ExecInitSubqueryScan		creates and initializes a subqueryscan node.
  *		ExecEndSubqueryScan			releases any storage allocated.
@@ -28,6 +27,7 @@
 #include "postgres.h"
 
 #include "executor/execdebug.h"
+#include "executor/execScan.h"
 #include "executor/nodeSubqueryscan.h"
 
 static TupleTableSlot *SubqueryNext(SubqueryScanState *node);
@@ -70,24 +70,7 @@ SubqueryRecheck(SubqueryScanState *node, TupleTableSlot *slot)
 	return true;
 }
 
-/* ----------------------------------------------------------------
- *		ExecSubqueryScan(node)
- *
- *		Scans the subquery sequentially and returns the next qualifying
- *		tuple.
- *		We call the ExecScan() routine and pass it the appropriate
- *		access method functions.
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecSubqueryScan(PlanState *pstate)
-{
-	SubqueryScanState *node = castNode(SubqueryScanState, pstate);
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) SubqueryNext,
-					(ExecScanRecheckMtd) SubqueryRecheck);
-}
+INSTANTIATE_SCAN_FUNCTIONS(ExecSubqueryScan, NULL, SubqueryNext, SubqueryRecheck);
 
 /* ----------------------------------------------------------------
  *		ExecInitSubqueryScan
@@ -111,7 +94,6 @@ ExecInitSubqueryScan(SubqueryScan *node, EState *estate, int eflags)
 	subquerystate = makeNode(SubqueryScanState);
 	subquerystate->ss.ps.plan = (Plan *) node;
 	subquerystate->ss.ps.state = estate;
-	subquerystate->ss.ps.ExecProcNode = ExecSubqueryScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -154,6 +136,8 @@ ExecInitSubqueryScan(SubqueryScan *node, EState *estate, int eflags)
 	 */
 	subquerystate->ss.ps.qual =
 		ExecInitQual(node->scan.plan.qual, (PlanState *) subquerystate);
+
+	CHOOSE_SCAN_FUNCTION(&subquerystate->ss, estate, ExecSubqueryScan);
 
 	return subquerystate;
 }

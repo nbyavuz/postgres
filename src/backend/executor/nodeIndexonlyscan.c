@@ -14,7 +14,6 @@
  */
 /*
  * INTERFACE ROUTINES
- *		ExecIndexOnlyScan			scans an index
  *		IndexOnlyNext				retrieve next tuple
  *		ExecInitIndexOnlyScan		creates and initializes state info.
  *		ExecReScanIndexOnlyScan		rescans the indexed relation.
@@ -36,6 +35,7 @@
 #include "access/tupdesc.h"
 #include "access/visibilitymap.h"
 #include "executor/execdebug.h"
+#include "executor/execScan.h"
 #include "executor/nodeIndexonlyscan.h"
 #include "executor/nodeIndexscan.h"
 #include "miscadmin.h"
@@ -299,25 +299,21 @@ IndexOnlyRecheck(IndexOnlyScanState *node, TupleTableSlot *slot)
 	return false;				/* keep compiler quiet */
 }
 
-/* ----------------------------------------------------------------
- *		ExecIndexOnlyScan(node)
- * ----------------------------------------------------------------
- */
-static TupleTableSlot *
-ExecIndexOnlyScan(PlanState *pstate)
+
+static void
+ExecOnlyIndexPrepareScan(ScanState *scanstate)
 {
-	IndexOnlyScanState *node = castNode(IndexOnlyScanState, pstate);
+	IndexOnlyScanState *node = castNode(IndexOnlyScanState, scanstate);
 
 	/*
 	 * If we have runtime keys and they've not already been set up, do it now.
 	 */
 	if (node->ioss_NumRuntimeKeys != 0 && !node->ioss_RuntimeKeysReady)
 		ExecReScan((PlanState *) node);
-
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) IndexOnlyNext,
-					(ExecScanRecheckMtd) IndexOnlyRecheck);
 }
+
+INSTANTIATE_SCAN_FUNCTIONS(ExecIndexOnlyScan, ExecOnlyIndexPrepareScan, IndexOnlyNext, IndexOnlyRecheck);
+
 
 /* ----------------------------------------------------------------
  *		ExecReScanIndexOnlyScan(node)
@@ -503,7 +499,6 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	indexstate = makeNode(IndexOnlyScanState);
 	indexstate->ss.ps.plan = (Plan *) node;
 	indexstate->ss.ps.state = estate;
-	indexstate->ss.ps.ExecProcNode = ExecIndexOnlyScan;
 
 	/*
 	 * Miscellaneous initialization
@@ -565,6 +560,8 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	 */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return indexstate;
+
+	CHOOSE_SCAN_FUNCTION(&indexstate->ss, estate, ExecIndexOnlyScan);
 
 	/* Open the index relation. */
 	lockmode = exec_rt_fetch(node->scan.scanrelid, estate)->rellockmode;
@@ -683,6 +680,12 @@ ExecIndexOnlyScanInitializeDSM(IndexOnlyScanState *node,
 	node->ioss_VMBuffer = InvalidBuffer;
 
 	/*
+	 * If we have runtime keys and they've not already been set up, do it now.
+	 */
+	if (node->ioss_NumRuntimeKeys != 0 && !node->ioss_RuntimeKeysReady)
+		ExecReScan((PlanState *) node);
+
+	/*
 	 * If no run-time keys to calculate or they are ready, go ahead and pass
 	 * the scankeys to the index AM.
 	 */
@@ -725,6 +728,12 @@ ExecIndexOnlyScanInitializeWorker(IndexOnlyScanState *node,
 								 node->ioss_NumOrderByKeys,
 								 piscan);
 	node->ioss_ScanDesc->xs_want_itup = true;
+
+	/*
+	 * If we have runtime keys and they've not already been set up, do it now.
+	 */
+	if (node->ioss_NumRuntimeKeys != 0 && !node->ioss_RuntimeKeysReady)
+		ExecReScan((PlanState *) node);
 
 	/*
 	 * If no run-time keys to calculate or they are ready, go ahead and pass
