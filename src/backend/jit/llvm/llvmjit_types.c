@@ -48,6 +48,7 @@
 PGFunction	TypePGFunction;
 size_t		TypeSizeT;
 bool		TypeStorageBool;
+ExecEvalParamCallback TypeExecEvalParamCallback;
 
 NullableDatum StructNullableDatum;
 AggState	StructAggState;
@@ -55,6 +56,7 @@ AggStatePerGroupData StructAggStatePerGroupData;
 AggStatePerTransData StructAggStatePerTransData;
 ExprContext StructExprContext;
 ExprEvalStep StructExprEvalStep;
+struct ExprEvalStepParamCallback StructExprEvalStepParamCallback;
 ExprState	StructExprState;
 FunctionCallInfoBaseData StructFunctionCallInfoData;
 HeapTupleData StructHeapTupleData;

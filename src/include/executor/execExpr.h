@@ -16,6 +16,7 @@
 
 #include "executor/nodeAgg.h"
 #include "nodes/execnodes.h"
+#include "nodes/params.h"
 
 /* forward references to avoid circularity */
 struct ExprEvalStep;
@@ -26,11 +27,6 @@ struct SubscriptingRefState;
 #define EEO_FLAG_INTERPRETER_INITIALIZED	(1 << 1)
 /* jump-threading is in use */
 #define EEO_FLAG_DIRECT_THREADED			(1 << 2)
-
-/* Typical API for out-of-line evaluation subroutines */
-typedef void (*ExecEvalSubroutine) (ExprState *state,
-									struct ExprEvalStep *op,
-									ExprContext *econtext);
 
 /*
  * Discriminator for ExprEvalSteps.
@@ -264,6 +260,7 @@ typedef struct ExprEvalStep
 	 * no more than 40 bytes on 64-bit systems (so that the entire struct is
 	 * no more than 64 bytes, a single cacheline on common systems).
 	 */
+#define FIELDNO_EXPREVALSTEP_D 3
 	union
 	{
 		/* for EEOP_INNER/OUTER/SCAN_FETCHSOME */
@@ -366,12 +363,14 @@ typedef struct ExprEvalStep
 		}			param;
 
 		/* for EEOP_PARAM_CALLBACK */
-		struct
+		struct ExprEvalStepParamCallback
 		{
-			ExecEvalSubroutine paramfunc;	/* add-on evaluation subroutine */
+#define FIELDNO_EXPREVALSTEPPARAMCALLBACK_PARAM 0
+			Param		param;
+#define FIELDNO_EXPREVALSTEPPARAMCALLBACK_PARAMFUNC 1
+			ExecEvalParamCallback paramfunc;	/* callback returning value */
+#define FIELDNO_EXPREVALSTEPPARAMCALLBACK_PARAMARG 2
 			void	   *paramarg;	/* private data for same */
-			int			paramid;	/* numeric ID for parameter */
-			Oid			paramtype;	/* OID of parameter's datatype */
 		}			cparam;
 
 		/* for EEOP_CASE_TESTVAL/DOMAIN_TESTVAL */
@@ -680,9 +679,6 @@ typedef struct SubscriptingRefState
 	bool		prevnull;
 } SubscriptingRefState;
 
-
-/* functions in execExpr.c */
-extern void ExprEvalPushStep(ExprState *es, const ExprEvalStep *s);
 
 /* functions in execExprInterp.c */
 extern void ExecReadyInterpretedExpr(ExprState *state);

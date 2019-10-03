@@ -63,6 +63,7 @@ extern LLVMTypeRef TypeParamBool;
 extern LLVMTypeRef TypePGFunction;
 extern LLVMTypeRef TypeSizeT;
 extern LLVMTypeRef TypeStorageBool;
+extern LLVMTypeRef TypeExecEvalParamCallback;
 
 extern LLVMTypeRef StructNullableDatum;
 extern LLVMTypeRef StructTupleDescData;
@@ -74,6 +75,7 @@ extern LLVMTypeRef StructMemoryContextData;
 extern LLVMTypeRef StructFunctionCallInfoData;
 extern LLVMTypeRef StructExprContext;
 extern LLVMTypeRef StructExprEvalStep;
+extern LLVMTypeRef StructExprEvalStepParamCallback;
 extern LLVMTypeRef StructExprState;
 extern LLVMTypeRef StructAggState;
 extern LLVMTypeRef StructAggStatePerTransData;
