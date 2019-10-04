@@ -181,22 +181,22 @@ ExecAggPlainTransByRef(AggState *aggstate, const AggStatePerCallContext *percall
  * Prepare ExprState for interpreted execution.
  */
 void
-ExecReadyInterpretedExpr(ExprState *state)
+ExecReadyInterpretedExpr(ExprState *state, ExprStateBuilder *esb)
 {
 	/* Ensure one-time interpreter setup has been done */
 	ExecInitInterpreter();
 
 	/* Simple validity checks on expression */
-	Assert(state->steps_len >= 1);
-	Assert(state->steps[state->steps_len - 1].opcode == EEOP_DONE_RETURN ||
-		   state->steps[state->steps_len - 1].opcode == EEOP_DONE_NO_RETURN);
+	Assert(esb->steps_len >= 1);
+	Assert(esb->steps[esb->steps_len - 1].opcode == EEOP_DONE_RETURN ||
+		   esb->steps[esb->steps_len - 1].opcode == EEOP_DONE_NO_RETURN);
 
 	/*
 	 * Don't perform redundant initialization. This is unreachable in current
 	 * cases, but might be hit if there's additional expression evaluation
 	 * methods that rely on interpreted execution to work.
 	 */
-	if (state->flags & EEO_FLAG_INTERPRETER_INITIALIZED)
+	if (esb->flags & EEO_FLAG_INTERPRETER_INITIALIZED)
 		return;
 
 	/*
@@ -208,7 +208,7 @@ ExecReadyInterpretedExpr(ExprState *state)
 	state->evalfunc = ExecInterpExprStillValid;
 
 	/* DIRECT_THREADED should not already be set */
-	Assert((state->flags & EEO_FLAG_DIRECT_THREADED) == 0);
+	Assert((esb->flags & EEO_FLAG_DIRECT_THREADED) == 0);
 
 	/*
 	 * There shouldn't be any errors before the expression is fully
@@ -222,7 +222,7 @@ ExecReadyInterpretedExpr(ExprState *state)
 	 * the full interpreter is a measurable overhead for these, and these
 	 * patterns occur often enough to be worth optimizing.
 	 */
-	if (state->steps_len == 3)
+	if (state->steps_final_len == 3)
 	{
 		ExprEvalOp	step0 = state->steps[0].opcode;
 		ExprEvalOp	step1 = state->steps[1].opcode;
@@ -264,7 +264,7 @@ ExecReadyInterpretedExpr(ExprState *state)
 			return;
 		}
 	}
-	else if (state->steps_len == 2)
+	else if (state->steps_final_len == 2)
 	{
 		ExprEvalOp	step0 = state->steps[0].opcode;
 
@@ -311,7 +311,7 @@ ExecReadyInterpretedExpr(ExprState *state)
 	 * In the direct-threaded implementation, replace each opcode with the
 	 * address to jump to.  (Use ExecEvalStepOp() to get back the opcode.)
 	 */
-	for (int off = 0; off < state->steps_len; off++)
+	for (int off = 0; off < state->steps_final_len; off++)
 	{
 		ExprEvalStep *op = &state->steps[off];
 
@@ -1886,7 +1886,7 @@ CheckExprStillValid(ExprState *state, ExprContext *econtext)
 	outerslot = econtext->ecxt_outertuple;
 	scanslot = econtext->ecxt_scantuple;
 
-	for (int i = 0; i < state->steps_len; i++)
+	for (int i = 0; i < state->steps_final_len; i++)
 	{
 		ExprEvalStep *op = &state->steps[i];
 
