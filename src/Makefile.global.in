@@ -1031,10 +1031,10 @@ ifndef COMPILE.cxx.bc
 COMPILE.cxx.bc = $(CLANG) -xc++ -Wno-ignored-attributes $(BITCODE_CXXFLAGS) $(CPPFLAGS) -flto=thin -emit-llvm -c
 endif
 
-%.bc : %.c
+%.bc : %.c %.o
 	$(COMPILE.c.bc) -o $@ $<
 
-%.bc : %.cpp
+%.bc : %.cpp %.o
 	$(COMPILE.cxx.bc) -o $@ $<
 
 # Install LLVM bitcode module (for JITing).
