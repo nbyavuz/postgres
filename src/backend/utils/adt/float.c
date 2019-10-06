@@ -3916,6 +3916,24 @@ width_bucket_float8(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(result);
 }
 
+void  __attribute__((cold, noreturn,noinline))
+float_overflow_error(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+			 errmsg("value out of range: overflow")));
+}
+
+
+void  __attribute__((cold, noreturn,noinline))
+float_underflow_error(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+			 errmsg("value out of range: underflow")));
+}
+
+
 /* ========== PRIVATE ROUTINES ========== */
 
 #ifndef HAVE_CBRT

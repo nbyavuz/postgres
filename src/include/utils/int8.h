@@ -20,6 +20,8 @@
 #ifndef INT8_H
 #define INT8_H
 
+void  __attribute__((cold, noreturn, noinline)) bigint_out_of_range_error(void);
+
 extern bool scanint8(const char *str, bool errorOK, int64 *result);
 
 #endif							/* INT8_H */

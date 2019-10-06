@@ -47,6 +47,9 @@ extern char *float8out_internal(float8 num);
 extern int	float4_cmp_internal(float4 a, float4 b);
 extern int	float8_cmp_internal(float8 a, float8 b);
 
+extern void float_overflow_error(void) __attribute__((cold, noreturn));
+extern void float_underflow_error(void) __attribute__((cold, noreturn));
+
 /*
  * Routines to provide reasonably platform-independent handling of
  * infinity and NaN
@@ -137,14 +140,10 @@ check_float4_val(const float4 val, const bool inf_is_valid,
 				 const bool zero_is_valid)
 {
 	if (!inf_is_valid && unlikely(isinf(val)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("value out of range: overflow")));
+		float_overflow_error();
 
 	if (!zero_is_valid && unlikely(val == 0.0))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("value out of range: underflow")));
+		float_underflow_error();
 }
 
 static inline void
@@ -152,14 +151,10 @@ check_float8_val(const float8 val, const bool inf_is_valid,
 				 const bool zero_is_valid)
 {
 	if (!inf_is_valid && unlikely(isinf(val)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("value out of range: overflow")));
+		float_overflow_error();
 
 	if (!zero_is_valid && unlikely(val == 0.0))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("value out of range: underflow")));
+		float_underflow_error();
 }
 
 /*

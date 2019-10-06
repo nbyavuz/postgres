@@ -43,6 +43,26 @@ typedef struct
  **
  ***********************************************************************/
 
+void  __attribute__((cold, noreturn, noinline)) integer_out_of_range_error(void);
+void  __attribute__((cold, noreturn, noinline)) smallint_out_of_range_error(void);
+void  __attribute__((cold, noreturn, noinline)) oid_out_of_range_error(void);
+
+void  __attribute__((cold, noreturn, noinline))
+bigint_out_of_range_error(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+			 errmsg("bigint out of range")));
+}
+
+void  __attribute__((cold, noreturn, noinline))
+oid_out_of_range_error(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+			 errmsg("OID out of range")));
+}
+
 /*----------------------------------------------------------
  * Formatting and conversion routines.
  *---------------------------------------------------------*/
@@ -524,9 +544,7 @@ int8um(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(arg == PG_INT64_MIN))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	result = -arg;
 	PG_RETURN_INT64(result);
 }
@@ -547,9 +565,7 @@ int8pl(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_add_s64_overflow(arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -561,9 +577,7 @@ int8mi(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_sub_s64_overflow(arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -575,9 +589,7 @@ int8mul(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_mul_s64_overflow(arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -606,9 +618,7 @@ int8div(PG_FUNCTION_ARGS)
 	if (arg2 == -1)
 	{
 		if (unlikely(arg1 == PG_INT64_MIN))
-			ereport(ERROR,
-					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					 errmsg("bigint out of range")));
+			bigint_out_of_range_error();
 		result = -arg1;
 		PG_RETURN_INT64(result);
 	}
@@ -630,9 +640,7 @@ int8abs(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(arg1 == PG_INT64_MIN))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	result = (arg1 < 0) ? -arg1 : arg1;
 	PG_RETURN_INT64(result);
 }
@@ -685,9 +693,7 @@ int8inc(PG_FUNCTION_ARGS)
 		int64	   *arg = (int64 *) PG_GETARG_POINTER(0);
 
 		if (unlikely(pg_add_s64_overflow(*arg, 1, arg)))
-			ereport(ERROR,
-					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					 errmsg("bigint out of range")));
+			bigint_out_of_range_error();
 
 		PG_RETURN_POINTER(arg);
 	}
@@ -699,9 +705,7 @@ int8inc(PG_FUNCTION_ARGS)
 		int64		result;
 
 		if (unlikely(pg_add_s64_overflow(arg, 1, &result)))
-			ereport(ERROR,
-					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					 errmsg("bigint out of range")));
+			bigint_out_of_range_error();
 
 		PG_RETURN_INT64(result);
 	}
@@ -723,9 +727,7 @@ int8dec(PG_FUNCTION_ARGS)
 		int64	   *arg = (int64 *) PG_GETARG_POINTER(0);
 
 		if (unlikely(pg_sub_s64_overflow(*arg, 1, arg)))
-			ereport(ERROR,
-					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					 errmsg("bigint out of range")));
+			bigint_out_of_range_error();
 		PG_RETURN_POINTER(arg);
 	}
 	else
@@ -736,9 +738,7 @@ int8dec(PG_FUNCTION_ARGS)
 		int64		result;
 
 		if (unlikely(pg_sub_s64_overflow(arg, 1, &result)))
-			ereport(ERROR,
-					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					 errmsg("bigint out of range")));
+			bigint_out_of_range_error();
 
 		PG_RETURN_INT64(result);
 	}
@@ -805,9 +805,7 @@ int84pl(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_add_s64_overflow(arg1, (int64) arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -819,9 +817,7 @@ int84mi(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_sub_s64_overflow(arg1, (int64) arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -833,9 +829,7 @@ int84mul(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_mul_s64_overflow(arg1, (int64) arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -864,9 +858,7 @@ int84div(PG_FUNCTION_ARGS)
 	if (arg2 == -1)
 	{
 		if (unlikely(arg1 == PG_INT64_MIN))
-			ereport(ERROR,
-					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					 errmsg("bigint out of range")));
+			bigint_out_of_range_error();
 		result = -arg1;
 		PG_RETURN_INT64(result);
 	}
@@ -886,9 +878,7 @@ int48pl(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_add_s64_overflow((int64) arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -900,9 +890,7 @@ int48mi(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_sub_s64_overflow((int64) arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -914,9 +902,7 @@ int48mul(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_mul_s64_overflow((int64) arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -947,9 +933,7 @@ int82pl(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_add_s64_overflow(arg1, (int64) arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -961,9 +945,7 @@ int82mi(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_sub_s64_overflow(arg1, (int64) arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -975,9 +957,7 @@ int82mul(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_mul_s64_overflow(arg1, (int64) arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -1006,9 +986,7 @@ int82div(PG_FUNCTION_ARGS)
 	if (arg2 == -1)
 	{
 		if (unlikely(arg1 == PG_INT64_MIN))
-			ereport(ERROR,
-					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					 errmsg("bigint out of range")));
+			bigint_out_of_range_error();
 		result = -arg1;
 		PG_RETURN_INT64(result);
 	}
@@ -1028,9 +1006,7 @@ int28pl(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_add_s64_overflow((int64) arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -1042,9 +1018,7 @@ int28mi(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_sub_s64_overflow((int64) arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -1056,9 +1030,7 @@ int28mul(PG_FUNCTION_ARGS)
 	int64		result;
 
 	if (unlikely(pg_mul_s64_overflow((int64) arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 	PG_RETURN_INT64(result);
 }
 
@@ -1162,9 +1134,7 @@ int84(PG_FUNCTION_ARGS)
 	int64		arg = PG_GETARG_INT64(0);
 
 	if (unlikely(arg < PG_INT32_MIN) || unlikely(arg > PG_INT32_MAX))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 
 	PG_RETURN_INT32((int32) arg);
 }
@@ -1183,9 +1153,7 @@ int82(PG_FUNCTION_ARGS)
 	int64		arg = PG_GETARG_INT64(0);
 
 	if (unlikely(arg < PG_INT16_MIN) || unlikely(arg > PG_INT16_MAX))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("smallint out of range")));
+		smallint_out_of_range_error();
 
 	PG_RETURN_INT16((int16) arg);
 }
@@ -1225,9 +1193,7 @@ dtoi8(PG_FUNCTION_ARGS)
 	if (unlikely(num < (float8) PG_INT64_MIN ||
 				 num >= -((float8) PG_INT64_MIN) ||
 				 isnan(num)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();;
 
 	PG_RETURN_INT64((int64) num);
 }
@@ -1267,9 +1233,7 @@ ftoi8(PG_FUNCTION_ARGS)
 	if (unlikely(num < (float4) PG_INT64_MIN ||
 				 num >= -((float4) PG_INT64_MIN) ||
 				 isnan(num)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("bigint out of range")));
+		bigint_out_of_range_error();
 
 	PG_RETURN_INT64((int64) num);
 }
@@ -1280,9 +1244,7 @@ i8tooid(PG_FUNCTION_ARGS)
 	int64		arg = PG_GETARG_INT64(0);
 
 	if (unlikely(arg < 0) || unlikely(arg > PG_UINT32_MAX))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("OID out of range")));
+		oid_out_of_range_error();
 
 	PG_RETURN_OID((Oid) arg);
 }

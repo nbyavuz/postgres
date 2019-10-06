@@ -51,6 +51,26 @@ typedef struct
 	int32		step;
 } generate_series_fctx;
 
+void  __attribute__((cold, noreturn, noinline)) integer_out_of_range_error(void);
+void  __attribute__((cold, noreturn, noinline)) smallint_out_of_range_error(void);
+
+void  __attribute__((cold, noreturn, noinline))
+integer_out_of_range_error(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+			 errmsg("integer out of range")));
+}
+
+void  __attribute__((cold, noreturn, noinline))
+smallint_out_of_range_error(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+			 errmsg("smallint out of range")));
+}
+
+
 
 /*****************************************************************************
  *	 USER I/O ROUTINES														 *
@@ -331,9 +351,7 @@ i4toi2(PG_FUNCTION_ARGS)
 	int32		arg1 = PG_GETARG_INT32(0);
 
 	if (unlikely(arg1 < SHRT_MIN) || unlikely(arg1 > SHRT_MAX))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("smallint out of range")));
+		smallint_out_of_range_error();
 
 	PG_RETURN_INT16((int16) arg1);
 }
@@ -754,9 +772,7 @@ int4um(PG_FUNCTION_ARGS)
 	int32		arg = PG_GETARG_INT32(0);
 
 	if (unlikely(arg == PG_INT32_MIN))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 	PG_RETURN_INT32(-arg);
 }
 
@@ -776,9 +792,7 @@ int4pl(PG_FUNCTION_ARGS)
 	int32		result;
 
 	if (unlikely(pg_add_s32_overflow(arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 	PG_RETURN_INT32(result);
 }
 
@@ -790,9 +804,7 @@ int4mi(PG_FUNCTION_ARGS)
 	int32		result;
 
 	if (unlikely(pg_sub_s32_overflow(arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 	PG_RETURN_INT32(result);
 }
 
@@ -804,9 +816,7 @@ int4mul(PG_FUNCTION_ARGS)
 	int32		result;
 
 	if (unlikely(pg_mul_s32_overflow(arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 	PG_RETURN_INT32(result);
 }
 
@@ -856,9 +866,7 @@ int4inc(PG_FUNCTION_ARGS)
 	int32		result;
 
 	if (unlikely(pg_add_s32_overflow(arg, 1, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 
 	PG_RETURN_INT32(result);
 }
@@ -869,9 +877,7 @@ int2um(PG_FUNCTION_ARGS)
 	int16		arg = PG_GETARG_INT16(0);
 
 	if (unlikely(arg == PG_INT16_MIN))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("smallint out of range")));
+		smallint_out_of_range_error();
 	PG_RETURN_INT16(-arg);
 }
 
@@ -891,9 +897,7 @@ int2pl(PG_FUNCTION_ARGS)
 	int16		result;
 
 	if (unlikely(pg_add_s16_overflow(arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("smallint out of range")));
+		smallint_out_of_range_error();
 	PG_RETURN_INT16(result);
 }
 
@@ -905,9 +909,7 @@ int2mi(PG_FUNCTION_ARGS)
 	int16		result;
 
 	if (unlikely(pg_sub_s16_overflow(arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("smallint out of range")));
+		smallint_out_of_range_error();
 	PG_RETURN_INT16(result);
 }
 
@@ -919,9 +921,7 @@ int2mul(PG_FUNCTION_ARGS)
 	int16		result;
 
 	if (unlikely(pg_mul_s16_overflow(arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("smallint out of range")));
+		smallint_out_of_range_error();
 
 	PG_RETURN_INT16(result);
 }
@@ -973,9 +973,7 @@ int24pl(PG_FUNCTION_ARGS)
 	int32		result;
 
 	if (unlikely(pg_add_s32_overflow((int32) arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 	PG_RETURN_INT32(result);
 }
 
@@ -987,9 +985,7 @@ int24mi(PG_FUNCTION_ARGS)
 	int32		result;
 
 	if (unlikely(pg_sub_s32_overflow((int32) arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 	PG_RETURN_INT32(result);
 }
 
@@ -1001,9 +997,7 @@ int24mul(PG_FUNCTION_ARGS)
 	int32		result;
 
 	if (unlikely(pg_mul_s32_overflow((int32) arg1, arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 	PG_RETURN_INT32(result);
 }
 
@@ -1034,9 +1028,7 @@ int42pl(PG_FUNCTION_ARGS)
 	int32		result;
 
 	if (unlikely(pg_add_s32_overflow(arg1, (int32) arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 	PG_RETURN_INT32(result);
 }
 
@@ -1048,9 +1040,7 @@ int42mi(PG_FUNCTION_ARGS)
 	int32		result;
 
 	if (unlikely(pg_sub_s32_overflow(arg1, (int32) arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 	PG_RETURN_INT32(result);
 }
 
@@ -1062,9 +1052,7 @@ int42mul(PG_FUNCTION_ARGS)
 	int32		result;
 
 	if (unlikely(pg_mul_s32_overflow(arg1, (int32) arg2, &result)))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 	PG_RETURN_INT32(result);
 }
 
@@ -1175,9 +1163,7 @@ int4abs(PG_FUNCTION_ARGS)
 	int32		result;
 
 	if (unlikely(arg1 == PG_INT32_MIN))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("integer out of range")));
+		integer_out_of_range_error();
 	result = (arg1 < 0) ? -arg1 : arg1;
 	PG_RETURN_INT32(result);
 }
@@ -1189,9 +1175,7 @@ int2abs(PG_FUNCTION_ARGS)
 	int16		result;
 
 	if (unlikely(arg1 == PG_INT16_MIN))
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				 errmsg("smallint out of range")));
+		smallint_out_of_range_error();
 	result = (arg1 < 0) ? -arg1 : arg1;
 	PG_RETURN_INT16(result);
 }
