@@ -1473,7 +1473,7 @@ dsqrt(PG_FUNCTION_ARGS)
 
 	result = sqrt(arg1);
 
-	check_float8_val(result, isinf(arg1), arg1 == 0);
+	check_float8_val(result, double_isinf_nosign(arg1), arg1 == 0);
 	PG_RETURN_FLOAT8(result);
 }
 
@@ -1488,7 +1488,7 @@ dcbrt(PG_FUNCTION_ARGS)
 	float8		result;
 
 	result = cbrt(arg1);
-	check_float8_val(result, isinf(arg1), arg1 == 0);
+	check_float8_val(result, double_isinf_nosign(arg1), arg1 == 0);
 	PG_RETURN_FLOAT8(result);
 }
 
@@ -1557,10 +1557,10 @@ dpow(PG_FUNCTION_ARGS)
 		else
 			result = 1;
 	}
-	else if (errno == ERANGE && result != 0 && !isinf(result))
+	else if (errno == ERANGE && result != 0 && !double_isinf_nosign(result))
 		result = get_float8_infinity();
 
-	check_float8_val(result, isinf(arg1) || isinf(arg2), arg1 == 0);
+	check_float8_val(result, double_isinf_nosign(arg1) || double_isinf_nosign(arg2), arg1 == 0);
 	PG_RETURN_FLOAT8(result);
 }
 
@@ -1576,10 +1576,10 @@ dexp(PG_FUNCTION_ARGS)
 
 	errno = 0;
 	result = exp(arg1);
-	if (errno == ERANGE && result != 0 && !isinf(result))
+	if (errno == ERANGE && result != 0 && !double_isinf_nosign(result))
 		result = get_float8_infinity();
 
-	check_float8_val(result, isinf(arg1), false);
+	check_float8_val(result, double_isinf_nosign(arg1), false);
 	PG_RETURN_FLOAT8(result);
 }
 
@@ -1608,7 +1608,7 @@ dlog1(PG_FUNCTION_ARGS)
 
 	result = log(arg1);
 
-	check_float8_val(result, isinf(arg1), arg1 == 1);
+	check_float8_val(result, double_isinf_nosign(arg1), arg1 == 1);
 	PG_RETURN_FLOAT8(result);
 }
 
@@ -1638,7 +1638,7 @@ dlog10(PG_FUNCTION_ARGS)
 
 	result = log10(arg1);
 
-	check_float8_val(result, isinf(arg1), arg1 == 1);
+	check_float8_val(result, double_isinf_nosign(arg1), arg1 == 1);
 	PG_RETURN_FLOAT8(result);
 }
 
@@ -1783,7 +1783,7 @@ dcos(PG_FUNCTION_ARGS)
 	 */
 	errno = 0;
 	result = cos(arg1);
-	if (errno != 0 || isinf(arg1))
+	if (errno != 0 || double_isinf_nosign(arg1))
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("input is out of range")));
@@ -1809,7 +1809,7 @@ dcot(PG_FUNCTION_ARGS)
 	/* Be sure to throw an error if the input is infinite --- see dcos() */
 	errno = 0;
 	result = tan(arg1);
-	if (errno != 0 || isinf(arg1))
+	if (errno != 0 || double_isinf_nosign(arg1))
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("input is out of range")));
@@ -1836,7 +1836,7 @@ dsin(PG_FUNCTION_ARGS)
 	/* Be sure to throw an error if the input is infinite --- see dcos() */
 	errno = 0;
 	result = sin(arg1);
-	if (errno != 0 || isinf(arg1))
+	if (errno != 0 || double_isinf_nosign(arg1))
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("input is out of range")));
@@ -1862,7 +1862,7 @@ dtan(PG_FUNCTION_ARGS)
 	/* Be sure to throw an error if the input is infinite --- see dcos() */
 	errno = 0;
 	result = tan(arg1);
-	if (errno != 0 || isinf(arg1))
+	if (errno != 0 || double_isinf_nosign(arg1))
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("input is out of range")));
@@ -2208,7 +2208,7 @@ dcosd(PG_FUNCTION_ARGS)
 	if (isnan(arg1))
 		PG_RETURN_FLOAT8(get_float8_nan());
 
-	if (isinf(arg1))
+	if (double_isinf_nosign(arg1))
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("input is out of range")));
@@ -2262,7 +2262,7 @@ dcotd(PG_FUNCTION_ARGS)
 	if (isnan(arg1))
 		PG_RETURN_FLOAT8(get_float8_nan());
 
-	if (isinf(arg1))
+	if (double_isinf_nosign(arg1))
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("input is out of range")));
@@ -2326,7 +2326,7 @@ dsind(PG_FUNCTION_ARGS)
 	if (isnan(arg1))
 		PG_RETURN_FLOAT8(get_float8_nan());
 
-	if (isinf(arg1))
+	if (double_isinf_nosign(arg1))
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("input is out of range")));
@@ -2381,7 +2381,7 @@ dtand(PG_FUNCTION_ARGS)
 	if (isnan(arg1))
 		PG_RETURN_FLOAT8(get_float8_nan());
 
-	if (isinf(arg1))
+	if (double_isinf_nosign(arg1))
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 				 errmsg("input is out of range")));
@@ -2812,7 +2812,7 @@ float8_combine(PG_FUNCTION_ARGS)
 		Sx = float8_pl(Sx1, Sx2);
 		tmp = Sx1 / N1 - Sx2 / N2;
 		Sxx = Sxx1 + Sxx2 + N1 * N2 * tmp * tmp / N;
-		check_float8_val(Sxx, isinf(Sxx1) || isinf(Sxx2), true);
+		check_float8_val(Sxx, double_isinf_nosign(Sxx1) || double_isinf_nosign(Sxx2), true);
 	}
 
 	/*
@@ -2878,9 +2878,9 @@ float8_accum(PG_FUNCTION_ARGS)
 		 * if any of the inputs are infinite, so we intentionally prevent Sxx
 		 * from becoming infinite.
 		 */
-		if (isinf(Sx) || isinf(Sxx))
+		if (double_isinf_nosign(Sx) || double_isinf_nosign(Sxx))
 		{
-			if (!isinf(transvalues[1]) && !isinf(newval))
+			if (!double_isinf_nosign(transvalues[1]) && !double_isinf_nosign(newval))
 				ereport(ERROR,
 						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 						 errmsg("value out of range: overflow")));
@@ -2954,9 +2954,9 @@ float4_accum(PG_FUNCTION_ARGS)
 		 * if any of the inputs are infinite, so we intentionally prevent Sxx
 		 * from becoming infinite.
 		 */
-		if (isinf(Sx) || isinf(Sxx))
+		if (double_isinf_nosign(Sx) || double_isinf_nosign(Sxx))
 		{
-			if (!isinf(transvalues[1]) && !isinf(newval))
+			if (!double_isinf_nosign(transvalues[1]) && !double_isinf_nosign(newval))
 				ereport(ERROR,
 						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 						 errmsg("value out of range: overflow")));
@@ -3171,24 +3171,24 @@ float8_regr_accum(PG_FUNCTION_ARGS)
 		 * should be NaN if any of the relevant inputs are infinite, so we
 		 * intentionally prevent them from becoming infinite.
 		 */
-		if (isinf(Sx) || isinf(Sxx) || isinf(Sy) || isinf(Syy) || isinf(Sxy))
+		if (double_isinf_nosign(Sx) || double_isinf_nosign(Sxx) || double_isinf_nosign(Sy) || double_isinf_nosign(Syy) || double_isinf_nosign(Sxy))
 		{
-			if (((isinf(Sx) || isinf(Sxx)) &&
-				 !isinf(transvalues[1]) && !isinf(newvalX)) ||
-				((isinf(Sy) || isinf(Syy)) &&
-				 !isinf(transvalues[3]) && !isinf(newvalY)) ||
-				(isinf(Sxy) &&
-				 !isinf(transvalues[1]) && !isinf(newvalX) &&
-				 !isinf(transvalues[3]) && !isinf(newvalY)))
+			if (((double_isinf_nosign(Sx) || double_isinf_nosign(Sxx)) &&
+				 !double_isinf_nosign(transvalues[1]) && !double_isinf_nosign(newvalX)) ||
+				((double_isinf_nosign(Sy) || double_isinf_nosign(Syy)) &&
+				 !double_isinf_nosign(transvalues[3]) && !double_isinf_nosign(newvalY)) ||
+				(double_isinf_nosign(Sxy) &&
+				 !double_isinf_nosign(transvalues[1]) && !double_isinf_nosign(newvalX) &&
+				 !double_isinf_nosign(transvalues[3]) && !double_isinf_nosign(newvalY)))
 				ereport(ERROR,
 						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 						 errmsg("value out of range: overflow")));
 
-			if (isinf(Sxx))
+			if (double_isinf_nosign(Sxx))
 				Sxx = get_float8_nan();
-			if (isinf(Syy))
+			if (double_isinf_nosign(Syy))
 				Syy = get_float8_nan();
-			if (isinf(Sxy))
+			if (double_isinf_nosign(Sxy))
 				Sxy = get_float8_nan();
 		}
 	}
@@ -3322,13 +3322,13 @@ float8_regr_combine(PG_FUNCTION_ARGS)
 		Sx = float8_pl(Sx1, Sx2);
 		tmp1 = Sx1 / N1 - Sx2 / N2;
 		Sxx = Sxx1 + Sxx2 + N1 * N2 * tmp1 * tmp1 / N;
-		check_float8_val(Sxx, isinf(Sxx1) || isinf(Sxx2), true);
+		check_float8_val(Sxx, double_isinf_nosign(Sxx1) || double_isinf_nosign(Sxx2), true);
 		Sy = float8_pl(Sy1, Sy2);
 		tmp2 = Sy1 / N1 - Sy2 / N2;
 		Syy = Syy1 + Syy2 + N1 * N2 * tmp2 * tmp2 / N;
-		check_float8_val(Syy, isinf(Syy1) || isinf(Syy2), true);
+		check_float8_val(Syy, double_isinf_nosign(Syy1) || double_isinf_nosign(Syy2), true);
 		Sxy = Sxy1 + Sxy2 + N1 * N2 * tmp1 * tmp2 / N;
-		check_float8_val(Sxy, isinf(Sxy1) || isinf(Sxy2), true);
+		check_float8_val(Sxy, double_isinf_nosign(Sxy1) || double_isinf_nosign(Sxy2), true);
 	}
 
 	/*
@@ -3872,7 +3872,7 @@ width_bucket_float8(PG_FUNCTION_ARGS)
 				 errmsg("operand, lower bound, and upper bound cannot be NaN")));
 
 	/* Note that we allow "operand" to be infinite */
-	if (isinf(bound1) || isinf(bound2))
+	if (double_isinf_nosign(bound1) || double_isinf_nosign(bound2))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION),
 				 errmsg("lower and upper bounds must be finite")));

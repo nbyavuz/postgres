@@ -49,6 +49,66 @@ extern int	float8_cmp_internal(float8 a, float8 b);
 
 extern void float_overflow_error(void) __attribute__((cold, noreturn));
 extern void float_underflow_error(void) __attribute__((cold, noreturn));
+__attribute__((__nothrow__, __const__, __artificial__))
+static inline uint64_t
+double_signbit_mask(void)
+{
+	uint64_t val;
+	__asm__("\n"
+			/* set to all ones */
+			"	vpcmpeqw %[val],%[val], %[val]\n"
+			/* all but high/sign bit set */
+			"   vpsrlq $1, %[val], %[val]\n"
+			: [val]"=x"(val));
+
+	return val;
+}
+
+__attribute__((__nothrow__, __const__, __artificial__))
+static inline uint64_t
+double_inf(void)
+{
+	uint64_t val;
+
+	__asm__("\n"
+			/* set to all ones */
+			"   vpcmpeqw %[val],%[val],%[val]\n"
+			/* set just exponent bits to 1 */
+			"   vpsrlq $53, %[val], %[val]\n"
+			"   vpsllq $52, %[val], %[val]\n"
+			: [val]"=x"(val));
+
+	return val;
+}
+
+__attribute__((__nothrow__, __const__))
+static inline int
+double_isinf_nosign(double testval)
+{
+	uint64_t clobber_reg;
+	uint64_t signbit_mask = double_signbit_mask();
+	uint64_t inf_val = double_inf();
+
+	int	ret;
+
+	__asm__ ("\n"
+			 /* zero out sign bit */
+			 "	vandpd %[testval], %[signbit_mask], %[clobber_reg]\n"
+			 /*
+			  * Compare whether remainder is bigger than than all exponent bits.
+			  * For infinite all the exponent bits have to be set, but none of the
+			  * mantissa bits may (that'd signal the different NaNs).
+			  */
+			 "	vucomisd %[inf], %[clobber_reg]\n"
+			 : "=@ccae"(ret), [clobber_reg]"=&x"(clobber_reg)
+			 : [testval]"x"(testval), [signbit_mask]"x"(signbit_mask), [inf]"x"(inf_val)
+			 : "cc");
+
+	if (ret)
+		return 1;
+	else
+		return 0;
+}
 
 /*
  * Routines to provide reasonably platform-independent handling of
@@ -150,7 +210,7 @@ static inline void
 check_float8_val(const float8 val, const bool inf_is_valid,
 				 const bool zero_is_valid)
 {
-	if (!inf_is_valid && unlikely(isinf(val)))
+	if (!inf_is_valid && unlikely(double_isinf_nosign(val)))
 		float_overflow_error();
 
 	if (!zero_is_valid && unlikely(val == 0.0))
@@ -184,7 +244,7 @@ float8_pl(const float8 val1, const float8 val2)
 	float8		result;
 
 	result = val1 + val2;
-	check_float8_val(result, isinf(val1) || isinf(val2), true);
+	check_float8_val(result, double_isinf_nosign(val1) || double_isinf_nosign(val2), true);
 
 	return result;
 }
@@ -206,7 +266,7 @@ float8_mi(const float8 val1, const float8 val2)
 	float8		result;
 
 	result = val1 - val2;
-	check_float8_val(result, isinf(val1) || isinf(val2), true);
+	check_float8_val(result, double_isinf_nosign(val1) || double_isinf_nosign(val2), true);
 
 	return result;
 }
@@ -229,7 +289,7 @@ float8_mul(const float8 val1, const float8 val2)
 	float8		result;
 
 	result = val1 * val2;
-	check_float8_val(result, isinf(val1) || isinf(val2),
+	check_float8_val(result, double_isinf_nosign(val1) || double_isinf_nosign(val2),
 					 val1 == 0.0 || val2 == 0.0);
 
 	return result;
@@ -262,7 +322,7 @@ float8_div(const float8 val1, const float8 val2)
 				 errmsg("division by zero")));
 
 	result = val1 / val2;
-	check_float8_val(result, isinf(val1) || isinf(val2), val1 == 0.0);
+	check_float8_val(result, double_isinf_nosign(val1) || double_isinf_nosign(val2), val1 == 0.0);
 
 	return result;
 }
