@@ -30,6 +30,7 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/ExecutionEngine.h>
+#include <llvm-c/Initialization.h>
 #include <llvm-c/OrcBindings.h>
 #include <llvm-c/Support.h>
 #include <llvm-c/Target.h>
@@ -109,6 +110,8 @@ static const char *llvm_layout = NULL;
 
 static LLVMTargetMachineRef llvm_opt0_targetmachine;
 static LLVMTargetMachineRef llvm_opt3_targetmachine;
+
+static LLVMTargetLibraryInfoRef llvm_targetlibraryinfo;
 
 static LLVMTargetRef llvm_targetref;
 static LLVMOrcJITStackRef llvm_opt0_orc;
@@ -429,13 +432,14 @@ llvm_function_reference(LLVMJitContext *context,
 	return v_fn;
 }
 
+static LLVMPassManagerBuilderRef llvm_pmb;
+
 /*
  * Optimize code in module using the flags set in context.
  */
 static void
 llvm_optimize_module(LLVMJitContext *context, LLVMModuleRef module)
 {
-	LLVMPassManagerBuilderRef llvm_pmb;
 	LLVMPassManagerRef llvm_mpm;
 	LLVMPassManagerRef llvm_fpm;
 	LLVMValueRef func;
@@ -446,14 +450,20 @@ llvm_optimize_module(LLVMJitContext *context, LLVMModuleRef module)
 	else
 		compile_optlevel = 0;
 
+	if (llvm_pmb == NULL)
+	{
+		llvm_pmb = LLVMPassManagerBuilderCreate();
+		LLVMPassManagerBuilderUseLibraryInfo(llvm_pmb, llvm_targetlibraryinfo);
+	}
+
 	/*
-	 * Have to create a new pass manager builder every pass through, as the
-	 * inliner has some per-builder state. Otherwise one ends up only inlining
-	 * a function the first time though.
+	 * Have to create a inliner every pass, as it gets "consumed" by
+	 * LLVMPassManagerBuilderPopulateModulePassManager().
 	 */
-	llvm_pmb = LLVMPassManagerBuilderCreate();
 	LLVMPassManagerBuilderSetOptLevel(llvm_pmb, compile_optlevel);
+
 	llvm_fpm = LLVMCreateFunctionPassManagerForModule(module);
+	LLVMAddAnalysisPasses(llvm_opt3_targetmachine, llvm_fpm);
 
 	if (context->base.flags & PGJIT_OPT3)
 	{
@@ -485,6 +495,7 @@ llvm_optimize_module(LLVMJitContext *context, LLVMModuleRef module)
 	 * case, so always-inline functions etc get inlined. It's cheap enough.
 	 */
 	llvm_mpm = LLVMCreatePassManager();
+	LLVMAddAnalysisPasses(llvm_opt3_targetmachine, llvm_mpm);
 	LLVMPassManagerBuilderPopulateModulePassManager(llvm_pmb,
 													llvm_mpm);
 	/* always use always-inliner pass */
@@ -497,7 +508,7 @@ llvm_optimize_module(LLVMJitContext *context, LLVMModuleRef module)
 	LLVMRunPassManager(llvm_mpm, context->module);
 	LLVMDisposePassManager(llvm_mpm);
 
-	LLVMPassManagerBuilderDispose(llvm_pmb);
+	//LLVMPassManagerBuilderDispose(llvm_pmb);
 }
 
 /*
@@ -511,6 +522,8 @@ llvm_compile_module(LLVMJitContext *context)
 	static LLVMOrcJITStackRef compile_orc;
 	instr_time	starttime;
 	instr_time	endtime;
+
+	Assert(!LLVMVerifyModule(context->module, LLVMPrintMessageAction, NULL));
 
 	if (context->base.flags & PGJIT_OPT3)
 		compile_orc = llvm_opt3_orc;
@@ -570,6 +583,8 @@ llvm_compile_module(LLVMJitContext *context)
 	INSTR_TIME_SET_CURRENT(endtime);
 	INSTR_TIME_ACCUM_DIFF(context->base.instr.optimization_counter,
 						  endtime, starttime);
+
+	Assert(!LLVMVerifyModule(context->module, LLVMPrintMessageAction, NULL));
 
 	if (jit_dump_bitcode)
 	{
@@ -665,6 +680,26 @@ llvm_session_initialize(void)
 	LLVMInitializeNativeAsmPrinter();
 	LLVMInitializeNativeAsmParser();
 
+	if (1)
+	{
+		LLVMPassRegistryRef pass_registry;
+
+		pass_registry = LLVMGetGlobalPassRegistry();
+
+		LLVMInitializeCore(pass_registry);
+		LLVMInitializeTransformUtils(pass_registry);
+		LLVMInitializeScalarOpts(pass_registry);
+		LLVMInitializeVectorization(pass_registry);
+		LLVMInitializeInstCombine(pass_registry);
+		LLVMInitializeAggressiveInstCombiner(pass_registry);
+		LLVMInitializeIPO(pass_registry);
+		LLVMInitializeInstrumentation(pass_registry);
+		LLVMInitializeAnalysis(pass_registry);
+		LLVMInitializeIPA(pass_registry);
+		LLVMInitializeCodeGen(pass_registry);
+		LLVMInitializeTarget(pass_registry);
+	}
+
 	/*
 	 * Synchronize types early, as that also includes inferring the target
 	 * triple.
@@ -697,6 +732,8 @@ llvm_session_initialize(void)
 								LLVMCodeGenLevelAggressive,
 								LLVMRelocDefault,
 								LLVMCodeModelJITDefault);
+
+	llvm_targetlibraryinfo = LLVMGetTargetLibraryInfo(llvm_opt3_targetmachine);
 
 	/* force symbols in main binary to be loaded */
 	LLVMLoadLibraryPermanently(NULL);

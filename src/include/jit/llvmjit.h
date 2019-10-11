@@ -147,6 +147,20 @@ extern char *LLVMGetHostCPUName(void);
 extern char *LLVMGetHostCPUFeatures(void);
 #endif
 
+struct LLVMOpaqueTargetLibraryInfoData;
+struct LLVMOpaquePassManagerBuilder;
+struct LLVMOpaqueTargetMachine;
+
+extern struct LLVMOpaqueTargetLibraryInfotData *
+LLVMGetTargetLibraryInfo(struct LLVMOpaqueTargetMachine *TM);
+extern void LLVMPassManagerBuilderUseLibraryInfo(
+	struct LLVMOpaquePassManagerBuilder *PMBR,
+	struct LLVMOpaqueTargetLibraryInfotData *TLI);
+extern void LLVMPassManagerBuilderSetMergeFunctions(
+	struct LLVMOpaquePassManagerBuilder *PMBR,
+	bool value);
+
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
