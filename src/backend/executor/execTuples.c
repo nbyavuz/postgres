@@ -1836,7 +1836,7 @@ ExecInitNullTupleSlot(EState *estate, TupleDesc tupType,
  * deforming. That exception aside, there should be no callers outside of this
  * file.
  */
-void
+void pg_noinline
 slot_getmissingattrs(TupleTableSlot *slot, int startAttNum, int lastAttNum)
 {
 	AttrMissing *attrmiss = NULL;
