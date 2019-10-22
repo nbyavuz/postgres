@@ -1362,7 +1362,7 @@ llvm_compile_expr(ExprState *state)
 					 * If input function is strict, skip if input string is
 					 * NULL.
 					 */
-					if (op->d.iocoerce.finfo_in->fn_strict)
+					if (op->d.iocoerce.fn_strict_in)
 					{
 						LLVMBuildCondBr(b,
 										LLVMBuildICmp(b, LLVMIntEQ, v_output,
@@ -1635,7 +1635,7 @@ llvm_compile_expr(ExprState *state)
 					 * If function is strict, and either arg is null, we're
 					 * done.
 					 */
-					if (op->d.rowcompare_step.finfo->fn_strict)
+					if (op->d.rowcompare_step.fn_strict)
 					{
 						LLVMValueRef v_fcinfo;
 						LLVMValueRef v_argnull0;
