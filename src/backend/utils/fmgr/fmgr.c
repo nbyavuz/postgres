@@ -1719,15 +1719,6 @@ Float8GetDatum(float8 X)
  */
 
 struct varlena *
-pg_detoast_datum(struct varlena *datum)
-{
-	if (VARATT_IS_EXTENDED(datum))
-		return detoast_attr(datum);
-	else
-		return datum;
-}
-
-struct varlena *
 pg_detoast_datum_copy(struct varlena *datum)
 {
 	if (VARATT_IS_EXTENDED(datum))
