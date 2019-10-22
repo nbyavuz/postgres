@@ -213,6 +213,7 @@ typedef enum NodeTag
 	T_SubPlanState,
 	T_AlternativeSubPlanState,
 	T_DomainConstraintState,
+	T_AggStatePerCallContext,
 
 	/*
 	 * TAGS FOR PLANNER NODES (pathnodes.h)

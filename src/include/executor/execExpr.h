@@ -632,16 +632,23 @@ typedef struct ExprEvalStep
 		}			agg_strict_input_check;
 
 		/* for EEOP_AGG_PLAIN_TRANS_{INIT_STRICT_,STRICT_,}{BYVAL,BYREF} */
-		/* for EEOP_AGG_ORDERED_TRANS_{DATUM,TUPLE} */
 		struct
 		{
-			AggStatePerTrans pertrans;
-			ExprContext *aggcontext;
+			FunctionCallInfo fcinfo_data;
+			const AggStatePerCallContext *percall;
 			PGFunction	fn_addr;
 			int			setno;
 			int			transno;
 			int			setoff;
 		}			agg_trans;
+
+		/* for EEOP_AGG_ORDERED_TRANS_{DATUM,TUPLE} */
+		struct
+		{
+			AggStatePerTrans pertrans;
+			int			setno;
+		}			agg_trans_ordered;
+
 	}			d;
 } ExprEvalStep;
 
@@ -741,9 +748,10 @@ extern void ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op,
 extern void ExecEvalSysVar(ExprState *state, ExprEvalStep *op,
 						   ExprContext *econtext, TupleTableSlot *slot);
 
-extern void ExecAggInitGroup(AggState *aggstate, AggStatePerTrans pertrans, AggStatePerGroup pergroup,
-							 ExprContext *aggcontext);
-extern Datum ExecAggTransReparent(AggState *aggstate, AggStatePerTrans pertrans,
+extern void ExecAggInitGroup(const AggStatePerCallContext *percall,
+							 AggStatePerGroup pergroup,
+							 FunctionCallInfo fcinfo);
+extern Datum ExecAggTransReparent(const AggStatePerCallContext *percall,
 								  Datum newValue, bool newValueIsNull,
 								  Datum oldValue, bool oldValueIsNull);
 extern void ExecEvalAggOrderedTransDatum(ExprState *state, ExprEvalStep *op,

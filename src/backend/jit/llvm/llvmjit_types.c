@@ -50,8 +50,10 @@ size_t		TypeSizeT;
 bool		TypeStorageBool;
 ExecEvalParamCallback TypeExecEvalParamCallback;
 
+Node StructNode;
 NullableDatum StructNullableDatum;
 AggState	StructAggState;
+AggStatePerCallContext StructAggStatePerCallContext;
 AggStatePerGroupData StructAggStatePerGroupData;
 AggStatePerTransData StructAggStatePerTransData;
 ExprContext StructExprContext;

@@ -54,6 +54,7 @@ LLVMTypeRef TypeParamBool;
 LLVMTypeRef TypeStorageBool;
 LLVMTypeRef TypePGFunction;
 LLVMTypeRef TypeExecEvalParamCallback;
+LLVMTypeRef StructNode;
 LLVMTypeRef StructNullableDatum;
 LLVMTypeRef StructHeapTupleFieldsField3;
 LLVMTypeRef StructHeapTupleFields;
@@ -78,6 +79,7 @@ LLVMTypeRef StructExprEvalStep;
 LLVMTypeRef StructExprEvalStepParamCallback;
 LLVMTypeRef StructExprState;
 LLVMTypeRef StructAggState;
+LLVMTypeRef StructAggStatePerCallContext;
 LLVMTypeRef StructAggStatePerGroupData;
 LLVMTypeRef StructAggStatePerTransData;
 
@@ -814,6 +816,7 @@ llvm_create_types(void)
 	TypeStorageBool = load_type(mod, "TypeStorageBool");
 	TypePGFunction = load_type(mod, "TypePGFunction");
 	TypeExecEvalParamCallback = load_type(mod, "TypeExecEvalParamCallback");
+	StructNode = load_type(mod, "StructNode");
 	StructNullableDatum = load_type(mod, "StructNullableDatum");
 	StructExprContext = load_type(mod, "StructExprContext");
 	StructExprEvalStep = load_type(mod, "StructExprEvalStep");
@@ -827,6 +830,7 @@ llvm_create_types(void)
 	StructHeapTupleData = load_type(mod, "StructHeapTupleData");
 	StructTupleDescData = load_type(mod, "StructTupleDescData");
 	StructAggState = load_type(mod, "StructAggState");
+	StructAggStatePerCallContext = load_type(mod, "StructAggStatePerCallContext");
 	StructAggStatePerGroupData = load_type(mod, "StructAggStatePerGroupData");
 	StructAggStatePerTransData = load_type(mod, "StructAggStatePerTransData");
 
