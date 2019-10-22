@@ -91,6 +91,9 @@ extern LLVMValueRef FuncExecEvalSubscriptingRef;
 extern LLVMValueRef FuncExecEvalSysVar;
 extern LLVMValueRef FuncExecAggTransReparent;
 extern LLVMValueRef FuncExecAggInitGroup;
+extern LLVMValueRef FuncExecEvalArrayCoerceRelabel;
+extern LLVMValueRef FuncExecEvalArrayCoerceUnpack;
+extern LLVMValueRef FuncExecEvalArrayCoercePack;
 
 
 extern void llvm_enter_fatal_on_oom(void);

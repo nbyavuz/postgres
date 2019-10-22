@@ -1631,11 +1631,63 @@ llvm_compile_expr(ExprState *state)
 				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
 
-			case EEOP_ARRAYCOERCE:
-				build_EvalXFunc(b, mod, "ExecEvalArrayCoerce",
-								v_state, v_econtext, v_opp);
-				LLVMBuildBr(b, opblocks[opno + 1]);
-				break;
+			case EEOP_ARRAYCOERCE_RELABEL:
+				{
+					LLVMValueRef v_params[2];
+
+					v_params[0] = v_state;
+					v_params[1] = v_opp;
+
+					LLVMBuildCall(b,
+								  llvm_get_decl(mod, FuncExecEvalArrayCoerceRelabel),
+								  v_params, lengthof(v_params), "");
+
+					LLVMBuildBr(b, opblocks[opno + 1]);
+					break;
+				}
+			case EEOP_ARRAYCOERCE_UNPACK:
+				{
+					LLVMValueRef v_params[2];
+					LLVMValueRef v_ret;
+
+					v_params[0] = v_state;
+					v_params[1] = v_opp;
+
+					v_ret =
+						LLVMBuildCall(b,
+									  llvm_get_decl(mod, FuncExecEvalArrayCoerceUnpack),
+									  v_params, lengthof(v_params), "");
+					v_ret = LLVMBuildZExt(b, v_ret, TypeStorageBool, "");
+
+					LLVMBuildCondBr(b,
+									LLVMBuildICmp(b, LLVMIntEQ, v_ret,
+												  l_sbool_const(1), ""),
+									opblocks[opno + 1],
+									opblocks[op->d.arraycoerce.jumpnext]);
+					break;
+				}
+
+			case EEOP_ARRAYCOERCE_PACK:
+				{
+					LLVMValueRef v_params[2];
+					LLVMValueRef v_ret;
+
+					v_params[0] = v_state;
+					v_params[1] = v_opp;
+
+					v_ret =
+						LLVMBuildCall(b,
+									  llvm_get_decl(mod, FuncExecEvalArrayCoercePack),
+									  v_params, lengthof(v_params), "");
+					v_ret = LLVMBuildZExt(b, v_ret, TypeStorageBool, "");
+
+					LLVMBuildCondBr(b,
+									LLVMBuildICmp(b, LLVMIntEQ, v_ret,
+												  l_sbool_const(1), ""),
+									opblocks[op->d.arraycoerce.jumpnext],
+									opblocks[opno + 1]);
+					break;
+				}
 
 			case EEOP_ROW:
 				build_EvalXFunc(b, mod, "ExecEvalRow",

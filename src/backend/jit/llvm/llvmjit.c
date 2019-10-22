@@ -91,6 +91,9 @@ LLVMValueRef FuncExecEvalSubscriptingRef;
 LLVMValueRef FuncExecEvalSysVar;
 LLVMValueRef FuncExecAggTransReparent;
 LLVMValueRef FuncExecAggInitGroup;
+LLVMValueRef FuncExecEvalArrayCoerceRelabel;
+LLVMValueRef FuncExecEvalArrayCoerceUnpack;
+LLVMValueRef FuncExecEvalArrayCoercePack;
 
 
 static bool llvm_session_initialized = false;
@@ -837,6 +840,9 @@ llvm_create_types(void)
 	FuncExecEvalSysVar = LLVMGetNamedFunction(mod, "ExecEvalSysVar");
 	FuncExecAggTransReparent = LLVMGetNamedFunction(mod, "ExecAggTransReparent");
 	FuncExecAggInitGroup = LLVMGetNamedFunction(mod, "ExecAggInitGroup");
+	FuncExecEvalArrayCoerceRelabel = LLVMGetNamedFunction(mod, "ExecEvalArrayCoerceRelabel");
+	FuncExecEvalArrayCoerceUnpack = LLVMGetNamedFunction(mod, "ExecEvalArrayCoerceUnpack");
+	FuncExecEvalArrayCoercePack = LLVMGetNamedFunction(mod, "ExecEvalArrayCoercePack");
 
 	/*
 	 * Leave the module alive, otherwise references to function would be

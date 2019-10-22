@@ -108,5 +108,8 @@ void	   *referenced_functions[] =
 	ExecEvalSubscriptingRef,
 	ExecEvalSysVar,
 	ExecAggTransReparent,
-	ExecAggInitGroup
+	ExecAggInitGroup,
+	ExecEvalArrayCoerceRelabel,
+	ExecEvalArrayCoerceUnpack,
+	ExecEvalArrayCoercePack
 };
