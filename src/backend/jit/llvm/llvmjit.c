@@ -581,7 +581,7 @@ llvm_optimize_module(LLVMJitContext *context, LLVMModuleRef module)
 	if (context->base.flags & PGJIT_OPT3)
 	{
 		/* TODO: Unscientifically determined threshold */
-		LLVMPassManagerBuilderUseInlinerWithThreshold(llvm_pmb, 512);
+		LLVMPassManagerBuilderUseInlinerWithThreshold(llvm_pmb, 1024);
 	}
 	else
 	{
