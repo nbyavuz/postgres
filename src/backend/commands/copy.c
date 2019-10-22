@@ -2181,8 +2181,7 @@ CopyOneRowTo(CopyState cstate, TupleTableSlot *slot)
 	foreach(cur, cstate->attnumlist)
 	{
 		int			attnum = lfirst_int(cur);
-		Datum		value = slot->tts_values[attnum - 1];
-		bool		isnull = slot->tts_isnull[attnum - 1];
+		NullableDatum *value = &slot->tts_values[attnum - 1];
 
 		if (!cstate->binary)
 		{
@@ -2191,7 +2190,7 @@ CopyOneRowTo(CopyState cstate, TupleTableSlot *slot)
 			need_delim = true;
 		}
 
-		if (isnull)
+		if (value->isnull)
 		{
 			if (!cstate->binary)
 				CopySendString(cstate, cstate->null_print_client);
@@ -2203,7 +2202,7 @@ CopyOneRowTo(CopyState cstate, TupleTableSlot *slot)
 			if (!cstate->binary)
 			{
 				string = OutputFunctionCall(&out_functions[attnum - 1],
-											value);
+											value->value);
 				if (cstate->csv_mode)
 					CopyAttributeOutCSV(cstate, string,
 										cstate->force_quote_flags[attnum - 1],
@@ -2216,7 +2215,7 @@ CopyOneRowTo(CopyState cstate, TupleTableSlot *slot)
 				bytea	   *outputbytes;
 
 				outputbytes = SendFunctionCall(&out_functions[attnum - 1],
-											   value);
+											   value->value);
 				CopySendInt32(cstate, VARSIZE(outputbytes) - VARHDRSZ);
 				CopySendData(cstate, VARDATA(outputbytes),
 							 VARSIZE(outputbytes) - VARHDRSZ);
@@ -3040,7 +3039,7 @@ CopyFrom(CopyState cstate)
 		ExecClearTuple(myslot);
 
 		/* Directly store the values/nulls array in the slot */
-		if (!NextCopyFrom(cstate, econtext, myslot->tts_values, myslot->tts_isnull))
+		if (!NextCopyFrom(cstate, econtext, myslot->tts_values))
 			break;
 
 		ExecStoreVirtualTuple(myslot);
@@ -3686,7 +3685,7 @@ NextCopyFromRawFields(CopyState cstate, char ***fields, int *nfields)
  */
 bool
 NextCopyFrom(CopyState cstate, ExprContext *econtext,
-			 Datum *values, bool *nulls)
+			 NullableDatum *values)
 {
 	TupleDesc	tupDesc;
 	AttrNumber	num_phys_attrs,
@@ -3703,8 +3702,8 @@ NextCopyFrom(CopyState cstate, ExprContext *econtext,
 	attr_count = list_length(cstate->attnumlist);
 
 	/* Initialize all values for row to NULL */
-	MemSet(values, 0, num_phys_attrs * sizeof(Datum));
-	MemSet(nulls, true, num_phys_attrs * sizeof(bool));
+	for (int i = 0; i < num_phys_attrs; i++)
+		values[i] = NULL_DATUM;
 
 	if (!cstate->binary)
 	{
@@ -3773,12 +3772,12 @@ NextCopyFrom(CopyState cstate, ExprContext *econtext,
 
 			cstate->cur_attname = NameStr(att->attname);
 			cstate->cur_attval = string;
-			values[m] = InputFunctionCall(&in_functions[m],
-										  string,
-										  typioparams[m],
-										  att->atttypmod);
+			values[m].value = InputFunctionCall(&in_functions[m],
+												string,
+												typioparams[m],
+												att->atttypmod);
 			if (string != NULL)
-				nulls[m] = false;
+				values[m].isnull = false;
 			cstate->cur_attname = NULL;
 			cstate->cur_attval = NULL;
 		}
@@ -3838,12 +3837,12 @@ NextCopyFrom(CopyState cstate, ExprContext *econtext,
 
 			cstate->cur_attname = NameStr(att->attname);
 			i++;
-			values[m] = CopyReadBinaryAttribute(cstate,
-												i,
-												&in_functions[m],
-												typioparams[m],
-												att->atttypmod,
-												&nulls[m]);
+			values[m].value = CopyReadBinaryAttribute(cstate,
+													  i,
+													  &in_functions[m],
+													  typioparams[m],
+													  att->atttypmod,
+													  &values[m].isnull);
 			cstate->cur_attname = NULL;
 		}
 	}
@@ -3855,6 +3854,8 @@ NextCopyFrom(CopyState cstate, ExprContext *econtext,
 	 */
 	for (i = 0; i < num_defaults; i++)
 	{
+		NullableDatum *value = &values[defmap[i]];
+
 		/*
 		 * The caller must supply econtext and have switched into the
 		 * per-tuple memory context in it.
@@ -3862,8 +3863,7 @@ NextCopyFrom(CopyState cstate, ExprContext *econtext,
 		Assert(econtext != NULL);
 		Assert(CurrentMemoryContext == econtext->ecxt_per_tuple_memory);
 
-		values[defmap[i]] = ExecEvalExpr(defexprs[i], econtext,
-										 &nulls[defmap[i]]);
+		value->value = ExecEvalExpr(defexprs[i], econtext, &value->isnull);
 	}
 
 	return true;

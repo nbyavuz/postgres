@@ -407,9 +407,9 @@ printtup(TupleTableSlot *slot, DestReceiver *self)
 	for (i = 0; i < natts; ++i)
 	{
 		PrinttupAttrInfo *thisState = myState->myinfo + i;
-		Datum		attr = slot->tts_values[i];
+		Datum		attr = slot->tts_values[i].value;
 
-		if (slot->tts_isnull[i])
+		if (slot->tts_values[i].isnull)
 		{
 			pq_sendint32(buf, -1);
 			continue;
@@ -493,7 +493,7 @@ printtup_20(TupleTableSlot *slot, DestReceiver *self)
 	k = 1 << 7;
 	for (i = 0; i < natts; ++i)
 	{
-		if (!slot->tts_isnull[i])
+		if (!slot->tts_values[i].isnull)
 			j |= k;				/* set bit if not null */
 		k >>= 1;
 		if (k == 0)				/* end of byte? */
@@ -512,10 +512,10 @@ printtup_20(TupleTableSlot *slot, DestReceiver *self)
 	for (i = 0; i < natts; ++i)
 	{
 		PrinttupAttrInfo *thisState = myState->myinfo + i;
-		Datum		attr = slot->tts_values[i];
+		Datum		attr = slot->tts_values[i].value;
 		char	   *outputstr;
 
-		if (slot->tts_isnull[i])
+		if (slot->tts_values[i].isnull)
 			continue;
 
 		Assert(thisState->format == 0);
@@ -682,7 +682,7 @@ printtup_internal_20(TupleTableSlot *slot, DestReceiver *self)
 	k = 1 << 7;
 	for (i = 0; i < natts; ++i)
 	{
-		if (!slot->tts_isnull[i])
+		if (!slot->tts_values[i].isnull)
 			j |= k;				/* set bit if not null */
 		k >>= 1;
 		if (k == 0)				/* end of byte? */
@@ -701,10 +701,10 @@ printtup_internal_20(TupleTableSlot *slot, DestReceiver *self)
 	for (i = 0; i < natts; ++i)
 	{
 		PrinttupAttrInfo *thisState = myState->myinfo + i;
-		Datum		attr = slot->tts_values[i];
+		Datum		attr = slot->tts_values[i].value;
 		bytea	   *outputbytes;
 
-		if (slot->tts_isnull[i])
+		if (slot->tts_values[i].isnull)
 			continue;
 
 		Assert(thisState->format == 1);

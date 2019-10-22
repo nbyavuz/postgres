@@ -426,10 +426,8 @@ execute_attr_map_slot(AttrNumber *attrMap,
 					  TupleTableSlot *in_slot,
 					  TupleTableSlot *out_slot)
 {
-	Datum	   *invalues;
-	bool	   *inisnull;
-	Datum	   *outvalues;
-	bool	   *outisnull;
+	NullableDatum *invalues;
+	NullableDatum *outvalues;
 	int			outnatts;
 	int			i;
 
@@ -447,9 +445,7 @@ execute_attr_map_slot(AttrNumber *attrMap,
 	ExecClearTuple(out_slot);
 
 	invalues = in_slot->tts_values;
-	inisnull = in_slot->tts_isnull;
 	outvalues = out_slot->tts_values;
-	outisnull = out_slot->tts_isnull;
 
 	/* Transpose into proper fields of the out slot. */
 	for (i = 0; i < outnatts; i++)
@@ -458,15 +454,9 @@ execute_attr_map_slot(AttrNumber *attrMap,
 
 		/* attrMap[i] == 0 means it's a NULL datum. */
 		if (j == -1)
-		{
-			outvalues[i] = (Datum) 0;
-			outisnull[i] = true;
-		}
+			outvalues[i] = NULL_DATUM;
 		else
-		{
 			outvalues[i] = invalues[j];
-			outisnull[i] = inisnull[j];
-		}
 	}
 
 	ExecStoreVirtualTuple(out_slot);

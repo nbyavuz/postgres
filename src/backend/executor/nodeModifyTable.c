@@ -253,8 +253,7 @@ ExecComputeStoredGenerated(EState *estate, TupleTableSlot *slot)
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	int			natts = tupdesc->natts;
 	MemoryContext oldContext;
-	Datum	   *values;
-	bool	   *nulls;
+	NullableDatum *values;
 
 	Assert(tupdesc->constr && tupdesc->constr->has_generated_stored);
 
@@ -291,10 +290,8 @@ ExecComputeStoredGenerated(EState *estate, TupleTableSlot *slot)
 	oldContext = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
 
 	values = palloc(sizeof(*values) * natts);
-	nulls = palloc(sizeof(*nulls) * natts);
 
 	slot_getallattrs(slot);
-	memcpy(nulls, slot->tts_isnull, sizeof(*nulls) * natts);
 
 	for (int i = 0; i < natts; i++)
 	{
@@ -311,19 +308,20 @@ ExecComputeStoredGenerated(EState *estate, TupleTableSlot *slot)
 
 			val = ExecEvalExpr(resultRelInfo->ri_GeneratedExprs[i], econtext, &isnull);
 
-			values[i] = val;
-			nulls[i] = isnull;
+			values[i].value = val;
+			values[i].isnull = isnull;
 		}
 		else
 		{
-			if (!nulls[i])
-				values[i] = datumCopy(slot->tts_values[i], attr->attbyval, attr->attlen);
+			values[i].isnull = slot->tts_values[i].isnull;
+			if (!values[i].isnull)
+				values[i].value = datumCopy(slot->tts_values[i].value,
+											attr->attbyval, attr->attlen);
 		}
 	}
 
 	ExecClearTuple(slot);
 	memcpy(slot->tts_values, values, sizeof(*values) * natts);
-	memcpy(slot->tts_isnull, nulls, sizeof(*nulls) * natts);
 	ExecStoreVirtualTuple(slot);
 	ExecMaterializeSlot(slot);
 

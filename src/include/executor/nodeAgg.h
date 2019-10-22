@@ -112,8 +112,7 @@ typedef struct AggStatePerTransData
 	/*
 	 * initial value from pg_aggregate entry
 	 */
-	Datum		initValue;
-	bool		initValueIsNull;
+	NullableDatum initValue;
 
 	/*
 	 * We need the len and byval info for the agg's input and transition data
@@ -235,11 +234,9 @@ typedef struct AggStatePerAggData
 typedef struct AggStatePerGroupData
 {
 #define FIELDNO_AGGSTATEPERGROUPDATA_TRANSVALUE 0
-	Datum		transValue;		/* current transition value */
-#define FIELDNO_AGGSTATEPERGROUPDATA_TRANSVALUEISNULL 1
-	bool		transValueIsNull;
+	NullableDatum transValue;		/* current transition value */
 
-#define FIELDNO_AGGSTATEPERGROUPDATA_NOTRANSVALUE 2
+#define FIELDNO_AGGSTATEPERGROUPDATA_NOTRANSVALUE 1
 	bool		noTransValue;	/* true if transValue not set yet */
 
 	/*

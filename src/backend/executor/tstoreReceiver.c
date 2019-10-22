@@ -32,7 +32,7 @@ typedef struct
 	MemoryContext cxt;			/* context containing tstore */
 	bool		detoast;		/* were we told to detoast? */
 	/* workspace: */
-	Datum	   *outvalues;		/* values array for result tuple */
+	NullableDatum *outvalues;	/* values array for result tuple */
 	Datum	   *tofree;			/* temp values to be pfree'd */
 } TStoreState;
 
@@ -74,8 +74,8 @@ tstoreStartupReceiver(DestReceiver *self, int operation, TupleDesc typeinfo)
 	{
 		myState->pub.receiveSlot = tstoreReceiveSlot_detoast;
 		/* Create workspace */
-		myState->outvalues = (Datum *)
-			MemoryContextAlloc(myState->cxt, natts * sizeof(Datum));
+		myState->outvalues = (NullableDatum *)
+			MemoryContextAlloc(myState->cxt, natts * sizeof(NullableDatum));
 		myState->tofree = (Datum *)
 			MemoryContextAlloc(myState->cxt, natts * sizeof(Datum));
 	}
@@ -126,28 +126,29 @@ tstoreReceiveSlot_detoast(TupleTableSlot *slot, DestReceiver *self)
 	nfree = 0;
 	for (i = 0; i < natts; i++)
 	{
-		Datum		val = slot->tts_values[i];
+		NullableDatum *val = &slot->tts_values[i];
 		Form_pg_attribute attr = TupleDescAttr(typeinfo, i);
 
-		if (!attr->attisdropped && attr->attlen == -1 && !slot->tts_isnull[i])
+		if (!attr->attisdropped && attr->attlen == -1 && !val->isnull)
 		{
 			if (VARATT_IS_EXTERNAL(DatumGetPointer(val)))
 			{
-				val = PointerGetDatum(detoast_external_attr((struct varlena *)
-															DatumGetPointer(val)));
-				myState->tofree[nfree++] = val;
+				val->value = PointerGetDatum(detoast_external_attr((struct varlena *)
+																   DatumGetPointer(val->value)));
+				myState->tofree[nfree++] = val->value;
 			}
 		}
 
-		myState->outvalues[i] = val;
+		myState->outvalues[i].isnull = val->isnull;
+		myState->outvalues[i].value = val->value;
 	}
 
 	/*
 	 * Push the modified tuple into the tuplestore.
 	 */
 	oldcxt = MemoryContextSwitchTo(myState->cxt);
-	tuplestore_putvalues(myState->tstore, typeinfo,
-						 myState->outvalues, slot->tts_isnull);
+	tuplestore_putvalues_s(myState->tstore, typeinfo,
+						   myState->outvalues);
 	MemoryContextSwitchTo(oldcxt);
 
 	/* And release any temporary detoasted values */

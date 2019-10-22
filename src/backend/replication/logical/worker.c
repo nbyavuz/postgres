@@ -258,8 +258,8 @@ slot_fill_defaults(LogicalRepRelMapEntry *rel, EState *estate,
 	}
 
 	for (i = 0; i < num_defaults; i++)
-		slot->tts_values[defmap[i]] =
-			ExecEvalExpr(defexprs[i], econtext, &slot->tts_isnull[defmap[i]]);
+		slot->tts_values[defmap[i]].value =
+			ExecEvalExpr(defexprs[i], econtext, &slot->tts_values[defmap[i]].isnull);
 }
 
 /*
@@ -336,10 +336,10 @@ slot_store_cstrings(TupleTableSlot *slot, LogicalRepRelMapEntry *rel,
 			errarg.remote_attnum = remoteattnum;
 
 			getTypeInputInfo(att->atttypid, &typinput, &typioparam);
-			slot->tts_values[i] =
+			slot->tts_values[i].value =
 				OidInputFunctionCall(typinput, values[remoteattnum],
 									 typioparam, att->atttypmod);
-			slot->tts_isnull[i] = false;
+			slot->tts_values[i].isnull = false;
 
 			errarg.local_attnum = -1;
 			errarg.remote_attnum = -1;
@@ -351,8 +351,7 @@ slot_store_cstrings(TupleTableSlot *slot, LogicalRepRelMapEntry *rel,
 			 * values (missing values should be later filled using
 			 * slot_fill_defaults).
 			 */
-			slot->tts_values[i] = (Datum) 0;
-			slot->tts_isnull[i] = true;
+			slot->tts_values[i] = NULL_DATUM;
 		}
 	}
 
@@ -410,19 +409,16 @@ slot_modify_cstrings(TupleTableSlot *slot, LogicalRepRelMapEntry *rel,
 			errarg.remote_attnum = remoteattnum;
 
 			getTypeInputInfo(att->atttypid, &typinput, &typioparam);
-			slot->tts_values[i] =
+			slot->tts_values[i].value =
 				OidInputFunctionCall(typinput, values[remoteattnum],
 									 typioparam, att->atttypmod);
-			slot->tts_isnull[i] = false;
+			slot->tts_values[i].isnull = false;
 
 			errarg.local_attnum = -1;
 			errarg.remote_attnum = -1;
 		}
 		else
-		{
-			slot->tts_values[i] = (Datum) 0;
-			slot->tts_isnull[i] = true;
-		}
+			slot->tts_values[i] = NULL_DATUM;
 	}
 
 	/* Pop the error context stack */

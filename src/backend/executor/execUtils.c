@@ -270,13 +270,9 @@ CreateExprContext(EState *estate)
 	econtext->ecxt_param_list_info = estate->es_param_list_info;
 
 	econtext->ecxt_aggvalues = NULL;
-	econtext->ecxt_aggnulls = NULL;
 
-	econtext->caseValue_datum = (Datum) 0;
-	econtext->caseValue_isNull = true;
-
-	econtext->domainValue_datum = (Datum) 0;
-	econtext->domainValue_isNull = true;
+	econtext->caseValue = NULL_DATUM;
+	econtext->domainValue = NULL_DATUM;
 
 	econtext->ecxt_estate = estate;
 
@@ -339,13 +335,9 @@ CreateStandaloneExprContext(void)
 	econtext->ecxt_param_list_info = NULL;
 
 	econtext->ecxt_aggvalues = NULL;
-	econtext->ecxt_aggnulls = NULL;
 
-	econtext->caseValue_datum = (Datum) 0;
-	econtext->caseValue_isNull = true;
-
-	econtext->domainValue_datum = (Datum) 0;
-	econtext->domainValue_isNull = true;
+	econtext->caseValue = NULL_DATUM;
+	econtext->domainValue = NULL_DATUM;
 
 	econtext->ecxt_estate = NULL;
 

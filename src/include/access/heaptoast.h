@@ -133,7 +133,6 @@ extern Datum toast_flatten_tuple_to_datum(HeapTupleHeader tup,
  * ----------
  */
 extern HeapTuple toast_build_flattened_tuple(TupleDesc tupleDesc,
-											 Datum *values,
-											 bool *isnull);
+											 NullableDatum *values);
 
 #endif							/* HEAPTOAST_H */
