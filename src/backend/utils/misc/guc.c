@@ -123,6 +123,7 @@ extern char *default_tablespace;
 extern char *temp_tablespaces;
 extern bool ignore_checksum_failure;
 extern bool synchronize_seqscans;
+extern bool seqscan_faster_order;
 
 #ifdef TRACE_SYNCSCAN
 extern bool trace_syncscan;
@@ -1736,6 +1737,16 @@ static struct config_bool ConfigureNamesBool[] =
 		},
 		&synchronize_seqscans,
 		true,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"seqscan_faster_order", PGC_USERSET, COMPAT_OPTIONS_PREVIOUS,
+			gettext_noop("Allow out-of-order synchronized sequential scans."),
+			NULL
+		},
+		&seqscan_faster_order,
+		false,
 		NULL, NULL, NULL
 	},
 
