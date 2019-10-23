@@ -128,15 +128,26 @@ static ExprEvalOpLookup reverse_dispatch_table[EEOP_LAST];
 
 #define EEO_NEXT() \
 	do { \
-		op++; \
+		nonconst_op++; \
+		op = nonconst_op; \
 		EEO_DISPATCH(); \
 	} while (0)
 
 #define EEO_JUMP(stepno) \
 	do { \
-		op = &state->steps[stepno]; \
+		nonconst_op = &state->steps[stepno]; \
+		op = nonconst_op; \
 		EEO_DISPATCH(); \
 	} while (0)
+
+
+#define RELPTR_RESOLVE(data, relptr) \
+	(void *) (AssertMacro(relptr.ptr.allocno != 0), \
+			  (data + relptr.ptr.off))
+
+#define RELPTR_RESOLVE_MAYNULL(data, relptr) \
+	(void *) (relptr.ptr.allocno == 0 ? NULL : \
+			  (data + relptr.ptr.off))
 
 
 static Datum ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull);
@@ -144,12 +155,13 @@ static void ExecInitInterpreter(void);
 
 /* support functions */
 static void CheckVarSlotCompatibility(TupleTableSlot *slot, int attnum, Oid vartype);
-static void CheckOpSlotCompatibility(ExprEvalStep *op, TupleTableSlot *slot);
+static void CheckOpSlotCompatibility(const ExprEvalStep *op, TupleTableSlot *slot);
 static TupleDesc get_cached_rowtype(Oid type_id, int32 typmod,
 									TupleDesc *cache_field, ExprContext *econtext);
 static void ShutdownTupleDescRef(Datum arg);
 static void ExecEvalRowNullInt(ExprState *state, ExprEvalStep *op,
-							   ExprContext *econtext, bool checkisnull);
+							   ExprContext *econtext, bool checkisnull,
+							   NullableDatum *opres);
 
 /* fast-path evaluation functions */
 static Datum ExecJustInnerVar(ExprState *state, ExprContext *econtext, bool *isnull);
@@ -187,9 +199,9 @@ ExecReadyInterpretedExpr(ExprState *state, ExprStateBuilder *esb)
 	ExecInitInterpreter();
 
 	/* Simple validity checks on expression */
-	Assert(esb->steps_len >= 1);
-	Assert(esb->steps[esb->steps_len - 1].opcode == EEOP_DONE_RETURN ||
-		   esb->steps[esb->steps_len - 1].opcode == EEOP_DONE_NO_RETURN);
+	Assert(state->steps_final_len >= 1);
+	Assert(state->steps[esb->steps_len - 1].opcode == EEOP_DONE_RETURN ||
+		   state->steps[esb->steps_len - 1].opcode == EEOP_DONE_NO_RETURN);
 
 	/*
 	 * Don't perform redundant initialization. This is unreachable in current
@@ -337,11 +349,14 @@ ExecReadyInterpretedExpr(ExprState *state, ExprStateBuilder *esb)
 static Datum
 ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 {
-	ExprEvalStep *op;
+	const ExprEvalStep *op;
+	ExprEvalStep *nonconst_op;
 	TupleTableSlot *resultslot;
 	TupleTableSlot *innerslot;
 	TupleTableSlot *outerslot;
 	TupleTableSlot *scanslot;
+	char *const data = state ?
+		(char *) state + state->mutable_off : NULL;
 
 	/*
 	 * This array has to be in the same order as enum ExprEvalOp.
@@ -455,7 +470,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 #endif							/* EEO_USE_COMPUTED_GOTO */
 
 	/* setup state */
-	op = state->steps;
+	op = nonconst_op = state->steps;
 	resultslot = state->resultslot;
 	innerslot = econtext->ecxt_innertuple;
 	outerslot = econtext->ecxt_outertuple;
@@ -469,8 +484,11 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 	{
 		EEO_CASE(EEOP_DONE_RETURN)
 		{
-			*isnull = state->result.isnull;
-			return state->result.value;
+			NullableDatum *result;
+
+			result = RELPTR_RESOLVE(data, op->result);
+			*isnull = result->isnull;
+			return result->value;
 		}
 
 		EEO_CASE(EEOP_DONE_NO_RETURN)
@@ -509,6 +527,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_INNER_VAR)
 		{
 			int			attnum = op->d.var.attnum;
+			NullableDatum *opres = RELPTR_RESOLVE(data, op->result);
 
 			/*
 			 * Since we already extracted all referenced columns from the
@@ -517,7 +536,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			 * have an Assert to check that that did happen.
 			 */
 			Assert(attnum >= 0 && attnum < innerslot->tts_nvalid);
-			*op->result = innerslot->tts_values[attnum];
+			*opres = innerslot->tts_values[attnum];
 
 			EEO_NEXT();
 		}
@@ -525,11 +544,11 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_OUTER_VAR)
 		{
 			int			attnum = op->d.var.attnum;
+			NullableDatum *opres = RELPTR_RESOLVE(data, op->result);
 
 			/* See EEOP_INNER_VAR comments */
-
 			Assert(attnum >= 0 && attnum < outerslot->tts_nvalid);
-			*op->result = outerslot->tts_values[attnum];
+			*opres = outerslot->tts_values[attnum];
 
 			EEO_NEXT();
 		}
@@ -537,37 +556,42 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_SCAN_VAR)
 		{
 			int			attnum = op->d.var.attnum;
+			NullableDatum *opres = RELPTR_RESOLVE(data, op->result);
 
 			/* See EEOP_INNER_VAR comments */
 
 			Assert(attnum >= 0 && attnum < scanslot->tts_nvalid);
-			*op->result = scanslot->tts_values[attnum];
+			*opres = scanslot->tts_values[attnum];
 
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_INNER_SYSVAR)
 		{
-			ExecEvalSysVar(state, op, econtext, innerslot);
+			ExecEvalSysVar(state, op->d.var.attnum, innerslot,
+						   RELPTR_RESOLVE(data, op->result));
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_OUTER_SYSVAR)
 		{
-			ExecEvalSysVar(state, op, econtext, outerslot);
+			ExecEvalSysVar(state, op->d.var.attnum, outerslot,
+						   RELPTR_RESOLVE(data, op->result));
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_SCAN_SYSVAR)
 		{
-			ExecEvalSysVar(state, op, econtext, scanslot);
+			ExecEvalSysVar(state, op->d.var.attnum, scanslot,
+						   RELPTR_RESOLVE(data, op->result));
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_WHOLEROW)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalWholeRowVar(state, op, econtext);
+			ExecEvalWholeRowVar(state, nonconst_op, econtext,
+								RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -620,8 +644,11 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_ASSIGN_TMP)
 		{
 			int			resultnum = op->d.assign_tmp.resultnum;
+			NullableDatum *result;
 
-			resultslot->tts_values[resultnum] = state->result;
+			result = RELPTR_RESOLVE(data, op->result);
+
+			resultslot->tts_values[resultnum] = *result;
 
 			EEO_NEXT();
 		}
@@ -630,20 +657,25 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			int			resultnum = op->d.assign_tmp.resultnum;
 			NullableDatum *rsval = &resultslot->tts_values[resultnum];
+			NullableDatum *result;
 
-			rsval->isnull = state->result.isnull;
+			result = RELPTR_RESOLVE(data, op->result);
+
+			rsval->isnull = result->isnull;
 			if (!rsval->isnull)
 				rsval->value =
-					MakeExpandedObjectReadOnlyInternal(state->result.value);
+					MakeExpandedObjectReadOnlyInternal(result->value);
 			else
-				rsval->value = state->result.value;
+				rsval->value = result->value;
 
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_CONST)
 		{
-			*op->result = op->d.constval.value;
+			NullableDatum *opres = RELPTR_RESOLVE(data, op->result);
+
+			*opres = op->d.constval.value;
 
 			EEO_NEXT();
 		}
@@ -665,13 +697,16 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		 */
 		EEO_CASE(EEOP_FUNCEXPR)
 		{
-			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.func.fcinfo_data);
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
 			Datum		d;
 
 			fcinfo->isnull = false;
 			d = op->d.func.fn_addr(fcinfo);
-			op->result->value = d;
-			op->result->isnull = fcinfo->isnull;
+			opres->value = d;
+			opres->isnull = fcinfo->isnull;
 
 			EEO_NEXT();
 		}
@@ -679,7 +714,10 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		/* strict function call with more than two arguments */
 		EEO_CASE(EEOP_FUNCEXPR_STRICT)
 		{
-			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.func.fcinfo_data);
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
 			NullableDatum *args = fcinfo->args;
 			int			nargs = op->d.func.nargs;
 			Datum		d;
@@ -691,14 +729,14 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			{
 				if (args[argno].isnull)
 				{
-					op->result->isnull = true;
+					opres->isnull = true;
 					goto strictfail;
 				}
 			}
 			fcinfo->isnull = false;
 			d = op->d.func.fn_addr(fcinfo);
-			op->result->value = d;
-			op->result->isnull = fcinfo->isnull;
+			opres->value = d;
+			opres->isnull = fcinfo->isnull;
 
 	strictfail:
 			EEO_NEXT();
@@ -707,22 +745,25 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		/* strict function call with one argument */
 		EEO_CASE(EEOP_FUNCEXPR_STRICT_1)
 		{
-			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.func.fcinfo_data);
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
 			NullableDatum *args = fcinfo->args;
 
 			Assert(op->d.func.nargs == 1);
 
 			/* strict function, so check for NULL args */
 			if (args[0].isnull)
-				op->result->isnull = true;
+				opres->isnull = true;
 			else
 			{
 				Datum		d;
 
 				fcinfo->isnull = false;
 				d = op->d.func.fn_addr(fcinfo);
-				op->result->value = d;
-				op->result->isnull = fcinfo->isnull;
+				opres->value = d;
+				opres->isnull = fcinfo->isnull;
 			}
 
 			EEO_NEXT();
@@ -731,22 +772,25 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		/* strict function call with two arguments */
 		EEO_CASE(EEOP_FUNCEXPR_STRICT_2)
 		{
-			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.func.fcinfo_data);
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
 			NullableDatum *args = fcinfo->args;
 
 			Assert(op->d.func.nargs == 2);
 
 			/* strict function, so check for NULL args */
 			if (args[0].isnull || args[1].isnull)
-				op->result->isnull = true;
+				opres->isnull = true;
 			else
 			{
 				Datum		d;
 
 				fcinfo->isnull = false;
 				d = op->d.func.fn_addr(fcinfo);
-				op->result->value = d;
-				op->result->isnull = fcinfo->isnull;
+				opres->value = d;
+				opres->isnull = fcinfo->isnull;
 			}
 
 			EEO_NEXT();
@@ -755,7 +799,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_FUNCEXPR_FUSAGE)
 		{
 			/* not common enough to inline */
-			ExecEvalFuncExprFusage(state, op, econtext);
+			ExecEvalFuncExprFusage(state, op,
+								   RELPTR_RESOLVE(data, op->result),
+								   RELPTR_RESOLVE(data, op->d.func.fcinfo_data));
 
 			EEO_NEXT();
 		}
@@ -763,7 +809,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_FUNCEXPR_STRICT_FUSAGE)
 		{
 			/* not common enough to inline */
-			ExecEvalFuncExprStrictFusage(state, op, econtext);
+			ExecEvalFuncExprStrictFusage(state, op,
+										 RELPTR_RESOLVE(data, op->result),
+										 RELPTR_RESOLVE(data, op->d.func.fcinfo_data));
 
 			EEO_NEXT();
 		}
@@ -780,7 +828,10 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		 */
 		EEO_CASE(EEOP_BOOL_AND_STEP_FIRST)
 		{
-			*op->d.boolexpr.anynull = false;
+			bool *anynull =
+				RELPTR_RESOLVE(data, op->d.boolexpr.anynull);
+
+			*anynull = false;
 
 			/*
 			 * EEOP_BOOL_AND_STEP_FIRST resets anynull, otherwise it's the
@@ -792,11 +843,17 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_BOOL_AND_STEP)
 		{
-			if (op->result->isnull)
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
+			if (opres->isnull)
 			{
-				*op->d.boolexpr.anynull = true;
+				bool *anynull =
+					RELPTR_RESOLVE(data, op->d.boolexpr.anynull);
+
+				*anynull = true;
 			}
-			else if (!DatumGetBool(op->result->value))
+			else if (!DatumGetBool(opres->value))
 			{
 				/* result is already set to FALSE, need not change it */
 				/* bail out early */
@@ -808,11 +865,16 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_BOOL_AND_STEP_LAST)
 		{
-			if (op->result->isnull)
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+			bool *anynull =
+				RELPTR_RESOLVE(data, op->d.boolexpr.anynull);
+
+			if (opres->isnull)
 			{
 				/* result is already set to NULL, need not change it */
 			}
-			else if (!DatumGetBool(op->result->value))
+			else if (!DatumGetBool(opres->value))
 			{
 				/* result is already set to FALSE, need not change it */
 
@@ -822,8 +884,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 				 * except more expensive.
 				 */
 			}
-			else if (*op->d.boolexpr.anynull)
-				*op->result = NULL_DATUM;
+			else if (*anynull)
+				*opres = NULL_DATUM;
 			else
 			{
 				/* result is already set to TRUE, need not change it */
@@ -844,7 +906,10 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		 */
 		EEO_CASE(EEOP_BOOL_OR_STEP_FIRST)
 		{
-			*op->d.boolexpr.anynull = false;
+			bool *anynull =
+				RELPTR_RESOLVE(data, op->d.boolexpr.anynull);
+
+			*anynull = false;
 
 			/*
 			 * EEOP_BOOL_OR_STEP_FIRST resets anynull, otherwise it's the same
@@ -856,11 +921,16 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_BOOL_OR_STEP)
 		{
-			if (op->result->isnull)
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+			bool *anynull =
+				RELPTR_RESOLVE(data, op->d.boolexpr.anynull);
+
+			if (opres->isnull)
 			{
-				*op->d.boolexpr.anynull = true;
+				*anynull = true;
 			}
-			else if (DatumGetBool(op->result->value))
+			else if (DatumGetBool(opres->value))
 			{
 				/* result is already set to TRUE, need not change it */
 				/* bail out early */
@@ -872,11 +942,16 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_BOOL_OR_STEP_LAST)
 		{
-			if (op->result->isnull)
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+			bool *anynull =
+				RELPTR_RESOLVE(data, op->d.boolexpr.anynull);
+
+			if (opres->isnull)
 			{
 				/* result is already set to NULL, need not change it */
 			}
-			else if (DatumGetBool(op->result->value))
+			else if (DatumGetBool(opres->value))
 			{
 				/* result is already set to TRUE, need not change it */
 
@@ -886,8 +961,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 				 * more expensive.
 				 */
 			}
-			else if (*op->d.boolexpr.anynull)
-				*op->result = NULL_DATUM;
+			else if (*anynull)
+				*opres = NULL_DATUM;
 			else
 			{
 				/* result is already set to FALSE, need not change it */
@@ -898,28 +973,34 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_BOOL_NOT_STEP)
 		{
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
 			/*
 			 * Evaluation of 'not' is simple... if expr is false, then return
 			 * 'true' and vice versa.  It's safe to do this even on a
 			 * nominally null value, so we ignore result->isnull; that means
 			 * that NULL in produces NULL out, which is what we want.
 			 */
-			op->result->value = BoolGetDatum(!DatumGetBool(op->result->value));
+			opres->value = BoolGetDatum(!DatumGetBool(opres->value));
 
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_QUAL)
 		{
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
 			/* simplified version of BOOL_AND_STEP for use by ExecQual() */
 
 			/* If argument (also result) is false or null ... */
-			if (op->result->isnull ||
-				!DatumGetBool(op->result->value))
+			if (opres->isnull ||
+				!DatumGetBool(opres->value))
 			{
 				/* ... bail out early, returning FALSE */
-				op->result->isnull = false;
-				op->result->value = BoolGetDatum(false);
+				opres->isnull = false;
+				opres->value = BoolGetDatum(false);
 				EEO_JUMP(op->d.qualexpr.jumpdone);
 			}
 
@@ -939,8 +1020,11 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_JUMP_IF_NULL)
 		{
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
 			/* Transfer control if current result is null */
-			if (op->result->isnull)
+			if (opres->isnull)
 				EEO_JUMP(op->d.jump.jumpdone);
 
 			EEO_NEXT();
@@ -948,8 +1032,11 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_JUMP_IF_NOT_NULL)
 		{
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
 			/* Transfer control if current result is non-null */
-			if (!op->result->isnull)
+			if (!opres->isnull)
 				EEO_JUMP(op->d.jump.jumpdone);
 
 			EEO_NEXT();
@@ -957,8 +1044,11 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_JUMP_IF_NOT_TRUE)
 		{
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
 			/* Transfer control if current result is null or false */
-			if (op->result->isnull || !DatumGetBool(op->result->value))
+			if (opres->isnull || !DatumGetBool(opres->value))
 				EEO_JUMP(op->d.jump.jumpdone);
 
 			EEO_NEXT();
@@ -966,16 +1056,22 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_NULLTEST_ISNULL)
 		{
-			op->result->value = BoolGetDatum(op->result->isnull);
-			op->result->isnull = false;
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
+			opres->value = BoolGetDatum(opres->isnull);
+			opres->isnull = false;
 
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_NULLTEST_ISNOTNULL)
 		{
-			op->result->value = BoolGetDatum(!op->result->isnull);
-			op->result->isnull = false;
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
+			opres->value = BoolGetDatum(!opres->isnull);
+			opres->isnull = false;
 
 			EEO_NEXT();
 		}
@@ -983,7 +1079,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_NULLTEST_ROWISNULL)
 		{
 			/* out of line implementation: too large */
-			ExecEvalRowNull(state, op, econtext);
+			ExecEvalRowNull(state, nonconst_op, econtext,
+							RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -991,7 +1088,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_NULLTEST_ROWISNOTNULL)
 		{
 			/* out of line implementation: too large */
-			ExecEvalRowNotNull(state, op, econtext);
+			ExecEvalRowNotNull(state, nonconst_op, econtext,
+							   RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -1000,10 +1098,13 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_BOOLTEST_IS_TRUE)
 		{
-			if (op->result->isnull)
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
+			if (opres->isnull)
 			{
-				op->result->value = BoolGetDatum(false);
-				op->result->isnull = false;
+				opres->value = BoolGetDatum(false);
+				opres->isnull = false;
 			}
 			/* else, input value is the correct output as well */
 
@@ -1012,36 +1113,45 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_BOOLTEST_IS_NOT_TRUE)
 		{
-			if (op->result->isnull)
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
+			if (opres->isnull)
 			{
-				op->result->value = BoolGetDatum(true);
-				op->result->isnull = false;
+				opres->value = BoolGetDatum(true);
+				opres->isnull = false;
 			}
 			else
-				op->result->value = BoolGetDatum(!DatumGetBool(op->result->value));
+				opres->value = BoolGetDatum(!DatumGetBool(opres->value));
 
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_BOOLTEST_IS_FALSE)
 		{
-			if (op->result->isnull)
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
+			if (opres->isnull)
 			{
-				op->result->value = BoolGetDatum(false);
-				op->result->isnull = false;
+				opres->value = BoolGetDatum(false);
+				opres->isnull = false;
 			}
 			else
-				op->result->value = BoolGetDatum(!DatumGetBool(op->result->value));
+				opres->value = BoolGetDatum(!DatumGetBool(opres->value));
 
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_BOOLTEST_IS_NOT_FALSE)
 		{
-			if (op->result->isnull)
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
+			if (opres->isnull)
 			{
-				op->result->value = BoolGetDatum(true);
-				op->result->isnull = false;
+				opres->value = BoolGetDatum(true);
+				opres->isnull = false;
 			}
 			/* else, input value is the correct output as well */
 
@@ -1051,7 +1161,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_PARAM_EXEC)
 		{
 			/* out of line implementation: too large */
-			ExecEvalParamExec(state, op, econtext);
+			ExecEvalParamExec(state, op, econtext,
+							  RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -1059,20 +1170,27 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_PARAM_EXTERN)
 		{
 			/* out of line implementation: too large */
-			ExecEvalParamExtern(state, op, econtext);
+			ExecEvalParamExtern(state, op, econtext,
+								RELPTR_RESOLVE(data, op->result));
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_PARAM_CALLBACK)
 		{
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
 			/* allow an extension module to supply a PARAM_EXTERN value */
 			op->d.cparam.paramfunc(op->d.cparam.paramarg, econtext,
-								   &op->d.cparam.param, op->result);
+								   &op->d.cparam.param, opres);
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_CASE_TESTVAL)
 		{
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
 			/*
 			 * Normally upper parts of the expression tree have setup the
 			 * values to be returned here, but some parts of the system
@@ -1082,13 +1200,16 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			 * and this is unlikely to be performance sensitive enough to
 			 * worry about an extra branch.
 			 */
-			if (op->d.casetest.value)
+			if (op->d.casetest.value.ptr.allocno != 0)
 			{
-				*op->result = *op->d.casetest.value;
+				NullableDatum *caseval =
+					RELPTR_RESOLVE(data, op->d.casetest.value);
+
+				*opres = *caseval;
 			}
 			else
 			{
-				*op->result = econtext->caseValue;
+				*opres = econtext->caseValue;
 			}
 
 			EEO_NEXT();
@@ -1096,16 +1217,22 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_DOMAIN_TESTVAL)
 		{
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
 			/*
 			 * See EEOP_CASE_TESTVAL comment.
 			 */
-			if (op->d.casetest.value)
+			if (op->d.casetest.value.ptr.allocno != 0)
 			{
-				*op->result = *op->d.casetest.value;
+				NullableDatum *caseval =
+					RELPTR_RESOLVE(data, op->d.casetest.value);
+
+				*opres = *caseval;
 			}
 			else
 			{
-				*op->result = econtext->domainValue;
+				*opres = econtext->domainValue;
 			}
 
 			EEO_NEXT();
@@ -1113,21 +1240,27 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_MAKE_READONLY)
 		{
-			NullableDatum *roval = op->d.make_readonly.value;
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+			NullableDatum *roval =
+				RELPTR_RESOLVE(data, op->d.make_readonly.value);
 
 			/*
 			 * Force a varlena value that might be read multiple times to R/O
 			 */
 			if (!roval->isnull)
-				op->result->value =
+				opres->value =
 					MakeExpandedObjectReadOnlyInternal(roval->value);
-			op->result->isnull = roval->isnull;
+			opres->isnull = roval->isnull;
 
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_IOCOERCE)
 		{
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+
 			/*
 			 * Evaluate a CoerceViaIO node.  This can be quite a hot path, so
 			 * inline as much work as possible.  The source value is in our
@@ -1136,18 +1269,18 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			char	   *str;
 
 			/* call output function (similar to OutputFunctionCall) */
-			if (op->result->isnull)
+			if (opres->isnull)
 			{
 				/* output functions are not called on nulls */
 				str = NULL;
 			}
 			else
 			{
-				FunctionCallInfo fcinfo_out;
+				FunctionCallInfo fcinfo_out =
+					RELPTR_RESOLVE(data, op->d.iocoerce.fcinfo_data_out);
 				PGFunction fn_addr_out = op->d.iocoerce.fn_addr_out;
 
-				fcinfo_out = op->d.iocoerce.fcinfo_data_out;
-				fcinfo_out->args[0] = *op->result;
+				fcinfo_out->args[0] = *opres;
 
 				fcinfo_out->isnull = false;
 				str = DatumGetCString(fn_addr_out(fcinfo_out));
@@ -1159,28 +1292,28 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			/* call input function (similar to InputFunctionCall) */
 			if (!op->d.iocoerce.fn_strict_in || str != NULL)
 			{
-				FunctionCallInfo fcinfo_in;
+				FunctionCallInfo fcinfo_in =
+					RELPTR_RESOLVE(data, op->d.iocoerce.fcinfo_data_in);
 				PGFunction fn_addr_in = op->d.iocoerce.fn_addr_in;
 				Datum		d;
 
-				fcinfo_in = op->d.iocoerce.fcinfo_data_in;
 				fcinfo_in->args[0].value = PointerGetDatum(str);
-				fcinfo_in->args[0].isnull = op->result->isnull;
+				fcinfo_in->args[0].isnull = opres->isnull;
 				/* second and third arguments are already set up */
 
 				fcinfo_in->isnull = false;
 				d = fn_addr_in(fcinfo_in);
-				op->result->value = d;
+				opres->value = d;
 
 				/* Should get null result if and only if str is NULL */
 				if (str == NULL)
 				{
-					Assert(op->result->isnull);
+					Assert(opres->isnull);
 					Assert(fcinfo_in->isnull);
 				}
 				else
 				{
-					Assert(!op->result->isnull);
+					Assert(!opres->isnull);
 					Assert(!fcinfo_in->isnull);
 				}
 			}
@@ -1199,20 +1332,23 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			 * that function is strict.  Because the handling of nulls is
 			 * different, we can't just reuse EEOP_FUNCEXPR.
 			 */
-			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.func.fcinfo_data);
 
 			/* check function arguments for NULLness */
 			if (fcinfo->args[0].isnull && fcinfo->args[1].isnull)
 			{
 				/* Both NULL? Then is not distinct... */
-				op->result->value = BoolGetDatum(false);
-				op->result->isnull = false;
+				opres->value = BoolGetDatum(false);
+				opres->isnull = false;
 			}
 			else if (fcinfo->args[0].isnull || fcinfo->args[1].isnull)
 			{
 				/* Only one is NULL? Then is distinct... */
-				op->result->value = BoolGetDatum(true);
-				op->result->isnull = false;
+				opres->value = BoolGetDatum(true);
+				opres->isnull = false;
 			}
 			else
 			{
@@ -1222,8 +1358,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 				fcinfo->isnull = false;
 				eqresult = op->d.func.fn_addr(fcinfo);
 				/* Must invert result of "="; safe to do even if null */
-				op->result->value = BoolGetDatum(!DatumGetBool(eqresult));
-				op->result->isnull = fcinfo->isnull;
+				opres->value = BoolGetDatum(!DatumGetBool(eqresult));
+				opres->isnull = fcinfo->isnull;
 			}
 
 			EEO_NEXT();
@@ -1232,17 +1368,20 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		/* see EEOP_DISTINCT for comments, this is just inverted */
 		EEO_CASE(EEOP_NOT_DISTINCT)
 		{
-			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.func.fcinfo_data);
 
 			if (fcinfo->args[0].isnull && fcinfo->args[1].isnull)
 			{
-				op->result->value = BoolGetDatum(true);
-				op->result->isnull = false;
+				opres->value = BoolGetDatum(true);
+				opres->isnull = false;
 			}
 			else if (fcinfo->args[0].isnull || fcinfo->args[1].isnull)
 			{
-				op->result->value = BoolGetDatum(false);
-				op->result->isnull = false;
+				opres->value = BoolGetDatum(false);
+				opres->isnull = false;
 			}
 			else
 			{
@@ -1250,8 +1389,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 				fcinfo->isnull = false;
 				eqresult = op->d.func.fn_addr(fcinfo);
-				op->result->value = eqresult;
-				op->result->isnull = fcinfo->isnull;
+				opres->value = eqresult;
+				opres->isnull = fcinfo->isnull;
 			}
 
 			EEO_NEXT();
@@ -1262,7 +1401,10 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			/*
 			 * The arguments are already evaluated into fcinfo->args.
 			 */
-			FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.func.fcinfo_data);
 
 			/* if either argument is NULL they can't be equal */
 			if (!fcinfo->args[0].isnull && !fcinfo->args[1].isnull)
@@ -1275,14 +1417,14 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 				/* if the arguments are equal return null */
 				if (!fcinfo->isnull && DatumGetBool(result))
 				{
-					*op->result = NULL_DATUM;
+					*opres = NULL_DATUM;
 
 					EEO_NEXT();
 				}
 			}
 
 			/* Arguments aren't equal, so return the first one */
-			*op->result = fcinfo->args[0];
+			*opres = fcinfo->args[0];
 
 			EEO_NEXT();
 		}
@@ -1293,7 +1435,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			 * Doesn't seem worthwhile to have an inline implementation
 			 * efficiency-wise.
 			 */
-			ExecEvalSQLValueFunction(state, op);
+			ExecEvalSQLValueFunction(state, op,
+									 RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -1312,7 +1455,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			 * Doesn't seem worthwhile to have an inline implementation
 			 * efficiency-wise.
 			 */
-			ExecEvalNextValueExpr(state, op);
+			ExecEvalNextValueExpr(state, op,
+								  RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -1320,7 +1464,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_ARRAYEXPR)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalArrayExpr(state, op);
+			ExecEvalArrayExpr(state, op,
+							  RELPTR_RESOLVE(data, op->result),
+							  RELPTR_RESOLVE(data, op->d.arrayexpr.elements));
 
 			EEO_NEXT();
 		}
@@ -1328,14 +1474,16 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_ARRAYCOERCE_RELABEL)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalArrayCoerceRelabel(state, op);
+			ExecEvalArrayCoerceRelabel(state, op,
+									   RELPTR_RESOLVE(data, op->result));
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_ARRAYCOERCE_UNPACK)
 		{
 			/* too complex for an inline implementation */
-			if (ExecEvalArrayCoerceUnpack(state, op))
+			if (ExecEvalArrayCoerceUnpack(state, op,
+										  RELPTR_RESOLVE(data, op->result)))
 				EEO_NEXT(); /* already done */
 			EEO_JUMP(op->d.arraycoerce.jumpnext);
 		}
@@ -1343,7 +1491,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_ARRAYCOERCE_PACK)
 		{
 			/* too complex for an inline implementation */
-			if (ExecEvalArrayCoercePack(state, op))
+			if (ExecEvalArrayCoercePack(state, op,
+										RELPTR_RESOLVE(data, op->result)))
 				EEO_JUMP(op->d.arraycoerce.jumpnext); /* transform next element */
 			else
 				EEO_NEXT(); /* finished */
@@ -1352,36 +1501,41 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_ROW)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalRow(state, op);
+			ExecEvalRow(state, op,
+						RELPTR_RESOLVE(data, op->result),
+						RELPTR_RESOLVE(data, op->d.row.elements));
 
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_ROWCOMPARE_STEP)
 		{
-			FunctionCallInfo fcinfo = op->d.rowcompare_step.fcinfo_data;
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.rowcompare_step.fcinfo_data);
 			Datum		d;
 
 			/* force NULL result if strict fn and NULL input */
 			if (op->d.rowcompare_step.fn_strict &&
 				(fcinfo->args[0].isnull || fcinfo->args[1].isnull))
 			{
-				op->result->isnull = true;
+				opres->isnull = true;
 				EEO_JUMP(op->d.rowcompare_step.jumpnull);
 			}
 
 			/* Apply comparison function */
 			fcinfo->isnull = false;
 			d = op->d.rowcompare_step.fn_addr(fcinfo);
-			op->result->value = d;
-			op->result->isnull = fcinfo->isnull;
+			opres->value = d;
+			opres->isnull = fcinfo->isnull;
 
 			/* force NULL result if NULL function result */
 			if (fcinfo->isnull)
 				EEO_JUMP(op->d.rowcompare_step.jumpnull);
 
 			/* If unequal, no need to compare remaining columns */
-			if (DatumGetInt32(op->result->value) != 0)
+			if (DatumGetInt32(opres->value) != 0)
 				EEO_JUMP(op->d.rowcompare_step.jumpdone);
 
 			EEO_NEXT();
@@ -1389,24 +1543,26 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 		EEO_CASE(EEOP_ROWCOMPARE_FINAL)
 		{
-			int32		cmpresult = DatumGetInt32(op->result->value);
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
 			RowCompareType rctype = op->d.rowcompare_final.rctype;
+			int32		cmpresult = DatumGetInt32(opres->value);
 
-			op->result->isnull = false;
+			opres->isnull = false;
 			switch (rctype)
 			{
 					/* EQ and NE cases aren't allowed here */
 				case ROWCOMPARE_LT:
-					op->result->value = BoolGetDatum(cmpresult < 0);
+					opres->value = BoolGetDatum(cmpresult < 0);
 					break;
 				case ROWCOMPARE_LE:
-					op->result->value = BoolGetDatum(cmpresult <= 0);
+					opres->value = BoolGetDatum(cmpresult <= 0);
 					break;
 				case ROWCOMPARE_GE:
-					op->result->value = BoolGetDatum(cmpresult >= 0);
+					opres->value = BoolGetDatum(cmpresult >= 0);
 					break;
 				case ROWCOMPARE_GT:
-					op->result->value = BoolGetDatum(cmpresult > 0);
+					opres->value = BoolGetDatum(cmpresult > 0);
 					break;
 				default:
 					Assert(false);
@@ -1419,15 +1575,18 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_MINMAX)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalMinMax(state, op);
-
+			ExecEvalMinMax(state, op,
+						   RELPTR_RESOLVE(data, op->result),
+						   RELPTR_RESOLVE(data, op->d.minmax.arguments),
+						   RELPTR_RESOLVE(data, op->d.minmax.fcinfo_data));
 			EEO_NEXT();
 		}
 
 		EEO_CASE(EEOP_FIELDSELECT)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalFieldSelect(state, op, econtext);
+			ExecEvalFieldSelect(state, nonconst_op, econtext,
+								RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -1435,7 +1594,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_FIELDSTORE_DEFORM)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalFieldStoreDeForm(state, op, econtext);
+			ExecEvalFieldStoreDeForm(state, op, econtext,
+									 RELPTR_RESOLVE(data, op->result),
+									 RELPTR_RESOLVE(data, op->d.fieldstore.columns));
 
 			EEO_NEXT();
 		}
@@ -1443,7 +1604,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_FIELDSTORE_FORM)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalFieldStoreForm(state, op, econtext);
+			ExecEvalFieldStoreForm(state, op,
+								   RELPTR_RESOLVE(data, op->result),
+								   RELPTR_RESOLVE(data, op->d.fieldstore.columns));
 
 			EEO_NEXT();
 		}
@@ -1453,7 +1616,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			/* Process an array subscript */
 
 			/* too complex for an inline implementation */
-			if (ExecEvalSubscriptingRef(state, op))
+			if (ExecEvalSubscriptingRef(state, op,
+										RELPTR_RESOLVE(data, op->result),
+										RELPTR_RESOLVE(data, op->d.sbsref_subscript.subscript)))
 			{
 				EEO_NEXT();
 			}
@@ -1473,7 +1638,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			 */
 
 			/* too complex for an inline implementation */
-			ExecEvalSubscriptingRefOld(state, op);
+			ExecEvalSubscriptingRefOld(state, op,
+									   RELPTR_RESOLVE(data, op->result),
+									   RELPTR_RESOLVE(data, op->d.sbsref.prev));
 
 			EEO_NEXT();
 		}
@@ -1484,7 +1651,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_SBSREF_ASSIGN)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalSubscriptingRefAssign(state, op);
+			ExecEvalSubscriptingRefAssign(state, op,
+										  RELPTR_RESOLVE(data, op->result),
+										  RELPTR_RESOLVE(data, op->d.sbsref.replace));
 
 			EEO_NEXT();
 		}
@@ -1495,7 +1664,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_SBSREF_FETCH)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalSubscriptingRefFetch(state, op);
+			ExecEvalSubscriptingRefFetch(state, op,
+										 RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -1503,7 +1673,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_CONVERT_ROWTYPE)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalConvertRowtype(state, op, econtext);
+			ExecEvalConvertRowtype(state, nonconst_op, econtext,
+								   RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -1511,7 +1682,9 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_SCALARARRAYOP)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalScalarArrayOp(state, op);
+			ExecEvalScalarArrayOp(state, nonconst_op,
+								  RELPTR_RESOLVE(data, op->result),
+								  RELPTR_RESOLVE(data, op->d.scalararrayop.fcinfo_data));
 
 			EEO_NEXT();
 		}
@@ -1519,7 +1692,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_DOMAIN_NOTNULL)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalConstraintNotNull(state, op);
+			ExecEvalConstraintNotNull(state, op,
+									  RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -1527,7 +1701,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_DOMAIN_CHECK)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalConstraintCheck(state, op);
+			ExecEvalConstraintCheck(state, op,
+									RELPTR_RESOLVE(data, op->d.domaincheck.check));
 
 			EEO_NEXT();
 		}
@@ -1535,7 +1710,10 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_XMLEXPR)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalXmlExpr(state, op);
+			ExecEvalXmlExpr(state, op,
+							RELPTR_RESOLVE(data, op->result),
+							RELPTR_RESOLVE_MAYNULL(data, op->d.xmlexpr.args),
+							RELPTR_RESOLVE_MAYNULL(data, op->d.xmlexpr.named_args));
 
 			EEO_NEXT();
 		}
@@ -1546,11 +1724,13 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			 * Returns a Datum whose value is the precomputed aggregate value
 			 * found in the given expression context.
 			 */
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
 			AggrefExprState *aggref = op->d.aggref.astate;
 
 			Assert(econtext->ecxt_aggvalues != NULL);
 
-			*op->result = econtext->ecxt_aggvalues[aggref->aggno];
+			*opres = econtext->ecxt_aggvalues[aggref->aggno];
 
 			EEO_NEXT();
 		}
@@ -1558,7 +1738,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_GROUPING_FUNC)
 		{
 			/* too complex/uncommon for an inline implementation */
-			ExecEvalGroupingFunc(state, op);
+			ExecEvalGroupingFunc(state, op,
+								 RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -1568,11 +1749,13 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			/*
 			 * Like Aggref, just return a precomputed value from the econtext.
 			 */
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
 			WindowFuncExprState *wfunc = op->d.window_func.wfstate;
 
 			Assert(econtext->ecxt_aggvalues != NULL);
 
-			*op->result = econtext->ecxt_aggvalues[wfunc->wfuncno];
+			*opres = econtext->ecxt_aggvalues[wfunc->wfuncno];
 
 			EEO_NEXT();
 		}
@@ -1580,7 +1763,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_SUBPLAN)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalSubPlan(state, op, econtext);
+			ExecEvalSubPlan(state, op, econtext,
+							RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -1588,7 +1772,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_ALTERNATIVE_SUBPLAN)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalAlternativeSubPlan(state, op, econtext);
+			ExecEvalAlternativeSubPlan(state, op, econtext,
+									   RELPTR_RESOLVE(data, op->result));
 
 			EEO_NEXT();
 		}
@@ -1596,8 +1781,11 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		/* evaluate a strict aggregate deserialization function */
 		EEO_CASE(EEOP_AGG_STRICT_DESERIALIZE)
 		{
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.agg_deserialize.fcinfo_data);
+
 			/* Don't call a strict deserialization function with NULL input */
-			if (op->d.agg_deserialize.fcinfo_data->args[0].isnull)
+			if (fcinfo->args[0].isnull)
 				EEO_JUMP(op->d.agg_deserialize.jumpnull);
 
 			/* fallthrough */
@@ -1606,7 +1794,10 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		/* evaluate aggregate deserialization function (non-strict portion) */
 		EEO_CASE(EEOP_AGG_DESERIALIZE)
 		{
-			FunctionCallInfo fcinfo = op->d.agg_deserialize.fcinfo_data;
+			NullableDatum *opres =
+				RELPTR_RESOLVE(data, op->result);
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.agg_deserialize.fcinfo_data);
 			AggState   *aggstate = castNode(AggState, state->parent);
 			MemoryContext oldContext;
 
@@ -1616,8 +1807,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			 */
 			oldContext = MemoryContextSwitchTo(aggstate->tmpcontext->ecxt_per_tuple_memory);
 			fcinfo->isnull = false;
-			op->result->value = op->d.agg_deserialize.fn_addr(fcinfo);
-			op->result->isnull = fcinfo->isnull;
+			opres->value = op->d.agg_deserialize.fn_addr(fcinfo);
+			opres->isnull = fcinfo->isnull;
 			MemoryContextSwitchTo(oldContext);
 
 			EEO_NEXT();
@@ -1631,7 +1822,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		/* when checking more than one argument */
 		EEO_CASE(EEOP_AGG_STRICT_INPUT_CHECK_ARGS)
 		{
-			NullableDatum *args = op->d.agg_strict_input_check.args;
+			NullableDatum *args =
+				RELPTR_RESOLVE(data, op->d.agg_strict_input_check.args);
 			int			nargs = op->d.agg_strict_input_check.nargs;
 
 			Assert(nargs > 1);
@@ -1647,10 +1839,10 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		/* special case for just one argument */
 		EEO_CASE(EEOP_AGG_STRICT_INPUT_CHECK_ARGS_1)
 		{
-			NullableDatum *args = op->d.agg_strict_input_check.args;
-			PG_USED_FOR_ASSERTS_ONLY int nargs = op->d.agg_strict_input_check.nargs;
+			NullableDatum *args =
+				RELPTR_RESOLVE(data, op->d.agg_strict_input_check.args);
 
-			Assert(nargs == 1);
+			Assert(op->d.agg_strict_input_check.nargs == 1);
 
 			if (args[0].isnull)
 				EEO_JUMP(op->d.agg_strict_input_check.jumpnull);
@@ -1666,7 +1858,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			AggState   *aggstate = castNode(AggState, state->parent);
 			const AggStatePerCallContext *percall = op->d.agg_trans.percall;
-			FunctionCallInfo fcinfo = op->d.agg_trans.fcinfo_data;
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.agg_trans.trans_fcinfo);
 			AggStatePerGroup pergroup;
 
 			Assert(percall->pertrans->transtypeByVal);
@@ -1702,7 +1895,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			AggState   *aggstate = castNode(AggState, state->parent);
 			const AggStatePerCallContext *percall = op->d.agg_trans.percall;
-			FunctionCallInfo fcinfo = op->d.agg_trans.fcinfo_data;
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.agg_trans.trans_fcinfo);
 			AggStatePerGroup pergroup;
 
 			Assert(percall->pertrans->transtypeByVal);
@@ -1725,7 +1919,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			AggState   *aggstate = castNode(AggState, state->parent);
 			const AggStatePerCallContext *percall = op->d.agg_trans.percall;
-			FunctionCallInfo fcinfo = op->d.agg_trans.fcinfo_data;
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.agg_trans.trans_fcinfo);
 			AggStatePerGroup pergroup;
 
 			Assert(percall->pertrans->transtypeByVal);
@@ -1752,7 +1947,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			AggState   *aggstate = castNode(AggState, state->parent);
 			const AggStatePerCallContext *percall = op->d.agg_trans.percall;
-			FunctionCallInfo fcinfo = op->d.agg_trans.fcinfo_data;
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.agg_trans.trans_fcinfo);
 			AggStatePerGroup pergroup;
 
 			Assert(!percall->pertrans->transtypeByVal);
@@ -1783,7 +1979,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			AggState   *aggstate = castNode(AggState, state->parent);
 			const AggStatePerCallContext *percall = op->d.agg_trans.percall;
-			FunctionCallInfo fcinfo = op->d.agg_trans.fcinfo_data;
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.agg_trans.trans_fcinfo);
 			AggStatePerGroup pergroup;
 
 			Assert(!percall->pertrans->transtypeByVal);
@@ -1804,7 +2001,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			AggState   *aggstate = castNode(AggState, state->parent);
 			const AggStatePerCallContext *percall = op->d.agg_trans.percall;
-			FunctionCallInfo fcinfo = op->d.agg_trans.fcinfo_data;
+			FunctionCallInfo fcinfo =
+				RELPTR_RESOLVE(data, op->d.agg_trans.trans_fcinfo);
 			AggStatePerGroup pergroup;
 
 			Assert(!percall->pertrans->transtypeByVal);
@@ -1823,7 +2021,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_AGG_ORDERED_TRANS_DATUM)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalAggOrderedTransDatum(state, op, econtext);
+			ExecEvalAggOrderedTransDatum(state, op,
+										 RELPTR_RESOLVE(data, op->d.agg_trans_ordered.columns));
 
 			EEO_NEXT();
 		}
@@ -1832,7 +2031,8 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		EEO_CASE(EEOP_AGG_ORDERED_TRANS_TUPLE)
 		{
 			/* too complex for an inline implementation */
-			ExecEvalAggOrderedTransTuple(state, op, econtext);
+			ExecEvalAggOrderedTransTuple(state, op,
+										 RELPTR_RESOLVE(data, op->d.agg_trans_ordered.columns));
 
 			EEO_NEXT();
 		}
@@ -1888,7 +2088,7 @@ CheckExprStillValid(ExprState *state, ExprContext *econtext)
 
 	for (int i = 0; i < state->steps_final_len; i++)
 	{
-		ExprEvalStep *op = &state->steps[i];
+		const ExprEvalStep *op = &state->steps[i];
 
 		switch (ExecEvalStepOp(state, op))
 		{
@@ -1978,7 +2178,7 @@ CheckVarSlotCompatibility(TupleTableSlot *slot, int attnum, Oid vartype)
  * Verify that the slot is compatible with a EEOP_*_FETCHSOME operation.
  */
 static void
-CheckOpSlotCompatibility(ExprEvalStep *op, TupleTableSlot *slot)
+CheckOpSlotCompatibility(const ExprEvalStep *op, TupleTableSlot *slot)
 {
 #ifdef USE_ASSERT_CHECKING
 	/* there's nothing to check */
@@ -2070,7 +2270,7 @@ ShutdownTupleDescRef(Datum arg)
 static pg_attribute_always_inline Datum
 ExecJustVarImpl(ExprState *state, TupleTableSlot *slot, bool *isnull)
 {
-	ExprEvalStep *op = &state->steps[1];
+	const ExprEvalStep *op = &state->steps[1];
 	int			attnum = op->d.var.attnum + 1;
 
 	CheckOpSlotCompatibility(&state->steps[0], slot);
@@ -2108,7 +2308,7 @@ ExecJustScanVar(ExprState *state, ExprContext *econtext, bool *isnull)
 static pg_attribute_always_inline Datum
 ExecJustAssignVarImpl(ExprState *state, TupleTableSlot *inslot, bool *isnull)
 {
-	ExprEvalStep *op = &state->steps[1];
+	const ExprEvalStep *op = &state->steps[1];
 	int			attnum = op->d.assign_var.attnum + 1;
 	int			resultnum = op->d.assign_var.resultnum;
 	TupleTableSlot *outslot = state->resultslot;
@@ -2153,7 +2353,7 @@ ExecJustAssignScanVar(ExprState *state, ExprContext *econtext, bool *isnull)
 static Datum
 ExecJustConst(ExprState *state, ExprContext *econtext, bool *isnull)
 {
-	ExprEvalStep *op = &state->steps[0];
+	const ExprEvalStep *op = &state->steps[0];
 
 	*isnull = op->d.constval.value.isnull;
 	return op->d.constval.value.value;
@@ -2163,7 +2363,7 @@ ExecJustConst(ExprState *state, ExprContext *econtext, bool *isnull)
 static pg_attribute_always_inline Datum
 ExecJustVarVirtImpl(ExprState *state, TupleTableSlot *slot, bool *isnull)
 {
-	ExprEvalStep *op = &state->steps[0];
+	const ExprEvalStep *op = &state->steps[0];
 	int			attnum = op->d.var.attnum;
 
 	/*
@@ -2205,7 +2405,7 @@ ExecJustScanVarVirt(ExprState *state, ExprContext *econtext, bool *isnull)
 static pg_attribute_always_inline Datum
 ExecJustAssignVarVirtImpl(ExprState *state, TupleTableSlot *inslot, bool *isnull)
 {
-	ExprEvalStep *op = &state->steps[0];
+	const ExprEvalStep *op = &state->steps[0];
 	int			attnum = op->d.assign_var.attnum;
 	int			resultnum = op->d.assign_var.resultnum;
 	TupleTableSlot *outslot = state->resultslot;
@@ -2327,10 +2527,9 @@ ExecEvalStepOp(ExprState *state, const ExprEvalStep *op)
  * Evaluate EEOP_FUNCEXPR_FUSAGE
  */
 void
-ExecEvalFuncExprFusage(ExprState *state, ExprEvalStep *op,
-					   ExprContext *econtext)
+ExecEvalFuncExprFusage(ExprState *state, const ExprEvalStep *op,
+					   NullableDatum *opres, FunctionCallInfo fcinfo)
 {
-	FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
 	PgStat_FunctionCallUsage fcusage;
 	Datum		d;
 
@@ -2338,8 +2537,8 @@ ExecEvalFuncExprFusage(ExprState *state, ExprEvalStep *op,
 
 	fcinfo->isnull = false;
 	d = op->d.func.fn_addr(fcinfo);
-	op->result->value = d;
-	op->result->isnull = fcinfo->isnull;
+	opres->value = d;
+	opres->isnull = fcinfo->isnull;
 
 	pgstat_end_function_usage(&fcusage, true);
 }
@@ -2348,11 +2547,9 @@ ExecEvalFuncExprFusage(ExprState *state, ExprEvalStep *op,
  * Evaluate EEOP_FUNCEXPR_STRICT_FUSAGE
  */
 void
-ExecEvalFuncExprStrictFusage(ExprState *state, ExprEvalStep *op,
-							 ExprContext *econtext)
+ExecEvalFuncExprStrictFusage(ExprState *state, const ExprEvalStep *op,
+							 NullableDatum *opres, FunctionCallInfo fcinfo)
 {
-
-	FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
 	PgStat_FunctionCallUsage fcusage;
 	NullableDatum *args = fcinfo->args;
 	int			nargs = op->d.func.nargs;
@@ -2363,7 +2560,7 @@ ExecEvalFuncExprStrictFusage(ExprState *state, ExprEvalStep *op,
 	{
 		if (args[argno].isnull)
 		{
-			op->result->isnull = true;
+			opres->isnull = true;
 			return;
 		}
 	}
@@ -2372,8 +2569,8 @@ ExecEvalFuncExprStrictFusage(ExprState *state, ExprEvalStep *op,
 
 	fcinfo->isnull = false;
 	d = op->d.func.fn_addr(fcinfo);
-	op->result->value = d;
-	op->result->isnull = fcinfo->isnull;
+	opres->value = d;
+	opres->isnull = fcinfo->isnull;
 
 	pgstat_end_function_usage(&fcusage, true);
 }
@@ -2385,7 +2582,8 @@ ExecEvalFuncExprStrictFusage(ExprState *state, ExprEvalStep *op,
  * ecxt_param_exec_vals array, and can be accessed by array index.
  */
 void
-ExecEvalParamExec(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+ExecEvalParamExec(ExprState *state, const ExprEvalStep *op, ExprContext *econtext,
+				  NullableDatum *opres)
 {
 	ParamExecData *prm;
 
@@ -2397,8 +2595,8 @@ ExecEvalParamExec(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 		/* ExecSetParamPlan should have processed this param... */
 		Assert(prm->execPlan == NULL);
 	}
-	op->result->value = prm->value;
-	op->result->isnull = prm->isnull;
+	opres->value = prm->value;
+	opres->isnull = prm->isnull;
 }
 
 /*
@@ -2407,7 +2605,8 @@ ExecEvalParamExec(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
  * PARAM_EXTERN parameters must be sought in ecxt_param_list_info.
  */
 void
-ExecEvalParamExtern(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+ExecEvalParamExtern(ExprState *state, const ExprEvalStep *op, ExprContext *econtext,
+					NullableDatum *opres)
 {
 	ParamListInfo paramInfo = econtext->ecxt_param_list_info;
 	int			paramId = op->d.param.paramid;
@@ -2434,8 +2633,8 @@ ExecEvalParamExtern(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 								paramId,
 								format_type_be(prm->ptype),
 								format_type_be(op->d.param.paramtype))));
-			op->result->value = prm->value;
-			op->result->isnull = prm->isnull;
+			opres->value = prm->value;
+			opres->isnull = prm->isnull;
 			return;
 		}
 	}
@@ -2449,12 +2648,13 @@ ExecEvalParamExtern(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
  * Evaluate a SQLValueFunction expression.
  */
 void
-ExecEvalSQLValueFunction(ExprState *state, ExprEvalStep *op)
+ExecEvalSQLValueFunction(ExprState *state, const ExprEvalStep *op,
+						 NullableDatum *opres)
 {
 	LOCAL_FCINFO(fcinfo, 0);
 	SQLValueFunction *svf = op->d.sqlvaluefunction.svf;
 
-	op->result->isnull = false;
+	opres->isnull = false;
 
 	/*
 	 * Note: current_schema() can return NULL.  current_user() etc currently
@@ -2463,45 +2663,45 @@ ExecEvalSQLValueFunction(ExprState *state, ExprEvalStep *op)
 	switch (svf->op)
 	{
 		case SVFOP_CURRENT_DATE:
-			op->result->value = DateADTGetDatum(GetSQLCurrentDate());
+			opres->value = DateADTGetDatum(GetSQLCurrentDate());
 			break;
 		case SVFOP_CURRENT_TIME:
 		case SVFOP_CURRENT_TIME_N:
-			op->result->value = TimeTzADTPGetDatum(GetSQLCurrentTime(svf->typmod));
+			opres->value = TimeTzADTPGetDatum(GetSQLCurrentTime(svf->typmod));
 			break;
 		case SVFOP_CURRENT_TIMESTAMP:
 		case SVFOP_CURRENT_TIMESTAMP_N:
-			op->result->value = TimestampTzGetDatum(GetSQLCurrentTimestamp(svf->typmod));
+			opres->value = TimestampTzGetDatum(GetSQLCurrentTimestamp(svf->typmod));
 			break;
 		case SVFOP_LOCALTIME:
 		case SVFOP_LOCALTIME_N:
-			op->result->value = TimeADTGetDatum(GetSQLLocalTime(svf->typmod));
+			opres->value = TimeADTGetDatum(GetSQLLocalTime(svf->typmod));
 			break;
 		case SVFOP_LOCALTIMESTAMP:
 		case SVFOP_LOCALTIMESTAMP_N:
-			op->result->value = TimestampGetDatum(GetSQLLocalTimestamp(svf->typmod));
+			opres->value = TimestampGetDatum(GetSQLLocalTimestamp(svf->typmod));
 			break;
 		case SVFOP_CURRENT_ROLE:
 		case SVFOP_CURRENT_USER:
 		case SVFOP_USER:
 			InitFunctionCallInfoData(*fcinfo, NULL, 0, InvalidOid, NULL, NULL);
-			op->result->value = current_user(fcinfo);
-			op->result->isnull = fcinfo->isnull;
+			opres->value = current_user(fcinfo);
+			opres->isnull = fcinfo->isnull;
 			break;
 		case SVFOP_SESSION_USER:
 			InitFunctionCallInfoData(*fcinfo, NULL, 0, InvalidOid, NULL, NULL);
-			op->result->value = session_user(fcinfo);
-			op->result->isnull = fcinfo->isnull;
+			opres->value = session_user(fcinfo);
+			opres->isnull = fcinfo->isnull;
 			break;
 		case SVFOP_CURRENT_CATALOG:
 			InitFunctionCallInfoData(*fcinfo, NULL, 0, InvalidOid, NULL, NULL);
-			op->result->value = current_database(fcinfo);
-			op->result->isnull = fcinfo->isnull;
+			opres->value = current_database(fcinfo);
+			opres->isnull = fcinfo->isnull;
 			break;
 		case SVFOP_CURRENT_SCHEMA:
 			InitFunctionCallInfoData(*fcinfo, NULL, 0, InvalidOid, NULL, NULL);
-			op->result->value = current_schema(fcinfo);
-			op->result->isnull = fcinfo->isnull;
+			opres->value = current_schema(fcinfo);
+			opres->isnull = fcinfo->isnull;
 			break;
 	}
 }
@@ -2516,7 +2716,7 @@ ExecEvalSQLValueFunction(ExprState *state, ExprEvalStep *op)
  * table whose FDW doesn't handle it, and complain accordingly.
  */
 void
-ExecEvalCurrentOfExpr(ExprState *state, ExprEvalStep *op)
+ExecEvalCurrentOfExpr(ExprState *state, const ExprEvalStep *op)
 {
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -2527,65 +2727,68 @@ ExecEvalCurrentOfExpr(ExprState *state, ExprEvalStep *op)
  * Evaluate NextValueExpr.
  */
 void
-ExecEvalNextValueExpr(ExprState *state, ExprEvalStep *op)
+ExecEvalNextValueExpr(ExprState *state, const ExprEvalStep *op, NullableDatum *opres)
 {
 	int64		newval = nextval_internal(op->d.nextvalueexpr.seqid, false);
 
 	switch (op->d.nextvalueexpr.seqtypid)
 	{
 		case INT2OID:
-			op->result->value = Int16GetDatum((int16) newval);
+			opres->value = Int16GetDatum((int16) newval);
 			break;
 		case INT4OID:
-			op->result->value = Int32GetDatum((int32) newval);
+			opres->value = Int32GetDatum((int32) newval);
 			break;
 		case INT8OID:
-			op->result->value = Int64GetDatum((int64) newval);
+			opres->value = Int64GetDatum((int64) newval);
 			break;
 		default:
 			elog(ERROR, "unsupported sequence type %u",
 				 op->d.nextvalueexpr.seqtypid);
 	}
-	op->result->isnull = false;
+	opres->isnull = false;
 }
 
 /*
  * Evaluate NullTest / IS NULL for rows.
  */
 void
-ExecEvalRowNull(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+ExecEvalRowNull(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
+				NullableDatum *opres)
 {
-	ExecEvalRowNullInt(state, op, econtext, true);
+	ExecEvalRowNullInt(state, op, econtext, true, opres);
 }
 
 /*
  * Evaluate NullTest / IS NOT NULL for rows.
  */
 void
-ExecEvalRowNotNull(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+ExecEvalRowNotNull(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
+				   NullableDatum *opres)
 {
-	ExecEvalRowNullInt(state, op, econtext, false);
+	ExecEvalRowNullInt(state, op, econtext, false, opres);
 }
 
 /* Common code for IS [NOT] NULL on a row value */
 static void
 ExecEvalRowNullInt(ExprState *state, ExprEvalStep *op,
-				   ExprContext *econtext, bool checkisnull)
+				   ExprContext *econtext, bool checkisnull,
+				   NullableDatum *opres)
 {
-	Datum		value = op->result->value;
-	bool		isnull = op->result->isnull;
+	Datum		value = opres->value;
+	bool		isnull = opres->isnull;
 	HeapTupleHeader tuple;
 	Oid			tupType;
 	int32		tupTypmod;
 	TupleDesc	tupDesc;
 	HeapTupleData tmptup;
 
-	op->result->isnull = false;
+	opres->isnull = false;
 
 	/* NULL row variables are treated just as NULL scalar columns */
 	if (isnull)
 	{
-		op->result->value = BoolGetDatum(checkisnull);
+		opres->value = BoolGetDatum(checkisnull);
 		return;
 	}
 
@@ -2631,7 +2834,7 @@ ExecEvalRowNullInt(ExprState *state, ExprEvalStep *op,
 			/* null field disproves IS NOT NULL */
 			if (!checkisnull)
 			{
-				op->result->value = BoolGetDatum(false);
+				opres->value = BoolGetDatum(false);
 				return;
 			}
 		}
@@ -2640,13 +2843,13 @@ ExecEvalRowNullInt(ExprState *state, ExprEvalStep *op,
 			/* non-null field disproves IS NULL */
 			if (checkisnull)
 			{
-				op->result->value = BoolGetDatum(false);
+				opres->value = BoolGetDatum(false);
 				return;
 			}
 		}
 	}
 
-	op->result->value = BoolGetDatum(true);
+	opres->value = BoolGetDatum(true);
 }
 
 /*
@@ -2656,7 +2859,8 @@ ExecEvalRowNullInt(ExprState *state, ExprEvalStep *op,
  * into op->d.arrayexpr.elemvalues[]/elemnulls[].
  */
 void
-ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)
+ExecEvalArrayExpr(ExprState *state, const ExprEvalStep *op,
+				  NullableDatum *opres, NullableDatum *elements)
 {
 	ArrayType  *result;
 	Oid			element_type = op->d.arrayexpr.elemtype;
@@ -2666,7 +2870,7 @@ ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)
 	int			lbs[MAXDIM];
 
 	/* Set non-null as default */
-	op->result->isnull = false;
+	opres->isnull = false;
 
 	if (!op->d.arrayexpr.multidims)
 	{
@@ -2677,8 +2881,8 @@ ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)
 
 		for (int i = 0; i < nelems; i++)
 		{
-			dvalues[i] = op->d.arrayexpr.elements[i].value;
-			dnulls[i] = op->d.arrayexpr.elements[i].isnull;
+			dvalues[i] = elements[i].value;
+			dnulls[i] = elements[i].isnull;
 		}
 
 		/* setup for 1-D array of the given length */
@@ -2727,7 +2931,7 @@ ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)
 			ArrayType  *array;
 			int			this_ndims;
 
-			arrayval = &op->d.arrayexpr.elements[elemoff];
+			arrayval = &elements[elemoff];
 
 			/* temporarily ignore null subarrays */
 			if (arrayval->isnull)
@@ -2809,7 +3013,7 @@ ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)
 		{
 			if (ndims == 0)		/* didn't find any nonempty array */
 			{
-				op->result->value =
+				opres->value =
 					PointerGetDatum(construct_empty_array(element_type));
 				return;
 			}
@@ -2861,23 +3065,24 @@ ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)
 		}
 	}
 
-	op->result->value = PointerGetDatum(result);
+	opres->value = PointerGetDatum(result);
 }
 
 void
-ExecEvalArrayCoerceRelabel(ExprState *state, const ExprEvalStep *op)
+ExecEvalArrayCoerceRelabel(ExprState *state, const ExprEvalStep *op,
+						   NullableDatum *opres)
 {
 	/* NULL array -> NULL result */
-	if (op->result->isnull)
+	if (opres->isnull)
 		return;
 	else
 	{
 		/* Detoast input array if necessary, and copy in any case */
-		Datum		arraydatum = op->result->value;
+		Datum		arraydatum = opres->value;
 		ArrayType  *array = DatumGetArrayTypePCopy(arraydatum);
 
 		ARR_ELEMTYPE(array) = op->d.arraycoerce.resultelemtype;
-		op->result->value = PointerGetDatum(array);
+		opres->value = PointerGetDatum(array);
 		return;
 	}
 }
@@ -2888,15 +3093,16 @@ ExecEvalArrayCoerceRelabel(ExprState *state, const ExprEvalStep *op)
  * Source array is in step's result variable.
  */
 bool
-ExecEvalArrayCoerceUnpack(ExprState *state, const ExprEvalStep *op)
+ExecEvalArrayCoerceUnpack(ExprState *state, const ExprEvalStep *op,
+						  NullableDatum *opres)
 {
 	/* NULL array -> NULL result */
-	if (op->result->isnull)
+	if (opres->isnull)
 		return false;
 
-	return array_map_unpack(op->result->value,
+	return array_map_unpack(opres->value,
 							op->d.arraycoerce.amstate,
-							op->result);
+							opres);
 }
 
 
@@ -2906,11 +3112,12 @@ ExecEvalArrayCoerceUnpack(ExprState *state, const ExprEvalStep *op)
  * Source array is in step's result variable.
  */
 bool
-ExecEvalArrayCoercePack(ExprState *state, const ExprEvalStep *op)
+ExecEvalArrayCoercePack(ExprState *state, const ExprEvalStep *op,
+						NullableDatum *opres)
 {
 	return array_map_pack(op->d.arraycoerce.resultelemtype,
 						  op->d.arraycoerce.amstate,
-						  op->result);
+						  opres);
 }
 
 /*
@@ -2920,16 +3127,17 @@ ExecEvalArrayCoercePack(ExprState *state, const ExprEvalStep *op)
  * op->d.row.elemvalues[]/elemnulls[].
  */
 void
-ExecEvalRow(ExprState *state, ExprEvalStep *op)
+ExecEvalRow(ExprState *state, const ExprEvalStep *op,
+			NullableDatum *opres, NullableDatum *elements)
 {
 	HeapTuple	tuple;
 
 	/* build tuple from evaluated field values */
 	tuple = heap_form_tuple_s(op->d.row.tupdesc,
-							  op->d.row.elements);
+							  elements);
 
-	op->result->value = HeapTupleGetDatum(tuple);
-	op->result->isnull = false;
+	opres->value = HeapTupleGetDatum(tuple);
+	opres->isnull = false;
 }
 
 /*
@@ -2939,10 +3147,10 @@ ExecEvalRow(ExprState *state, ExprEvalStep *op)
  * op->d.minmax.values[]/nulls[].
  */
 void
-ExecEvalMinMax(ExprState *state, ExprEvalStep *op)
+ExecEvalMinMax(ExprState *state, const ExprEvalStep *op,
+			   NullableDatum *opres, NullableDatum *args,
+			   FunctionCallInfo fcinfo)
 {
-	NullableDatum *args = op->d.minmax.arguments;
-	FunctionCallInfo fcinfo = op->d.minmax.fcinfo_data;
 	MinMaxOp	operator = op->d.minmax.op;
 	PGFunction	fn_addr = op->d.minmax.fn_addr;
 
@@ -2951,7 +3159,7 @@ ExecEvalMinMax(ExprState *state, ExprEvalStep *op)
 	Assert(fcinfo->args[1].isnull == false);
 
 	/* default to null result */
-	op->result->isnull = true;
+	opres->isnull = true;
 
 	for (int off = 0; off < op->d.minmax.nelems; off++)
 	{
@@ -2959,17 +3167,17 @@ ExecEvalMinMax(ExprState *state, ExprEvalStep *op)
 		if (args[off].isnull)
 			continue;
 
-		if (op->result->isnull)
+		if (opres->isnull)
 		{
 			/* first nonnull input, adopt value */
-			*op->result = args[off];
+			*opres = args[off];
 		}
 		else
 		{
 			int			cmpresult;
 
 			/* apply comparison function */
-			fcinfo->args[0].value = op->result->value;
+			fcinfo->args[0].value = opres->value;
 			fcinfo->args[1].value = args[off].value;
 
 			fcinfo->isnull = false;
@@ -2978,9 +3186,9 @@ ExecEvalMinMax(ExprState *state, ExprEvalStep *op)
 				continue;
 
 			if (cmpresult > 0 && operator == IS_LEAST)
-				op->result->value = args[off].value;
+				opres->value = args[off].value;
 			else if (cmpresult < 0 && operator == IS_GREATEST)
-				op->result->value = args[off].value;
+				opres->value = args[off].value;
 		}
 	}
 }
@@ -2991,7 +3199,8 @@ ExecEvalMinMax(ExprState *state, ExprEvalStep *op)
  * Source record is in step's result variable.
  */
 void
-ExecEvalFieldSelect(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+ExecEvalFieldSelect(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
+					NullableDatum *opres)
 {
 	AttrNumber	fieldnum = op->d.fieldselect.fieldnum;
 	Datum		tupDatum;
@@ -3003,10 +3212,10 @@ ExecEvalFieldSelect(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 	HeapTupleData tmptup;
 
 	/* NULL record -> NULL result */
-	if (op->result->isnull)
+	if (opres->isnull)
 		return;
 
-	tupDatum = op->result->value;
+	tupDatum = opres->value;
 
 	/* We can special-case expanded records for speed */
 	if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(tupDatum)))
@@ -3034,7 +3243,7 @@ ExecEvalFieldSelect(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 		/* Check for dropped column, and force a NULL result if so */
 		if (attr->attisdropped)
 		{
-			op->result->isnull = true;
+			opres->isnull = true;
 			return;
 		}
 
@@ -3049,8 +3258,8 @@ ExecEvalFieldSelect(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 							   format_type_be(op->d.fieldselect.resulttype))));
 
 		/* extract the field */
-		op->result->value = expanded_record_get_field(erh, fieldnum,
-													  &op->result->isnull);
+		opres->value = expanded_record_get_field(erh, fieldnum,
+													  &opres->isnull);
 	}
 	else
 	{
@@ -3081,7 +3290,7 @@ ExecEvalFieldSelect(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 		/* Check for dropped column, and force a NULL result if so */
 		if (attr->attisdropped)
 		{
-			op->result->isnull = true;
+			opres->isnull = true;
 			return;
 		}
 
@@ -3100,10 +3309,10 @@ ExecEvalFieldSelect(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 		tmptup.t_data = tuple;
 
 		/* extract the field */
-		op->result->value = heap_getattr(&tmptup,
+		opres->value = heap_getattr(&tmptup,
 										 fieldnum,
 										 tupDesc,
-										 &op->result->isnull);
+										 &opres->isnull);
 	}
 }
 
@@ -3117,7 +3326,8 @@ ExecEvalFieldSelect(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
  * Source record is in step's result variable.
  */
 void
-ExecEvalFieldStoreDeForm(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+ExecEvalFieldStoreDeForm(ExprState *state, const ExprEvalStep *op, ExprContext *econtext,
+						 NullableDatum *opres, NullableDatum *columns)
 {
 	TupleDesc	tupDesc;
 
@@ -3130,11 +3340,11 @@ ExecEvalFieldStoreDeForm(ExprState *state, ExprEvalStep *op, ExprContext *econte
 		elog(ERROR, "too many columns in composite type %u",
 			 op->d.fieldstore.fstore->resulttype);
 
-	if (op->result->isnull)
+	if (opres->isnull)
 	{
 		/* Convert null input tuple into an all-nulls row */
 		for (int i = 0; i < op->d.fieldstore.ncolumns; i++)
-			op->d.fieldstore.columns[i].isnull = true;
+			columns[i].isnull = true;
 	}
 	else
 	{
@@ -3142,7 +3352,7 @@ ExecEvalFieldStoreDeForm(ExprState *state, ExprEvalStep *op, ExprContext *econte
 		 * heap_deform_tuple needs a HeapTuple not a bare HeapTupleHeader. We
 		 * set all the fields in the struct just in case.
 		 */
-		Datum		tupDatum = op->result->value;
+		Datum		tupDatum = opres->value;
 		HeapTupleHeader tuphdr;
 		HeapTupleData tmptup;
 
@@ -3152,8 +3362,7 @@ ExecEvalFieldStoreDeForm(ExprState *state, ExprEvalStep *op, ExprContext *econte
 		tmptup.t_tableOid = InvalidOid;
 		tmptup.t_data = tuphdr;
 
-		heap_deform_tuple_s(&tmptup, tupDesc,
-							op->d.fieldstore.columns);
+		heap_deform_tuple_s(&tmptup, tupDesc, columns);
 	}
 }
 
@@ -3162,16 +3371,17 @@ ExecEvalFieldStoreDeForm(ExprState *state, ExprEvalStep *op, ExprContext *econte
  * FieldStore expression has been evaluated.
  */
 void
-ExecEvalFieldStoreForm(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+ExecEvalFieldStoreForm(ExprState *state, const ExprEvalStep *op,
+					   NullableDatum *opres, NullableDatum *columns)
 {
 	HeapTuple	tuple;
 
 	/* argdesc should already be valid from the DeForm step */
 	tuple = heap_form_tuple_s(*op->d.fieldstore.argdesc,
-							  op->d.fieldstore.columns);
+							  columns);
 
-	op->result->value = HeapTupleGetDatum(tuple);
-	op->result->isnull = false;
+	opres->value = HeapTupleGetDatum(tuple);
+	opres->isnull = false;
 }
 
 /*
@@ -3186,20 +3396,21 @@ ExecEvalFieldStoreForm(ExprState *state, ExprEvalStep *op, ExprContext *econtext
  * lowerindex[] for use later.
  */
 bool
-ExecEvalSubscriptingRef(ExprState *state, ExprEvalStep *op)
+ExecEvalSubscriptingRef(ExprState *state, const ExprEvalStep *op,
+						NullableDatum *opres, NullableDatum *subscript)
 {
 	SubscriptingRefState *sbsrefstate = op->d.sbsref_subscript.state;
 	int		   *indexes;
 	int			off;
 
 	/* If any index expr yields NULL, result is NULL or error */
-	if (sbsrefstate->subscript.isnull)
+	if (subscript->isnull)
 	{
 		if (sbsrefstate->isassignment)
 			ereport(ERROR,
 					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 					 errmsg("array subscript in assignment must not be null")));
-		op->result->isnull = true;
+		opres->isnull = true;
 		return false;
 	}
 
@@ -3210,7 +3421,7 @@ ExecEvalSubscriptingRef(ExprState *state, ExprEvalStep *op)
 		indexes = sbsrefstate->lowerindex;
 	off = op->d.sbsref_subscript.off;
 
-	indexes[off] = DatumGetInt32(sbsrefstate->subscript.value);
+	indexes[off] = DatumGetInt32(subscript->value);
 
 	return true;
 }
@@ -3221,38 +3432,39 @@ ExecEvalSubscriptingRef(ExprState *state, ExprEvalStep *op)
  * Source container is in step's result variable.
  */
 void
-ExecEvalSubscriptingRefFetch(ExprState *state, ExprEvalStep *op)
+ExecEvalSubscriptingRefFetch(ExprState *state, const ExprEvalStep *op,
+							 NullableDatum *opres)
 {
 	SubscriptingRefState *sbsrefstate = op->d.sbsref.state;
 
 	/* Should not get here if source container (or any subscript) is null */
-	Assert(!op->result->isnull);
+	Assert(!opres->isnull);
 
 	if (sbsrefstate->numlower == 0)
 	{
 		/* Scalar case */
-		op->result->value = array_get_element(op->result->value,
-											  sbsrefstate->numupper,
-											  sbsrefstate->upperindex,
-											  sbsrefstate->refattrlength,
-											  sbsrefstate->refelemlength,
-											  sbsrefstate->refelembyval,
-											  sbsrefstate->refelemalign,
-											  &op->result->isnull);
+		opres->value = array_get_element(opres->value,
+										 sbsrefstate->numupper,
+										 sbsrefstate->upperindex,
+										 sbsrefstate->refattrlength,
+										 sbsrefstate->refelemlength,
+										 sbsrefstate->refelembyval,
+										 sbsrefstate->refelemalign,
+										 &opres->isnull);
 	}
 	else
 	{
 		/* Slice case */
-		op->result->value = array_get_slice(op->result->value,
-											sbsrefstate->numupper,
-											sbsrefstate->upperindex,
-											sbsrefstate->lowerindex,
-											sbsrefstate->upperprovided,
-											sbsrefstate->lowerprovided,
-											sbsrefstate->refattrlength,
-											sbsrefstate->refelemlength,
-											sbsrefstate->refelembyval,
-											sbsrefstate->refelemalign);
+		opres->value = array_get_slice(opres->value,
+									   sbsrefstate->numupper,
+									   sbsrefstate->upperindex,
+									   sbsrefstate->lowerindex,
+									   sbsrefstate->upperprovided,
+									   sbsrefstate->lowerprovided,
+									   sbsrefstate->refattrlength,
+									   sbsrefstate->refelemlength,
+									   sbsrefstate->refelembyval,
+									   sbsrefstate->refelemalign);
 	}
 }
 
@@ -3263,34 +3475,35 @@ ExecEvalSubscriptingRefFetch(ExprState *state, ExprEvalStep *op)
  * SubscriptingRefState's prevvalue/prevnull fields.
  */
 void
-ExecEvalSubscriptingRefOld(ExprState *state, ExprEvalStep *op)
+ExecEvalSubscriptingRefOld(ExprState *state, const ExprEvalStep *op,
+						   NullableDatum *opres, NullableDatum *prev)
 {
 	SubscriptingRefState *sbsrefstate = op->d.sbsref.state;
 
-	if (op->result->isnull)
+	if (opres->isnull)
 	{
 		/* whole array is null, so any element or slice is too */
-		sbsrefstate->prev = NULL_DATUM;
+		*prev = NULL_DATUM;
 	}
 	else if (sbsrefstate->numlower == 0)
 	{
 		/* Scalar case */
-		sbsrefstate->prev.value =
-			array_get_element(op->result->value,
+		prev->value =
+			array_get_element(opres->value,
 							  sbsrefstate->numupper,
 							  sbsrefstate->upperindex,
 							  sbsrefstate->refattrlength,
 							  sbsrefstate->refelemlength,
 							  sbsrefstate->refelembyval,
 							  sbsrefstate->refelemalign,
-							  &sbsrefstate->prev.isnull);
+							  &prev->isnull);
 	}
 	else
 	{
 		/* Slice case */
 		/* this is currently unreachable */
-		sbsrefstate->prev.value =
-			array_get_slice(op->result->value,
+		prev->value =
+			array_get_slice(opres->value,
 							sbsrefstate->numupper,
 							sbsrefstate->upperindex,
 							sbsrefstate->lowerindex,
@@ -3300,7 +3513,7 @@ ExecEvalSubscriptingRefOld(ExprState *state, ExprEvalStep *op)
 							sbsrefstate->refelemlength,
 							sbsrefstate->refelembyval,
 							sbsrefstate->refelemalign);
-		sbsrefstate->prev.isnull = false;
+		prev->isnull = false;
 	}
 }
 
@@ -3311,9 +3524,11 @@ ExecEvalSubscriptingRefOld(ExprState *state, ExprEvalStep *op)
  * SubscriptingRefState's replacevalue/replacenull.
  */
 void
-ExecEvalSubscriptingRefAssign(ExprState *state, ExprEvalStep *op)
+ExecEvalSubscriptingRefAssign(ExprState *state, const ExprEvalStep *op,
+							  NullableDatum *opres,
+							  NullableDatum *replace)
 {
-	SubscriptingRefState *sbsrefstate = op->d.sbsref_subscript.state;
+	SubscriptingRefState *sbsrefstate = op->d.sbsref.state;
 
 	/*
 	 * For an assignment to a fixed-length container type, both the original
@@ -3322,7 +3537,7 @@ ExecEvalSubscriptingRefAssign(ExprState *state, ExprEvalStep *op)
 	 */
 	if (sbsrefstate->refattrlength > 0)
 	{
-		if (op->result->isnull || sbsrefstate->replace.isnull)
+		if (opres->isnull || replace->isnull)
 			return;
 	}
 
@@ -3332,21 +3547,21 @@ ExecEvalSubscriptingRefAssign(ExprState *state, ExprEvalStep *op)
 	 * element will result in a singleton array value.  It does not matter
 	 * whether the new element is NULL.
 	 */
-	if (op->result->isnull)
+	if (opres->isnull)
 	{
-		op->result->value = PointerGetDatum(construct_empty_array(sbsrefstate->refelemtype));
-		op->result->isnull = false;
+		opres->value = PointerGetDatum(construct_empty_array(sbsrefstate->refelemtype));
+		opres->isnull = false;
 	}
 
 	if (sbsrefstate->numlower == 0)
 	{
 		/* Scalar case */
-		op->result->value =
-			array_set_element(op->result->value,
+		opres->value =
+			array_set_element(opres->value,
 							  sbsrefstate->numupper,
 							  sbsrefstate->upperindex,
-							  sbsrefstate->replace.value,
-							  sbsrefstate->replace.isnull,
+							  replace->value,
+							  replace->isnull,
 							  sbsrefstate->refattrlength,
 							  sbsrefstate->refelemlength,
 							  sbsrefstate->refelembyval,
@@ -3355,15 +3570,15 @@ ExecEvalSubscriptingRefAssign(ExprState *state, ExprEvalStep *op)
 	else
 	{
 		/* Slice case */
-		op->result->value =
-			array_set_slice(op->result->value,
+		opres->value =
+			array_set_slice(opres->value,
 							sbsrefstate->numupper,
 							sbsrefstate->upperindex,
 							sbsrefstate->lowerindex,
 							sbsrefstate->upperprovided,
 							sbsrefstate->lowerprovided,
-							sbsrefstate->replace.value,
-							sbsrefstate->replace.isnull,
+							replace->value,
+							replace->isnull,
 							sbsrefstate->refattrlength,
 							sbsrefstate->refelemlength,
 							sbsrefstate->refelembyval,
@@ -3378,7 +3593,8 @@ ExecEvalSubscriptingRefAssign(ExprState *state, ExprEvalStep *op)
  * Source record is in step's result variable.
  */
 void
-ExecEvalConvertRowtype(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+ExecEvalConvertRowtype(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
+					   NullableDatum *opres)
 {
 	ConvertRowtypeExpr *convert = op->d.convert_rowtype.convert;
 	HeapTuple	result;
@@ -3388,10 +3604,10 @@ ExecEvalConvertRowtype(ExprState *state, ExprEvalStep *op, ExprContext *econtext
 				outdesc;
 
 	/* NULL in -> NULL out */
-	if (op->result->isnull)
+	if (opres->isnull)
 		return;
 
-	tuple = DatumGetHeapTupleHeader(op->result->value);
+	tuple = DatumGetHeapTupleHeader(opres->value);
 
 	/* Lookup tupdescs if first time through or after rescan */
 	if (op->d.convert_rowtype.indesc == NULL)
@@ -3445,7 +3661,7 @@ ExecEvalConvertRowtype(ExprState *state, ExprEvalStep *op, ExprContext *econtext
 		/* Full conversion with attribute rearrangement needed */
 		result = execute_attr_map_tuple(&tmptup, op->d.convert_rowtype.map);
 		/* Result already has appropriate composite-datum header fields */
-		op->result->value = HeapTupleGetDatum(result);
+		opres->value = HeapTupleGetDatum(result);
 	}
 	else
 	{
@@ -3459,7 +3675,7 @@ ExecEvalConvertRowtype(ExprState *state, ExprEvalStep *op, ExprContext *econtext
 		 * datum, so it shouldn't contain any.  So heap_copy_tuple_as_datum()
 		 * is overkill here, but its check for external fields is cheap.
 		 */
-		op->result->value = heap_copy_tuple_as_datum(&tmptup, outdesc);
+		opres->value = heap_copy_tuple_as_datum(&tmptup, outdesc);
 	}
 }
 
@@ -3474,9 +3690,9 @@ ExecEvalConvertRowtype(ExprState *state, ExprEvalStep *op, ExprContext *econtext
  * we short-circuit as soon as the result is known.
  */
 void
-ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
+ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op,
+					  NullableDatum *opres, FunctionCallInfo fcinfo)
 {
-	FunctionCallInfo fcinfo = op->d.scalararrayop.fcinfo_data;
 	bool		useOr = op->d.scalararrayop.useOr;
 	bool		strictfunc = op->d.scalararrayop.fn_strict;
 	ArrayType  *arr;
@@ -3494,11 +3710,11 @@ ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
 	 * If the array is NULL then we return NULL --- it's not very meaningful
 	 * to do anything else, even if the operator isn't strict.
 	 */
-	if (op->result->isnull)
+	if (opres->isnull)
 		return;
 
 	/* Else okay to fetch and detoast the array */
-	arr = DatumGetArrayTypeP(op->result->value);
+	arr = DatumGetArrayTypeP(opres->value);
 
 	/*
 	 * If the array is empty, we return either FALSE or TRUE per the useOr
@@ -3509,8 +3725,8 @@ ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
 	nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
 	if (nitems <= 0)
 	{
-		op->result->value = BoolGetDatum(!useOr);
-		op->result->isnull = false;
+		opres->value = BoolGetDatum(!useOr);
+		opres->isnull = false;
 		return;
 	}
 
@@ -3520,7 +3736,7 @@ ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
 	 */
 	if (fcinfo->args[0].isnull && strictfunc)
 	{
-		op->result->isnull = true;
+		opres->isnull = true;
 		return;
 	}
 
@@ -3616,17 +3832,17 @@ ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
 		}
 	}
 
-	op->result->value = result;
-	op->result->isnull = resultnull;
+	opres->value = result;
+	opres->isnull = resultnull;
 }
 
 /*
  * Evaluate a NOT NULL domain constraint.
  */
 void
-ExecEvalConstraintNotNull(ExprState *state, ExprEvalStep *op)
+ExecEvalConstraintNotNull(ExprState *state, const ExprEvalStep *op, NullableDatum *opres)
 {
-	if (op->result->isnull)
+	if (opres->isnull)
 		ereport(ERROR,
 				(errcode(ERRCODE_NOT_NULL_VIOLATION),
 				 errmsg("domain %s does not allow null values",
@@ -3638,10 +3854,10 @@ ExecEvalConstraintNotNull(ExprState *state, ExprEvalStep *op)
  * Evaluate a CHECK domain constraint.
  */
 void
-ExecEvalConstraintCheck(ExprState *state, ExprEvalStep *op)
+ExecEvalConstraintCheck(ExprState *state, const ExprEvalStep *op, NullableDatum *check)
 {
-	if (!op->d.domaincheck.check->isnull &&
-		!DatumGetBool(op->d.domaincheck.check->value))
+	if (!check->isnull &&
+		!DatumGetBool(check->value))
 		ereport(ERROR,
 				(errcode(ERRCODE_CHECK_VIOLATION),
 				 errmsg("value for domain %s violates check constraint \"%s\"",
@@ -3658,18 +3874,19 @@ ExecEvalConstraintCheck(ExprState *state, ExprEvalStep *op)
  * and/or argvalue/argnull arrays.
  */
 void
-ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
+ExecEvalXmlExpr(ExprState *state, const ExprEvalStep *op,
+				NullableDatum *opres, NullableDatum *args,
+				NullableDatum *named_args)
 {
 	XmlExpr    *xexpr = op->d.xmlexpr.xexpr;
 	Datum		value;
 
-	*op->result = NULL_DATUM;	/* until we get a result */
+	*opres = NULL_DATUM;	/* until we get a result */
 
 	switch (xexpr->op)
 	{
 		case IS_XMLCONCAT:
 			{
-				NullableDatum *args = op->d.xmlexpr.args;
 				List	   *values = NIL;
 
 				for (int i = 0; i < list_length(xexpr->args); i++)
@@ -3680,15 +3897,14 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 
 				if (values != NIL)
 				{
-					op->result->value = PointerGetDatum(xmlconcat(values));
-					op->result->isnull = false;
+					opres->value = PointerGetDatum(xmlconcat(values));
+					opres->isnull = false;
 				}
 			}
 			break;
 
 		case IS_XMLFOREST:
 			{
-				NullableDatum  *args = op->d.xmlexpr.named_args;
 				StringInfoData buf;
 				ListCell   *lc;
 				ListCell   *lc2;
@@ -3702,25 +3918,25 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 					Expr	   *e = (Expr *) lfirst(lc);
 					char	   *argname = strVal(lfirst(lc2));
 
-					if (!args[i].isnull)
+					if (!named_args[i].isnull)
 					{
-						value = args[i].value;
+						value = named_args[i].value;
 						appendStringInfo(&buf, "<%s>%s</%s>",
 										 argname,
 										 map_sql_value_to_xml_value(value,
 																	exprType((Node *) e), true),
 										 argname);
-						op->result->isnull = false;
+						opres->isnull = false;
 					}
 					i++;
 				}
 
-				if (!op->result->isnull)
+				if (!opres->isnull)
 				{
 					text	   *result;
 
 					result = cstring_to_text_with_len(buf.data, buf.len);
-					op->result->value = PointerGetDatum(result);
+					opres->value = PointerGetDatum(result);
 				}
 
 				pfree(buf.data);
@@ -3728,16 +3944,13 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 			break;
 
 		case IS_XMLELEMENT:
-			op->result->value = PointerGetDatum(
-				xmlelement(xexpr,
-						   op->d.xmlexpr.named_args,
-						   op->d.xmlexpr.args));
-			op->result->isnull = false;
+			opres->value =
+				PointerGetDatum(xmlelement(xexpr, named_args, args));
+			opres->isnull = false;
 			break;
 
 		case IS_XMLPARSE:
 			{
-				NullableDatum *args = op->d.xmlexpr.args;
 				text	   *data;
 				bool		preserve_whitespace;
 
@@ -3754,11 +3967,11 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 				value = args[1].value;
 				preserve_whitespace = DatumGetBool(value);
 
-				op->result->value = PointerGetDatum(
+				opres->value = PointerGetDatum(
 					xmlparse(data,
 							 xexpr->xmloption,
 							 preserve_whitespace));
-				op->result->isnull = false;
+				opres->isnull = false;
 			}
 			break;
 
@@ -3772,11 +3985,11 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 
 				if (xexpr->args)
 				{
-					isnull = op->d.xmlexpr.args[0].isnull;
+					isnull = args[0].isnull;
 					if (isnull)
 						arg = NULL;
 					else
-						arg = DatumGetTextPP(op->d.xmlexpr.args[0].value);
+						arg = DatumGetTextPP(args[0].value);
 				}
 				else
 				{
@@ -3784,17 +3997,16 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 					isnull = false;
 				}
 
-				op->result->value = PointerGetDatum(
+				opres->value = PointerGetDatum(
 					xmlpi(xexpr->name,
 						  arg,
 						  isnull,
-						  &op->result->isnull));
+						  &opres->isnull));
 			}
 			break;
 
 		case IS_XMLROOT:
 			{
-				NullableDatum *args = op->d.xmlexpr.args;
 				xmltype    *data;
 				text	   *version;
 				int			standalone;
@@ -3814,18 +4026,16 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 				Assert(!args[2].isnull);	/* always present */
 				standalone = DatumGetInt32(args[2].value);
 
-				op->result->value = PointerGetDatum(
+				opres->value = PointerGetDatum(
 					xmlroot(data,
 							version,
 							standalone));
-				op->result->isnull = false;
+				opres->isnull = false;
 			}
 			break;
 
 		case IS_XMLSERIALIZE:
 			{
-				NullableDatum *args = op->d.xmlexpr.args;
-
 				/* argument type is known to be xml */
 				Assert(list_length(xexpr->args) == 1);
 
@@ -3833,17 +4043,15 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 					return;
 				value = args[0].value;
 
-				op->result->value = PointerGetDatum(
+				opres->value = PointerGetDatum(
 					xmltotext_with_xmloption(DatumGetXmlP(value),
 											 xexpr->xmloption));
-				op->result->isnull = false;
+				opres->isnull = false;
 			}
 			break;
 
 		case IS_DOCUMENT:
 			{
-				NullableDatum *args = op->d.xmlexpr.args;
-
 				/* optional argument is known to be xml */
 				Assert(list_length(xexpr->args) == 1);
 
@@ -3851,9 +4059,9 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
 					return;
 				value = args[0].value;
 
-				op->result->value =
+				opres->value =
 					BoolGetDatum(xml_is_document(DatumGetXmlP(value)));
-				op->result->isnull = false;
+				opres->isnull = false;
 			}
 			break;
 
@@ -3873,7 +4081,8 @@ ExecEvalXmlExpr(ExprState *state, ExprEvalStep *op)
  * grouping expressions in the current grouping set.
  */
 void
-ExecEvalGroupingFunc(ExprState *state, ExprEvalStep *op)
+ExecEvalGroupingFunc(ExprState *state, const ExprEvalStep *op,
+					 NullableDatum *opres)
 {
 	AggState   *aggstate = castNode(AggState, state->parent);
 	int			result = 0;
@@ -3890,38 +4099,40 @@ ExecEvalGroupingFunc(ExprState *state, ExprEvalStep *op)
 			result |= 1;
 	}
 
-	op->result->value = Int32GetDatum(result);
-	op->result->isnull = false;
+	opres->value = Int32GetDatum(result);
+	opres->isnull = false;
 }
 
 /*
  * Hand off evaluation of a subplan to nodeSubplan.c
  */
 void
-ExecEvalSubPlan(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+ExecEvalSubPlan(ExprState *state, const ExprEvalStep *op, ExprContext *econtext,
+				NullableDatum *opres)
 {
 	SubPlanState *sstate = op->d.subplan.sstate;
 
 	/* could potentially be nested, so make sure there's enough stack */
 	check_stack_depth();
 
-	op->result->value =
-		ExecSubPlan(sstate, econtext, &op->result->isnull);
+	opres->value =
+		ExecSubPlan(sstate, econtext, &opres->isnull);
 }
 
 /*
  * Hand off evaluation of an alternative subplan to nodeSubplan.c
  */
 void
-ExecEvalAlternativeSubPlan(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+ExecEvalAlternativeSubPlan(ExprState *state, const ExprEvalStep *op, ExprContext *econtext,
+						   NullableDatum *opres)
 {
 	AlternativeSubPlanState *asstate = op->d.alternative_subplan.asstate;
 
 	/* could potentially be nested, so make sure there's enough stack */
 	check_stack_depth();
 
-	op->result->value =
-		ExecAlternativeSubPlan(asstate, econtext, &op->result->isnull);
+	opres->value =
+		ExecAlternativeSubPlan(asstate, econtext, &opres->isnull);
 }
 
 /*
@@ -3931,7 +4142,8 @@ ExecEvalAlternativeSubPlan(ExprState *state, ExprEvalStep *op, ExprContext *econ
  * with respect to given expression context.
  */
 void
-ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
+ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
+					NullableDatum *opres)
 {
 	Var		   *variable = op->d.wholerow.var;
 	TupleTableSlot *slot;
@@ -4154,23 +4366,21 @@ ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext)
 	HeapTupleHeaderSetTypeId(dtuple, op->d.wholerow.tupdesc->tdtypeid);
 	HeapTupleHeaderSetTypMod(dtuple, op->d.wholerow.tupdesc->tdtypmod);
 
-	op->result->value = PointerGetDatum(dtuple);
-	op->result->isnull = false;
+	opres->value = PointerGetDatum(dtuple);
+	opres->isnull = false;
 }
 
 void
-ExecEvalSysVar(ExprState *state, ExprEvalStep *op, ExprContext *econtext,
-			   TupleTableSlot *slot)
+ExecEvalSysVar(ExprState *state, int attnum,
+			   TupleTableSlot *slot, NullableDatum *opres)
 {
 	Datum		d;
 
 	/* slot_getsysattr has sufficient defenses against bad attnums */
-	d = slot_getsysattr(slot,
-						op->d.var.attnum,
-						&op->result->isnull);
-	op->result->value = d;
+	d = slot_getsysattr(slot, attnum, &opres->isnull);
+	opres->value = d;
 	/* this ought to be unreachable, but it's cheap enough to check */
-	if (unlikely(op->result->isnull))
+	if (unlikely(opres->isnull))
 		elog(ERROR, "failed to fetch attribute from slot");
 }
 
@@ -4243,29 +4453,32 @@ ExecAggTransReparent(const AggStatePerCallContext *percall,
  * Invoke ordered transition function, with a datum argument.
  */
 void
-ExecEvalAggOrderedTransDatum(ExprState *state, ExprEvalStep *op,
-							 ExprContext *econtext)
+ExecEvalAggOrderedTransDatum(ExprState *state, const ExprEvalStep *op,
+							 NullableDatum *columns)
 {
 	AggStatePerTrans pertrans = op->d.agg_trans_ordered.pertrans;
 	int			setno = op->d.agg_trans_ordered.setno;
 
 	tuplesort_putdatum(pertrans->sortstates[setno],
-					   op->result->value, op->result->isnull);
+					   columns[0].value, columns[0].isnull);
 }
 
 /*
  * Invoke ordered transition function, with a tuple argument.
  */
 void
-ExecEvalAggOrderedTransTuple(ExprState *state, ExprEvalStep *op,
-							 ExprContext *econtext)
+ExecEvalAggOrderedTransTuple(ExprState *state, const ExprEvalStep *op,
+							 NullableDatum *columns)
 {
 	AggStatePerTrans pertrans = op->d.agg_trans_ordered.pertrans;
 	int			setno = op->d.agg_trans_ordered.setno;
 
 	ExecClearTuple(pertrans->sortslot);
+
+	memcpy(pertrans->sortslot->tts_values, columns, sizeof(NullableDatum) * pertrans->numInputs);
 	pertrans->sortslot->tts_nvalid = pertrans->numInputs;
 	ExecStoreVirtualTuple(pertrans->sortslot);
+
 	tuplesort_puttupleslot(pertrans->sortstates[setno], pertrans->sortslot);
 }
 

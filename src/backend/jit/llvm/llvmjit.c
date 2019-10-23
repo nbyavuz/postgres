@@ -829,6 +829,7 @@ llvm_create_types(void)
 	StructExprEvalStep = load_type(mod, "StructExprEvalStep");
 	StructExprEvalStepParamCallback = load_type(mod, "StructExprEvalStepParamCallback");
 	StructExprState = load_type(mod, "StructExprState");
+	StructFmgrInfo = load_type(mod, "StructFmgrInfo");
 	StructFunctionCallInfoData = load_type(mod, "StructFunctionCallInfoData");
 	StructMemoryContextData = load_type(mod, "StructMemoryContextData");
 	StructTupleTableSlot = load_type(mod, "StructTupleTableSlot");

@@ -73,6 +73,7 @@ extern LLVMTypeRef StructTupleTableSlot;
 extern LLVMTypeRef StructHeapTupleTableSlot;
 extern LLVMTypeRef StructMinimalTupleTableSlot;
 extern LLVMTypeRef StructMemoryContextData;
+extern LLVMTypeRef StructFmgrInfo;
 extern LLVMTypeRef StructFunctionCallInfoData;
 extern LLVMTypeRef StructExprContext;
 extern LLVMTypeRef StructExprEvalStep;

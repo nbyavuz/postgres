@@ -60,6 +60,7 @@ ExprContext StructExprContext;
 ExprEvalStep StructExprEvalStep;
 struct ExprEvalStepParamCallback StructExprEvalStepParamCallback;
 ExprState	StructExprState;
+FmgrInfo StructFmgrInfo;
 FunctionCallInfoBaseData StructFunctionCallInfoData;
 HeapTupleData StructHeapTupleData;
 MemoryContextData StructMemoryContextData;
