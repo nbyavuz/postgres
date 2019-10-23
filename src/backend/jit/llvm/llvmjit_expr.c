@@ -175,58 +175,30 @@ llvm_compile_expr(ExprState *state, ExprStateBuilder *esb)
 	LLVMSetVisibility(ecs.fn, LLVMDefaultVisibility);
 	llvm_copy_attributes(AttributeTemplate, ecs.fn);
 
+	{
+		int			id = LLVMGetEnumAttributeKindForName("noalias", sizeof("noalias") - 1);
+		LLVMAttributeRef attr;
+
+		attr = LLVMCreateEnumAttribute(LLVMGetGlobalContext(), id, 0);
+
+		/*
+		 * Cannot currently legally be set on first argument (the expression
+		 * itself), there likely are "outgoing" pointers that alias from
+		 * within expression steps.
+		 */
+		LLVMAddAttributeAtIndex(ecs.fn, 2, attr);
+		LLVMAddAttributeAtIndex(ecs.fn, 3, attr);
+	}
+
 	ecs.b_entry = LLVMAppendBasicBlock(ecs.fn, "entry");
 	LLVMPositionBuilderAtEnd(b, ecs.b_entry);
 
-	/* build state */
 	ecs.v_state = LLVMGetParam(ecs.fn, 0);
 	ecs.v_econtext = LLVMGetParam(ecs.fn, 1);
 
-	v_isnullp = LLVMGetParam(ecs.fn, 2);
-
-	v_tmpvaluep = LLVMBuildStructGEP(b, ecs.v_state,
-									 FIELDNO_EXPRSTATE_RESULT,
-									 "v.state.result");
-	ecs.v_parent = l_load_struct_gep(b, ecs.v_state,
-									 FIELDNO_EXPRSTATE_PARENT,
-									 "v.state.parent");
 	ecs.v_steps = l_load_struct_gep(b, ecs.v_state,
 									FIELDNO_EXPRSTATE_STEPS,
 									"v.state.steps");
-	v_steps = ecs.v_steps;
-
-	/* build global slots */
-	v_scanslot = l_load_struct_gep(b, ecs.v_econtext,
-								   FIELDNO_EXPRCONTEXT_SCANTUPLE,
-								   "v_scanslot");
-	v_innerslot = l_load_struct_gep(b, ecs.v_econtext,
-									FIELDNO_EXPRCONTEXT_INNERTUPLE,
-									"v_innerslot");
-	v_outerslot = l_load_struct_gep(b, ecs.v_econtext,
-									FIELDNO_EXPRCONTEXT_OUTERTUPLE,
-									"v_outerslot");
-	v_resultslot = l_load_struct_gep(b, ecs.v_state,
-									 FIELDNO_EXPRSTATE_RESULTSLOT,
-									 "v_resultslot");
-
-	/* build global values/isnull pointers */
-	v_scanvalues = l_load_struct_gep(b, v_scanslot,
-									 FIELDNO_TUPLETABLESLOT_VALUES,
-									 "v_scanvalues");
-	v_innervalues = l_load_struct_gep(b, v_innerslot,
-									  FIELDNO_TUPLETABLESLOT_VALUES,
-									  "v_innervalues");
-	v_outervalues = l_load_struct_gep(b, v_outerslot,
-									  FIELDNO_TUPLETABLESLOT_VALUES,
-									  "v_outervalues");
-	v_resultvalues = l_load_struct_gep(b, v_resultslot,
-									   FIELDNO_TUPLETABLESLOT_VALUES,
-									   "v_resultvalues");
-
-	/* aggvalues */
-	v_aggvalues = l_load_struct_gep(b, ecs.v_econtext,
-									FIELDNO_EXPRCONTEXT_AGGVALUES,
-									"v.econtext.aggvalues");
 
 	/* allocate blocks for each op upfront, so we can do jumps easily */
 	opblocks = palloc(sizeof(LLVMBasicBlockRef) * state->steps_final_len);
