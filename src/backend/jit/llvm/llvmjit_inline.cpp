@@ -413,7 +413,7 @@ llvm_execute_inline_plan(llvm::Module *mod, ImportMapTy *globalsToInline)
 				 * Per-function info isn't necessarily stripped yet, as the
 				 * module is lazy-loaded when stripped above.
 				 */
-				llvm::stripDebugInfo(*F);
+				//llvm::stripDebugInfo(*F);
 
 				/*
 				 * If the to-be-imported function is one referenced including
@@ -430,7 +430,7 @@ llvm_execute_inline_plan(llvm::Module *mod, ImportMapTy *globalsToInline)
 					AF = create_redirection_function(importMod, F, SymbolName);
 
 					GlobalsToImport.insert(AF);
-					llvm::stripDebugInfo(*AF);
+					//llvm::stripDebugInfo(*AF);
 				}
 
 				if (valueToImport->hasExternalLinkage())
@@ -499,7 +499,7 @@ load_module(llvm::StringRef Identifier)
 	 * code. Until that changes, not much point in wasting memory and cycles
 	 * on processing debuginfo.
 	 */
-	llvm::StripDebugInfo(*llvm::unwrap(mod));
+	//llvm::StripDebugInfo(*llvm::unwrap(mod));
 
 	return std::unique_ptr<llvm::Module>(llvm::unwrap(mod));
 }
