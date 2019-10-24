@@ -37,12 +37,15 @@
   aggmfinalfn => 'numeric_avg', aggtranstype => 'internal',
   aggtransspace => '128', aggmtranstype => 'internal',
   aggmtransspace => '128' },
-{ aggfnoid => 'avg(float4)', aggtransfn => 'float4_accum',
-  aggfinalfn => 'float8_avg', aggcombinefn => 'float8_combine',
-  aggtranstype => '_float8', agginitval => '{0,0,0}' },
-{ aggfnoid => 'avg(float8)', aggtransfn => 'float8_accum',
-  aggfinalfn => 'float8_avg', aggcombinefn => 'float8_combine',
-  aggtranstype => '_float8', agginitval => '{0,0,0}' },
+
+{ aggfnoid => 'avg(float4)', aggtransfn => 'float4_avg_accum',
+  aggfinalfn => 'float8_avg',
+  aggtranstype => 'internal', aggtransspace => '16' },
+
+{ aggfnoid => 'avg(float8)', aggtransfn => 'float8_avg_accum',
+  aggfinalfn => 'float8_avg',
+  aggtranstype => 'internal', aggtransspace => '16' },
+
 { aggfnoid => 'avg(interval)', aggtransfn => 'interval_accum',
   aggfinalfn => 'interval_avg', aggcombinefn => 'interval_combine',
   aggmtransfn => 'interval_accum', aggminvtransfn => 'interval_accum_inv',

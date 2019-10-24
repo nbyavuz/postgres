@@ -2463,6 +2463,7 @@ llvm_compile_expr(ExprState *state, ExprStateBuilder *esb)
 					v_oldcontext = l_mcxt_switch(ecs.mod, b, ecs.d.agg.tmpcontext_pertup);
 
 					/* set the per-call context */
+#if 1
 					v_fcinfo_context =
 						LLVMBuildStructGEP(b, v_fcinfo,
 										   FIELDNO_FUNCTIONCALLINFODATA_CONTEXT,
@@ -2470,6 +2471,7 @@ llvm_compile_expr(ExprState *state, ExprStateBuilder *esb)
 					LLVMBuildStore(b,
 								   LLVMBuildBitCast(b, v_percall, l_ptr(StructNode), ""),
 								   v_fcinfo_context);
+#endif
 
 					/* store transvalue in fcinfo->args[0] */
 					LLVMBuildStore(b, v_transvalue, l_funcargp(b, v_fcinfo, 0));
@@ -2682,9 +2684,11 @@ expr_emit_allocations(ExprCompileState *ecs)
 				pfree(allocname);
 
 				/* zero initialize header */
+#if 1
 				LLVMBuildMemSet(ecs->b, v_allocation, l_int8_const(0),
 								l_int32_const(offsetof(FunctionCallInfoBaseData, args)),
 								0);
+#endif
 
 				allocname = psprintf("alloc.%u.function_call_info", i + 1);
 				v_allocation =
@@ -2692,9 +2696,11 @@ expr_emit_allocations(ExprCompileState *ecs)
 									 l_ptr(StructFunctionCallInfoData),
 									 allocname);
 
+#if 1
 				expr_init_fci(ecs,
 							  (FunctionCallInfo) allocation->initial_content,
 							  v_allocation);
+#endif
 				break;
 		}
 

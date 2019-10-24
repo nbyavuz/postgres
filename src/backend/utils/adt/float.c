@@ -2995,24 +2995,90 @@ float4_accum(PG_FUNCTION_ARGS)
 	}
 }
 
+typedef struct Float8AvgAccumState
+{
+	uint64 n;
+	float8 sum;
+} Float8AvgAccumState;
+
+Datum
+float8_avg_accum(PG_FUNCTION_ARGS)
+{
+	Float8AvgAccumState *state;
+
+	state = PG_ARGISNULL(0) ? NULL : (Float8AvgAccumState *) PG_GETARG_POINTER(0);
+
+	/* Create the state data on the first call */
+	if (unlikely(state == NULL))
+	{
+		MemoryContext agg_context;
+		MemoryContext old_context;
+
+		if (!AggCheckCallContext(fcinfo, &agg_context))
+			elog(ERROR, "aggregate function called in non-aggregate context");
+
+		old_context = MemoryContextSwitchTo(agg_context);
+
+		state = (Float8AvgAccumState *) palloc(sizeof(Float8AvgAccumState));
+		state->n = 0;
+		state->sum = 0;
+		MemoryContextSwitchTo(old_context);
+	}
+
+	if (!PG_ARGISNULL(1))
+	{
+		state->n++;
+		state->sum = float8_pl(state->sum, PG_GETARG_FLOAT8(1));
+	}
+
+	PG_RETURN_POINTER(state);
+}
+
+Datum
+float4_avg_accum(PG_FUNCTION_ARGS)
+{
+	Float8AvgAccumState *state;
+
+	state = PG_ARGISNULL(0) ? NULL : (Float8AvgAccumState *) PG_GETARG_POINTER(0);
+
+	/* Create the state data on the first call */
+	if (unlikely(state == NULL))
+	{
+		MemoryContext agg_context;
+		MemoryContext old_context;
+
+		if (!AggCheckCallContext(fcinfo, &agg_context))
+			elog(ERROR, "aggregate function called in non-aggregate context");
+
+		old_context = MemoryContextSwitchTo(agg_context);
+
+		state = (Float8AvgAccumState *) palloc(sizeof(Float8AvgAccumState));
+		state->n = 0;
+		state->sum = 0;
+		MemoryContextSwitchTo(old_context);
+	}
+
+	if (!PG_ARGISNULL(1))
+	{
+		state->n++;
+		state->sum = float8_pl(state->sum, PG_GETARG_FLOAT4(1));
+	}
+
+	PG_RETURN_POINTER(state);
+}
+
 Datum
 float8_avg(PG_FUNCTION_ARGS)
 {
-	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
-	float8	   *transvalues;
-	float8		N,
-				Sx;
+	Float8AvgAccumState *state;
 
-	transvalues = check_float8_array(transarray, "float8_avg", 3);
-	N = transvalues[0];
-	Sx = transvalues[1];
-	/* ignore Sxx */
+	state = PG_ARGISNULL(0) ? NULL : (Float8AvgAccumState *) PG_GETARG_POINTER(0);
 
 	/* SQL defines AVG of no values to be NULL */
-	if (N == 0.0)
+	if (state == NULL || state->n == 0)
 		PG_RETURN_NULL();
 
-	PG_RETURN_FLOAT8(Sx / N);
+	PG_RETURN_FLOAT8(state->sum / state->n);
 }
 
 Datum

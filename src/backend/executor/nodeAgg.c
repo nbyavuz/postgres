@@ -1425,7 +1425,10 @@ find_hash_columns(AggState *aggstate)
 		}
 
 		hashDesc = ExecTypeFromTL(hashTlist);
-
+#if 0
+		for (int i = 0; i < hashDesc->natts; i++)
+			TupleDescAttr(hashDesc, i)->attnotnull = true;
+#endif
 		execTuplesHashPrepare(perhash->numCols,
 							  perhash->aggnode->grpOperators,
 							  &perhash->eqfuncoids,

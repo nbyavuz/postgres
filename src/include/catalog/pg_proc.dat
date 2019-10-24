@@ -608,6 +608,14 @@
 { oid => '222', descr => 'aggregate transition function',
   proname => 'float8_accum', prorettype => '_float8',
   proargtypes => '_float8 float8', prosrc => 'float8_accum' },
+{ oid => '4', descr => 'aggregate transition function',
+  proname => 'float4_avg_accum', prorettype => 'internal',
+  proisstrict => 'f',
+  proargtypes => 'internal float4', prosrc => 'float4_avg_accum' },
+{ oid => '5', descr => 'aggregate transition function',
+  proname => 'float8_avg_accum', prorettype => 'internal',
+  proisstrict => 'f',
+  proargtypes => 'internal float8', prosrc => 'float8_avg_accum' },
 { oid => '276', descr => 'aggregate combine function',
   proname => 'float8_combine', prorettype => '_float8',
   proargtypes => '_float8 _float8', prosrc => 'float8_combine' },
@@ -4521,7 +4529,7 @@
 
 # Aggregate-related functions
 { oid => '1830', descr => 'aggregate final function',
-  proname => 'float8_avg', prorettype => 'float8', proargtypes => '_float8',
+  proname => 'float8_avg', prorettype => 'float8', proargtypes => 'internal',
   prosrc => 'float8_avg' },
 { oid => '2512', descr => 'aggregate final function',
   proname => 'float8_var_pop', prorettype => 'float8', proargtypes => '_float8',

@@ -239,7 +239,13 @@ typedef enum ExprEvalOp
 	EEOP_AGG_PLAIN_TRANS_BYREF,
 	EEOP_AGG_ORDERED_TRANS_DATUM,
 	EEOP_AGG_ORDERED_TRANS_TUPLE,
-
+#if 0
+	/* hash related nodes */
+	EEOP_HASH_ONE_LAST_STRICT,
+	EEOP_HASH_ONE_LAST,
+	EEOP_HASH_ONE_STRICT,
+	EEOP_HASH_ONE,
+#endif
 	/* non-existent operation, used e.g. to check array lengths */
 	EEOP_LAST
 } ExprEvalOp;

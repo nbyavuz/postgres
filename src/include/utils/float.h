@@ -81,6 +81,7 @@ double_inf(void)
 	return val;
 }
 
+#if 1
 __attribute__((__nothrow__, __const__))
 static inline int
 double_isinf_nosign(double testval)
@@ -109,6 +110,9 @@ double_isinf_nosign(double testval)
 	else
 		return 0;
 }
+#else
+#define double_isinf_nosign(val) __builtin_isinf(val)
+#endif
 
 /*
  * Routines to provide reasonably platform-independent handling of
