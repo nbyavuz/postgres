@@ -110,3 +110,33 @@ LLVMPassManagerBuilderUseLibraryInfo(LLVMPassManagerBuilderRef PMBR,
 									 LLVMTargetLibraryInfoRef TLI) {
 	unwrap(PMBR)->LibraryInfo = unwrap(TLI);
 }
+
+#include <llvm/Support/Timer.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/IR/PassTimingInfo.h>
+#include <llvm/ADT/Statistic.h>
+#include <llvm/Support/JSON.h>
+
+void
+LLVMEnableStatistics()
+{
+	llvm::TimePassesIsEnabled = true;
+	llvm::EnableStatistics(false /* print at shutdown */);
+}
+
+void
+LLVMPrintAllTimers(bool clear)
+{
+	std::string s;
+	llvm::raw_string_ostream o(s);
+
+	llvm::TimerGroup::printAll(o);
+	if (clear)
+		llvm::TimerGroup::clearAll();
+
+	llvm::PrintStatistics(o);
+	if (clear)
+		llvm::ResetStatistics();
+
+	ereport(LOG, (errmsg("statistics: %s", s.c_str())));
+}

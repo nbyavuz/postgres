@@ -205,6 +205,8 @@ llvm_release_context(JitContext *context)
 			pfree(jit_handle);
 		}
 	}
+
+	LLVMPrintAllTimers(true);
 }
 
 /*
@@ -706,6 +708,8 @@ llvm_session_initialize(void)
 										"-mergefunc-use-aliases"},
 								NULL);
 
+	LLVMEnableStatistics();
+
 	/*
 	 * Synchronize types early, as that also includes inferring the target
 	 * triple.
@@ -797,6 +801,8 @@ llvm_shutdown(int code, Datum arg)
 		LLVMOrcDisposeInstance(llvm_opt0_orc);
 		llvm_opt0_orc = NULL;
 	}
+
+	LLVMShutdown();
 }
 
 /* helper for llvm_create_types, returning a global var's type */
