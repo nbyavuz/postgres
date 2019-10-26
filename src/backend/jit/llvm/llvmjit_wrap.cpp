@@ -16,8 +16,14 @@ extern "C"
 #include "postgres.h"
 }
 
+/* Avoid macro clash with LLVM's C++ headers */
+#undef Min
+
 #include <llvm/MC/SubtargetFeature.h>
 #include <llvm/Support/Host.h>
+#include <llvm/Transforms/IPO/PassManagerBuilder.h>
+
+#include <llvm-c/Transforms/PassManagerBuilder.h>
 
 #include "jit/llvmjit.h"
 
@@ -45,12 +51,8 @@ char *LLVMGetHostCPUFeatures(void) {
 }
 #endif
 
-/* Avoid macro clash with LLVM's C++ headers */
-#undef Min
 
 #include "llvm/Analysis/TargetLibraryInfo.h"
-#include "llvm/Transforms/IPO/PassManagerBuilder.h"
-#include "llvm-c/Transforms/PassManagerBuilder.h"
 #include "llvm-c/Target.h"
 #include "llvm-c/TargetMachine.h"
 #include "llvm/Target/TargetMachine.h"
@@ -86,6 +88,14 @@ wrap(const llvm::TargetMachine *P) {
 	return reinterpret_cast<LLVMTargetMachineRef>(const_cast<llvm::TargetMachine *>(P));
 }
 
+void
+LLVMPassManagerBuilderSetMergeFunctions(
+	struct LLVMOpaquePassManagerBuilder *PMBR,
+	bool value)
+{
+    unwrap(PMBR)->MergeFunctions = value;
+}
+
 LLVMTargetLibraryInfoRef
 LLVMGetTargetLibraryInfo(LLVMTargetMachineRef T)
 {
@@ -99,14 +109,4 @@ void
 LLVMPassManagerBuilderUseLibraryInfo(LLVMPassManagerBuilderRef PMBR,
 									 LLVMTargetLibraryInfoRef TLI) {
 	unwrap(PMBR)->LibraryInfo = unwrap(TLI);
-}
-
-void
-LLVMPassManagerBuilderSetMergeFunctions(
-	struct LLVMOpaquePassManagerBuilder *PMBR,
-	bool value)
-{
-#if LLVM_VERSION_MAJOR >= 7
-	unwrap(PMBR)->MergeFunctions = true;;
-#endif
 }

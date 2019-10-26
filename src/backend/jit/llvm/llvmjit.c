@@ -461,6 +461,7 @@ llvm_optimize_module(LLVMJitContext *context, LLVMModuleRef module)
 	 * LLVMPassManagerBuilderPopulateModulePassManager().
 	 */
 	LLVMPassManagerBuilderSetOptLevel(llvm_pmb, compile_optlevel);
+	LLVMPassManagerBuilderSetMergeFunctions(llvm_pmb, 1);
 
 	llvm_fpm = LLVMCreateFunctionPassManagerForModule(module);
 	LLVMAddAnalysisPasses(llvm_opt3_targetmachine, llvm_fpm);
@@ -699,6 +700,11 @@ llvm_session_initialize(void)
 		LLVMInitializeCodeGen(pass_registry);
 		LLVMInitializeTarget(pass_registry);
 	}
+
+	LLVMParseCommandLineOptions(2,
+								(const char*[]){"postgres",
+										"-mergefunc-use-aliases"},
+								NULL);
 
 	/*
 	 * Synchronize types early, as that also includes inferring the target

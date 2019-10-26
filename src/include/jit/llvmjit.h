@@ -156,11 +156,9 @@ LLVMGetTargetLibraryInfo(struct LLVMOpaqueTargetMachine *TM);
 extern void LLVMPassManagerBuilderUseLibraryInfo(
 	struct LLVMOpaquePassManagerBuilder *PMBR,
 	struct LLVMOpaqueTargetLibraryInfotData *TLI);
-extern void LLVMPassManagerBuilderSetMergeFunctions(
-	struct LLVMOpaquePassManagerBuilder *PMBR,
-	bool value);
 
-
+extern void LLVMPassManagerBuilderSetMergeFunctions(struct LLVMOpaquePassManagerBuilder *PMBR,
+													bool value);
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
