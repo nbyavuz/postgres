@@ -463,7 +463,7 @@ llvm_optimize_module(LLVMJitContext *context, LLVMModuleRef module)
 	 * LLVMPassManagerBuilderPopulateModulePassManager().
 	 */
 	LLVMPassManagerBuilderSetOptLevel(llvm_pmb, compile_optlevel);
-	LLVMPassManagerBuilderSetMergeFunctions(llvm_pmb, 1);
+	//LLVMPassManagerBuilderSetMergeFunctions(llvm_pmb, 1);
 
 	llvm_fpm = LLVMCreateFunctionPassManagerForModule(module);
 	LLVMAddAnalysisPasses(llvm_opt3_targetmachine, llvm_fpm);
@@ -493,14 +493,21 @@ llvm_optimize_module(LLVMJitContext *context, LLVMModuleRef module)
 	LLVMFinalizeFunctionPassManager(llvm_fpm);
 	LLVMDisposePassManager(llvm_fpm);
 
+
+	LLVMPrintAllTimers(true);
+
 	/*
 	 * Perform module level optimization. We do so even in the non-optimized
 	 * case, so always-inline functions etc get inlined. It's cheap enough.
 	 */
 	llvm_mpm = LLVMCreatePassManager();
+
+	LLVMAddMergeFunctionsPass(llvm_mpm);
 	LLVMAddAnalysisPasses(llvm_opt3_targetmachine, llvm_mpm);
+
 	LLVMPassManagerBuilderPopulateModulePassManager(llvm_pmb,
 													llvm_mpm);
+
 	/* always use always-inliner pass */
 	if (!(context->base.flags & PGJIT_OPT3))
 		LLVMAddAlwaysInlinerPass(llvm_mpm);
@@ -510,6 +517,8 @@ llvm_optimize_module(LLVMJitContext *context, LLVMModuleRef module)
 		LLVMAddFunctionInliningPass(llvm_mpm);
 	LLVMRunPassManager(llvm_mpm, context->module);
 	LLVMDisposePassManager(llvm_mpm);
+
+	LLVMPrintAllTimers(true);
 
 	//LLVMPassManagerBuilderDispose(llvm_pmb);
 }
@@ -703,9 +712,11 @@ llvm_session_initialize(void)
 		LLVMInitializeTarget(pass_registry);
 	}
 
-	LLVMParseCommandLineOptions(2,
+	LLVMParseCommandLineOptions(3,
 								(const char*[]){"postgres",
-										"-mergefunc-use-aliases"},
+										"-mergefunc-use-aliases",
+										"-debug-pass=Structure"
+										},
 								NULL);
 
 	LLVMEnableStatistics();

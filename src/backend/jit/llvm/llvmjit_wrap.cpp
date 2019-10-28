@@ -120,7 +120,7 @@ LLVMPassManagerBuilderUseLibraryInfo(LLVMPassManagerBuilderRef PMBR,
 void
 LLVMEnableStatistics()
 {
-	llvm::TimePassesIsEnabled = true;
+	//llvm::TimePassesIsEnabled = true;
 	llvm::EnableStatistics(false /* print at shutdown */);
 }
 
@@ -130,13 +130,20 @@ LLVMPrintAllTimers(bool clear)
 	std::string s;
 	llvm::raw_string_ostream o(s);
 
-	llvm::TimerGroup::printAll(o);
-	if (clear)
-		llvm::TimerGroup::clearAll();
+	if (llvm::TimePassesIsEnabled)
+	{
+		llvm::TimerGroup::printAll(o);
+		if (clear)
+			llvm::TimerGroup::clearAll();
+	}
 
-	llvm::PrintStatistics(o);
-	if (clear)
-		llvm::ResetStatistics();
+	if (llvm::AreStatisticsEnabled())
+	{
+		llvm::PrintStatistics(o);
+		if (clear)
+			llvm::ResetStatistics();
+	}
 
-	ereport(LOG, (errmsg("statistics: %s", s.c_str())));
+	if (s.size() > 0)
+		ereport(LOG, (errmsg("statistics: %s", s.c_str())));
 }
