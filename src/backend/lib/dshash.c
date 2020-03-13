@@ -383,6 +383,10 @@ dshash_get_hash_table_handle(dshash_table *hash_table)
  * the caller must take care to ensure that the entry is not left corrupted.
  * The lock mode is either shared or exclusive depending on 'exclusive'.
  *
+ * If found is not NULL, *found is set to true if the key is found in the hash
+ * table. If the key is not found, *found is set to false and a pointer to a
+ * newly created entry is returned.
+ *
  * The caller must not lock a lock already.
  *
  * Note that the lock held is in fact an LWLock, so interrupts will be held on
@@ -392,36 +396,7 @@ dshash_get_hash_table_handle(dshash_table *hash_table)
 void *
 dshash_find(dshash_table *hash_table, const void *key, bool exclusive)
 {
-	dshash_hash hash;
-	size_t		partition;
-	dshash_table_item *item;
-
-	hash = hash_key(hash_table, key);
-	partition = PARTITION_FOR_HASH(hash);
-
-	Assert(hash_table->control->magic == DSHASH_MAGIC);
-	Assert(!hash_table->find_locked);
-
-	LWLockAcquire(PARTITION_LOCK(hash_table, partition),
-				  exclusive ? LW_EXCLUSIVE : LW_SHARED);
-	ensure_valid_bucket_pointers(hash_table);
-
-	/* Search the active bucket. */
-	item = find_in_bucket(hash_table, key, BUCKET_FOR_HASH(hash_table, hash));
-
-	if (!item)
-	{
-		/* Not found. */
-		LWLockRelease(PARTITION_LOCK(hash_table, partition));
-		return NULL;
-	}
-	else
-	{
-		/* The caller will free the lock by calling dshash_release_lock. */
-		hash_table->find_locked = true;
-		hash_table->find_exclusively_locked = exclusive;
-		return ENTRY_FROM_ITEM(item);
-	}
+	return dshash_find_extended(hash_table, key, exclusive, false, false, NULL);
 }
 
 /*
@@ -439,31 +414,60 @@ dshash_find_or_insert(dshash_table *hash_table,
 					  const void *key,
 					  bool *found)
 {
-	dshash_hash hash;
-	size_t		partition_index;
-	dshash_partition *partition;
+	return dshash_find_extended(hash_table, key, true, false, true, found);
+}
+
+
+/*
+ * Find the key in the hash table.
+ *
+ * "exclusive" is the lock mode in which the partition for the returned item
+ * is locked.  If "nowait" is true, the function immediately returns if
+ * required lock was not acquired.  "insert" indicates insert mode. In this
+ * mode new entry is inserted and set *found to false. *found is set to true if
+ * found. "found" must be non-null in this mode.
+ */
+void *
+dshash_find_extended(dshash_table *hash_table, const void *key,
+					 bool exclusive, bool nowait, bool insert, bool *found)
+{
+	dshash_hash hash = hash_key(hash_table, key);
+	size_t		partidx = PARTITION_FOR_HASH(hash);
+	dshash_partition *partition = &hash_table->control->partitions[partidx];
+	LWLockMode  lockmode = exclusive ? LW_EXCLUSIVE : LW_SHARED;
 	dshash_table_item *item;
 
-	hash = hash_key(hash_table, key);
-	partition_index = PARTITION_FOR_HASH(hash);
-	partition = &hash_table->control->partitions[partition_index];
-
-	Assert(hash_table->control->magic == DSHASH_MAGIC);
-	Assert(!hash_table->find_locked);
+	/* must be exclusive when insert allowed */
+	Assert(!insert || (exclusive && found != NULL));
 
 restart:
-	LWLockAcquire(PARTITION_LOCK(hash_table, partition_index),
-				  LW_EXCLUSIVE);
+	if (!nowait)
+		LWLockAcquire(PARTITION_LOCK(hash_table, partidx), lockmode);
+	else if (!LWLockConditionalAcquire(PARTITION_LOCK(hash_table, partidx),
+									   lockmode))
+		return NULL;
+
 	ensure_valid_bucket_pointers(hash_table);
 
 	/* Search the active bucket. */
 	item = find_in_bucket(hash_table, key, BUCKET_FOR_HASH(hash_table, hash));
 
 	if (item)
-		*found = true;
+	{
+		if (found)
+			*found = true;
+	}
 	else
 	{
-		*found = false;
+		if (found)
+			*found = false;
+
+		if (!insert)
+		{
+			/* The caller didn't told to add a new entry. */
+			LWLockRelease(PARTITION_LOCK(hash_table, partidx));
+			return NULL;
+		}
 
 		/* Check if we are getting too full. */
 		if (partition->count > MAX_COUNT_PER_PARTITION(hash_table))
@@ -479,7 +483,8 @@ restart:
 			 * Give up our existing lock first, because resizing needs to
 			 * reacquire all the locks in the right order to avoid deadlocks.
 			 */
-			LWLockRelease(PARTITION_LOCK(hash_table, partition_index));
+			LWLockRelease(PARTITION_LOCK(hash_table, partidx));
+
 			resize(hash_table, hash_table->size_log2 + 1);
 
 			goto restart;
@@ -493,11 +498,12 @@ restart:
 		++partition->count;
 	}
 
-	/* The caller must release the lock with dshash_release_lock. */
+	/* The caller will free the lock by calling dshash_release_lock. */
 	hash_table->find_locked = true;
-	hash_table->find_exclusively_locked = true;
+	hash_table->find_exclusively_locked = exclusive;
 	return ENTRY_FROM_ITEM(item);
 }
+
 
 /*
  * Remove an entry by key.  Returns true if the key was found and the
