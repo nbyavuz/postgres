@@ -46,8 +46,8 @@ typedef struct prefetch
 {
 	Relation rel;
 	ForkNumber forkNumber;
-	BlockNumber curblock;
-	BlockNumber lastblock;
+	int64 curblock;
+	int64 lastblock;
 } prefetch;
 
 static PgStreamingReadNextStatus
