@@ -26,6 +26,7 @@ typedef struct PgAioBounceBuffer PgAioBounceBuffer;
 extern void pgaio_postmaster_init(void);
 extern Size AioShmemSize(void);
 extern void AioShmemInit(void);
+extern void pgaio_postmaster_child_init_local(void);
 extern void pgaio_postmaster_child_init(void);
 
 extern void pgaio_at_abort(void);

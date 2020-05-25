@@ -123,7 +123,7 @@ InitPostmasterChild(void)
 	MyLatch = &LocalLatchData;
 	InitLatch(MyLatch);
 
-	pgaio_postmaster_child_init();
+	pgaio_postmaster_child_init_local();
 
 	/*
 	 * If possible, make this process a group leader, so that the postmaster
