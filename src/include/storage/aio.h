@@ -75,4 +75,23 @@ extern void pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb
 extern PgAioBounceBuffer *pgaio_bounce_buffer_get(void);
 extern char *pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb);
 
+/*
+ * Helpers. In aio_util.c.
+ */
+
+/*
+ * Helper to efficiently perform bulk writes.
+ */
+typedef struct pg_streaming_write pg_streaming_write;
+typedef void (*pg_streaming_write_completed)(void *pgsw_private, void *write_private);
+
+extern pg_streaming_write *pg_streaming_write_alloc(uint32 iodepth, void *private,
+													pg_streaming_write_completed on_completion);
+extern PgAioInProgress *pg_streaming_write_get_io(pg_streaming_write *pgsw);
+extern uint32 pg_streaming_write_inflight(pg_streaming_write *pgsw);
+extern void pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io, void *private);
+extern void pg_streaming_write_wait(pg_streaming_write *pgsw, uint32 count);
+extern void pg_streaming_write_wait_all(pg_streaming_write *pgsw);
+extern void pg_streaming_write_free(pg_streaming_write *pgsw);
+
 #endif							/* AIO_H */

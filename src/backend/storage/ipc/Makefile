@@ -10,6 +10,7 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = \
 	aio.o \
+	aio_util.o \
 	barrier.o \
 	dsm.o \
 	dsm_impl.o \
