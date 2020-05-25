@@ -805,7 +805,6 @@ ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 	{
 		release_io = false;
 		aio = *aiop;
-		pgaio_io_recycle(aio);
 	}
 
 	/*
