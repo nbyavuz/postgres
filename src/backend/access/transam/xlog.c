@@ -58,6 +58,7 @@
 #include "replication/snapbuild.h"
 #include "replication/walreceiver.h"
 #include "replication/walsender.h"
+#include "storage/aio.h"
 #include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
@@ -120,7 +121,7 @@ int			wal_segment_size = DEFAULT_XLOG_SEG_SIZE;
  * to happen concurrently, but adds some CPU overhead to flushing the WAL,
  * which needs to iterate all the locks.
  */
-#define NUM_XLOGINSERT_LOCKS  8
+#define NUM_XLOGINSERT_LOCKS  16
 
 /*
  * Max distance from last checkpoint, before triggering a new xlog-based
@@ -2416,9 +2417,12 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 	bool		finishing_seg;
 	bool		use_existent;
 	int			curridx;
+	int			lastpartialidx;
 	int			npages;
 	int			startidx;
 	uint32		startoffset;
+
+	XLogRecPtr startwrite;
 
 	/* We should always be inside a critical section here */
 	Assert(CritSectionCount > 0);
@@ -2447,6 +2451,9 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 	 * page, or last partially written page.
 	 */
 	curridx = XLogRecPtrToBufIdx(LogwrtResult.Write);
+	lastpartialidx = curridx;
+
+	startwrite = LogwrtResult.Write;
 
 	while (LogwrtResult.Write < WriteRqst.Write)
 	{
@@ -2532,9 +2539,11 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 			do
 			{
 				errno = 0;
+#if 0
 				pgstat_report_wait_start(WAIT_EVENT_WAL_WRITE);
 				written = pg_pwrite(openLogFile, from, nleft, startoffset);
 				pgstat_report_wait_end();
+
 				if (written <= 0)
 				{
 					char		xlogfname[MAXFNAMELEN];
@@ -2556,6 +2565,27 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 				nleft -= written;
 				from += written;
 				startoffset += written;
+#else
+
+				elog(DEBUG1, "writing from %X/%X to %X/%X "
+					 "startidx: %d, curridx: %d, lastidx %d",
+					 (uint32) (startwrite >> 32),
+					 (uint32) startwrite,
+					 (uint32) (LogwrtResult.Write >> 32),
+					 (uint32) LogwrtResult.Write,
+					 startidx, curridx, lastpartialidx
+					);
+
+				pgaio_start_write_wal(openLogFile, startoffset, nleft, from,
+									  lastpartialidx == curridx);
+				pgaio_submit_pending();
+
+				written = nleft;
+
+				nleft -= written;
+				from += written;
+				startoffset += written;
+#endif
 			} while (nleft > 0);
 
 			npages = 0;
@@ -2631,8 +2661,8 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 		 * have no open file or the wrong one.  However, we do not need to
 		 * fsync more than one file.
 		 */
-		if (sync_method != SYNC_METHOD_OPEN &&
-			sync_method != SYNC_METHOD_OPEN_DSYNC)
+		if ((sync_method != SYNC_METHOD_OPEN &&
+			sync_method != SYNC_METHOD_OPEN_DSYNC) || true)
 		{
 			if (openLogFile >= 0 &&
 				!XLByteInPrevSeg(LogwrtResult.Write, openLogSegNo,
@@ -10310,8 +10340,11 @@ get_sync_bit(int method)
 	 * after its written. Also, walreceiver performs unaligned writes, which
 	 * don't work with O_DIRECT, so it is required for correctness too.
 	 */
+#if 0
 	if (!XLogIsNeeded() && !AmWalReceiverProcess())
-		o_direct_flag = PG_O_DIRECT;
+		;
+#endif
+	o_direct_flag = PG_O_DIRECT;
 
 	switch (method)
 	{
@@ -10405,12 +10438,14 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 #endif
 #ifdef HAVE_FDATASYNC
 		case SYNC_METHOD_FDATASYNC:
+			pgaio_drain_outstanding();
 			if (pg_fdatasync(fd) != 0)
 				msg = _("could not fdatasync file \"%s\": %m");
 			break;
 #endif
 		case SYNC_METHOD_OPEN:
 		case SYNC_METHOD_OPEN_DSYNC:
+			pgaio_drain_outstanding();
 			/* write synced it already */
 			break;
 		default:

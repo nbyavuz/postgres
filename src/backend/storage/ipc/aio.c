@@ -33,7 +33,8 @@ typedef enum PgAioAction
 	PGAIO_NOP,
 	PGAIO_FLUSH_RANGE,
 	PGAIO_READ_BUFFER,
-	PGAIO_WRITE_BUFFER
+	PGAIO_WRITE_BUFFER,
+	PGAIO_WRITE_WAL,
 } PgAioAction;
 
 typedef enum PgAioInProgressFlags
@@ -99,6 +100,15 @@ struct PgAioInProgress
 			Buffer buf;
 			struct iovec iovec;
 		} write_buffer;
+
+		struct
+		{
+			int fd;
+			int already_done;
+			bool no_reorder;
+			off_t offset;
+			struct iovec iovec;
+		} write_wal;
 	} d;
 };
 
@@ -114,6 +124,7 @@ static void pgaio_complete_nop(PgAioInProgress *io);
 static void pgaio_complete_flush_range(PgAioInProgress *io);
 static void pgaio_complete_read_buffer(PgAioInProgress *io);
 static void pgaio_complete_write_buffer(PgAioInProgress *io);
+static void pgaio_complete_write_wal(PgAioInProgress *io);
 
 /* io_uring related functions */
 static void pgaio_put_io_locked(PgAioInProgress *io);
@@ -175,6 +186,7 @@ static const PgAioCompletedCB completion_callbacks[] =
 	[PGAIO_FLUSH_RANGE] = pgaio_complete_flush_range,
 	[PGAIO_READ_BUFFER] = pgaio_complete_read_buffer,
 	[PGAIO_WRITE_BUFFER] = pgaio_complete_write_buffer,
+	[PGAIO_WRITE_WAL] = pgaio_complete_write_wal,
 };
 
 
@@ -332,6 +344,36 @@ pgaio_start_buffer_read(int fd, off_t offset, off_t nbytes, char* data, int buff
 		 (unsigned long long) offset,
 		 (unsigned long long) nbytes,
 		 buffno,
+		 data);
+#endif
+
+	return io;
+}
+
+extern PgAioInProgress *
+pgaio_start_write_wal(int fd, off_t offset, off_t nbytes, char *data, bool no_reorder)
+{
+	PgAioInProgress *io;
+	//struct io_uring_sqe *sqe;
+
+	io = pgaio_start_get_io(PGAIO_WRITE_WAL);
+
+	io->d.write_wal.fd = fd;
+	io->d.write_wal.offset = offset;
+	io->d.write_wal.already_done = 0;
+	io->d.write_wal.no_reorder = no_reorder;
+	io->d.write_wal.iovec.iov_base = data;
+	io->d.write_wal.iovec.iov_len = nbytes;
+	pgaio_end_get_io();
+
+#ifdef PGAIO_VERBOSE
+	elog(DEBUG1, "start_write_wal %zu:"
+		 "fd %d, off: %llu, bytes: %llu, no_reorder: %d, data %p",
+		 io - aio_ctl->in_progress_io,
+		 fd,
+		 (unsigned long long) offset,
+		 (unsigned long long) nbytes,
+		 no_reorder,
 		 data);
 #endif
 
@@ -810,6 +852,42 @@ pgaio_complete_write_buffer(PgAioInProgress *io)
 #endif
 }
 
+static void
+pgaio_complete_write_wal(PgAioInProgress *io)
+{
+#ifdef PGAIO_VERBOSE
+	elog(DEBUG1, "completed write_wal: %zu, %d/%s, offset: %d, nbytes: %d",
+		 io - aio_ctl->in_progress_io,
+		 io->result,
+		 io->result < 0 ? strerror(-io->result) : "ok",
+		 (int)io->d.write_wal.offset,
+		 (int) io->d.write_wal.iovec.iov_len
+		);
+#endif
+
+	if (io->result < 0)
+	{
+		if (io->result == EAGAIN || io->result == EINTR)
+		{
+			elog(WARNING, "need to implement retries");
+		}
+
+		ereport(PANIC,
+				(errcode_for_file_access(),
+				 errmsg("could not write to log file: %s",
+						strerror(-io->result))));
+	}
+	else if (io->result != io->d.write_wal.iovec.iov_len)
+	{
+		ereport(PANIC,
+				(errcode_for_file_access(),
+				 errmsg("could not write to log file: wroteonly %d of %d bytes",
+						io->result, (int) io->d.write_wal.iovec.iov_len)));
+	}
+
+	/* FIXME: update xlog.c state */
+}
+
 
 /* --------------------------------------------------------------------------------
  * io_uring related code
@@ -871,6 +949,15 @@ pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 							 io->d.flush_range.nbytes,
 							 io->d.flush_range.offset);
 			sqe->sync_range_flags = SYNC_FILE_RANGE_WRITE;
+			break;
+		case PGAIO_WRITE_WAL:
+			io_uring_prep_writev(sqe,
+								 io->d.write_wal.fd,
+								 &io->d.write_wal.iovec,
+								 1,
+								 io->d.write_wal.offset);
+			if (io->d.write_wal.no_reorder)
+				sqe->flags = IOSQE_IO_DRAIN;
 			break;
 		case PGAIO_WRITE_BUFFER:
 		case PGAIO_NOP:
