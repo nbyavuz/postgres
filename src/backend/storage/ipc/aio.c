@@ -84,8 +84,8 @@ typedef enum PgAioInProgressFlags
 	/* request reaped */
 	PGAIOIP_REAPED = 1 << 5,
 
-	/* completion callback was called */
-	PGAIOIP_CALLBACK_CALLED = 1 << 6,
+	/* shared completion callback was called */
+	PGAIOIP_SHARED_CALLBACK_CALLED = 1 << 6,
 
 	/* completed */
 	PGAIOIP_DONE = 1 << 7,
@@ -104,6 +104,9 @@ typedef enum PgAioInProgressFlags
 	PGAIOIP_SOFT_FAILURE = 1 << 12,
 
 	PGAIOIP_SHARED_FAILED = 1 << 13,
+
+	/* local completion callback was called */
+	PGAIOIP_LOCAL_CALLBACK_CALLED = 1 << 14,
 
 } PgAioInProgressFlags;
 
@@ -137,6 +140,12 @@ struct PgAioInProgress
 	 * another backend (e.g. in WaitIO).
 	 */
 	pg_atomic_uint32 extra_refs;
+
+	/*
+	 * Single callback that can be registered on an IO to be called upon
+	 * completion. Note that this is reset whenever an IO is recycled..
+	 */
+	PgAioOnCompletionLocalContext *on_completion_local;
 
 	/*
 	 * Membership in one of
@@ -293,7 +302,7 @@ typedef struct PgAioPerBackend
 	 * PgAioInProgress->io_node
 	 */
 	dlist_head local_completed;
-	dlist_node local_completed_count;
+	uint32 local_completed_count;
 
 	/*
 	 * IOs where the completion was received in another backend.
@@ -352,7 +361,6 @@ typedef struct PgAioCtl
 
 /* general pgaio helper functions */
 static void pgaio_complete_ios(bool in_error);
-static void pgaio_recycle_completed(void);
 static void pgaio_backpressure(struct io_uring *ring, const char *loc);
 static void pgaio_prepare_io(PgAioInProgress *io, PgAioAction action);
 static void pgaio_finish_io(PgAioInProgress *io);
@@ -600,14 +608,7 @@ pgaio_postmaster_child_init(void)
 void
 pgaio_at_abort(void)
 {
-	pgaio_recycle_completed();
-
-	if (my_aio->reaped_count > 0)
-	{
-		elog(LOG, "at abort with %d pending", my_aio->reaped_count);
-
-		pgaio_complete_ios(/* in_error = */ true);
-	}
+	pgaio_complete_ios(/* in_error = */ true);
 
 	pgaio_submit_pending(true);
 
@@ -650,7 +651,7 @@ pgaio_split_complete(PgAioInProgress *io)
 	{
 		PgAioInProgress *next = cur->merge_with;
 
-		Assert(!(cur->flags & PGAIOIP_CALLBACK_CALLED));
+		Assert(!(cur->flags & PGAIOIP_SHARED_CALLBACK_CALLED));
 		Assert(cur->merge_with || cur != io);
 
 		switch (cur->type)
@@ -760,12 +761,12 @@ pgaio_complete_ios(bool in_error)
 
 		Assert(node != NULL);
 
-		if (!(io->flags & PGAIOIP_CALLBACK_CALLED))
+		if (!(io->flags & PGAIOIP_SHARED_CALLBACK_CALLED))
 		{
 			PgAioCompletedCB cb;
 			bool finished;
 
-			*(volatile PgAioIPFlags*) &io->flags |= PGAIOIP_CALLBACK_CALLED;
+			*(volatile PgAioIPFlags*) &io->flags |= PGAIOIP_SHARED_CALLBACK_CALLED;
 
 			cb = completion_callbacks[io->type];
 			finished = cb(io);
@@ -811,16 +812,17 @@ pgaio_complete_ios(bool in_error)
 
 	Assert(my_aio->reaped_count == 0);
 
-	pgaio_recycle_completed();
-
 	/* if any IOs weren't fully done, re-submit them */
 	if (pending_count_before != my_aio->pending_count)
 		pgaio_submit_pending(false);
-}
 
-static void
-pgaio_recycle_completed(void)
-{
+	/*
+	 * Next, under lock, process all the still pending requests. This entails
+	 * releasing the "system" reference on the IO and checking which callbacks
+	 * need to be called.
+	 */
+	START_CRIT_SECTION();
+
 	while (!dlist_is_empty(&local_recycle_requests))
 	{
 		dlist_mutable_iter iter;
@@ -855,14 +857,15 @@ pgaio_recycle_completed(void)
 
 					SpinLockAcquire(&other->foreign_completed_lock);
 
+					dlist_push_tail(&other->foreign_completed, &cur->io_node);
+					other->foreign_completed_count++;
+					other->foreign_completed_total_count++;
+
 					*(volatile PgAioIPFlags*) &cur->flags =
 						(cur->flags & ~(PGAIOIP_REAPED | PGAIOIP_IN_PROGRESS)) |
 						PGAIOIP_DONE |
 						PGAIOIP_FOREIGN_DONE;
 
-					dlist_push_tail(&other->foreign_completed, &cur->io_node);
-					other->foreign_completed_count++;
-					other->foreign_completed_total_count++;
 					SpinLockRelease(&other->foreign_completed_lock);
 				}
 				else
@@ -872,6 +875,7 @@ pgaio_recycle_completed(void)
 						PGAIOIP_DONE;
 
 					dlist_push_tail(&my_aio->local_completed, &cur->io_node);
+					my_aio->local_completed_count++;
 				}
 			}
 			else
@@ -884,6 +888,7 @@ pgaio_recycle_completed(void)
 				cur->owner_id = INVALID_PGPROCNO;
 				cur->result = 0;
 				cur->system_referenced = true;
+				cur->on_completion_local = NULL;
 
 				dlist_push_tail(&aio_ctl->unused_ios, &cur->owner_node);
 				aio_ctl->used_count--;
@@ -902,6 +907,8 @@ pgaio_recycle_completed(void)
 			}
 		}
 	}
+
+	END_CRIT_SECTION();
 }
 
 /*
@@ -958,9 +965,8 @@ pgaio_drain_and_unlock(struct io_uring *ring)
 }
 
 static int  __attribute__((noinline))
-pgaio_drain(struct io_uring *ring, bool already_locked)
+pgaio_drain(struct io_uring *ring)
 {
-	bool lock_held = already_locked;
 	int total = 0;
 
 	while (true)
@@ -971,22 +977,64 @@ pgaio_drain(struct io_uring *ring, bool already_locked)
 		if (ready == 0)
 			break;
 
-		if (!lock_held)
-		{
-			LWLockAcquire(SharedAIOCompletionLock, LW_EXCLUSIVE);
-			lock_held = true;
-		}
 
+		LWLockAcquire(SharedAIOCompletionLock, LW_EXCLUSIVE);
 		processed = pgaio_drain_and_unlock(ring);
-		lock_held = false;
 		total += processed;
 
 		if (processed >= ready)
 			break;
 	}
 
-	if (already_locked && !lock_held)
-		LWLockAcquire(SharedAIOCompletionLock, LW_EXCLUSIVE);
+
+	/*
+	 * Transfer all the foreign completions into the local queue.
+	 */
+	if (my_aio->foreign_completed_count != 0)
+	{
+		SpinLockAcquire(&my_aio->foreign_completed_lock);
+
+		while (!dlist_is_empty(&my_aio->foreign_completed))
+		{
+			dlist_node *node = dlist_pop_head_node(&my_aio->foreign_completed);
+			PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, node);
+
+			Assert(!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED));
+
+			dlist_push_tail(&my_aio->local_completed, &io->io_node);
+			io->flags &= ~PGAIOIP_FOREIGN_DONE;
+			my_aio->foreign_completed_count--;
+			my_aio->local_completed_count++;
+		}
+		SpinLockRelease(&my_aio->foreign_completed_lock);
+	}
+
+	if (my_aio->local_completed_count != 0)
+	{
+		static int recursion_count  = 0;
+
+		if (recursion_count == 0)
+		{
+			recursion_count++;
+
+			while (!dlist_is_empty(&my_aio->local_completed))
+			{
+				dlist_node *node = dlist_pop_head_node(&my_aio->local_completed);
+				PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, node);
+
+				Assert(!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED));
+				io->flags |= PGAIOIP_LOCAL_CALLBACK_CALLED;
+				my_aio->local_completed_count--;
+
+				if (!io->on_completion_local)
+					continue;
+
+				io->on_completion_local->callback(io->on_completion_local, io);
+			}
+
+			recursion_count--;
+		}
+	}
 
 	return total;
 }
@@ -994,7 +1042,7 @@ pgaio_drain(struct io_uring *ring, bool already_locked)
 void
 pgaio_drain_shared(void)
 {
-	pgaio_drain(&aio_ctl->shared_ring, false);
+	pgaio_drain(&aio_ctl->shared_ring);
 }
 
 static bool
@@ -1217,7 +1265,7 @@ pgaio_submit_pending(bool drain)
 
 		/* check if there are completions we could process */
 		if (drain)
-			pgaio_drain(&aio_ctl->shared_ring, false);
+			pgaio_drain(&aio_ctl->shared_ring);
 	}
 
 #ifdef PGAIO_VERBOSE
@@ -1230,7 +1278,7 @@ pgaio_submit_pending(bool drain)
 static void  __attribute__((noinline))
 pgaio_backpressure(struct io_uring *ring, const char *loc)
 {
-	pgaio_drain(ring, false);
+	pgaio_drain(ring);
 
 	while (true)
 	{
@@ -1245,7 +1293,7 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 			int cqr_before = io_uring_cq_ready(ring);
 			int used_before = aio_ctl->used_count;
 
-			total = pgaio_drain(ring, false);
+			total = pgaio_drain(ring);
 
 			elog(DEBUG1, "backpressure drain at %s: cqr before/after: %d/%d, my inflight b/a: %d/%d, used b/a: %d/%d, processed %d",
 				 loc,
@@ -1308,7 +1356,7 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 				 io_uring_sq_ready(ring));
 #endif
 			if (cqr_after)
-				pgaio_drain(ring, false);
+				pgaio_drain(ring);
 		}
 	}
 }
@@ -1356,7 +1404,7 @@ again:
 		 * wait for the callback to have been called. But if the backend might
 		 * want to recycle the IO, that's not good enough.
 		 */
-		done_flags |= PGAIOIP_CALLBACK_CALLED;
+		done_flags |= PGAIOIP_SHARED_CALLBACK_CALLED;
 
 		/* possible due to racyness */
 		done_flags |= PGAIOIP_UNUSED | PGAIOIP_IDLE2;
@@ -1399,18 +1447,13 @@ again:
 		goto out;
 	}
 
-#if 0
-	if (!(init_flags & PGAIOIP_INFLIGHT) &&
-		!(init_flags & PGAIOIP_DONE))
+	if (holding_reference &&
+		(init_flags & PGAIOIP_PENDING) &&
+		(!IsUnderPostmaster || io->owner_id == my_aio_id))
 	{
-		pgaio_submit_pending(false);
+		if (init_flags & PGAIOIP_PENDING)
+			pgaio_submit_pending(false);
 	}
-#else
-	if (!IsUnderPostmaster || io->owner_id == my_aio_id)
-	{
-		pgaio_submit_pending(false);
-	}
-#endif
 
 	while (true)
 	{
@@ -1419,7 +1462,7 @@ again:
 		if (flags & done_flags)
 			break;
 
-		pgaio_drain(&aio_ctl->shared_ring, false);
+		pgaio_drain(&aio_ctl->shared_ring);
 
 		flags = *(volatile PgAioIPFlags*) &io->flags;
 
@@ -1466,7 +1509,7 @@ again:
 			else if (ret != 0)
 				elog(WARNING, "unexpected: %d/%s: %m", ret, strerror(-ret));
 
-			pgaio_drain(&aio_ctl->shared_ring, false);
+			pgaio_drain(&aio_ctl->shared_ring);
 
 			if (IsUnderPostmaster)
 				ConditionVariableCancelSleep();
@@ -1524,6 +1567,13 @@ out:
 		ConditionVariableBroadcast(&io->cv);
 		RESUME_INTERRUPTS();
 	}
+
+	if (holding_reference &&
+		!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED) &&
+		io->on_completion_local)
+	{
+		pgaio_drain(&aio_ctl->shared_ring);
+	}
 }
 
 static void
@@ -1562,7 +1612,7 @@ pgaio_io_get(void)
 		LWLockRelease(SharedAIOCtlLock);
 		elog(DEBUG1, "needed to drain while getting IO (used %d inflight %d)",
 			 aio_ctl->used_count, pg_atomic_read_u32(&my_aio->inflight));
-		pgaio_drain(&aio_ctl->shared_ring, false);
+		pgaio_drain(&aio_ctl->shared_ring);
 
 		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 	}
@@ -1602,7 +1652,7 @@ pgaio_io_success(PgAioInProgress *io)
 		return false;
 
 	/* FIXME: is this possible? */
-	if (!(io->flags & PGAIOIP_CALLBACK_CALLED))
+	if (!(io->flags & PGAIOIP_SHARED_CALLBACK_CALLED))
 		return false;
 
 	return true;
@@ -1621,6 +1671,23 @@ pgaio_io_done(PgAioInProgress *io)
 		return true;
 
 	return false;
+}
+
+/*
+ * Register a completion callback that is executed locally in the backend that
+ * initiated the IO, even if the the completion of the IO has been reaped by
+ * another process (which executed the shared callback, unlocking buffers
+ * etc).  This is mainly useful for AIO using code to promptly react to
+ * individual IOs finishing, without having to individually check each of the
+ * IOs.
+ */
+void
+pgaio_io_on_completion_local(PgAioInProgress *io, PgAioOnCompletionLocalContext *ocb)
+{
+	Assert(io->flags & PGAIOIP_IDLE2);
+	Assert(io->on_completion_local == NULL);
+
+	io->on_completion_local = ocb;
 }
 
 void
@@ -1662,7 +1729,8 @@ pgaio_io_retry(PgAioInProgress *io)
 			(io->flags & ~(PGAIOIP_SHARED_FAILED |
 						   PGAIOIP_DONE |
 						   PGAIOIP_FOREIGN_DONE |
-						   PGAIOIP_CALLBACK_CALLED |
+						   PGAIOIP_SHARED_CALLBACK_CALLED |
+						   PGAIOIP_LOCAL_CALLBACK_CALLED |
 						   PGAIOIP_HARD_FAILURE |
 						   PGAIOIP_SOFT_FAILURE)) |
 			PGAIOIP_IN_PROGRESS |
@@ -1737,17 +1805,25 @@ pgaio_io_recycle(PgAioInProgress *io)
 			my_aio->foreign_completed_count--;
 			SpinLockRelease(&my_aio->foreign_completed_lock);
 		}
-		else
+		else if (!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED))
 		{
 			dlist_delete_from(&my_aio->local_completed, &io->io_node);
+			my_aio->local_completed_count--;
 		}
 		io->flags &= ~PGAIOIP_DONE;
 		io->flags |= PGAIOIP_IDLE2;
 	}
 
-	io->flags &= ~(PGAIOIP_DONE | PGAIOIP_MERGE | PGAIOIP_CALLBACK_CALLED | PGAIOIP_RETRY | PGAIOIP_HARD_FAILURE | PGAIOIP_SOFT_FAILURE);
+	io->flags &= ~(PGAIOIP_DONE |
+				   PGAIOIP_MERGE |
+				   PGAIOIP_SHARED_CALLBACK_CALLED |
+				   PGAIOIP_LOCAL_CALLBACK_CALLED |
+				   PGAIOIP_RETRY |
+				   PGAIOIP_HARD_FAILURE |
+				   PGAIOIP_SOFT_FAILURE);
 	Assert(io->flags == PGAIOIP_IDLE2);
 	io->result = 0;
+	io->on_completion_local = NULL;
 }
 
 static void  __attribute__((noinline))
@@ -1813,9 +1889,10 @@ pgaio_io_release(PgAioInProgress *io)
 				my_aio->foreign_completed_count--;
 				SpinLockRelease(&my_aio->foreign_completed_lock);
 			}
-			else
+			else if (!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED))
 			{
 				dlist_delete_from(&my_aio->local_completed, &io->io_node);
+				my_aio->local_completed_count--;
 			}
 		}
 
@@ -1824,6 +1901,8 @@ pgaio_io_release(PgAioInProgress *io)
 		io->owner_id = INVALID_PGPROCNO;
 		io->result = 0;
 		io->system_referenced = true;
+		io->on_completion_local = NULL;
+
 		Assert(io->merge_with == NULL);
 
 		/* could do this earlier or conditionally */
@@ -1896,7 +1975,8 @@ pgaio_io_flag_string(PgAioIPFlags flags, StringInfo s)
 	STRINGIFY_FLAG(PGAIOIP_PENDING);
 	STRINGIFY_FLAG(PGAIOIP_INFLIGHT);
 	STRINGIFY_FLAG(PGAIOIP_REAPED);
-	STRINGIFY_FLAG(PGAIOIP_CALLBACK_CALLED);
+	STRINGIFY_FLAG(PGAIOIP_SHARED_CALLBACK_CALLED);
+	STRINGIFY_FLAG(PGAIOIP_LOCAL_CALLBACK_CALLED);
 
 	STRINGIFY_FLAG(PGAIOIP_DONE);
 	STRINGIFY_FLAG(PGAIOIP_FOREIGN_DONE);
@@ -2073,7 +2153,7 @@ pgaio_bounce_buffer_get(void)
 		LWLockRelease(SharedAIOCtlLock);
 
 		if (!bb)
-			pgaio_drain(&aio_ctl->shared_ring, false);
+			pgaio_drain(&aio_ctl->shared_ring);
 		else
 			break;
 	}

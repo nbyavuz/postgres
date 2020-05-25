@@ -54,6 +54,20 @@ extern void pgaio_at_commit(void);
 extern PgAioInProgress *pgaio_io_get(void);
 extern void pgaio_io_release(PgAioInProgress *io);
 
+extern dlist_node* pgaio_io_node(PgAioInProgress *io);
+
+typedef struct PgAioOnCompletionLocalContext PgAioOnCompletionLocalContext;;
+typedef void (*PgAioOnCompletionLocalCB)(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *io);
+struct PgAioOnCompletionLocalContext
+{
+	PgAioOnCompletionLocalCB callback;
+};
+#define pgaio_ocb_container(type, membername, ptr)								\
+	(AssertVariableIsOfTypeMacro(ptr, PgAioOnCompletionLocalContext *),			\
+	 AssertVariableIsOfTypeMacro(((type *) NULL)->membername, PgAioOnCompletionLocalContext),	\
+	 ((type *) ((char *) (ptr) - offsetof(type, membername))))
+extern void pgaio_io_on_completion_local(PgAioInProgress *io, PgAioOnCompletionLocalContext *ocb);
+
 extern void pgaio_io_wait(PgAioInProgress *io, bool holding_reference);
 extern bool pgaio_io_success(PgAioInProgress *io);
 extern bool pgaio_io_done(PgAioInProgress *io);
