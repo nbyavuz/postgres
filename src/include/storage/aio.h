@@ -56,11 +56,19 @@ extern void pgaio_start_nop(PgAioInProgress *io);
 extern void pgaio_start_fsync(PgAioInProgress *io, int fd, bool barrier);
 extern void pgaio_start_fdatasync(PgAioInProgress *io, int fd, bool barrier);
 
-extern void pgaio_start_read_buffer(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes,
+typedef struct AioBufferTag
+{
+	RelFileNodeBackend rnode;			/* physical relation identifier */
+	ForkNumber	forkNum;
+	BlockNumber blockNum;		/* blknum relative to begin of reln */
+} AioBufferTag;
+struct buftag;
+extern void pgaio_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes,
 									char *bufdata, int buffno, int mode);
-extern void pgaio_start_write_buffer(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes,
+extern void pgaio_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes,
 									 char *bufdata, int buffno);
-extern void pgaio_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes,
+extern void pgaio_start_write_wal(PgAioInProgress *io, int fd,
+								  uint32 offset, uint32 nbytes,
 								  char *bufdata, bool no_reorder);
 extern void pgaio_release(PgAioInProgress *io);
 extern void pgaio_submit_pending(bool drain);

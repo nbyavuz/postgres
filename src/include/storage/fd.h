@@ -84,9 +84,10 @@ extern int	FilePrefetch(File file, off_t offset, int amount, uint32 wait_event_i
 extern int FileRead(File file, char *buffer, int amount, off_t offset,
 					uint32 wait_event_info);
 struct PgAioInProgress;
-extern bool FileStartRead(struct PgAioInProgress *io, File file, char *buffer, int amount, off_t offset, int bufid, int mode);
+struct AioBufferTag;
+extern bool FileStartRead(struct PgAioInProgress *io, File file, char *buffer, int amount, off_t offset, const struct AioBufferTag *tag, int bufid, int mode);
 extern int	FileWrite(File file, char *buffer, int amount, off_t offset, uint32 wait_event_info);
-extern bool FileStartWrite(struct PgAioInProgress *io, File file, char *buffer, int amount, off_t offset, int bufid);
+extern bool FileStartWrite(struct PgAioInProgress *io, File file, char *buffer, int amount, off_t offset, const struct AioBufferTag *tag, int bufid);
 extern int	FileSync(File file, uint32 wait_event_info);
 extern off_t FileSize(File file);
 extern int	FileTruncate(File file, off_t offset, uint32 wait_event_info);

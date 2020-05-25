@@ -675,6 +675,7 @@ mdstartread(PgAioInProgress *io, SMgrRelation reln,
 {
 	off_t		seekpos;
 	MdfdVec    *v;
+	AioBufferTag tag = {.rnode = reln->smgr_rnode, .forkNum = forknum, .blockNum = blocknum};
 
 	AssertPointerAlignment(buffer, 4096);
 
@@ -685,7 +686,7 @@ mdstartread(PgAioInProgress *io, SMgrRelation reln,
 
 	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
 
-	if (!FileStartRead(io, v->mdfd_vfd, buffer, BLCKSZ, seekpos, bufno, mode))
+	if (!FileStartRead(io, v->mdfd_vfd, buffer, BLCKSZ, seekpos, &tag, bufno, mode))
 	{
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -772,6 +773,7 @@ mdstartwrite(PgAioInProgress *io, SMgrRelation reln,
 {
 	off_t		seekpos;
 	MdfdVec    *v;
+	AioBufferTag tag = {.rnode = reln->smgr_rnode, .forkNum = forknum, .blockNum = blocknum};
 
 	/* This assert is too expensive to have on normally ... */
 #ifdef CHECK_WRITE_VS_EXTEND
@@ -798,7 +800,7 @@ mdstartwrite(PgAioInProgress *io, SMgrRelation reln,
 	if (!skipFsync && !SmgrIsTemp(reln))
 		register_dirty_segment(reln, forknum, v);
 
-	if (!FileStartWrite(io, v->mdfd_vfd, buffer, BLCKSZ, seekpos, bufno))
+	if (!FileStartWrite(io, v->mdfd_vfd, buffer, BLCKSZ, seekpos, &tag, bufno))
 	{
 		ereport(ERROR,
 				(errcode_for_file_access(),
