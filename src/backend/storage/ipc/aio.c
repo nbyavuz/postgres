@@ -209,7 +209,7 @@ static void pgaio_finish_io(PgAioInProgress *io);
 static void pgaio_bounce_buffer_release_locked(PgAioInProgress *io);
 
 /* io_uring related functions */
-static void pgaio_put_io_locked(PgAioInProgress *io);
+static void pgaio_put_io_locked(PgAioInProgress *io, bool release_internal);
 static void pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe);
 static void pgaio_complete_cqes(struct io_uring *ring, PgAioInProgress **ios,
 								struct io_uring_cqe **cqes, int ready);
@@ -439,7 +439,7 @@ pgaio_complete_ios(bool in_error)
 			PgAioInProgress *io = local_reaped_ios[i];
 
 			if (io->flags & PGAIOIP_DONE)
-				pgaio_put_io_locked(io);
+				pgaio_put_io_locked(io, true);
 		}
 		LWLockRelease(SharedAIOCtlLock);
 	}
@@ -853,6 +853,7 @@ pgaio_io_get(void)
 	Assert(io->flags == PGAIOIP_IDLE);
 	io->flags &= ~PGAIOIP_IDLE;
 	io->flags |= PGAIOIP_ONLY_USER;
+	io->refcount = 1;
 
 	// FIXME: resowner integration
 
@@ -868,10 +869,11 @@ pgaio_prepare_io(PgAioInProgress *io, PgAioAction action)
 
 	Assert(num_local_pending_requests < PGAIO_SUBMIT_BATCH_SIZE);
 
-	io->flags &= ~PGAIOIP_ONLY_USER;
+	io->flags &= ~(PGAIOIP_ONLY_USER | PGAIOIP_DONE);
 
 	io->flags |= PGAIOIP_IN_USE;
-	io->refcount = 2; // one for this module, one for the user */
+	/* for this module */
+	io->refcount++;
 	io->type = action;
 	io->initiatorProcIndex = MyProc->pgprocno;
 
@@ -891,18 +893,25 @@ pgaio_finish_io(PgAioInProgress *io)
 }
 
 static void __attribute__((noinline))
-pgaio_put_io_locked(PgAioInProgress *io)
+pgaio_put_io_locked(PgAioInProgress *io, bool release_internal)
 {
 	Assert(LWLockHeldByMe(SharedAIOCtlLock));
 
 	Assert(io->refcount > 0);
 	io->refcount--;
+
+	if (release_internal && io->refcount > 0)
+	{
+		io->flags |= PGAIOIP_ONLY_USER;
+		pgaio_bounce_buffer_release_locked(io);
+	}
+
 	if (io->refcount > 0)
 		return;
 
 	Assert(io->flags & PGAIOIP_DONE);
 
-	io->flags &= ~(PGAIOIP_IN_USE|PGAIOIP_DONE);
+	io->flags &= ~(PGAIOIP_IN_USE|PGAIOIP_DONE | PGAIOIP_ONLY_USER);
 	io->flags |= PGAIOIP_IDLE;
 	io->type = 0;
 	io->initiatorProcIndex = INVALID_PGPROCNO;
@@ -920,7 +929,7 @@ void
 pgaio_release(PgAioInProgress *io)
 {
 	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
-	pgaio_put_io_locked(io);
+	pgaio_put_io_locked(io, false);
 	LWLockRelease(SharedAIOCtlLock);
 }
 
@@ -987,7 +996,7 @@ pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb)
 	Assert(io->bb == NULL);
 	Assert(!(io->flags & PGAIOIP_IDLE));
 	Assert(io->flags & PGAIOIP_ONLY_USER);
-	Assert(!(io->flags & (PGAIOIP_DONE | PGAIOIP_INFLIGHT)));
+	Assert(!(io->flags & PGAIOIP_INFLIGHT));
 
 	io->bb = bb;
 }
