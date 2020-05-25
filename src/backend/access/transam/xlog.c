@@ -3315,6 +3315,11 @@ XLogNeedsFlush(XLogRecPtr record)
 	return true;
 }
 
+static void
+XLogFileInitComplete(void *pgsw_private, void *write_private)
+{
+}
+
 /*
  * Create a new XLOG file segment, or open a pre-existing one.
  *
@@ -3346,6 +3351,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 	int			fd;
 	int			nbytes;
 	int			save_errno;
+	pg_streaming_write *pgsw;
 
 	XLogFilePath(path, ThisTimeLineID, logsegno, wal_segment_size);
 
@@ -3374,12 +3380,21 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 	 */
 	elog(DEBUG2, "creating and filling new WAL file");
 
+	/*
+	 * FIXME: Probably want one permanently allocated? Or perhaps this should
+	 * just be part of the AIO infrastructure somehow.
+	 */
+	CurrentMemoryContext->allowInCritSection = true;
+	pgsw = pg_streaming_write_alloc(64, NULL, XLogFileInitComplete);
+	CurrentMemoryContext->allowInCritSection = true;
+
 	snprintf(tmppath, MAXPGPATH, XLOGDIR "/xlogtemp.%d", (int) getpid());
 
 	unlink(tmppath);
 
 	/* do not use get_sync_bit() here --- want to fsync only at end of fill */
-	fd = BasicOpenFile(tmppath, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
+	/* FIXME: make O_DIRECT separately configurable */
+	fd = BasicOpenFile(tmppath, O_RDWR | O_CREAT | O_EXCL | O_DIRECT | PG_BINARY);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -3402,6 +3417,12 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 		 */
 		for (nbytes = 0; nbytes < wal_segment_size; nbytes += XLOG_BLCKSZ)
 		{
+#if 1
+			PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
+
+			pgaio_start_write_wal(aio, fd, nbytes, XLOG_BLCKSZ, zbuffer.data, false);
+			pg_streaming_write_write(pgsw, aio, NULL);
+#else
 			errno = 0;
 			if (write(fd, zbuffer.data, XLOG_BLCKSZ) != XLOG_BLCKSZ)
 			{
@@ -3409,6 +3430,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 				save_errno = errno ? errno : ENOSPC;
 				break;
 			}
+#endif
 		}
 	}
 	else
@@ -3443,6 +3465,16 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 	}
 
 	pgstat_report_wait_start(WAIT_EVENT_WAL_INIT_SYNC);
+#if 1
+	{
+		PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
+
+		pgaio_start_fsync(aio, fd, /* barrier = */ true);
+		pg_streaming_write_write(pgsw, aio, NULL);
+		pg_streaming_write_wait_all(pgsw);
+		pg_streaming_write_free(pgsw);
+	}
+#else
 	if (pg_fsync(fd) != 0)
 	{
 		int			save_errno = errno;
@@ -3453,6 +3485,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 				(errcode_for_file_access(),
 				 errmsg("could not fsync file \"%s\": %m", tmppath)));
 	}
+#endif
 	pgstat_report_wait_end();
 
 	if (close(fd) != 0)
