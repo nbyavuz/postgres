@@ -1364,6 +1364,10 @@ pgaio_complete_write_buffer(PgAioInProgress *io)
 			return false;
 		}
 	}
+
+	// FIXME: broken address in case of rewrite
+	ReadBufferCompleteWrite(io->d.read_buffer.buf, io->d.write_buffer.iovec.iov_base, failed);
+
 	return true;
 }
 

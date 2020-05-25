@@ -306,6 +306,7 @@ extern void IssuePendingWritebacks(WritebackContext *context);
 extern void ScheduleBufferTagForWriteback(WritebackContext *context, BufferTag *tag);
 
 extern void ReadBufferCompleteRead(Buffer buffer, int mode, bool failed);
+extern void ReadBufferCompleteWrite(Buffer buffer, char *buf, bool failed);
 
 
 /* freelist.c */

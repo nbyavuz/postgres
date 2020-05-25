@@ -481,6 +481,7 @@ static BufferDesc *BufferAlloc(SMgrRelation smgr,
 							   BufferAccessStrategy strategy,
 							   bool *foundPtr);
 static void FlushBuffer(BufferDesc *buf, SMgrRelation reln);
+static PgAioInProgress * AsyncFlushBuffer(BufferDesc *buf, SMgrRelation reln);
 static void AtProcExit_Buffers(int code, Datum arg);
 static void CheckForBufferLeaks(void);
 static int	rnode_comparator(const void *p1, const void *p2);
@@ -1206,6 +1207,24 @@ ReadBufferCompleteRead(Buffer buffer, int mode, bool failed)
 	TerminateBufferIO(bufHdr, islocal,
 					  /* syncio = */ false, /* clear_dirty = */ false,
 					  failed ? BM_IO_ERROR : BM_VALID);
+}
+
+void
+ReadBufferCompleteWrite(Buffer buffer, char *dbuf, bool failed)
+{
+	BufferDesc *bufHdr;
+	bool		islocal = BufferIsLocal(buffer);
+
+	if (islocal)
+		bufHdr = GetLocalBufferDescriptor(-buffer - 1);
+	else
+		bufHdr = GetBufferDescriptor(buffer - 1);
+
+	/* FIXME: implement track_io_timing */
+
+	TerminateBufferIO(bufHdr, islocal,
+					  /* syncio = */ false, /* clear_dirty = */ true,
+					  failed ? BM_IO_ERROR : 0);
 }
 
 /*
@@ -2009,6 +2028,136 @@ UnpinBuffer(BufferDesc *buf, bool fixOwner)
 	}
 }
 
+typedef struct StreamingWrite
+{
+	uint32 batch_size;
+	uint32 head;
+	uint32 inflight;
+	PgAioInProgress **outstanding_aio;
+	BufferDesc **outstanding_buffers;
+	WritebackContext *wb_context;
+} StreamingWrite;
+
+static StreamingWrite *
+StreamingWriteAlloc(WritebackContext *wb_context)
+{
+	StreamingWrite *sw = palloc0(sizeof(StreamingWrite));
+
+	sw->batch_size = 128;
+	sw->outstanding_aio = (PgAioInProgress **) palloc0(sizeof(PgAioInProgress*) * sw->batch_size);
+	sw->outstanding_buffers = (BufferDesc **) palloc0(sizeof(BufferDesc*) * sw->batch_size);
+
+	return sw;
+}
+
+static void
+StreamingWriteComplete(StreamingWrite *sw, uint32 count)
+{
+	Assert(count <= sw->batch_size);
+
+	for (uint32 i = 0; i < sw->batch_size; i++)
+	{
+		uint32 off = (i + sw->head) % sw->batch_size;
+		PgAioInProgress *aio = sw->outstanding_aio[off];
+		BufferDesc *bufHdr = sw->outstanding_buffers[off];
+		BufferTag	tag;
+
+		if (aio == NULL)
+			continue;
+
+		pgaio_wait_for_io(aio);
+		pgaio_release(aio);
+		LWLockRelease(BufferDescriptorGetContentLock(bufHdr));
+		tag = bufHdr->tag;
+		UnpinBuffer(bufHdr, true);
+
+		if (sw->wb_context)
+			ScheduleBufferTagForWriteback(sw->wb_context, &tag);
+
+		sw->outstanding_aio[off] = NULL;
+		sw->outstanding_buffers[off] = NULL;
+		sw->inflight--;
+	}
+}
+
+static bool
+StreamingWriteWrite(StreamingWrite *sw, BufferDesc *bufHdr)
+{
+	uint32		buf_state;
+	uint32		off = (sw->head + 1) % sw->batch_size;
+	bool		did_write = false;
+
+	if (sw->outstanding_aio[off] != NULL)
+	{
+		StreamingWriteComplete(sw, 16);
+	}
+
+	Assert(sw->outstanding_aio[off] == NULL);
+	Assert(sw->outstanding_buffers[off] == NULL);
+
+	ReservePrivateRefCountEntry();
+	ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
+
+	buf_state = LockBufHdr(bufHdr);
+
+	if ((buf_state & BM_VALID) && (buf_state & BM_DIRTY))
+	{
+		LWLock *content_lock;
+		PgAioInProgress *aio;
+
+		PinBuffer_Locked(bufHdr);
+
+		content_lock = BufferDescriptorGetContentLock(bufHdr);
+
+		/*
+		 * If there are pre-existing IOs in-flight, we can't block on the
+		 * content lock, it could lead to a deadlock. So first wait for
+		 * outstanding IO, and then block on acquiring the lock.
+		 */
+		if (sw->inflight > 0 &&
+			LWLockConditionalAcquire(content_lock, LW_SHARED))
+		{
+		}
+		else
+		{
+			if (sw->inflight > 0)
+				StreamingWriteComplete(sw, sw->batch_size);
+			LWLockAcquire(content_lock, LW_SHARED);
+		}
+
+		aio = AsyncFlushBuffer(bufHdr, NULL);
+		if (aio)
+		{
+			sw->outstanding_aio[off] = aio;
+			sw->outstanding_buffers[off] = bufHdr;
+
+			BgWriterStats.m_buf_written_checkpoints++;
+			did_write = true;
+			sw->head++;
+		}
+		else
+		{
+			LWLockRelease(content_lock);
+			UnpinBuffer(bufHdr, true);
+		}
+	}
+	else
+	{
+		UnlockBufHdr(bufHdr, buf_state);
+	}
+
+	return did_write;
+}
+
+static void
+StreamingWriteFinish(StreamingWrite *sw)
+{
+	StreamingWriteComplete(sw, sw->batch_size);
+	pfree(sw->outstanding_aio);
+	pfree(sw->outstanding_buffers);
+	pfree(sw);
+}
+
 /*
  * BufferSync -- Write out all dirty buffers in the pool.
  *
@@ -2034,6 +2183,7 @@ BufferSync(int flags)
 	int			i;
 	int			mask = BM_DIRTY;
 	WritebackContext wb_context;
+	StreamingWrite *sw;
 
 	/* Make sure we can handle the pin inside SyncOneBuffer */
 	ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
@@ -2101,6 +2251,8 @@ BufferSync(int flags)
 		return;					/* nothing to do */
 
 	WritebackContextInit(&wb_context, &checkpoint_flush_after);
+
+	sw = StreamingWriteAlloc(&wb_context);
 
 	TRACE_POSTGRESQL_BUFFER_SYNC_START(NBuffers, num_to_scan);
 
@@ -2207,7 +2359,6 @@ BufferSync(int flags)
 
 	elog(DEBUG1, "checkpoint done heaping");
 
-
 	/*
 	 * Iterate through to-be-checkpointed buffers and write the ones (still)
 	 * marked with BM_CHECKPOINT_NEEDED. The writes are balanced between
@@ -2243,7 +2394,7 @@ BufferSync(int flags)
 		 */
 		if (pg_atomic_read_u32(&bufHdr->state) & BM_CHECKPOINT_NEEDED)
 		{
-			if (SyncOneBuffer(buf_id, false, &wb_context) & BUF_WRITTEN)
+			if (StreamingWriteWrite(sw, bufHdr))
 			{
 				TRACE_POSTGRESQL_BUFFER_SYNC_WRITTEN(buf_id);
 				BgWriterStats.m_buf_written_checkpoints++;
@@ -2277,6 +2428,8 @@ BufferSync(int flags)
 		 */
 		CheckpointWriteDelay(flags, (double) num_processed / num_to_scan);
 	}
+
+	StreamingWriteFinish(sw);
 
 	/* issue all pending flushes */
 	IssuePendingWritebacks(&wb_context);
@@ -2992,6 +3145,8 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	if (buf_state & BM_PERMANENT)
 		XLogFlush(recptr);
 
+	pgBufferUsage.shared_blks_written++;
+
 	/*
 	 * Now it's safe to write buffer to disk. Note that no one else should
 	 * have been able to write it while we were busy with log flushing because
@@ -3054,15 +3209,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 							 false);
 		pgaio_wait_for_io(aio);
 		pgaio_release(aio);
-
-		/*
-		 * Mark the buffer as clean (unless BM_JUST_DIRTIED has become set) and
-		 * end the BM_IO_IN_PROGRESS state.
-		 */
-		TerminateSharedBufferIO(buf, /* syncio = */ false, /* clear_dirty = */ true, 0);
 	}
-
-	pgBufferUsage.shared_blks_written++;
 
 	TRACE_POSTGRESQL_BUFFER_FLUSH_DONE(buf->tag.forkNum,
 									   buf->tag.blockNum,
@@ -3072,6 +3219,65 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 
 	/* Pop the error context stack */
 	error_context_stack = errcallback.previous;
+}
+
+static PgAioInProgress *
+AsyncFlushBuffer(BufferDesc *buf, SMgrRelation reln)
+{
+	XLogRecPtr	recptr;
+	Block		bufBlock;
+	char	   *bufToWrite;
+	uint32		buf_state;
+	PgAioInProgress *aio;
+
+	/*
+	 * Try to start an I/O operation.  If StartBufferIO returns false, then
+	 * someone else flushed the buffer before we could, so we need not do
+	 * anything.
+	 */
+	if (!StartBufferIO(buf, false))
+		return NULL;
+
+	/* Find smgr relation for buffer */
+	if (reln == NULL)
+		reln = smgropen(buf->tag.rnode, InvalidBackendId);
+
+	buf_state = LockBufHdr(buf);
+
+	/*
+	 * Run PageGetLSN while holding header lock, since we don't have the
+	 * buffer locked exclusively in all cases.
+	 */
+	recptr = BufferGetLSN(buf);
+
+	/* To check if block content changes while flushing. - vadim 01/17/97 */
+	buf_state &= ~BM_JUST_DIRTIED;
+
+	/* ownership while in AIO subsystem */
+	buf_state += BUF_REFCOUNT_ONE;
+
+	UnlockBufHdr(buf, buf_state);
+
+	if (buf_state & BM_PERMANENT)
+		XLogFlush(recptr);
+
+	bufBlock = BufHdrGetBlock(buf);
+
+	bufToWrite = PageSetChecksumCopy((Page) bufBlock, buf->tag.blockNum);
+
+	/* FIXME: improve */
+	InProgressBuf = NULL;
+
+	pgBufferUsage.shared_blks_written++;
+
+	aio = smgrstartwrite(reln,
+						 buf->tag.forkNum,
+						 buf->tag.blockNum,
+						 bufToWrite,
+						 BufferDescriptorGetBuffer(buf),
+						 false);
+
+	return aio;
 }
 
 /*
