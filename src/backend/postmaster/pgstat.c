@@ -4141,6 +4141,9 @@ pgstat_get_wait_io(WaitEventIO w)
 		case WAIT_EVENT_WAL_WRITE:
 			event_name = "WALWrite";
 			break;
+		case WAIT_EVENT_WAL_WAIT_INSERT:
+			event_name = "WALWaitInsert";
+			break;
 		case WAIT_EVENT_AIO_SUBMIT:
 			event_name = "AIOSubmit";
 			break;
