@@ -702,6 +702,13 @@ pgaio_wait_for_io(PgAioInProgress *io)
 			if (IsUnderPostmaster)
 				ConditionVariablePrepareToSleep(&io->cv);
 			PG_SETMASK(&BlockSig);
+			ResetLatch(MyLatch);
+
+			if (!(io->flags & PGAIOIP_INFLIGHT))
+			{
+				PG_SETMASK(&UnBlockSig);
+				continue;
+			}
 
 #ifdef PGAIO_VERBOSE
 			elog(DEBUG2, "sys enter %zu",
