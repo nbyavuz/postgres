@@ -78,10 +78,21 @@ typedef enum PgAioInProgressFlags
 	/* IO is merged with others */
 	PGAIOIP_MERGE = 1 << 5,
 
+	PGAIOIP_RETRY = 1 << 6,
+
+	/* request failed completely */
+	PGAIOIP_HARD_FAILURE = 1 << 7,
+	/* request failed partly, e.g. a short write */
+	PGAIOIP_SOFT_FAILURE = 1 << 8,
+
+	PGAIOIP_SHARED_UNREAPED = 1 << 9,
+
 } PgAioInProgressFlags;
 
 /* IO completion callback */
 typedef bool (*PgAioCompletedCB)(PgAioInProgress *io);
+
+typedef uint16 PgAioIPFlags;
 
 struct PgAioInProgress
 {
@@ -90,7 +101,7 @@ struct PgAioInProgress
 
 	ConditionVariable cv;
 
-	uint8 flags;
+	PgAioIPFlags flags;
 
 	/* which AIO ring is this entry active for */
 	uint8 ring;
@@ -189,7 +200,7 @@ typedef struct PgAioCtl
 	/* PgAioInProgress that are not used */
 	dlist_head unused_ios;
 
-	dlist_head reissue_ios;
+	dlist_head reaped_uncompleted;
 
 	/* FIXME: this should be per ring */
 	/*
@@ -247,6 +258,8 @@ static bool pgaio_complete_flush_range(PgAioInProgress *io);
 static bool pgaio_complete_read_buffer(PgAioInProgress *io);
 static bool pgaio_complete_write_buffer(PgAioInProgress *io);
 static bool pgaio_complete_write_wal(PgAioInProgress *io);
+
+static int reopen_buffered(const AioBufferTag *tag);
 
 static MemoryContext aio_retry_context;
 
@@ -326,6 +339,7 @@ AioShmemInit(void)
 		memset(aio_ctl, 0, AioCtlShmemSize());
 
 		dlist_init(&aio_ctl->unused_ios);
+		dlist_init(&aio_ctl->reaped_uncompleted);
 		pg_atomic_init_u32(&aio_ctl->inflight, 0);
 		pg_atomic_init_u32(&aio_ctl->outstanding, 0);
 
@@ -392,7 +406,7 @@ pgaio_postmaster_init(void)
 											  1024,
 											  1024,
 											  1024);
-	MemoryContextAllowInCriticalSection(ErrorContext, true);
+	MemoryContextAllowInCriticalSection(aio_retry_context, true);
 }
 
 void
@@ -543,7 +557,6 @@ pgaio_split_complete(PgAioInProgress *io)
 static void  __attribute__((noinline))
 pgaio_complete_ios(bool in_error)
 {
-	int num_complete = 0;
 	int num_pending_before = num_local_pending_requests;
 	dlist_mutable_iter iter;
 	int extracted = 0;
@@ -575,31 +588,48 @@ pgaio_complete_ios(bool in_error)
 
 		Assert(node != NULL);
 
-		/* FIXME: need to add handle "recovering" this io in case of error */
-		num_local_reaped--;
-		dlist_delete(node);
 
 		if (!(io->flags & PGAIOIP_CALLBACK_CALLED))
 		{
 			PgAioCompletedCB cb;
-			bool done;
+			bool finished;
+
+			*(volatile PgAioIPFlags*) &io->flags |= PGAIOIP_CALLBACK_CALLED;
 
 			cb = completion_callbacks[io->type];
-			done = cb(io);
+			finished = cb(io);
 
-			if (done)
+			num_local_reaped--;
+			dlist_delete(node);
+
+			if (finished)
 			{
-				*(volatile uint8*) &io->flags |= PGAIOIP_CALLBACK_CALLED;
 				dlist_push_tail(&local_recycle_requests, &io->system_node);
-				num_complete++;
+			}
+			else
+			{
+				LWLockAcquire(SharedAIOCompletionLock, LW_EXCLUSIVE);
+				io->flags |= PGAIOIP_SHARED_UNREAPED;
+				dlist_push_tail(&aio_ctl->reaped_uncompleted, &io->system_node);
+				LWLockRelease(SharedAIOCompletionLock);
 			}
 
 			/* signal state change */
-			ConditionVariableBroadcast(&io->cv);
+			if (IsUnderPostmaster)
+				ConditionVariableBroadcast(&io->cv);
 		}
 		else
 		{
+
 			Assert(in_error);
+
+			num_local_reaped--;
+			dlist_delete(node);
+
+			LWLockAcquire(SharedAIOCompletionLock, LW_EXCLUSIVE);
+			io->flags |= PGAIOIP_HARD_FAILURE | PGAIOIP_SHARED_UNREAPED;
+			dlist_push_tail(&aio_ctl->reaped_uncompleted, &io->system_node);
+			LWLockRelease(SharedAIOCompletionLock);
 		}
 	}
 
@@ -634,18 +664,19 @@ pgaio_recycle_completed(void)
 			Assert(!(cur->flags & PGAIOIP_INFLIGHT));
 			Assert(!(cur->flags & PGAIOIP_MERGE));
 			Assert(cur->merge_with == NULL);
-			pgaio_bounce_buffer_release_locked(cur);
+			Assert(cur->flags & PGAIOIP_IN_USE);
 
 			if (cur->user_referenced)
 			{
 				cur->system_referenced = false;
-				*(volatile uint8*) &cur->flags = (cur->flags & ~PGAIOIP_IN_USE) | PGAIOIP_ONLY_USER;
-				pgaio_bounce_buffer_release_locked(cur);
+				*(volatile PgAioIPFlags*) &cur->flags = (cur->flags & ~PGAIOIP_IN_USE) | PGAIOIP_ONLY_USER;
 			}
 			else
 			{
-				*(volatile uint8*) &cur->flags =
-					(cur->flags & ~(PGAIOIP_IN_USE | PGAIOIP_CALLBACK_CALLED | PGAIOIP_ONLY_USER)) | PGAIOIP_IDLE;
+				*(volatile PgAioIPFlags*) &cur->flags = PGAIOIP_IDLE;
+
+				pgaio_bounce_buffer_release_locked(cur);
+
 				cur->type = 0;
 				cur->initiatorProcIndex = INVALID_PGPROCNO;
 				cur->result = 0;
@@ -661,9 +692,12 @@ pgaio_recycle_completed(void)
 		}
 		LWLockRelease(SharedAIOCtlLock);
 
-		for (int i = 0; i < to_signal; i++)
+		if (IsUnderPostmaster)
 		{
-			ConditionVariableBroadcast(&signal_ios[i]->cv);
+			for (int i = 0; i < to_signal; i++)
+			{
+				ConditionVariableBroadcast(&signal_ios[i]->cv);
+			}
 		}
 	}
 }
@@ -751,6 +785,10 @@ pgaio_can_be_combined(PgAioInProgress *last, PgAioInProgress *cur)
 	if (last->type != cur->type)
 		return false;
 
+	if (last->flags & PGAIOIP_RETRY ||
+		cur->flags & PGAIOIP_RETRY)
+		return false;
+
 	switch (last->type)
 	{
 		case PGAIO_INVALID:
@@ -799,6 +837,14 @@ pgaio_combine_pending(void)
 	dlist_foreach_modify(iter, &local_pending_requests)
 	{
 		PgAioInProgress *cur = dlist_container(PgAioInProgress, system_node, iter.cur);
+
+		/* can happen when failing partway through io submission */
+		if (cur->merge_with)
+		{
+			elog(DEBUG1, "already merged request (%zu), giving up on merging",
+				 cur - aio_ctl->in_progress_io);
+			return;
+		}
 
 		Assert(cur->merge_with == NULL);
 		Assert(!(cur->flags & PGAIOIP_MERGE));
@@ -949,7 +995,7 @@ pgaio_submit_pending(bool drain)
 static void  __attribute__((noinline))
 pgaio_backpressure(struct io_uring *ring, const char *loc)
 {
-	if (pg_atomic_read_u32(&aio_ctl->outstanding) > PGAIO_BACKPRESSURE_LIMIT &&
+	if (pg_atomic_read_u32(&aio_ctl->inflight) > PGAIO_BACKPRESSURE_LIMIT &&
 		io_uring_cq_ready(ring) > 0)
 	{
 		int total;
@@ -1039,15 +1085,21 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 void
 pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference)
 {
-	uint8 init_flags;
-	uint8 flags;
+	PgAioIPFlags init_flags;
+	PgAioIPFlags flags;
 	bool increased_refcount = false;
-	uint32 done_flags = PGAIOIP_ONLY_USER | PGAIOIP_IDLE;
+	uint32 done_flags =
+		PGAIOIP_ONLY_USER |
+		PGAIOIP_IDLE |
+		PGAIOIP_SOFT_FAILURE |
+		PGAIOIP_HARD_FAILURE;
 
 #ifdef PGAIO_VERBOSE
 	elog(DEBUG3, "waiting for %zu",
 		 io - aio_ctl->in_progress_io);
 #endif
+
+again:
 
 	if (!holding_reference)
 	{
@@ -1058,7 +1110,7 @@ pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference)
 		 */
 		done_flags |= PGAIOIP_CALLBACK_CALLED;
 
-		init_flags = flags = *(volatile uint8*) &io->flags;
+		init_flags = flags = *(volatile PgAioIPFlags*) &io->flags;
 
 		if (init_flags & (PGAIOIP_IN_USE))
 		{
@@ -1072,11 +1124,11 @@ pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference)
 		}
 
 		if (!increased_refcount)
-			return;
+			goto out;
 	}
 	else
 	{
-		init_flags = flags = *(volatile uint8*) &io->flags;
+		init_flags = flags = *(volatile PgAioIPFlags*) &io->flags;
 		Assert(io->user_referenced);
 	}
 
@@ -1090,7 +1142,7 @@ pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference)
 	if (init_flags & PGAIOIP_ONLY_USER)
 	{
 		Assert(holding_reference);
-		return;
+		goto out;
 	}
 
 #if 0
@@ -1100,7 +1152,7 @@ pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference)
 		pgaio_submit_pending(false);
 	}
 #else
-	if (io->initiatorProcIndex == MyProc->pgprocno)
+	if (!IsUnderPostmaster || io->initiatorProcIndex == MyProc->pgprocno)
 	{
 		pgaio_submit_pending(false);
 	}
@@ -1108,14 +1160,14 @@ pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference)
 
 	while (true)
 	{
-		flags = *(volatile uint8*) &io->flags;
+		flags = *(volatile PgAioIPFlags*) &io->flags;
 
 		if (flags & done_flags)
 			break;
 
 		pgaio_drain(&aio_ctl->shared_ring, false);
 
-		flags = *(volatile uint8*) &io->flags;
+		flags = *(volatile PgAioIPFlags*) &io->flags;
 
 		if (flags & done_flags)
 			break;
@@ -1132,7 +1184,7 @@ pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference)
 				ResetLatch(MyLatch);
 			}
 
-			flags = *(volatile uint8*) &io->flags;
+			flags = *(volatile PgAioIPFlags*) &io->flags;
 			if (!(flags & PGAIOIP_INFLIGHT))
 			{
 				PG_SETMASK(&UnBlockSig);
@@ -1174,7 +1226,7 @@ pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference)
 			if (IsUnderPostmaster)
 				ConditionVariablePrepareToSleep(&io->cv);
 
-			flags = *(volatile uint8*) &io->flags;
+			flags = *(volatile PgAioIPFlags*) &io->flags;
 			if (!(flags & done_flags))
 				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
 
@@ -1183,8 +1235,40 @@ pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference)
 		}
 	}
 
-	flags = *(volatile uint8*) &io->flags;
+	flags = *(volatile PgAioIPFlags*) &io->flags;
 	Assert(flags & done_flags);
+
+out:
+	if (flags & (PGAIOIP_SOFT_FAILURE | PGAIOIP_SOFT_FAILURE))
+	{
+		/* can retry soft failures, but not hard ones */
+		/* FIXME: limit number of soft retries */
+		if (flags & PGAIOIP_SOFT_FAILURE)
+		{
+			ereport(LOG, errmsg("retrying IO %zd",
+								 io - aio_ctl->in_progress_io),
+					errhidestmt(true),
+					errhidecontext(true));
+			pgaio_io_print(io, NULL);
+
+			pgaio_io_retry(io);
+
+			if (increased_refcount)
+			{
+				pg_atomic_fetch_sub_u32(&io->extra_refs, 1);
+				ConditionVariableBroadcast(&io->cv);
+				RESUME_INTERRUPTS();
+				increased_refcount = false;
+			}
+
+			goto again;
+		}
+		else
+		{
+			elog(WARNING, "request %zd failed permanently",
+				 io - aio_ctl->in_progress_io);
+		}
+	}
 
 	if (increased_refcount)
 	{
@@ -1248,22 +1332,84 @@ pgaio_io_get(void)
 	io->user_referenced = true;
 	io->system_referenced = false;
 
-	*(volatile uint8*) &io->flags = (io->flags & ~PGAIOIP_IDLE) | PGAIOIP_ONLY_USER;
+	*(volatile PgAioIPFlags*) &io->flags = (io->flags & ~PGAIOIP_IDLE) | PGAIOIP_ONLY_USER;
 
 	pgaio_io_wait_extra_refs(io);
 	Assert(pg_atomic_read_u32(&io->extra_refs) == 0);
 
-	io->initiatorProcIndex = MyProc->pgprocno;
+	if (IsUnderPostmaster)
+		io->initiatorProcIndex = MyProc->pgprocno;
 
 	dlist_push_tail(&local_outstanding_requests, &io->issuer_node);
 
 	return io;
 }
 
+bool
+pgaio_io_success(PgAioInProgress *io)
+{
+	Assert(io->user_referenced);
+
+	Assert(!(io->flags & PGAIOIP_IN_USE));
+
+	if (io->flags & (PGAIOIP_HARD_FAILURE | PGAIOIP_SOFT_FAILURE))
+		return false;
+
+	if (!(io->flags & PGAIOIP_CALLBACK_CALLED))
+		return false;
+
+	return true;
+}
+
+void
+pgaio_io_retry(PgAioInProgress *io)
+{
+	bool retryable = false;
+
+
+	switch (io->type)
+	{
+		case PGAIO_READ_BUFFER:
+			retryable = true;
+			io->d.read_buffer.fd = reopen_buffered(&io->d.write_buffer.tag);
+			break;
+
+		case PGAIO_WRITE_BUFFER:
+			retryable = true;
+			io->d.write_buffer.fd = reopen_buffered(&io->d.write_buffer.tag);
+			break;
+
+		default:
+			return;
+			break;
+	}
+
+	if (retryable)
+	{
+		io->flags &= ~(PGAIOIP_CALLBACK_CALLED | PGAIOIP_HARD_FAILURE | PGAIOIP_SOFT_FAILURE);
+		io->flags |= PGAIOIP_IN_USE;
+		io->flags |= PGAIOIP_RETRY;
+		io->local_pending = true;
+
+		if (io->flags & PGAIOIP_SHARED_UNREAPED)
+		{
+			LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
+			io->flags &= ~PGAIOIP_SHARED_UNREAPED;
+			dlist_delete(&io->system_node);
+			LWLockRelease(SharedAIOCtlLock);
+		}
+
+		dlist_push_tail(&local_pending_requests, &io->system_node);
+		num_local_pending_requests++;
+
+		pgaio_submit_pending(true);
+	}
+}
+
 extern void
 pgaio_io_recycle(PgAioInProgress *io)
 {
-	uint32 init_flags = *(volatile uint8*) &io->flags;
+	uint32 init_flags = *(volatile PgAioIPFlags*) &io->flags;
 
 	Assert(init_flags & PGAIOIP_ONLY_USER);
 	Assert(io->user_referenced);
@@ -1271,7 +1417,14 @@ pgaio_io_recycle(PgAioInProgress *io)
 
 	pgaio_io_wait_extra_refs(io);
 
-	io->flags &= ~PGAIOIP_CALLBACK_CALLED;
+	if (io->bb)
+	{
+		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
+		pgaio_bounce_buffer_release_locked(io);
+		LWLockRelease(SharedAIOCtlLock);
+	}
+
+	io->flags &= ~(PGAIOIP_CALLBACK_CALLED | PGAIOIP_RETRY | PGAIOIP_HARD_FAILURE | PGAIOIP_SOFT_FAILURE);
 	io->result = 0;
 }
 
@@ -1286,11 +1439,12 @@ pgaio_prepare_io(PgAioInProgress *io, PgAioAction action)
 
 	Assert(num_local_pending_requests < PGAIO_SUBMIT_BATCH_SIZE);
 
-	*(volatile uint8*) &io->flags = (io->flags & ~PGAIOIP_ONLY_USER) | PGAIOIP_IN_USE;
+	*(volatile PgAioIPFlags*) &io->flags = (io->flags & ~PGAIOIP_ONLY_USER) | PGAIOIP_IN_USE;
 	/* for this module */
 	io->system_referenced = true;
 	io->type = action;
-	io->initiatorProcIndex = MyProc->pgprocno;
+	if (IsUnderPostmaster)
+		io->initiatorProcIndex = MyProc->pgprocno;
 	io->local_pending = true;
 
 	// FIXME: should this be done in end_get_io?
@@ -1313,7 +1467,7 @@ void
 pgaio_release(PgAioInProgress *io)
 {
 	Assert(io->user_referenced);
-	Assert(io->initiatorProcIndex == MyProc->pgprocno);
+	Assert(!IsUnderPostmaster || io->initiatorProcIndex == MyProc->pgprocno);
 
 	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 
@@ -1328,8 +1482,8 @@ pgaio_release(PgAioInProgress *io)
 		Assert(io->flags & PGAIOIP_CALLBACK_CALLED ||
 			   io->flags & PGAIOIP_ONLY_USER);
 
-		*(volatile uint8*) &io->flags =
-			(io->flags & ~(PGAIOIP_IN_USE | PGAIOIP_CALLBACK_CALLED | PGAIOIP_ONLY_USER)) | PGAIOIP_IDLE;
+		*(volatile PgAioIPFlags*) &io->flags =
+			(io->flags & ~(PGAIOIP_IN_USE | PGAIOIP_CALLBACK_CALLED | PGAIOIP_ONLY_USER | PGAIOIP_RETRY)) | PGAIOIP_IDLE;
 
 		io->type = 0;
 		io->initiatorProcIndex = INVALID_PGPROCNO;
@@ -1386,7 +1540,7 @@ pgaio_io_action_string(PgAioAction a)
 
 
 static void
-pgaio_io_flag_string(uint8 flags, StringInfo s)
+pgaio_io_flag_string(PgAioIPFlags flags, StringInfo s)
 {
 	bool first = true;
 
@@ -1398,6 +1552,10 @@ pgaio_io_flag_string(uint8 flags, StringInfo s)
 	STRINGIFY_FLAG(PGAIOIP_INFLIGHT);
 	STRINGIFY_FLAG(PGAIOIP_CALLBACK_CALLED);
 	STRINGIFY_FLAG(PGAIOIP_MERGE);
+	STRINGIFY_FLAG(PGAIOIP_RETRY);
+	STRINGIFY_FLAG(PGAIOIP_HARD_FAILURE);
+	STRINGIFY_FLAG(PGAIOIP_SOFT_FAILURE);
+	STRINGIFY_FLAG(PGAIOIP_SHARED_UNREAPED);
 
 #undef STRINGIFY_FLAG
 }
@@ -1431,20 +1589,22 @@ pgaio_io_print_one(PgAioInProgress *io, StringInfo s)
 							 (unsigned long long) io->d.flush_range.nbytes);
 			break;
 		case PGAIO_READ_BUFFER:
-			appendStringInfo(s, " (fd: %d, mode: %d, offset: %d, nbytes: %d, already_done: %d, bufdata: %p)",
+			appendStringInfo(s, " (fd: %d, mode: %d, offset: %d, nbytes: %d, already_done: %d, buf/data: %d/%p)",
 							 io->d.read_buffer.fd,
 							 io->d.read_buffer.mode,
 							 io->d.read_buffer.offset,
 							 io->d.read_buffer.nbytes,
 							 io->d.read_buffer.already_done,
+							 io->d.read_buffer.buf,
 							 io->d.read_buffer.bufdata);
 			break;
 		case PGAIO_WRITE_BUFFER:
-			appendStringInfo(s, " (fd: %d, offset: %d, nbytes: %d, already_done: %d, bufdata: %p)",
+			appendStringInfo(s, " (fd: %d, offset: %d, nbytes: %d, already_done: %d, buf/data: %d/%p)",
 							 io->d.write_buffer.fd,
 							 io->d.write_buffer.offset,
 							 io->d.write_buffer.nbytes,
 							 io->d.write_buffer.already_done,
+							 io->d.read_buffer.buf,
 							 io->d.write_buffer.bufdata);
 			break;
 		case PGAIO_WRITE_WAL:
@@ -1624,7 +1784,7 @@ pgaio_complete_cqes(struct io_uring *ring, struct io_uring_cqe **cqes, int ready
 		Assert(io->flags & PGAIOIP_IN_USE);
 		Assert(!(io->flags == PGAIOIP_IDLE));
 
-		*(volatile uint8*) &io->flags = (io->flags & ~PGAIOIP_INFLIGHT);
+		*(volatile PgAioIPFlags*) &io->flags = (io->flags & ~PGAIOIP_INFLIGHT);
 		io->result = cqe->res;
 
 		dlist_push_tail(&local_reaped_ios, &io->system_node);
@@ -1663,7 +1823,8 @@ prep_read_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
 	cur = io;
 	while (cur)
 	{
-		iov->iov_base = cur->d.read_buffer.bufdata;
+		offset += cur->d.write_buffer.already_done;
+		iov->iov_base = cur->d.read_buffer.bufdata + cur->d.read_buffer.already_done;
 		iov->iov_len = cur->d.read_buffer.nbytes - cur->d.read_buffer.already_done;
 
 		niov++;
@@ -1695,7 +1856,8 @@ prep_write_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
 	cur = io;
 	while (cur)
 	{
-		iov->iov_base = cur->d.write_buffer.bufdata;
+		offset += cur->d.write_buffer.already_done;
+		iov->iov_base = cur->d.write_buffer.bufdata + cur->d.write_buffer.already_done;
 		iov->iov_len = cur->d.write_buffer.nbytes - cur->d.write_buffer.already_done;
 
 		niov++;
@@ -1831,7 +1993,7 @@ pgaio_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, ui
 	pgaio_finish_io(io);
 
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "start_buffer_read %zu:"
+	elog(DEBUG3, "start_buffer_read %zu: "
 		 "fd %d, off: %llu, bytes: %llu, buff: %d, data %p",
 		 io - aio_ctl->in_progress_io,
 		 fd,
@@ -1858,7 +2020,7 @@ pgaio_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, u
 	pgaio_finish_io(io);
 
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "start_buffer_write %zu:"
+	elog(DEBUG3, "start_buffer_write %zu: "
 		 "fd %d, off: %llu, bytes: %llu, buff: %d, data %p",
 		 io - aio_ctl->in_progress_io,
 		 fd,
@@ -1900,6 +2062,25 @@ pgaio_start_nop(PgAioInProgress *io)
 {
 	pgaio_prepare_io(io, PGAIO_NOP);
 	pgaio_finish_io(io);
+}
+
+void
+pgaio_start_fsync(PgAioInProgress *io, int fd, bool barrier)
+{
+	pgaio_prepare_io(io, PGAIO_FSYNC);
+	io->d.fsync.fd = fd;
+	io->d.fsync.barrier = barrier;
+	io->d.fsync.datasync = false;
+	pgaio_finish_io(io);
+
+#ifdef PGAIO_VERBOSE
+	elog(DEBUG3, "start_fsync %zu:"
+		 "fd %d, is_barrier: %d, is_datasync: %d",
+		 io - aio_ctl->in_progress_io,
+		 fd,
+		 barrier,
+		 false);
+#endif
 }
 
 void
@@ -1968,25 +2149,38 @@ reopen_buffered(const AioBufferTag *tag)
 static bool
 pgaio_complete_read_buffer(PgAioInProgress *io)
 {
-	bool		failed = false;
 	Buffer		buffer = io->d.read_buffer.buf;
 
+	bool		call_completion;
+	bool		failed;
+	bool		done;
+
+	/* great for torturing error handling */
+#if 0
+	if (io->result > 4096)
+		io->result = 4096;
+#endif
+
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "completed read_buffer: %zu, %d/%s, buf %d",
+	elog(io->flags & PGAIOIP_RETRY ? DEBUG1 : DEBUG3,
+		 "completed read_buffer: %zu, %d/%s, buf %d",
 		 io - aio_ctl->in_progress_io,
 		 io->result,
 		 io->result < 0 ? strerror(-io->result) : "ok",
 		 io->d.read_buffer.buf);
 #endif
 
-	/* FIXME: most of this should be in bufmgr.c */
 	if (io->result != (io->d.read_buffer.nbytes - io->d.read_buffer.already_done))
 	{
+		MemoryContext old_context = MemoryContextSwitchTo(aio_retry_context);
+
+		failed = true;
+
+		pgaio_io_print(io, NULL);
+
 		if (io->result < 0)
 		{
-			MemoryContext old_context = MemoryContextSwitchTo(aio_retry_context);
-
-			failed = true;
+			io->flags |= PGAIOIP_HARD_FAILURE;
 
 			if (io->result == EAGAIN || io->result == EINTR)
 			{
@@ -2003,14 +2197,15 @@ pgaio_complete_read_buffer(PgAioInProgress *io)
 							   strerror(-io->result)));
 			}
 
-			MemoryContextSwitchTo(old_context);
-			MemoryContextReset(aio_retry_context);
+			call_completion = true;
+			done = true;
 		}
 		else
 		{
-			MemoryContext old_context = MemoryContextSwitchTo(aio_retry_context);
-
-			failed = true;
+			io->flags |= PGAIOIP_SOFT_FAILURE;
+			call_completion = false;
+			done = false;
+			io->d.read_buffer.already_done += io->result;
 
 			/*
 			 * This is actually pretty common and harmless, happens when part
@@ -2026,39 +2221,42 @@ pgaio_complete_read_buffer(PgAioInProgress *io)
 			 */
 			ereport(DEBUG1,
 					errcode(ERRCODE_DATA_CORRUPTED),
-					errmsg("could not read block %u in file \"%s\": read only %d of %d bytes (init: %d, cur: %d)",
+					errmsg("%zd: could not read block %u in file \"%s\": read only %d of %d bytes (init: %d, cur: %d)",
+						   io - aio_ctl->in_progress_io,
 						   io->d.read_buffer.tag.blockNum,
 						   relpath(io->d.read_buffer.tag.rnode,
 								   io->d.read_buffer.tag.forkNum),
 						   io->result, BLCKSZ,
-						   io->initiatorProcIndex, MyProc->pgprocno));
-
-			io->d.read_buffer.fd = reopen_buffered(&io->d.write_buffer.tag);
-			io->d.read_buffer.already_done += io->result;
-
-			MemoryContextSwitchTo(old_context);
-			MemoryContextReset(aio_retry_context);
-
-			Assert(!io->local_pending);
-			io->local_pending = true;
-			dlist_push_tail(&local_pending_requests, &io->system_node);
-			num_local_pending_requests++;
-
-			return false;
+						   io->initiatorProcIndex, MyProc ? MyProc->pgprocno : INVALID_PGPROCNO));
 		}
+
+		MemoryContextSwitchTo(old_context);
+		MemoryContextReset(aio_retry_context);
+	}
+	else
+	{
+		io->d.read_buffer.already_done += io->result;
+		Assert(io->d.read_buffer.already_done == BLCKSZ);
+
+		call_completion = true;
+		failed = false;
+		done = true;
 	}
 
-	if (BufferIsValid(buffer))
+	if (call_completion && BufferIsValid(buffer))
 		ReadBufferCompleteRead(buffer, io->d.read_buffer.mode, failed);
 
-	return true;
+	return done;
 }
 
 static bool
 pgaio_complete_write_buffer(PgAioInProgress *io)
 {
-	bool		failed = false;
 	Buffer		buffer = io->d.write_buffer.buf;
+
+	bool		call_completion;
+	bool		failed;
+	bool		done;
 
 #ifdef PGAIO_VERBOSE
 	elog(DEBUG3, "completed write_buffer: %zu, %d/%s, buf %d",
@@ -2068,18 +2266,24 @@ pgaio_complete_write_buffer(PgAioInProgress *io)
 		 io->d.write_buffer.buf);
 #endif
 
-	/* FIXME: most of this should be in bufmgr.c */
 	if (io->result != (io->d.write_buffer.nbytes - io->d.write_buffer.already_done))
 	{
+		MemoryContext old_context = MemoryContextSwitchTo(aio_retry_context);
+
+		failed = true;
+
+		pgaio_io_print(io, NULL);
+
+
 		if (io->result < 0)
 		{
-			MemoryContext old_context = MemoryContextSwitchTo(aio_retry_context);
-
 			failed = true;
+
+			io->flags |= PGAIOIP_HARD_FAILURE;
 
 			if (io->result == EAGAIN || io->result == EINTR)
 			{
-				elog(PANIC, "need to implement retries for failed requests");
+				elog(PANIC, "need to implement retries for transiently failed requests");
 			}
 			else
 			{
@@ -2093,12 +2297,16 @@ pgaio_complete_write_buffer(PgAioInProgress *io)
 						errhint("Check free disk space."));
 			}
 
-			MemoryContextSwitchTo(old_context);
-			MemoryContextReset(aio_retry_context);
+			call_completion = true;
+			done = true;
 		}
 		else
 		{
-			MemoryContext old_context = MemoryContextSwitchTo(aio_retry_context);
+			io->flags |= PGAIOIP_SOFT_FAILURE;
+			io->d.write_buffer.already_done += io->result;
+
+			call_completion = false;
+			done = false;
 
 			ereport(WARNING,
 					(errcode(ERRCODE_DATA_CORRUPTED),
@@ -2107,27 +2315,26 @@ pgaio_complete_write_buffer(PgAioInProgress *io)
 							relpath(io->d.write_buffer.tag.rnode,
 									io->d.write_buffer.tag.forkNum),
 							io->result, (io->d.write_buffer.nbytes - io->d.write_buffer.already_done),
-							io->initiatorProcIndex, MyProc->pgprocno)));
-
-			io->d.write_buffer.fd = reopen_buffered(&io->d.write_buffer.tag);
-			io->d.write_buffer.already_done += io->result;
-
-			MemoryContextSwitchTo(old_context);
-			MemoryContextReset(aio_retry_context);
-
-			Assert(!io->local_pending);
-			io->local_pending = true;
-			dlist_push_tail(&local_pending_requests, &io->system_node);
-			num_local_pending_requests++;
-
-			return false;
+							io->initiatorProcIndex, MyProc ? MyProc->pgprocno : INVALID_PGPROCNO)));
 		}
+
+		MemoryContextSwitchTo(old_context);
+		MemoryContextReset(aio_retry_context);
+	}
+	else
+	{
+		io->d.write_buffer.already_done += io->result;
+		Assert(io->d.write_buffer.already_done == BLCKSZ);
+
+		call_completion = true;
+		failed = false;
+		done = true;
 	}
 
-	if (BufferIsValid(buffer))
+	if (call_completion && BufferIsValid(buffer))
 		ReadBufferCompleteWrite(buffer, failed);
 
-	return true;
+	return done;
 }
 
 static bool
@@ -2157,9 +2364,10 @@ pgaio_complete_write_wal(PgAioInProgress *io)
 	}
 	else if (io->result != io->d.write_wal.iovec.iov_len)
 	{
+		/* FIXME: implement retries for short writes */
 		ereport(PANIC,
 				(errcode_for_file_access(),
-				 errmsg("could not write to log file: wroteonly %d of %d bytes",
+				 errmsg("could not write to log file: wrote only %d of %d bytes",
 						io->result, (int) io->d.write_wal.iovec.iov_len)));
 	}
 

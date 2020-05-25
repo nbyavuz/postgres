@@ -48,7 +48,11 @@ extern void pgaio_at_commit(void);
  * e.g. for buffer writes interleaved with WAL writes, for queue depth
  * management of checkpointer, for readahead)
  */
+
 extern PgAioInProgress *pgaio_io_get(void);
+extern bool pgaio_io_success(PgAioInProgress *io);
+extern void pgaio_io_retry(PgAioInProgress *io);
+
 extern void pgaio_io_recycle(PgAioInProgress *io);
 
 extern void pgaio_start_flush_range(PgAioInProgress *io, int fd, off_t offset, off_t nbytes);

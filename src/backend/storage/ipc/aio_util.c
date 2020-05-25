@@ -1,6 +1,7 @@
 #include "postgres.h"
 
 #include "storage/aio.h"
+#include "miscadmin.h"
 
 /* typedef is in header */
 typedef struct oustanding_write
@@ -30,6 +31,8 @@ pg_streaming_write_alloc(uint32 iodepth, void *private_data, pg_streaming_write_
 {
 	pg_streaming_write *psw;
 
+	iodepth = Max(Min(iodepth, NBuffers / 128), 1);
+
 	psw = palloc0(offsetof(pg_streaming_write, outstanding_writes)
 				 + sizeof(outstanding_write) * iodepth);
 
@@ -49,6 +52,7 @@ pg_streaming_write_get_io(pg_streaming_write *pgsw)
 	if (this_write->in_progress)
 	{
 		pg_streaming_write_wait(pgsw, 1);
+		pgaio_io_recycle(this_write->aio);
 	}
 
 	if (!this_write->aio)
@@ -59,6 +63,8 @@ pg_streaming_write_get_io(pg_streaming_write *pgsw)
 	{
 		pgaio_io_recycle(this_write->aio);
 	}
+
+	Assert(!this_write->in_progress);
 
 	return this_write->aio;
 }
@@ -321,6 +327,9 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 	//if (pgsr->prefetch_at == 0)
 	pg_streaming_read_prefetch(pgsr);
 
+	if (pgsr->scan_at == pgsr->end_at)
+		return 0;
+
 	Assert(pgsr->scan_at < pgsr->prefetch_at);
 	Assert(this_read->aio);
 	Assert(this_read->done || this_read->in_progress);
@@ -328,6 +337,7 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 	if (!this_read->done)
 	{
 		pgaio_wait_for_io(this_read->aio, true);
+		Assert(pgaio_io_success(this_read->aio));
 		this_read->in_progress = false;
 		this_read->done = true;
 	}
