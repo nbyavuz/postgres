@@ -132,7 +132,7 @@ struct PgAioInProgress
 	int32 result;
 
 	/*
-	 * FIXME: This is just used for a realy ugly hacky pgaio_wait_for_io(), to
+	 * FIXME: This is just used for a realy ugly hacky pgaio_io_wait(), to
 	 * deal with some edge-cases when waiting for an IO that's owned by
 	 * another backend (e.g. in WaitIO).
 	 */
@@ -616,8 +616,8 @@ pgaio_at_abort(void)
 		PgAioInProgress *io = dlist_head_element(PgAioInProgress, owner_node, &my_aio->outstanding);
 
 		if (!pgaio_io_done(io))
-			pgaio_wait_for_io(io, true);
-		pgaio_release(io);
+			pgaio_io_wait(io, true);
+		pgaio_io_release(io);
 	}
 }
 
@@ -632,8 +632,8 @@ pgaio_at_commit(void)
 
 		elog(WARNING, "leaked io %zu", io - aio_ctl->in_progress_io);
 		if (!pgaio_io_done(io))
-			pgaio_wait_for_io(io, true);
-		pgaio_release(io);
+			pgaio_io_wait(io, true);
+		pgaio_io_release(io);
 	}
 }
 
@@ -1335,7 +1335,7 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
  * wait on the wrong buffer.
  */
 void
-pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference)
+pgaio_io_wait(PgAioInProgress *io, bool holding_reference)
 {
 	PgAioIPFlags init_flags;
 	PgAioIPFlags flags;
@@ -1784,7 +1784,7 @@ pgaio_finish_io(PgAioInProgress *io)
 
 
 void
-pgaio_release(PgAioInProgress *io)
+pgaio_io_release(PgAioInProgress *io)
 {
 	Assert(io->user_referenced);
 	Assert(!IsUnderPostmaster || io->owner_id == MyProc->pgprocno);
@@ -2323,7 +2323,7 @@ __sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
  */
 
 void
-pgaio_start_flush_range(PgAioInProgress *io, int fd, off_t offset, off_t nbytes)
+pgaio_io_start_flush_range(PgAioInProgress *io, int fd, off_t offset, off_t nbytes)
 {
 	pgaio_prepare_io(io, PGAIO_FLUSH_RANGE);
 
@@ -2341,7 +2341,7 @@ pgaio_start_flush_range(PgAioInProgress *io, int fd, off_t offset, off_t nbytes)
 }
 
 void
-pgaio_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes, char *bufdata, int buffno, int mode)
+pgaio_io_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes, char *bufdata, int buffno, int mode)
 {
 	pgaio_prepare_io(io, PGAIO_READ_BUFFER);
 
@@ -2369,7 +2369,7 @@ pgaio_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, ui
 }
 
 void
-pgaio_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes, char *bufdata, int buffno)
+pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes, char *bufdata, int buffno)
 {
 	pgaio_prepare_io(io, PGAIO_WRITE_BUFFER);
 
@@ -2396,7 +2396,7 @@ pgaio_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, u
 }
 
 void
-pgaio_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, bool no_reorder)
+pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, bool no_reorder)
 {
 	pgaio_prepare_io(io, PGAIO_WRITE_WAL);
 
@@ -2422,14 +2422,14 @@ pgaio_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes,
 }
 
 void
-pgaio_start_nop(PgAioInProgress *io)
+pgaio_io_start_nop(PgAioInProgress *io)
 {
 	pgaio_prepare_io(io, PGAIO_NOP);
 	pgaio_finish_io(io);
 }
 
 void
-pgaio_start_fsync(PgAioInProgress *io, int fd, bool barrier)
+pgaio_io_start_fsync(PgAioInProgress *io, int fd, bool barrier)
 {
 	pgaio_prepare_io(io, PGAIO_FSYNC);
 	io->d.fsync.fd = fd;
@@ -2448,7 +2448,7 @@ pgaio_start_fsync(PgAioInProgress *io, int fd, bool barrier)
 }
 
 void
-pgaio_start_fdatasync(PgAioInProgress *io, int fd, bool barrier)
+pgaio_io_start_fdatasync(PgAioInProgress *io, int fd, bool barrier)
 {
 	pgaio_prepare_io(io, PGAIO_FSYNC);
 	io->d.fsync.fd = fd;

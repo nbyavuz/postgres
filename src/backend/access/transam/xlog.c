@@ -2864,12 +2864,12 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 					 * such. And then only wait before fsyncing. And do that
 					 * under a separate lock.
 					 */
-					pgaio_start_write_wal(aio, openLogFile, startoffset,
+					pgaio_io_start_write_wal(aio, openLogFile, startoffset,
 										  nleft,
 										  from,
 										  false /* ispartialpage */);
-					pgaio_wait_for_io(aio, true);
-					pgaio_release(aio);
+					pgaio_io_wait(aio, true);
+					pgaio_io_release(aio);
 					written = nleft;
 				}
 #endif
@@ -3734,7 +3734,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 				 * processes. So retries wouldn't work right. But since we
 				 * don't implement those for wal writes yet...
 				 */
-				pgaio_start_write_wal(aio, fd, nbytes, XLOG_BLCKSZ, zbuffer.data, false);
+				pgaio_io_start_write_wal(aio, fd, nbytes, XLOG_BLCKSZ, zbuffer.data, false);
 				pg_streaming_write_write(pgsw, aio, NULL);
 #else
 				errno = 0;
@@ -3784,7 +3784,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 	{
 		PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
 
-		pgaio_start_fsync(aio, fd, /* barrier = */ true);
+		pgaio_io_start_fsync(aio, fd, /* barrier = */ true);
 		pg_streaming_write_write(pgsw, aio, NULL);
 		pg_streaming_write_wait_all(pgsw);
 		pg_streaming_write_free(pgsw);
@@ -10857,9 +10857,9 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 			{
 				PgAioInProgress *aio = pgaio_io_get();
 
-				pgaio_start_fsync(aio, fd, false);
-				pgaio_wait_for_io(aio, true);
-				pgaio_release(aio);
+				pgaio_io_start_fsync(aio, fd, false);
+				pgaio_io_wait(aio, true);
+				pgaio_io_release(aio);
 			}
 #else
 			if (pg_fsync_no_writethrough(fd) != 0)
@@ -10879,9 +10879,9 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 			{
 				PgAioInProgress *aio = pgaio_io_get();
 
-				pgaio_start_fdatasync(aio, fd, false);
-				pgaio_wait_for_io(aio, true);
-				pgaio_release(aio);
+				pgaio_io_start_fdatasync(aio, fd, false);
+				pgaio_io_wait(aio, true);
+				pgaio_io_release(aio);
 			}
 #else
 			if (pg_fdatasync(fd) != 0)

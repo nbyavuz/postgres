@@ -841,7 +841,7 @@ ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 	ReadBufferInitRead(aio, reln->rd_smgr, forkNum, blockNum, buf, bufHdr, mode);
 
 	if (release_io)
-		pgaio_release(aio);
+		pgaio_io_release(aio);
 
 	return buf;
 }
@@ -1190,8 +1190,8 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 		UnlockBufHdr(bufHdr, buf_state);
 
 		ReadBufferInitRead(aio, smgr, forkNum, blockNum, buf, bufHdr, mode);
-		pgaio_wait_for_io(aio, true);
-		pgaio_release(aio);
+		pgaio_io_wait(aio, true);
+		pgaio_io_release(aio);
 	}
 
 	VacuumPageMiss++;
@@ -3600,8 +3600,8 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 					   bufToWrite,
 					   BufferDescriptorGetBuffer(buf),
 					   false);
-		pgaio_wait_for_io(aio, true);
-		pgaio_release(aio);
+		pgaio_io_wait(aio, true);
+		pgaio_io_release(aio);
 	}
 
 	TRACE_POSTGRESQL_BUFFER_FLUSH_DONE(buf->tag.forkNum,
@@ -4907,7 +4907,7 @@ WaitIO(BufferDesc *buf)
 
 		if (aio)
 		{
-			pgaio_wait_for_io(aio, false);
+			pgaio_io_wait(aio, false);
 			ConditionVariablePrepareToSleep(cv);
 		}
 

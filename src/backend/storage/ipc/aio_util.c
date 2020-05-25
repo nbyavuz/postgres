@@ -110,7 +110,7 @@ pg_streaming_write_wait(pg_streaming_write *pgsw, uint32 wait_for)
 
 		if (wait_for > 0)
 		{
-			pgaio_wait_for_io(this_write->aio, true);
+			pgaio_io_wait(this_write->aio, true);
 			waited = true;
 		}
 		else if (!pgaio_io_done(this_write->aio))
@@ -142,7 +142,7 @@ pg_streaming_write_free(pg_streaming_write *pgsw)
 
 		Assert(!this_write->in_progress);
 		if (this_write->aio)
-			pgaio_release(this_write->aio);
+			pgaio_io_release(this_write->aio);
 		this_write->aio = NULL;
 	}
 
@@ -202,7 +202,7 @@ pg_streaming_read_free(PgStreamingRead *pgsr)
 
 		if (this_read->in_progress)
 		{
-			pgaio_wait_for_io(this_read->aio, true);
+			pgaio_io_wait(this_read->aio, true);
 			this_read->in_progress = false;
 			this_read->done = true;
 		}
@@ -212,7 +212,7 @@ pg_streaming_read_free(PgStreamingRead *pgsr)
 
 		if (this_read->aio)
 		{
-			pgaio_release(this_read->aio);
+			pgaio_io_release(this_read->aio);
 			this_read->aio = NULL;
 		}
 	}
@@ -344,7 +344,7 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
 
 	if (!this_read->done)
 	{
-		pgaio_wait_for_io(this_read->aio, true);
+		pgaio_io_wait(this_read->aio, true);
 		Assert(pgaio_io_success(this_read->aio));
 		this_read->in_progress = false;
 		this_read->done = true;

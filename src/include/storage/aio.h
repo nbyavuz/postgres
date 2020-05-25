@@ -18,6 +18,7 @@
 #include "storage/block.h"
 #include "storage/buf.h"
 #include "storage/relfilenode.h"
+#include "lib/ilist.h"
 
 typedef struct PgAioInProgress PgAioInProgress;
 typedef struct PgAioBounceBuffer PgAioBounceBuffer;
@@ -51,16 +52,13 @@ extern void pgaio_at_commit(void);
  */
 
 extern PgAioInProgress *pgaio_io_get(void);
+extern void pgaio_io_release(PgAioInProgress *io);
+
+extern void pgaio_io_wait(PgAioInProgress *io, bool holding_reference);
 extern bool pgaio_io_success(PgAioInProgress *io);
 extern bool pgaio_io_done(PgAioInProgress *io);
-extern void pgaio_io_retry(PgAioInProgress *io);
-
 extern void pgaio_io_recycle(PgAioInProgress *io);
 
-extern void pgaio_start_flush_range(PgAioInProgress *io, int fd, off_t offset, off_t nbytes);
-extern void pgaio_start_nop(PgAioInProgress *io);
-extern void pgaio_start_fsync(PgAioInProgress *io, int fd, bool barrier);
-extern void pgaio_start_fdatasync(PgAioInProgress *io, int fd, bool barrier);
 
 typedef struct AioBufferTag
 {
@@ -69,19 +67,24 @@ typedef struct AioBufferTag
 	BlockNumber blockNum;		/* blknum relative to begin of reln */
 } AioBufferTag;
 struct buftag;
-extern void pgaio_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes,
-									char *bufdata, int buffno, int mode);
-extern void pgaio_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes,
-									 char *bufdata, int buffno);
-extern void pgaio_start_write_wal(PgAioInProgress *io, int fd,
-								  uint32 offset, uint32 nbytes,
-								  char *bufdata, bool no_reorder);
-extern void pgaio_release(PgAioInProgress *io);
+
+extern void pgaio_io_start_flush_range(PgAioInProgress *io, int fd, off_t offset, off_t nbytes);
+extern void pgaio_io_start_nop(PgAioInProgress *io);
+extern void pgaio_io_start_fsync(PgAioInProgress *io, int fd, bool barrier);
+extern void pgaio_io_start_fdatasync(PgAioInProgress *io, int fd, bool barrier);
+
+extern void pgaio_io_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes,
+									   char *bufdata, int buffno, int mode);
+extern void pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes,
+										char *bufdata, int buffno);
+extern void pgaio_io_start_write_wal(PgAioInProgress *io, int fd,
+									 uint32 offset, uint32 nbytes,
+									 char *bufdata, bool no_reorder);
+
+extern void pgaio_io_retry(PgAioInProgress *io);
 extern void pgaio_submit_pending(bool drain);
 
 extern void pgaio_drain_shared(void);
-
-extern void pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference);
 
 extern void pgaio_print_queues(void);
 struct StringInfoData;
@@ -89,10 +92,11 @@ extern void pgaio_io_print(PgAioInProgress *io, struct StringInfoData *s);
 struct dlist_head;
 extern void pgaio_print_list(struct dlist_head *head, struct StringInfoData *s, size_t offset);
 
-extern void pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb);
 
+extern void pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb);
 extern PgAioBounceBuffer *pgaio_bounce_buffer_get(void);
 extern char *pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb);
+
 
 /*
  * Helpers. In aio_util.c.

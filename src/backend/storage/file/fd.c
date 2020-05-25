@@ -470,8 +470,8 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 	{
 		PgAioInProgress *aio = pgaio_io_get();
 
-		pgaio_start_flush_range(aio, fd, offset, nbytes);
-		pgaio_release(aio);
+		pgaio_io_start_flush_range(aio, fd, offset, nbytes);
+		pgaio_io_release(aio);
 		return;
 	}
 #endif
@@ -2064,7 +2064,7 @@ FileStartRead(struct PgAioInProgress *io, File file, char *buffer, int amount, o
 
 	vfdP = &VfdCache[file];
 
-	pgaio_start_read_buffer(io, tag, vfdP->fd, offset, amount, buffer, bufid, mode);
+	pgaio_io_start_read_buffer(io, tag, vfdP->fd, offset, amount, buffer, bufid, mode);
 
 	return true;
 }
@@ -2186,7 +2186,7 @@ FileStartWrite(struct PgAioInProgress *io, File file, char *buffer, int amount, 
 
 	vfdP = &VfdCache[file];
 
-	pgaio_start_write_buffer(io, tag, vfdP->fd, offset, amount, buffer, bufid);
+	pgaio_io_start_write_buffer(io, tag, vfdP->fd, offset, amount, buffer, bufid);
 
 	return true;
 }
