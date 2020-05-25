@@ -584,6 +584,8 @@ typedef struct XLogCtlInsert
 	int			nonExclusiveBackups;
 	XLogRecPtr	lastBackupStart;
 
+	pg_atomic_uint64 knownCompletedUpto;
+
 	/*
 	 * WAL insertion locks.
 	 */
@@ -1778,6 +1780,22 @@ WALInsertLockUpdateInsertingAt(XLogRecPtr insertingAt)
 						insertingAt);
 }
 
+static bool
+XLogInsertionsKnownFinished(XLogRecPtr upto)
+{
+	XLogRecPtr	knownFinishedUpto;
+
+	knownFinishedUpto = (XLogRecPtr) pg_atomic_read_u64(&XLogCtl->Insert.knownCompletedUpto);
+
+	if (upto <= knownFinishedUpto)
+	{
+		pg_read_barrier();
+		return true;
+	}
+	else
+		return false;
+}
+
 /*
  * Wait for any WAL insertions < upto to finish.
  *
@@ -1876,6 +1894,20 @@ WaitXLogInsertionsToFinish(XLogRecPtr upto)
 		if (insertingat != InvalidXLogRecPtr && insertingat < finishedUpto)
 			finishedUpto = insertingat;
 	}
+
+	{
+		XLogRecPtr knownCompletedUpto =
+			(XLogRecPtr) pg_atomic_read_u64(&XLogCtl->Insert.knownCompletedUpto);
+
+		while (knownCompletedUpto < finishedUpto)
+		{
+			if (pg_atomic_compare_exchange_u64(&XLogCtl->Insert.knownCompletedUpto,
+											   &knownCompletedUpto,
+											   finishedUpto))
+				break;
+		}
+	}
+
 	return finishedUpto;
 }
 
@@ -2191,7 +2223,11 @@ AdvanceXLInsertBuffer(XLogRecPtr upto, bool opportunistic)
 				 */
 				LWLockRelease(WALBufMappingLock);
 
-				WaitXLogInsertionsToFinish(OldPageRqstPtr);
+				if (!XLogInsertionsKnownFinished(OldPageRqstPtr))
+				{
+					WaitXLogInsertionsToFinish(OldPageRqstPtr);
+					Assert(XLogInsertionsKnownFinished(OldPageRqstPtr));
+				}
 
 				LWLockAcquire(WALWriteLock, LW_EXCLUSIVE);
 
@@ -2461,6 +2497,8 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 
 	/* We should always be inside a critical section here */
 	Assert(CritSectionCount > 0);
+
+	Assert(XLogInsertionsKnownFinished(WriteRqst.Write));
 
 	/*
 	 * Update local LogwrtResult (caller probably did this already, but...)
@@ -5243,6 +5281,8 @@ XLOGShmemInit(void)
 	SpinLockInit(&XLogCtl->info_lck);
 	SpinLockInit(&XLogCtl->ulsn_lck);
 	InitSharedLatch(&XLogCtl->recoveryWakeupLatch);
+
+	pg_atomic_init_u64(&XLogCtl->Insert.knownCompletedUpto, 0);
 }
 
 /*
