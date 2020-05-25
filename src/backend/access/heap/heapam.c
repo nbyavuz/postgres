@@ -275,6 +275,17 @@ heap_pgsr_release(uintptr_t pgsr_private, uintptr_t read_private)
 	ReleaseBuffer(buf);
 }
 
+static PgStreamingRead *
+heap_pgsr_alloc(HeapScanDesc scan)
+{
+	int iodepth = Max(Min(128, NBuffers / 128), 1);
+
+	return pg_streaming_read_alloc(iodepth, (uintptr_t) scan,
+								   heap_pgsr_next_single,
+								   heap_pgsr_release);
+}
+
+
 /* ----------------
  *		initscan - scan code common to heap_beginscan and heap_rescan
  * ----------------
@@ -318,7 +329,7 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	 * if you change this, consider changing that one, too.
 	 */
 	if (!RelationUsesLocalBuffers(scan->rs_base.rs_rd) &&
-		scan->rs_nblocks > NBuffers / 4 && false)
+		scan->rs_nblocks > NBuffers / 4)
 	{
 		allow_strat = (scan->rs_base.rs_flags & SO_ALLOW_STRAT) != 0;
 		allow_sync = (scan->rs_base.rs_flags & SO_ALLOW_SYNC) != 0;
@@ -402,9 +413,7 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 
 	if ((scan->rs_base.rs_flags & SO_TYPE_SEQSCAN) &&
 		!scan->rs_base.rs_parallel && !RelationUsesLocalBuffers(scan->rs_base.rs_rd))
-		scan->pgsr = pg_streaming_read_alloc(128, (uintptr_t) scan,
-											 heap_pgsr_next_single,
-											 heap_pgsr_release);
+		scan->pgsr = heap_pgsr_alloc(scan);
 	else
 		scan->pgsr = NULL;
 }

@@ -66,11 +66,14 @@ extern void pgaio_release(PgAioInProgress *io);
 extern void pgaio_submit_pending(bool drain);
 
 extern void pgaio_drain_shared(void);
-extern void pgaio_drain_outstanding(void);
 
 extern void pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference);
 
 extern void pgaio_print_queues(void);
+struct StringInfoData;
+extern void pgaio_io_print(PgAioInProgress *io, struct StringInfoData *s);
+struct dlist_head;
+extern void pgaio_print_list(struct dlist_head *head, struct StringInfoData *s, size_t offset);
 
 extern void pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb);
 

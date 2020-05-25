@@ -280,14 +280,14 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 	}
 	else
 	{
-		min_issue = 64;
+		min_issue = Min(pgsr->iodepth, 8);
 	}
 
 	if (pgsr->scan_at + pgsr->current_window < pgsr->prefetch_at + min_issue)
 		return;
 
-#if 1
-	ereport(DEBUG3,
+#if 0
+	ereport(DEBUG2,
 			errmsg("checking prefetch at scan_at: %d, prefetch_at: %d, window: %d, fetching %d",
 				   pgsr->scan_at, pgsr->prefetch_at, pgsr->current_window,
 				   (pgsr->scan_at + pgsr->current_window) - pgsr->prefetch_at),

@@ -1169,14 +1169,14 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	}
 	else
 	{
-		PgAioInProgress* aio;
+		PgAioInProgress* aio = pgaio_io_get();
 		uint32		buf_state;
 
 		buf_state = LockBufHdr(bufHdr);
 		buf_state += BUF_REFCOUNT_ONE;
 		UnlockBufHdr(bufHdr, buf_state);
 
-		aio = ReadBufferInitRead(smgr, forkNum, blockNum, buf, bufHdr, mode);
+		ReadBufferInitRead(aio, smgr, forkNum, blockNum, buf, bufHdr, mode);
 		pgaio_wait_for_io(aio, true);
 		pgaio_release(aio);
 	}

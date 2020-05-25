@@ -10445,6 +10445,7 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 #ifdef HAVE_FDATASYNC
 		case SYNC_METHOD_FDATASYNC:
 #if 1
+			if (enableFsync)
 			{
 				PgAioInProgress *aio = pgaio_io_get();
 
