@@ -53,12 +53,14 @@ typedef struct f_smgr
 								  BlockNumber blocknum);
 	void		(*smgr_read) (SMgrRelation reln, ForkNumber forknum,
 							  BlockNumber blocknum, char *buffer);
-	struct PgAioInProgress* (*smgr_startread) (SMgrRelation reln, ForkNumber forknum,
-											 BlockNumber blocknum, char *buffer,
-											   int bufno, int mode);
-	struct PgAioInProgress* (*smgr_startwrite) (SMgrRelation reln, ForkNumber forknum,
-												BlockNumber blocknum, char *buffer,
-												int bufno, bool skipFsync);
+	void		(*smgr_startread) (struct PgAioInProgress *io ,
+								   SMgrRelation reln, ForkNumber forknum,
+								   BlockNumber blocknum, char *buffer,
+								   int bufno, int mode);
+	void		(*smgr_startwrite) (struct PgAioInProgress *io,
+									SMgrRelation reln, ForkNumber forknum,
+									BlockNumber blocknum, char *buffer,
+									int bufno, bool skipFsync);
 	void		(*smgr_write) (SMgrRelation reln, ForkNumber forknum,
 							   BlockNumber blocknum, char *buffer, bool skipFsync);
 	void		(*smgr_writeback) (SMgrRelation reln, ForkNumber forknum,
@@ -504,11 +506,11 @@ smgrread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	smgrsw[reln->smgr_which].smgr_read(reln, forknum, blocknum, buffer);
 }
 
-struct PgAioInProgress*
-smgrstartread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+void
+smgrstartread(struct PgAioInProgress *io, SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			  char *buffer, int bufno, int mode)
 {
-	return smgrsw[reln->smgr_which].smgr_startread(reln, forknum, blocknum, buffer, bufno, mode);
+	return smgrsw[reln->smgr_which].smgr_startread(io, reln, forknum, blocknum, buffer, bufno, mode);
 }
 
 /*
@@ -534,13 +536,14 @@ smgrwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 										buffer, skipFsync);
 }
 
-struct PgAioInProgress*
-smgrstartwrite(SMgrRelation reln, ForkNumber forknum,
+void
+smgrstartwrite(struct PgAioInProgress *io,
+			   SMgrRelation reln, ForkNumber forknum,
 			   BlockNumber blocknum, char *buffer,
 			   int bufno, bool skipFsync)
 {
-	return smgrsw[reln->smgr_which].smgr_startwrite(reln, forknum, blocknum,
-													buffer, bufno, skipFsync);
+	smgrsw[reln->smgr_which].smgr_startwrite(io, reln, forknum, blocknum,
+											 buffer, bufno, skipFsync);
 }
 
 

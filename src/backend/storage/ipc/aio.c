@@ -59,10 +59,12 @@ typedef enum PgAioInProgressFlags
 	PGAIOIP_IDLE = 1 << 0,
 	/* request used, may also be in other states */
 	PGAIOIP_IN_USE = 1 << 1,
+	/* owned solely by user */
+	PGAIOIP_ONLY_USER = 1 << 2,
 	/* request in kernel */
-	PGAIOIP_INFLIGHT = 1 << 2,
+	PGAIOIP_INFLIGHT = 1 << 3,
 	/* completion callback was called */
-	PGAIOIP_DONE = 1 << 3,
+	PGAIOIP_DONE = 1 << 4,
 } PgAioInProgressFlags;
 
 /* IO completion callback */
@@ -118,8 +120,10 @@ struct PgAioInProgress
 			Buffer buf;
 			int mode;
 			int fd;
-			int already_done;
-			off_t offset;
+			uint32 offset;
+			uint32 nbytes;
+			uint32 already_done;
+			char *bufdata;
 			struct iovec iovec;
 		} read_buffer;
 
@@ -127,17 +131,21 @@ struct PgAioInProgress
 		{
 			Buffer buf;
 			int fd;
-			int already_done;
-			off_t offset;
+			uint32 offset;
+			uint32 nbytes;
+			uint32 already_done;
+			char *bufdata;
 			struct iovec iovec;
 		} write_buffer;
 
 		struct
 		{
 			int fd;
-			int already_done;
 			bool no_reorder;
-			off_t offset;
+			uint32 offset;
+			uint32 nbytes;
+			uint32 already_done;
+			char *bufdata;
 			struct iovec iovec;
 		} write_wal;
 	} d;
@@ -195,8 +203,8 @@ struct io_uring local_ring;
 /* general pgaio helper functions */
 static void pgaio_complete_ios(bool in_error);
 static void pgaio_backpressure(struct io_uring *ring, const char *loc);
-static PgAioInProgress* pgaio_start_get_io(PgAioAction action);
-static void pgaio_end_get_io(void);
+static void pgaio_prepare_io(PgAioInProgress *io, PgAioAction action);
+static void pgaio_finish_io(PgAioInProgress *io);
 
 static void pgaio_bounce_buffer_release_locked(PgAioInProgress *io);
 
@@ -351,7 +359,18 @@ pgaio_postmaster_child_init(void)
 	num_local_pending_requests = 0;
 	num_local_reaped = 0;
 
-	// XXX: could create a local queue here.
+	/*
+	 *
+	 */
+	{
+		int ret;
+
+		ret = io_uring_queue_init(32, &local_ring, 0);
+		if (ret < 0)
+		{
+			elog(ERROR, "io_uring_queue_init failed: %s", strerror(-ret));
+		}
+	}
 }
 
 void
@@ -799,13 +818,15 @@ pgaio_wait_for_io(PgAioInProgress *io)
 	}
 }
 
-static PgAioInProgress*  __attribute__((noinline))
-pgaio_start_get_io(PgAioAction action)
+PgAioInProgress *
+pgaio_io_get(void)
 {
 	dlist_node *elem;
 	PgAioInProgress *io;
 
 	Assert(!LWLockHeldByMe(SharedAIOCtlLock));
+
+	// FIXME: relax?
 	Assert(num_local_pending_requests < PGAIO_SUBMIT_BATCH_SIZE);
 
 	/* FIXME: wait for an IO to complete if full */
@@ -821,8 +842,6 @@ pgaio_start_get_io(PgAioAction action)
 		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 	}
 
-	START_CRIT_SECTION();
-
 	elem = dlist_pop_head_node(&aio_ctl->unused_ios);
 	pg_atomic_write_u32(&aio_ctl->outstanding, pg_atomic_read_u32(&aio_ctl->outstanding) + 1);
 
@@ -832,8 +851,25 @@ pgaio_start_get_io(PgAioAction action)
 
 	Assert(!(io->flags & PGAIOIP_IN_USE));
 	Assert(io->flags == PGAIOIP_IDLE);
-
 	io->flags &= ~PGAIOIP_IDLE;
+	io->flags |= PGAIOIP_ONLY_USER;
+
+	// FIXME: resowner integration
+
+	return io;
+}
+
+static void  __attribute__((noinline))
+pgaio_prepare_io(PgAioInProgress *io, PgAioAction action)
+{
+	Assert(!(io->flags & PGAIOIP_IDLE));
+	/* true for now, but not necessarily in the future */
+	Assert(io->flags & PGAIOIP_ONLY_USER);
+
+	Assert(num_local_pending_requests < PGAIO_SUBMIT_BATCH_SIZE);
+
+	io->flags &= ~PGAIOIP_ONLY_USER;
+
 	io->flags |= PGAIOIP_IN_USE;
 	io->refcount = 2; // one for this module, one for the user */
 	io->type = action;
@@ -843,17 +879,11 @@ pgaio_start_get_io(PgAioAction action)
 	dlist_push_tail(&local_pending_requests,
 					&io->node);
 	num_local_pending_requests++;
-
-	return io;
 }
 
 static void  __attribute__((noinline))
-pgaio_end_get_io(void)
+pgaio_finish_io(PgAioInProgress *io)
 {
-	END_CRIT_SECTION();
-
-	//pgaio_drain(&aio_ctl->shared_ring, false);
-
 	if (num_local_pending_requests >= PGAIO_SUBMIT_BATCH_SIZE)
 		pgaio_submit_pending(true);
 	else
@@ -953,28 +983,13 @@ pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb)
 void
 pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb)
 {
+	Assert(bb != NULL);
 	Assert(io->bb == NULL);
+	Assert(!(io->flags & PGAIOIP_IDLE));
+	Assert(io->flags & PGAIOIP_ONLY_USER);
+	Assert(!(io->flags & (PGAIOIP_DONE | PGAIOIP_INFLIGHT)));
 
-	/*
-	 * FIXME: temporary hack until io acquisition is moved to caller. Instead
-	 * this should insist that bounce buffers are associated with IOs before
-	 * there's a chance they get submitted.
-	 */
-	LWLockAcquire(SharedAIOCompletionLock, LW_SHARED);
-
-	if (io->flags & (PGAIOIP_IDLE | PGAIOIP_DONE))
-	{
-		LWLockRelease(SharedAIOCompletionLock);
-
-		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
-		dlist_push_tail(&aio_ctl->bounce_buffers, &bb->d.node);
-		LWLockRelease(SharedAIOCtlLock);
-	}
-	else
-	{
-		io->bb = bb;
-		LWLockRelease(SharedAIOCompletionLock);
-	}
+	io->bb = bb;
 }
 
 /* --------------------------------------------------------------------------------
@@ -1011,14 +1026,25 @@ pgaio_complete_cqes(struct io_uring *ring, PgAioInProgress **ios, struct io_urin
 		}
 
 		io_uring_cqe_seen(ring, cqe);
+		// FIXME: do outside of lwlock'ed region
 		pg_atomic_sub_fetch_u32(&aio_ctl->inflight, 1);
 	}
 }
 
+static off_t
+prep_iov(struct iovec *iov, uint32 offset, uint32 nbytes, uint32 already_done, char *bufdata)
+{
+	iov->iov_base = bufdata + already_done;
+	iov->iov_len = nbytes - already_done;
+
+	return offset + already_done;
+}
 
 static void
 pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 {
+	off_t offset;
+
 	switch (io->type)
 	{
 		case PGAIO_FSYNC:
@@ -1030,19 +1056,28 @@ pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 			break;
 
 		case PGAIO_READ_BUFFER:
+			offset = prep_iov(&io->d.read_buffer.iovec,
+							  io->d.read_buffer.offset,
+							  io->d.read_buffer.nbytes,
+							  io->d.read_buffer.already_done,
+							  io->d.read_buffer.bufdata);
+
 			io_uring_prep_readv(sqe,
 								io->d.read_buffer.fd,
 								&io->d.read_buffer.iovec,
 								1,
-								io->d.read_buffer.offset + io->d.read_buffer.already_done);
-			//sqe->flags |= IOSQE_ASYNC;
+								offset);
 			break;
 		case PGAIO_WRITE_BUFFER:
+			offset = prep_iov(&io->d.write_buffer.iovec,
+							  io->d.write_buffer.offset,
+							  io->d.write_buffer.nbytes,
+							  io->d.write_buffer.already_done,
+							  io->d.write_buffer.bufdata);
+
 			io_uring_prep_writev(sqe,
-								 io->d.write_buffer.fd,
-								 &io->d.write_buffer.iovec,
-								 1,
-								 io->d.write_buffer.offset + io->d.write_buffer.already_done);
+								 io->d.write_buffer.fd, &io->d.write_buffer.iovec,
+								 1, offset);
 			break;
 		case PGAIO_FLUSH_RANGE:
 			io_uring_prep_rw(IORING_OP_SYNC_FILE_RANGE,
@@ -1054,11 +1089,14 @@ pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 			sqe->sync_range_flags = SYNC_FILE_RANGE_WRITE;
 			break;
 		case PGAIO_WRITE_WAL:
+			offset = prep_iov(&io->d.write_wal.iovec,
+							  io->d.write_wal.offset,
+							  io->d.write_wal.nbytes,
+							  io->d.write_wal.already_done,
+							  io->d.write_wal.bufdata);
 			io_uring_prep_writev(sqe,
-								 io->d.write_wal.fd,
-								 &io->d.write_wal.iovec,
-								 1,
-								 io->d.write_wal.offset);
+								 io->d.write_wal.fd, &io->d.write_wal.iovec,
+								 1, offset);
 			if (io->d.write_wal.no_reorder)
 				sqe->flags = IOSQE_IO_DRAIN;
 			break;
@@ -1092,57 +1130,39 @@ __sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
  * --------------------------------------------------------------------------------
  */
 
-PgAioInProgress *
-pgaio_start_flush_range(int fd, off_t offset, off_t nbytes)
+void
+pgaio_start_flush_range(PgAioInProgress *io, int fd, off_t offset, off_t nbytes)
 {
-	PgAioInProgress *io;
-
-	io = pgaio_start_get_io(PGAIO_FLUSH_RANGE);
+	pgaio_prepare_io(io, PGAIO_FLUSH_RANGE);
 
 	io->d.flush_range.fd = fd;
 	io->d.flush_range.offset = offset;
 	io->d.flush_range.nbytes = nbytes;
 
-	pgaio_end_get_io();
+	pgaio_finish_io(io);
 
 #ifdef PGAIO_VERBOSE
 	elog(DEBUG2, "start_flush_range %zu: %d, %llu, %llu",
 		 io - aio_ctl->in_progress_io,
 		 fd, (unsigned long long) offset, (unsigned long long) nbytes);
 #endif
-
-	return io;
 }
 
 
-PgAioInProgress *
-pgaio_start_read_buffer(int fd, off_t offset, off_t nbytes, char* data, int buffno, int mode)
+void
+pgaio_start_read_buffer(PgAioInProgress *io, int fd, off_t offset, off_t nbytes, char *bufdata, int buffno, int mode)
 {
-	PgAioInProgress *io;
-
-	io = pgaio_start_get_io(PGAIO_READ_BUFFER);
+	pgaio_prepare_io(io, PGAIO_READ_BUFFER);
 
 	io->d.read_buffer.buf = buffno;
 	io->d.read_buffer.mode = mode;
 	io->d.read_buffer.fd = fd;
 	io->d.read_buffer.offset = offset;
+	io->d.read_buffer.nbytes = nbytes;
+	io->d.read_buffer.bufdata = bufdata;
 	io->d.read_buffer.already_done = 0;
-	io->d.read_buffer.iovec.iov_base = data;
-	io->d.read_buffer.iovec.iov_len = nbytes;
 
-	/* FIXME: probably shouldn't be here */
-	{
-		bool		localBuffer = BufferIsLocal(buffno);
-		BufferDesc *bufHdr;
-
-		if (localBuffer)
-			bufHdr = GetLocalBufferDescriptor(-buffno - 1);
-		else
-			bufHdr = GetBufferDescriptor(buffno - 1);
-		bufHdr->io_in_progress = io;
-	}
-
-	pgaio_end_get_io();
+	pgaio_finish_io(io);
 
 #ifdef PGAIO_VERBOSE
 	elog(DEBUG2, "start_buffer_read %zu:"
@@ -1152,39 +1172,23 @@ pgaio_start_read_buffer(int fd, off_t offset, off_t nbytes, char* data, int buff
 		 (unsigned long long) offset,
 		 (unsigned long long) nbytes,
 		 buffno,
-		 data);
+		 bufdata);
 #endif
-
-	return io;
 }
 
-PgAioInProgress *
-pgaio_start_write_buffer(int fd, off_t offset, off_t nbytes, char* data, int buffno)
+void
+pgaio_start_write_buffer(PgAioInProgress *io, int fd, off_t offset, off_t nbytes, char *bufdata, int buffno)
 {
-	PgAioInProgress *io;
-
-	io = pgaio_start_get_io(PGAIO_WRITE_BUFFER);
+	pgaio_prepare_io(io, PGAIO_WRITE_BUFFER);
 
 	io->d.write_buffer.buf = buffno;
 	io->d.write_buffer.fd = fd;
 	io->d.write_buffer.offset = offset;
+	io->d.write_buffer.nbytes = nbytes;
+	io->d.write_buffer.bufdata = bufdata;
 	io->d.write_buffer.already_done = 0;
-	io->d.write_buffer.iovec.iov_base = data;
-	io->d.write_buffer.iovec.iov_len = nbytes;
 
-	/* FIXME: probably shouldn't be here */
-	{
-		bool		localBuffer = BufferIsLocal(buffno);
-		BufferDesc *bufHdr;
-
-		if (localBuffer)
-			bufHdr = GetLocalBufferDescriptor(-buffno - 1);
-		else
-			bufHdr = GetBufferDescriptor(buffno - 1);
-		bufHdr->io_in_progress = io;
-	}
-
-	pgaio_end_get_io();
+	pgaio_finish_io(io);
 
 #ifdef PGAIO_VERBOSE
 	elog(DEBUG2, "start_buffer_write %zu:"
@@ -1194,27 +1198,23 @@ pgaio_start_write_buffer(int fd, off_t offset, off_t nbytes, char* data, int buf
 		 (unsigned long long) offset,
 		 (unsigned long long) nbytes,
 		 buffno,
-		 data);
+		 bufdata);
 #endif
-
-	return io;
 }
 
-PgAioInProgress *
-pgaio_start_write_wal(int fd, off_t offset, off_t nbytes, char *data, bool no_reorder)
+void
+pgaio_start_write_wal(PgAioInProgress *io, int fd, off_t offset, off_t nbytes, char *bufdata, bool no_reorder)
 {
-	PgAioInProgress *io;
-
-	io = pgaio_start_get_io(PGAIO_WRITE_WAL);
+	pgaio_prepare_io(io, PGAIO_WRITE_WAL);
 
 	io->d.write_wal.fd = fd;
-	io->d.write_wal.offset = offset;
-	io->d.write_wal.already_done = 0;
 	io->d.write_wal.no_reorder = no_reorder;
-	io->d.write_wal.iovec.iov_base = data;
-	io->d.write_wal.iovec.iov_len = nbytes;
+	io->d.write_wal.offset = offset;
+	io->d.write_wal.nbytes = nbytes;
+	io->d.write_wal.bufdata = bufdata;
+	io->d.write_wal.already_done = 0;
 
-	pgaio_end_get_io();
+	pgaio_finish_io(io);
 
 #ifdef PGAIO_VERBOSE
 	elog(DEBUG2, "start_write_wal %zu:"
@@ -1224,33 +1224,25 @@ pgaio_start_write_wal(int fd, off_t offset, off_t nbytes, char *data, bool no_re
 		 (unsigned long long) offset,
 		 (unsigned long long) nbytes,
 		 no_reorder,
-		 data);
+		 bufdata);
 #endif
-
-	return io;
 }
 
-PgAioInProgress *
-pgaio_start_nop(void)
+void
+pgaio_start_nop(PgAioInProgress *io)
 {
-	PgAioInProgress *io;
-
-	io = pgaio_start_get_io(PGAIO_NOP);
-	pgaio_end_get_io();
-
-	return io;
+	pgaio_prepare_io(io, PGAIO_NOP);
+	pgaio_finish_io(io);
 }
 
-PgAioInProgress *
-pgaio_start_fdatasync(int fd, bool barrier)
+void
+pgaio_start_fdatasync(PgAioInProgress *io, int fd, bool barrier)
 {
-	PgAioInProgress *io;
-
-	io = pgaio_start_get_io(PGAIO_FSYNC);
+	pgaio_prepare_io(io, PGAIO_FSYNC);
 	io->d.fsync.fd = fd;
 	io->d.fsync.barrier = barrier;
 	io->d.fsync.datasync = true;
-	pgaio_end_get_io();
+	pgaio_finish_io(io);
 
 #ifdef PGAIO_VERBOSE
 	elog(DEBUG2, "start_fsync %zu:"
@@ -1260,8 +1252,6 @@ pgaio_start_fdatasync(int fd, bool barrier)
 		 barrier,
 		 true);
 #endif
-
-	return io;
 }
 
 static bool
@@ -1321,6 +1311,7 @@ pgaio_complete_read_buffer(PgAioInProgress *io)
 		 io->d.read_buffer.buf);
 #endif
 
+	/* FIXME: most of this should be in bufmgr.c */
 	if (io->result != io->d.read_buffer.iovec.iov_len)
 	{
 		bool		localBuffer = BufferIsLocal(buffer);
@@ -1380,8 +1371,9 @@ pgaio_complete_read_buffer(PgAioInProgress *io)
 
 			fd = reopen_buffered(rnode, InvalidBackendId /* FIXME */, forkNum, blockNum, &off);
 			io->d.read_buffer.fd = fd;
-			io->d.read_buffer.already_done = io->result;
-			io->d.read_buffer.iovec.iov_base = (char * ) io->d.read_buffer.iovec.iov_base + io->result;
+			io->d.read_buffer.already_done += io->result;
+			io->d.read_buffer.iovec.iov_base =
+				io->d.read_buffer.bufdata + io->d.read_buffer.already_done;
 			io->d.read_buffer.iovec.iov_len -= io->result;
 
 			dlist_push_tail(&local_pending_requests,
@@ -1413,6 +1405,7 @@ pgaio_complete_write_buffer(PgAioInProgress *io)
 		 io->d.write_buffer.buf);
 #endif
 
+	/* FIXME: most of this should be in bufmgr.c */
 	if (io->result != io->d.write_buffer.iovec.iov_len)
 	{
 		bool		localBuffer = BufferIsLocal(buffer);

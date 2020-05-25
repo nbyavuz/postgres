@@ -719,7 +719,7 @@ static PgAioInProgress *
 ReadBufferInitRead(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 				   Buffer buf, BufferDesc *bufHdr, int mode)
 {
-	PgAioInProgress* aio;
+	PgAioInProgress* aio = pgaio_io_get();
 	Block		bufBlock;
 
 	//bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
@@ -738,9 +738,10 @@ ReadBufferInitRead(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 	/* FIXME: improve */
 	InProgressBuf = NULL;
 
-	aio = smgrstartread(smgr, forkNum, blockNum,
-						bufBlock, buf, mode);
-	Assert(aio != NULL);
+	bufHdr->io_in_progress = aio;
+
+	smgrstartread(aio, smgr, forkNum, blockNum,
+				  bufBlock, buf, mode);
 
 	return aio;
 }
@@ -3192,7 +3193,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	}
 	else
 	{
-		PgAioInProgress *aio;
+		PgAioInProgress *aio = pgaio_io_get();
 		uint32		buf_state;
 
 		buf_state = LockBufHdr(buf);
@@ -3202,14 +3203,17 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 		/* FIXME: improve */
 		InProgressBuf = NULL;
 
-		aio = smgrstartwrite(reln,
-							 buf->tag.forkNum,
-							 buf->tag.blockNum,
-							 bufToWrite,
-							 BufferDescriptorGetBuffer(buf),
-							 false);
 		if (bb)
 			pgaio_assoc_bounce_buffer(aio, bb);
+		buf->io_in_progress = aio;
+
+		smgrstartwrite(aio,
+					   reln,
+					   buf->tag.forkNum,
+					   buf->tag.blockNum,
+					   bufToWrite,
+					   BufferDescriptorGetBuffer(buf),
+					   false);
 		pgaio_wait_for_io(aio);
 		pgaio_release(aio);
 	}
@@ -3274,14 +3278,18 @@ AsyncFlushBuffer(BufferDesc *buf, SMgrRelation reln)
 
 	pgBufferUsage.shared_blks_written++;
 
-	aio = smgrstartwrite(reln,
-						 buf->tag.forkNum,
-						 buf->tag.blockNum,
-						 bufToWrite,
-						 BufferDescriptorGetBuffer(buf),
-						 false);
+	aio = pgaio_io_get();
+
 	if (bb)
 		pgaio_assoc_bounce_buffer(aio, bb);
+
+	buf->io_in_progress = aio;
+
+	smgrstartwrite(aio, reln,
+				   buf->tag.forkNum, buf->tag.blockNum,
+				   bufToWrite,
+				   BufferDescriptorGetBuffer(buf),
+				   false);
 
 	return aio;
 }

@@ -668,8 +668,9 @@ mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 /*
  *	mdread() -- Read the specified block from a relation.
  */
-PgAioInProgress *
-mdstartread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+void
+mdstartread(PgAioInProgress *io, SMgrRelation reln,
+			ForkNumber forknum, BlockNumber blocknum,
 			char *buffer, int bufno, int mode)
 {
 	off_t		seekpos;
@@ -684,7 +685,14 @@ mdstartread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
 
-	return FileStartRead(v->mdfd_vfd, buffer, BLCKSZ, seekpos, bufno, mode);
+	if (!FileStartRead(io, v->mdfd_vfd, buffer, BLCKSZ, seekpos, bufno, mode))
+	{
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write block %u in file \"%s\": %m",
+						blocknum, FilePathName(v->mdfd_vfd))));
+	}
+
 }
 
 /*
@@ -757,9 +765,10 @@ mdwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
  *	mdstartwrite() -- Asynchronously start a Write the supplied block at the
  *  appropriate location.
  */
-PgAioInProgress *
-mdstartwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-			char *buffer, int bufno, bool skipFsync)
+void
+mdstartwrite(PgAioInProgress *io, SMgrRelation reln,
+			 ForkNumber forknum, BlockNumber blocknum,
+			 char *buffer, int bufno, bool skipFsync)
 {
 	off_t		seekpos;
 	MdfdVec    *v;
@@ -789,7 +798,13 @@ mdstartwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	if (!skipFsync && !SmgrIsTemp(reln))
 		register_dirty_segment(reln, forknum, v);
 
-	return FileStartWrite(v->mdfd_vfd, buffer, BLCKSZ, seekpos, bufno);
+	if (!FileStartWrite(io, v->mdfd_vfd, buffer, BLCKSZ, seekpos, bufno))
+	{
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write block %u in file \"%s\": %m",
+						blocknum, FilePathName(v->mdfd_vfd))));
+	}
 }
 
 /*

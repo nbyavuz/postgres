@@ -47,18 +47,20 @@ extern void pgaio_at_abort(void);
  * e.g. for buffer writes interleaved with WAL writes, for queue depth
  * management of checkpointer, for readahead)
  */
-extern PgAioInProgress *pgaio_start_flush_range(int fd, off_t offset, off_t nbytes);
-extern PgAioInProgress *pgaio_start_nop(void);
-extern PgAioInProgress *pgaio_start_fsync(int fd, bool barrier);
-extern PgAioInProgress *pgaio_start_fdatasync(int fd, bool barrier);
+extern PgAioInProgress *pgaio_io_get(void);
+
+extern void pgaio_start_flush_range(PgAioInProgress *io, int fd, off_t offset, off_t nbytes);
+extern void pgaio_start_nop(PgAioInProgress *io);
+extern void pgaio_start_fsync(PgAioInProgress *io, int fd, bool barrier);
+extern void pgaio_start_fdatasync(PgAioInProgress *io, int fd, bool barrier);
 
 struct BufferDesc;
-extern PgAioInProgress *pgaio_start_read_buffer(int fd, off_t offset, off_t nbytes,
-												char *data, int buffno, int mode);
-extern PgAioInProgress *pgaio_start_write_buffer(int fd, off_t offset, off_t nbytes,
-												char *data, int buffno);
-extern PgAioInProgress *pgaio_start_write_wal(int fd, off_t offset, off_t nbytes,
-											  char *data, bool no_reorder);
+extern void pgaio_start_read_buffer(PgAioInProgress *io, int fd, off_t offset, off_t nbytes,
+									char *bufdata, int buffno, int mode);
+extern void pgaio_start_write_buffer(PgAioInProgress *io, int fd, off_t offset, off_t nbytes,
+									 char *bufdata, int buffno);
+extern void pgaio_start_write_wal(PgAioInProgress *io, int fd, off_t offset, off_t nbytes,
+								  char *bufdata, bool no_reorder);
 extern void pgaio_release(PgAioInProgress *io);
 extern void pgaio_submit_pending(bool drain);
 

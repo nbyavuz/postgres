@@ -10446,9 +10446,9 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 		case SYNC_METHOD_FDATASYNC:
 #if 1
 			{
-				PgAioInProgress *aio;
+				PgAioInProgress *aio = pgaio_io_get();
 
-				aio = pgaio_start_fdatasync(fd, true);
+				pgaio_start_fdatasync(aio, fd, true);
 				pgaio_wait_for_io(aio);
 				pgaio_release(aio);
 			}
@@ -10461,9 +10461,9 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 		case SYNC_METHOD_OPEN:
 		case SYNC_METHOD_OPEN_DSYNC:
 			{
-				PgAioInProgress *aio;
+				PgAioInProgress *aio = pgaio_io_get();
 
-				aio = pgaio_start_fdatasync(fd, true);
+				pgaio_start_fdatasync(aio, fd, true);
 				pgaio_wait_for_io(aio);
 				pgaio_release(aio);
 			}

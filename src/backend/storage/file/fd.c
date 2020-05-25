@@ -468,7 +468,10 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 	 */
 #if USE_LIBURING
 	{
-		pgaio_release(pgaio_start_flush_range(fd, offset, nbytes));
+		PgAioInProgress *aio = pgaio_io_get();
+
+		pgaio_start_flush_range(aio, fd, offset, nbytes);
+		pgaio_release(aio);
 		return;
 	}
 #endif
@@ -2040,8 +2043,8 @@ retry:
 
 #include "storage/aio.h"
 
-struct PgAioInProgress *
-FileStartRead(File file, char *buffer, int amount, off_t offset, int bufid, int mode)
+bool
+FileStartRead(struct PgAioInProgress *io, File file, char *buffer, int amount, off_t offset, int bufid, int mode)
 {
 	int			returnCode;
 	Vfd		   *vfdP;
@@ -2055,11 +2058,13 @@ FileStartRead(File file, char *buffer, int amount, off_t offset, int bufid, int 
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
-		return NULL;
+		return false;
 
 	vfdP = &VfdCache[file];
 
-	return pgaio_start_read_buffer(vfdP->fd, offset, amount, buffer, bufid, mode);
+	pgaio_start_read_buffer(io, vfdP->fd, offset, amount, buffer, bufid, mode);
+
+	return true;
 }
 
 int
@@ -2160,8 +2165,8 @@ retry:
 	return returnCode;
 }
 
-struct PgAioInProgress *
-FileStartWrite(File file, char *buffer, int amount, off_t offset, int bufid)
+bool
+FileStartWrite(struct PgAioInProgress *io, File file, char *buffer, int amount, off_t offset, int bufid)
 {
 	int			returnCode;
 	Vfd		   *vfdP;
@@ -2175,11 +2180,13 @@ FileStartWrite(File file, char *buffer, int amount, off_t offset, int bufid)
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
-		return NULL;
+		return false;
 
 	vfdP = &VfdCache[file];
 
-	return pgaio_start_write_buffer(vfdP->fd, offset, amount, buffer, bufid);
+	pgaio_start_write_buffer(io, vfdP->fd, offset, amount, buffer, bufid);
+
+	return true;
 }
 
 int
