@@ -2577,10 +2577,11 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 			from = XLogCtl->pages + startidx * (Size) XLOG_BLCKSZ;
 			nbytes = npages * (Size) XLOG_BLCKSZ;
 			nleft = nbytes;
+
 			do
 			{
 				errno = 0;
-#if 1
+#if 0
 				pgstat_report_wait_start(WAIT_EVENT_WAL_WRITE);
 				written = pg_pwrite(openLogFile, from, nleft, startoffset);
 				pgstat_report_wait_end();
@@ -2603,35 +2604,46 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 									"at offset %u, length %zu: %m",
 									xlogfname, startoffset, nleft)));
 				}
-				nleft -= written;
-				from += written;
-				startoffset += written;
 #else
 
-				elog(DEBUG1, "writing from %X/%X to %X/%X "
-					 "startidx: %d, curridx: %d, lastidx %d",
-					 (uint32) (startwrite >> 32),
-					 (uint32) startwrite,
-					 (uint32) (LogwrtResult.Write >> 32),
-					 (uint32) LogwrtResult.Write,
-					 startidx, curridx, lastpartialidx
-					);
+#ifdef TOO_VERBOSE
+				ereport(DEBUG1,
+						errmsg("writing from %X/%X to %X/%X "
+							   "large: %d, startidx: %d, curridx: %d, lastpartial %d (%d), nleft: %zu",
+							   (uint32) (startwrite >> 32),
+							   (uint32) startwrite,
+							   (uint32) (LogwrtResult.Write >> 32),
+							   (uint32) LogwrtResult.Write,
+							   large_enough_write,
+							   startidx, curridx,
+							   lastpartialidx, ispartialpage,
+							   nleft),
+						errhidestmt(true),
+						errhidecontext(true));
+#endif
 
 				{
-					PgAioInProgress *aio;
+					PgAioInProgress *aio = pgaio_io_get();
 
-					aio = pgaio_start_write_wal(openLogFile, startoffset, nleft, from,
-												lastpartialidx == curridx);
-					pgaio_submit_pending(false);
-					paio_release(aio);
+					/*
+					 * FIXME: We shouldn't block here, instead we should track
+					 * the pending writes on a per-xlog page basis or
+					 * such. And then only wait before fsyncing. And do that
+					 * under a separate lock.
+					 */
+					pgaio_start_write_wal(aio, openLogFile, startoffset,
+										  nleft,
+										  from,
+										  false /* lastpartialidx == curridx */);
+					pgaio_wait_for_io(aio, true);
+					pgaio_release(aio);
+					written = nleft;
 				}
-
-				written = nleft;
+#endif
 
 				nleft -= written;
 				from += written;
 				startoffset += written;
-#endif
 			} while (nleft > 0);
 
 			npages = 0;
