@@ -90,6 +90,8 @@ struct PgAioInProgress
 
 	uint32 refcount;
 
+	PgAioBounceBuffer *bb;
+
 	/*
 	 * NB: Note that fds in here may *not* be relied upon for re-issuing
 	 * requests (e.g. for partial reads/writes) - the fd might be from another
@@ -141,6 +143,15 @@ struct PgAioInProgress
 	} d;
 };
 
+/* typedef in header */
+struct PgAioBounceBuffer
+{
+	union
+	{
+		char buffer[BLCKSZ];
+		dlist_node node;
+	} d;
+};
 
 typedef struct PgAioCtl
 {
@@ -174,15 +185,20 @@ typedef struct PgAioCtl
 	 */
 	pg_atomic_uint32 outstanding;
 
+	dlist_head bounce_buffers;
+
 	PgAioInProgress in_progress_io[FLEXIBLE_ARRAY_MEMBER];
 } PgAioCtl;
 
+struct io_uring local_ring;
 
 /* general pgaio helper functions */
 static void pgaio_complete_ios(bool in_error);
 static void pgaio_backpressure(struct io_uring *ring, const char *loc);
 static PgAioInProgress* pgaio_start_get_io(PgAioAction action);
 static void pgaio_end_get_io(void);
+
+static void pgaio_bounce_buffer_release_locked(PgAioInProgress *io);
 
 /* io_uring related functions */
 static void pgaio_put_io_locked(PgAioInProgress *io);
@@ -243,12 +259,22 @@ static struct io_uring_cqe *local_reaped_cqes[PGAIO_MAX_LOCAL_REAPED];
 static PgAioInProgress *local_reaped_ios[PGAIO_MAX_LOCAL_REAPED];
 
 
+static Size AioCtlShmemSize(void)
+{
+	return add_size(mul_size(max_aio_in_progress, sizeof(PgAioInProgress)),
+					offsetof(PgAioCtl, in_progress_io));
+}
+
+static Size AioBounceShmemSize(void)
+{
+	return add_size(BLCKSZ /* alignment padding */,
+					mul_size(BLCKSZ, max_aio_in_progress));
+}
 
 Size
 AioShmemSize(void)
 {
-	return add_size(mul_size(max_aio_in_progress, sizeof(PgAioInProgress)),
-					offsetof(PgAioCtl, in_progress_io));
+	return add_size(AioCtlShmemSize(), AioBounceShmemSize());
 }
 
 void
@@ -257,11 +283,11 @@ AioShmemInit(void)
 	bool		found;
 
 	aio_ctl = (PgAioCtl *)
-		ShmemInitStruct("PgAio", AioShmemSize(), &found);
+		ShmemInitStruct("PgAio", AioCtlShmemSize(), &found);
 
 	if (!found)
 	{
-		memset(aio_ctl, 0, AioShmemSize());
+		memset(aio_ctl, 0, AioCtlShmemSize());
 
 		dlist_init(&aio_ctl->unused_ios);
 		pg_atomic_init_u32(&aio_ctl->inflight, 0);
@@ -275,6 +301,24 @@ AioShmemInit(void)
 			dlist_push_head(&aio_ctl->unused_ios,
 							&io->node);
 			io->flags = PGAIOIP_IDLE;
+		}
+
+		{
+			char *p;
+			PgAioBounceBuffer *buffers;
+
+			dlist_init(&aio_ctl->bounce_buffers);
+			p = ShmemInitStruct("PgAioBounceBuffers", AioBounceShmemSize(), &found);
+			Assert(!found);
+			buffers = (PgAioBounceBuffer *) TYPEALIGN(BLCKSZ, (uintptr_t) p);
+
+			for (int i = 0; i < max_aio_in_progress; i++)
+			{
+				PgAioBounceBuffer *bb = &buffers[i];
+
+				memset(bb, 0, BLCKSZ);
+				dlist_push_tail(&aio_ctl->bounce_buffers, &bb->d.node);
+			}
 		}
 
 		{
@@ -833,6 +877,9 @@ pgaio_put_io_locked(PgAioInProgress *io)
 	io->type = 0;
 	io->initiatorProcIndex = INVALID_PGPROCNO;
 
+	/* could do this earlier or conditionally */
+	pgaio_bounce_buffer_release_locked(io);
+
 	//pg_atomic_fetch_sub_u32(&aio_ctl->outstanding, 1);
 	pg_atomic_write_u32(&aio_ctl->outstanding, pg_atomic_read_u32(&aio_ctl->outstanding) - 1);
 	dlist_push_tail(&aio_ctl->unused_ios,
@@ -858,6 +905,76 @@ pgaio_print_queues(void)
 			errhidestmt(true),
 			errhidecontext(true)
 		);
+}
+
+PgAioBounceBuffer *
+pgaio_bounce_buffer_get(void)
+{
+	PgAioBounceBuffer *bb = NULL;
+
+	while (true)
+	{
+		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
+		if (!dlist_is_empty(&aio_ctl->bounce_buffers))
+		{
+			dlist_node *node = dlist_pop_head_node(&aio_ctl->bounce_buffers);
+
+			bb = dlist_container(PgAioBounceBuffer, d.node, node);
+		}
+		LWLockRelease(SharedAIOCtlLock);
+
+		if (!bb)
+			pgaio_drain_outstanding();
+		else
+			break;
+	}
+
+	return bb;
+}
+
+static void
+pgaio_bounce_buffer_release_locked(PgAioInProgress *io)
+{
+	Assert(LWLockHeldByMe(SharedAIOCtlLock));
+
+	if (!io->bb)
+		return;
+
+	dlist_push_tail(&aio_ctl->bounce_buffers, &io->bb->d.node);
+	io->bb = NULL;
+}
+
+char *
+pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb)
+{
+	return bb->d.buffer;
+}
+
+void
+pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb)
+{
+	Assert(io->bb == NULL);
+
+	/*
+	 * FIXME: temporary hack until io acquisition is moved to caller. Instead
+	 * this should insist that bounce buffers are associated with IOs before
+	 * there's a chance they get submitted.
+	 */
+	LWLockAcquire(SharedAIOCompletionLock, LW_SHARED);
+
+	if (io->flags & (PGAIOIP_IDLE | PGAIOIP_DONE))
+	{
+		LWLockRelease(SharedAIOCompletionLock);
+
+		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
+		dlist_push_tail(&aio_ctl->bounce_buffers, &bb->d.node);
+		LWLockRelease(SharedAIOCtlLock);
+	}
+	else
+	{
+		io->bb = bb;
+		LWLockRelease(SharedAIOCompletionLock);
+	}
 }
 
 /* --------------------------------------------------------------------------------

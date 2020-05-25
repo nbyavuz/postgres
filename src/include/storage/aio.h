@@ -20,6 +20,7 @@
 #include "storage/relfilenode.h"
 
 typedef struct PgAioInProgress PgAioInProgress;
+typedef struct PgAioBounceBuffer PgAioBounceBuffer;
 
 /* initialization */
 extern void pgaio_postmaster_init(void);
@@ -68,4 +69,8 @@ extern void pgaio_wait_for_io(PgAioInProgress *io);
 
 extern void pgaio_print_queues(void);
 
+extern void pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb);
+
+extern PgAioBounceBuffer *pgaio_bounce_buffer_get(void);
+extern char *pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb);
 #endif							/* AIO_H */

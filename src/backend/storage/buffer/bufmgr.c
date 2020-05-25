@@ -3088,6 +3088,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	Block		bufBlock;
 	char	   *bufToWrite;
 	uint32		buf_state;
+	PgAioBounceBuffer *bb;
 
 	/*
 	 * Try to start an I/O operation.  If StartBufferIO returns false, then
@@ -3159,7 +3160,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	 * buffer, other processes might be updating hint bits in it, so we must
 	 * copy the page to private storage if we do checksumming.
 	 */
-	bufToWrite = PageSetChecksumCopy((Page) bufBlock, buf->tag.blockNum);
+	bufToWrite = PageSetChecksumCopy((Page) bufBlock, buf->tag.blockNum, &bb);
 
 	if (0)
 	{
@@ -3207,6 +3208,8 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 							 bufToWrite,
 							 BufferDescriptorGetBuffer(buf),
 							 false);
+		if (bb)
+			pgaio_assoc_bounce_buffer(aio, bb);
 		pgaio_wait_for_io(aio);
 		pgaio_release(aio);
 	}
@@ -3229,6 +3232,7 @@ AsyncFlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	char	   *bufToWrite;
 	uint32		buf_state;
 	PgAioInProgress *aio;
+	PgAioBounceBuffer *bb;
 
 	/*
 	 * Try to start an I/O operation.  If StartBufferIO returns false, then
@@ -3263,7 +3267,7 @@ AsyncFlushBuffer(BufferDesc *buf, SMgrRelation reln)
 
 	bufBlock = BufHdrGetBlock(buf);
 
-	bufToWrite = PageSetChecksumCopy((Page) bufBlock, buf->tag.blockNum);
+	bufToWrite = PageSetChecksumCopy((Page) bufBlock, buf->tag.blockNum, &bb);
 
 	/* FIXME: improve */
 	InProgressBuf = NULL;
@@ -3276,6 +3280,8 @@ AsyncFlushBuffer(BufferDesc *buf, SMgrRelation reln)
 						 bufToWrite,
 						 BufferDescriptorGetBuffer(buf),
 						 false);
+	if (bb)
+		pgaio_assoc_bounce_buffer(aio, bb);
 
 	return aio;
 }
