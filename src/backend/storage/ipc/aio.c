@@ -1305,6 +1305,27 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 	}
 }
 
+/*
+ * FIXME: The !holding_reference implementation is a really ugly crock. It's
+ * needed for things like WaitIO(), where we can't ensure that the io hasn't
+ * already been freed and recycled by the time we check. And locking
+ * preventing that would be prohibitively expensive.
+ *
+ * It'd be much better to implement it as something like:
+ *
+ * aio = buf->io_in_progress;
+ * if (buf->io_in_progress)
+ * {
+ *     pgaio_io_wait_prepare(io);
+ *     if (!buf->io_in_progress)
+ *         continue;
+ *     pgaio_io_wait(io);
+ * ...
+
+ * where pgaio_io_wait_prepare would start to wait on the IO's condition
+ * variable, and the subsequent check of buf->io_in_progress would ensure that
+ * wait on the wrong buffer.
+ */
 void
 pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference)
 {
