@@ -688,70 +688,6 @@ mdstartread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 }
 
 /*
- *	mdread() -- Read the specified block from a relation.
- */
-PgAioInProgress *
-mdstartwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-			char *buffer, int bufno, bool skipFsync)
-{
-	off_t		seekpos;
-	int			nbytes;
-	MdfdVec    *v;
-
-	/* This assert is too expensive to have on normally ... */
-#ifdef CHECK_WRITE_VS_EXTEND
-	Assert(blocknum < mdnblocks(reln, forknum));
-#endif
-
-	TRACE_POSTGRESQL_SMGR_MD_WRITE_START(forknum, blocknum,
-										 reln->smgr_rnode.node.spcNode,
-										 reln->smgr_rnode.node.dbNode,
-										 reln->smgr_rnode.node.relNode,
-										 reln->smgr_rnode.backend);
-
-	v = _mdfd_getseg(reln, forknum, blocknum, skipFsync,
-					 EXTENSION_FAIL | EXTENSION_CREATE_RECOVERY);
-
-	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
-
-	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
-
-	return FileStartWrite(v->mdfd_vfd, buffer, BLCKSZ, seekpos, WAIT_EVENT_DATA_FILE_WRITE);
-
-#if 0
-	nbytes = ...;
-
-	TRACE_POSTGRESQL_SMGR_MD_WRITE_DONE(forknum, blocknum,
-										reln->smgr_rnode.node.spcNode,
-										reln->smgr_rnode.node.dbNode,
-										reln->smgr_rnode.node.relNode,
-										reln->smgr_rnode.backend,
-										nbytes,
-										BLCKSZ);
-
-	if (nbytes != BLCKSZ)
-	{
-		if (nbytes < 0)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not write block %u in file \"%s\": %m",
-							blocknum, FilePathName(v->mdfd_vfd))));
-		/* short write: complain appropriately */
-		ereport(ERROR,
-				(errcode(ERRCODE_DISK_FULL),
-				 errmsg("could not write block %u in file \"%s\": wrote only %d of %d bytes",
-						blocknum,
-						FilePathName(v->mdfd_vfd),
-						nbytes, BLCKSZ),
-				 errhint("Check free disk space.")));
-	}
-
-	if (!skipFsync && !SmgrIsTemp(reln))
-		register_dirty_segment(reln, forknum, v);
-#endif
-}
-
-/*
  *	mdwrite() -- Write the supplied block at the appropriate location.
  *
  *		This is to be used only for updating already-existing blocks of a
@@ -815,6 +751,45 @@ mdwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	if (!skipFsync && !SmgrIsTemp(reln))
 		register_dirty_segment(reln, forknum, v);
+}
+
+/*
+ *	mdstartwrite() -- Asynchronously start a Write the supplied block at the
+ *  appropriate location.
+ */
+PgAioInProgress *
+mdstartwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+			char *buffer, int bufno, bool skipFsync)
+{
+	off_t		seekpos;
+	MdfdVec    *v;
+
+	/* This assert is too expensive to have on normally ... */
+#ifdef CHECK_WRITE_VS_EXTEND
+	Assert(blocknum < mdnblocks(reln, forknum));
+#endif
+
+	TRACE_POSTGRESQL_SMGR_MD_WRITE_START(forknum, blocknum,
+										 reln->smgr_rnode.node.spcNode,
+										 reln->smgr_rnode.node.dbNode,
+										 reln->smgr_rnode.node.relNode,
+										 reln->smgr_rnode.backend);
+
+	v = _mdfd_getseg(reln, forknum, blocknum, skipFsync,
+					 EXTENSION_FAIL | EXTENSION_CREATE_RECOVERY);
+
+	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+
+	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
+
+	/*
+	 * XXX: In the synchronous case this is after the write - should be fine,
+	 * I think?
+	 */
+	if (!skipFsync && !SmgrIsTemp(reln))
+		register_dirty_segment(reln, forknum, v);
+
+	return FileStartWrite(v->mdfd_vfd, buffer, BLCKSZ, seekpos, bufno);
 }
 
 /*

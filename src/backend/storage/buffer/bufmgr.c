@@ -3006,33 +3006,63 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	 */
 	bufToWrite = PageSetChecksumCopy((Page) bufBlock, buf->tag.blockNum);
 
-	if (track_io_timing)
-		INSTR_TIME_SET_CURRENT(io_start);
-
-	/*
-	 * bufToWrite is either the shared buffer or a copy, as appropriate.
-	 */
-	smgrwrite(reln,
-			  buf->tag.forkNum,
-			  buf->tag.blockNum,
-			  bufToWrite,
-			  false);
-
-	if (track_io_timing)
+	if (0)
 	{
-		INSTR_TIME_SET_CURRENT(io_time);
-		INSTR_TIME_SUBTRACT(io_time, io_start);
-		pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
-		INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
+
+		/*
+		 * bufToWrite is either the shared buffer or a copy, as appropriate.
+		 */
+		smgrwrite(reln,
+				  buf->tag.forkNum,
+				  buf->tag.blockNum,
+				  bufToWrite,
+				  false);
+
+		if (track_io_timing)
+		{
+			INSTR_TIME_SET_CURRENT(io_time);
+			INSTR_TIME_SUBTRACT(io_time, io_start);
+			pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
+			INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
+		}
+
+		/*
+		 * Mark the buffer as clean (unless BM_JUST_DIRTIED has become set) and
+		 * end the BM_IO_IN_PROGRESS state.
+		 */
+		TerminateSharedBufferIO(buf, /* syncio = */ true, /* clear_dirty = */ true, 0);
+	}
+	else
+	{
+		PgAioInProgress *aio;
+		uint32		buf_state;
+
+		buf_state = LockBufHdr(buf);
+		buf_state += BUF_REFCOUNT_ONE;
+		UnlockBufHdr(buf, buf_state);
+
+		/* FIXME: improve */
+		InProgressBuf = NULL;
+
+		aio = smgrstartwrite(reln,
+							 buf->tag.forkNum,
+							 buf->tag.blockNum,
+							 bufToWrite,
+							 BufferDescriptorGetBuffer(buf),
+							 false);
+		pgaio_wait_for_io(aio);
+		pgaio_release(aio);
+
+		/*
+		 * Mark the buffer as clean (unless BM_JUST_DIRTIED has become set) and
+		 * end the BM_IO_IN_PROGRESS state.
+		 */
+		TerminateSharedBufferIO(buf, /* syncio = */ false, /* clear_dirty = */ true, 0);
 	}
 
 	pgBufferUsage.shared_blks_written++;
-
-	/*
-	 * Mark the buffer as clean (unless BM_JUST_DIRTIED has become set) and
-	 * end the BM_IO_IN_PROGRESS state.
-	 */
-	TerminateSharedBufferIO(buf, /* syncio = */ true, /* clear_dirty = */ true, 0);
 
 	TRACE_POSTGRESQL_BUFFER_FLUSH_DONE(buf->tag.forkNum,
 									   buf->tag.blockNum,
@@ -4283,8 +4313,6 @@ WaitIO(BufferDesc *buf)
 		 */
 		buf_state = LockBufHdr(buf);
 		UnlockBufHdr(buf, buf_state);
-
-		Assert(!aio || !(buf_state & BM_IO_IN_PROGRESS));
 
 		if (!(buf_state & BM_IO_IN_PROGRESS))
 			break;

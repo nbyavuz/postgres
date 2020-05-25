@@ -546,6 +546,7 @@ pgaio_submit_pending(bool drain)
 			Assert(ios[nios]->flags & PGAIOIP_IN_USE);
 			ios[nios]->flags |= PGAIOIP_INFLIGHT;
 
+			/* FIXME: do outside of lwlocked region */
 			pg_atomic_add_fetch_u32(&aio_ctl->inflight, 1);
 
 			nios++;
@@ -921,12 +922,10 @@ pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 			break;
 		case PGAIO_WRITE_BUFFER:
 			io_uring_prep_writev(sqe,
-								 io->d.write_wal.fd,
-								 &io->d.write_wal.iovec,
+								 io->d.write_buffer.fd,
+								 &io->d.write_buffer.iovec,
 								 1,
-								 io->d.write_wal.offset);
-			if (io->d.write_wal.no_reorder)
-				sqe->flags = IOSQE_IO_DRAIN;
+								 io->d.write_buffer.offset + io->d.write_buffer.already_done);
 			break;
 		case PGAIO_FLUSH_RANGE:
 			io_uring_prep_rw(IORING_OP_SYNC_FILE_RANGE,
@@ -1014,6 +1013,7 @@ pgaio_start_read_buffer(int fd, off_t offset, off_t nbytes, char* data, int buff
 	io->d.read_buffer.iovec.iov_base = data;
 	io->d.read_buffer.iovec.iov_len = nbytes;
 
+	/* FIXME: probably shouldn't be here */
 	{
 		bool		localBuffer = BufferIsLocal(buffno);
 		BufferDesc *bufHdr;
@@ -1054,6 +1054,18 @@ pgaio_start_write_buffer(int fd, off_t offset, off_t nbytes, char* data, int buf
 	io->d.write_buffer.already_done = 0;
 	io->d.write_buffer.iovec.iov_base = data;
 	io->d.write_buffer.iovec.iov_len = nbytes;
+
+	/* FIXME: probably shouldn't be here */
+	{
+		bool		localBuffer = BufferIsLocal(buffno);
+		BufferDesc *bufHdr;
+
+		if (localBuffer)
+			bufHdr = GetLocalBufferDescriptor(-buffno - 1);
+		else
+			bufHdr = GetBufferDescriptor(buffno - 1);
+		bufHdr->io_in_progress = io;
+	}
 
 	pgaio_end_get_io();
 
@@ -1273,6 +1285,9 @@ pgaio_complete_read_buffer(PgAioInProgress *io)
 static bool
 pgaio_complete_write_buffer(PgAioInProgress *io)
 {
+	bool		failed = false;
+	Buffer		buffer = io->d.write_buffer.buf;
+
 #ifdef PGAIO_VERBOSE
 	elog(DEBUG2, "completed write_buffer: %zu, %d/%s, buf %d",
 		 io - aio_ctl->in_progress_io,
@@ -1281,6 +1296,74 @@ pgaio_complete_write_buffer(PgAioInProgress *io)
 		 io->d.write_buffer.buf);
 #endif
 
+	if (io->result != io->d.write_buffer.iovec.iov_len)
+	{
+		bool		localBuffer = BufferIsLocal(buffer);
+		BufferDesc *bufHdr;
+		RelFileNode rnode;
+		ForkNumber forkNum;
+		BlockNumber blockNum;
+
+		if (localBuffer)
+			bufHdr = GetLocalBufferDescriptor(-buffer - 1);
+		else
+			bufHdr = GetBufferDescriptor(buffer - 1);
+
+		rnode = bufHdr->tag.rnode;
+		forkNum = bufHdr->tag.forkNum;
+		blockNum = bufHdr->tag.blockNum;
+
+		if (io->result < 0)
+		{
+			failed = true;
+
+			if (io->result == EAGAIN || io->result == EINTR)
+			{
+				int fd;
+				uint32 off;
+
+				elog(WARNING, "need to implement retries");
+
+				fd = reopen_buffered(rnode, InvalidBackendId /* FIXME */, forkNum, blockNum, &off);
+			}
+			else
+			{
+				ereport(WARNING,
+						(errcode_for_file_access(),
+						 errmsg("could not write block %u in file \"%s\": %s",
+								blockNum,
+								relpathperm(rnode, forkNum),
+								strerror(-io->result)),
+						 errhint("Check free disk space.")));
+			}
+		}
+		else
+		{
+			int fd;
+			uint32 off;
+
+			failed = true;
+			ereport(DEBUG1,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("could not write block %u in file \"%s\": wrote only %d of %d bytes (init: %d, cur: %d)",
+							blockNum,
+							relpathperm(rnode, forkNum),
+							io->result, BLCKSZ,
+							io->initiatorProcIndex, MyProc->pgprocno)));
+
+			fd = reopen_buffered(rnode, InvalidBackendId /* FIXME */, forkNum, blockNum, &off);
+			io->d.write_buffer.fd = fd;
+			io->d.write_buffer.already_done = io->result;
+			io->d.write_buffer.iovec.iov_base = (char * ) io->d.read_buffer.iovec.iov_base + io->result;
+			io->d.write_buffer.iovec.iov_len -= io->result;
+
+			dlist_push_tail(&local_pending_requests,
+							&io->node);
+			num_local_pending_requests++;
+
+			return false;
+		}
+	}
 	return true;
 }
 

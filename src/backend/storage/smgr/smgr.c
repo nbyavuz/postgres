@@ -58,7 +58,7 @@ typedef struct f_smgr
 											   int bufno, int mode);
 	struct PgAioInProgress* (*smgr_startwrite) (SMgrRelation reln, ForkNumber forknum,
 												BlockNumber blocknum, char *buffer,
-												int bufno);
+												int bufno, bool skipFsync);
 	void		(*smgr_write) (SMgrRelation reln, ForkNumber forknum,
 							   BlockNumber blocknum, char *buffer, bool skipFsync);
 	void		(*smgr_writeback) (SMgrRelation reln, ForkNumber forknum,
@@ -85,6 +85,7 @@ static const f_smgr smgrsw[] = {
 		.smgr_read = mdread,
 		.smgr_startread = mdstartread,
 		.smgr_write = mdwrite,
+		.smgr_startwrite = mdstartwrite,
 		.smgr_writeback = mdwriteback,
 		.smgr_nblocks = mdnblocks,
 		.smgr_truncate = mdtruncate,
@@ -531,6 +532,15 @@ smgrwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 {
 	smgrsw[reln->smgr_which].smgr_write(reln, forknum, blocknum,
 										buffer, skipFsync);
+}
+
+struct PgAioInProgress*
+smgrstartwrite(SMgrRelation reln, ForkNumber forknum,
+			   BlockNumber blocknum, char *buffer,
+			   int bufno, bool skipFsync)
+{
+	return smgrsw[reln->smgr_which].smgr_startwrite(reln, forknum, blocknum,
+													buffer, bufno, skipFsync);
 }
 
 
