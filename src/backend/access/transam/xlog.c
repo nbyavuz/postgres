@@ -3386,7 +3386,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 	 * just be part of the AIO infrastructure somehow.
 	 */
 	CurrentMemoryContext->allowInCritSection = true;
-	pgsw = pg_streaming_write_alloc(64, NULL, XLogFileInitComplete);
+	pgsw = pg_streaming_write_alloc(128, NULL, XLogFileInitComplete);
 	CurrentMemoryContext->allowInCritSection = true;
 
 	snprintf(tmppath, MAXPGPATH, XLOGDIR "/xlogtemp.%d", (int) getpid());
@@ -3418,22 +3418,37 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 		 * indirect blocks are down on disk.  Therefore, fdatasync(2) or
 		 * O_DSYNC will be sufficient to sync future writes to the log file.
 		 */
-		for (nbytes = 0; nbytes < wal_segment_size; nbytes += XLOG_BLCKSZ)
-		{
-#if 1
-			PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
 
-			pgaio_start_write_wal(aio, fd, nbytes, XLOG_BLCKSZ, zbuffer.data, false);
-			pg_streaming_write_write(pgsw, aio, NULL);
-#else
-			errno = 0;
-			if (write(fd, zbuffer.data, XLOG_BLCKSZ) != XLOG_BLCKSZ)
+		if (posix_fallocate(fd, 0, wal_segment_size) != 0)
+		{
+			/* if write didn't set errno, assume no disk space */
+			save_errno = errno ? errno : ENOSPC;
+		}
+		else
+		{
+			for (nbytes = 0; nbytes < wal_segment_size; nbytes += XLOG_BLCKSZ)
 			{
-				/* if write didn't set errno, assume no disk space */
-				save_errno = errno ? errno : ENOSPC;
-				break;
-			}
+#if 1
+				PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
+
+				/*
+				 * FIXME: This is kinda incorrect, because zbuffer isn't
+				 * guaranteed to be the same / at the same location in all
+				 * processes. So retries wouldn't work right. But since we
+				 * don't implement those for wal writes yet...
+				 */
+				pgaio_start_write_wal(aio, fd, nbytes, XLOG_BLCKSZ, zbuffer.data, false);
+				pg_streaming_write_write(pgsw, aio, NULL);
+#else
+				errno = 0;
+				if (write(fd, zbuffer.data, XLOG_BLCKSZ) != XLOG_BLCKSZ)
+				{
+					/* if write didn't set errno, assume no disk space */
+					save_errno = errno ? errno : ENOSPC;
+					break;
+				}
 #endif
+			}
 		}
 	}
 	else
