@@ -184,9 +184,9 @@ extern Buffer ReadBufferWithoutRelcache(RelFileNode rnode,
 										ForkNumber forkNum, BlockNumber blockNum,
 										ReadBufferMode mode, BufferAccessStrategy strategy);
 struct PgAioInProgress;
-extern struct PgAioInProgress* ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
-											   ReadBufferMode mode, BufferAccessStrategy strategy,
-											   Buffer *buf);
+extern Buffer ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
+							  ReadBufferMode mode, BufferAccessStrategy strategy,
+							  bool *already_valid, struct PgAioInProgress** aio);
 extern void ReleaseBuffer(Buffer buffer);
 extern void UnlockReleaseBuffer(Buffer buffer);
 extern void MarkBufferDirty(Buffer buffer);

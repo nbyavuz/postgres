@@ -55,6 +55,7 @@
 #include "pgstat.h"
 #include "port/atomics.h"
 #include "storage/aio.h"
+#include "storage/block.h"
 #include "storage/bufmgr.h"
 #include "storage/freespace.h"
 #include "storage/lmgr.h"
@@ -201,6 +202,79 @@ static const int MultiXactStatusLock[MaxMultiXactStatus + 1] =
  * ----------------------------------------------------------------
  */
 
+static PgStreamingReadNextStatus
+heap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
+{
+	HeapScanDesc scan = (HeapScanDesc) pgsr_private;
+	Buffer buf;
+	bool already_valid;
+	BlockNumber blockno;
+
+	Assert(scan->rs_inited);
+	Assert(!scan->rs_base.rs_parallel);
+	Assert(scan->rs_nblocks > 0);
+
+	if (scan->rs_prefetch_block == InvalidBlockNumber)
+	{
+		scan->rs_prefetch_block = blockno = scan->rs_startblock;
+	}
+	else
+	{
+		blockno = ++scan->rs_prefetch_block;
+		if (blockno >= scan->rs_nblocks)
+			blockno = 0;
+		if (blockno == scan->rs_startblock)
+		{
+			return PGSR_NEXT_END;
+		}
+	}
+
+
+	buf = ReadBufferAsync(scan->rs_base.rs_rd, MAIN_FORKNUM, blockno,
+						  RBM_NORMAL, scan->rs_strategy, &already_valid,
+						  &aio);
+
+	*read_private = (uintptr_t) buf;
+
+	if (already_valid)
+	{
+		ereport(DEBUG2,
+				errmsg("pgsr %s: found block %d already in buf %d",
+					   NameStr(scan->rs_base.rs_rd->rd_rel->relname),
+					   blockno, buf),
+				errhidestmt(true),
+				errhidecontext(true));
+		return PGSR_NEXT_NO_IO;
+	}
+	else
+	{
+		ereport(DEBUG2,
+				errmsg("pgsr %s: fetching block %d into buf %d",
+					   NameStr(scan->rs_base.rs_rd->rd_rel->relname),
+					   blockno, buf),
+				errhidestmt(true),
+				errhidecontext(true));
+		return PGSR_NEXT_IO;
+	}
+}
+
+static void
+heap_pgsr_release(uintptr_t pgsr_private, uintptr_t read_private)
+{
+	HeapScanDesc scan = (HeapScanDesc) pgsr_private;
+	Buffer buf = (Buffer) read_private;
+
+	ereport(DEBUG2,
+			errmsg("pgsr %s: releasing buf %d",
+				   NameStr(scan->rs_base.rs_rd->rd_rel->relname),
+				   buf),
+			errhidestmt(true),
+			errhidecontext(true));
+
+	Assert(BufferIsValid(buf));
+	ReleaseBuffer(buf);
+}
+
 /* ----------------
  *		initscan - scan code common to heap_beginscan and heap_rescan
  * ----------------
@@ -318,6 +392,21 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	 */
 	if (scan->rs_base.rs_flags & SO_TYPE_SEQSCAN)
 		pgstat_count_heap_scan(scan->rs_base.rs_rd);
+
+	scan->rs_prefetch_block = InvalidBlockNumber;
+	if (scan->pgsr)
+	{
+		pg_streaming_read_free(scan->pgsr);
+		scan->pgsr = NULL;
+	}
+
+	if ((scan->rs_base.rs_flags & SO_TYPE_SEQSCAN) &&
+		!scan->rs_base.rs_parallel && !RelationUsesLocalBuffers(scan->rs_base.rs_rd))
+		scan->pgsr = pg_streaming_read_alloc(128, (uintptr_t) scan,
+											 heap_pgsr_next_single,
+											 heap_pgsr_release);
+	else
+		scan->pgsr = NULL;
 }
 
 /*
@@ -378,9 +467,25 @@ heapgetpage(TableScanDesc sscan, BlockNumber page)
 	 */
 	CHECK_FOR_INTERRUPTS();
 
-	/* read page using selected strategy */
-	scan->rs_cbuf = ReadBufferExtended(scan->rs_base.rs_rd, MAIN_FORKNUM, page,
-									   RBM_NORMAL, scan->rs_strategy);
+	if (scan->pgsr)
+	{
+		scan->rs_cbuf = pg_streaming_read_get_next(scan->pgsr);
+		Assert(BufferIsValid(scan->rs_cbuf));
+#if 0
+		ereport(LOG,
+			(errmsg("got buf %d block %d, expecting %d",
+					scan->rs_cbuf, BufferGetBlockNumber(scan->rs_cbuf), page),
+			 errhidestmt(true),
+			 errhidecontext(true)));
+#endif
+		Assert(BufferGetBlockNumber(scan->rs_cbuf) == page);
+	}
+	else
+	{
+		/* read page using selected strategy */
+		scan->rs_cbuf = ReadBufferExtended(scan->rs_base.rs_rd, MAIN_FORKNUM, page,
+										   RBM_NORMAL, scan->rs_strategy);
+	}
 	scan->rs_cblock = page;
 
 	if (!(scan->rs_base.rs_flags & SO_ALLOW_PAGEMODE))
@@ -538,9 +643,9 @@ heapgettup(HeapScanDesc scan,
 			}
 			else
 				page = scan->rs_startblock; /* first page */
+			scan->rs_inited = true;
 			heapgetpage((TableScanDesc) scan, page);
 			lineoff = FirstOffsetNumber;	/* first offnum */
-			scan->rs_inited = true;
 		}
 		else
 		{
@@ -563,6 +668,12 @@ heapgettup(HeapScanDesc scan,
 	{
 		/* backward parallel scan not supported */
 		Assert(scan->rs_base.rs_parallel == NULL);
+
+		if (scan->pgsr)
+		{
+			pg_streaming_read_free(scan->pgsr);
+			scan->pgsr = NULL;
+		}
 
 		if (!scan->rs_inited)
 		{
@@ -852,9 +963,9 @@ heapgettup_pagemode(HeapScanDesc scan,
 			}
 			else
 				page = scan->rs_startblock; /* first page */
+			scan->rs_inited = true;
 			heapgetpage((TableScanDesc) scan, page);
 			lineindex = 0;
-			scan->rs_inited = true;
 		}
 		else
 		{
@@ -874,6 +985,12 @@ heapgettup_pagemode(HeapScanDesc scan,
 	{
 		/* backward parallel scan not supported */
 		Assert(scan->rs_base.rs_parallel == NULL);
+
+		if (scan->pgsr)
+		{
+			pg_streaming_read_free(scan->pgsr);
+			scan->pgsr = NULL;
+		}
 
 		if (!scan->rs_inited)
 		{
@@ -1158,6 +1275,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_strategy = NULL;	/* set in initscan */
 
+	scan->pgsr = NULL;
+
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
 	 */
@@ -1268,6 +1387,12 @@ heap_endscan(TableScanDesc sscan)
 
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
+
+	if (scan->pgsr)
+	{
+		pg_streaming_read_free(scan->pgsr);
+		scan->pgsr = NULL;
+	}
 
 	pfree(scan);
 }

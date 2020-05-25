@@ -29,6 +29,7 @@ extern void AioShmemInit(void);
 extern void pgaio_postmaster_child_init(void);
 
 extern void pgaio_at_abort(void);
+extern void pgaio_at_commit(void);
 
 /*
  * XXX: Add flags to the initiation functions that govern:
@@ -94,5 +95,25 @@ extern void pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *
 extern void pg_streaming_write_wait(pg_streaming_write *pgsw, uint32 count);
 extern void pg_streaming_write_wait_all(pg_streaming_write *pgsw);
 extern void pg_streaming_write_free(pg_streaming_write *pgsw);
+
+/*
+ * Helper for efficient reads (using readahead).
+ */
+
+typedef struct PgStreamingRead PgStreamingRead;
+typedef enum PgStreamingReadNextStatus
+{
+	PGSR_NEXT_END,
+	PGSR_NEXT_NO_IO,
+	PGSR_NEXT_IO
+} PgStreamingReadNextStatus;
+
+typedef PgStreamingReadNextStatus (*PgStreamingReadDetermineNextCB)(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private);
+typedef void (*PgStreamingReadRelease)(uintptr_t pgsr_private, uintptr_t read_private);
+extern PgStreamingRead *pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
+												PgStreamingReadDetermineNextCB determine_next_cb,
+												PgStreamingReadRelease release_cb);
+extern void pg_streaming_read_free(PgStreamingRead *pgsr);
+extern uintptr_t pg_streaming_read_get_next(PgStreamingRead *pgsr);
 
 #endif							/* AIO_H */

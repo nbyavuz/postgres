@@ -206,11 +206,11 @@ pg_prewarm(PG_FUNCTION_ARGS)
 		for (block = first_block; block <= last_block; ++block)
 		{
 			Buffer		buf;
-			PgAioInProgress *io;
+			bool already_valid;
 
 			CHECK_FOR_INTERRUPTS();
-			io = ReadBufferAsync(rel, forkNumber, block, RBM_NORMAL, NULL, &buf);
-			if (!io)
+			buf = ReadBufferAsync(rel, forkNumber, block, RBM_NORMAL, NULL, &already_valid, NULL);
+			if (already_valid)
 				ReleaseBuffer(buf);
 			++blocks_done;
 		}

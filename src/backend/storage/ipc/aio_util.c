@@ -135,3 +135,212 @@ pg_streaming_write_free(pg_streaming_write *pgsw)
 	pfree(pgsw);
 }
 
+
+typedef struct OutstandingRead
+{
+	PgAioInProgress *aio;
+	bool in_progress;
+	bool done;
+	uintptr_t read_private;
+} OutstandingRead;
+
+struct PgStreamingRead
+{
+	uint32 iodepth;
+	uintptr_t pgsr_private;
+	PgStreamingReadDetermineNextCB determine_next_cb;
+	PgStreamingReadRelease release_cb;
+
+	uint32 current_window;
+
+	uint32 end_at;
+	uint32 scan_at;
+	uint32 prefetch_at;
+
+	OutstandingRead outstanding_reads[];
+};
+
+PgStreamingRead *
+pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
+						PgStreamingReadDetermineNextCB determine_next_cb,
+						PgStreamingReadRelease release_cb)
+{
+	PgStreamingRead *pgsr;
+
+	pgsr = palloc0(offsetof(PgStreamingRead, outstanding_reads) +
+				   sizeof(OutstandingRead) * iodepth);
+
+	pgsr->iodepth = iodepth;
+	pgsr->pgsr_private = pgsr_private;
+	pgsr->end_at = -1;
+	pgsr->determine_next_cb = determine_next_cb;
+	pgsr->release_cb = release_cb;
+
+	return pgsr;
+}
+
+void
+pg_streaming_read_free(PgStreamingRead *pgsr)
+{
+	ereport(DEBUG2,
+			(errmsg("freeing pgsr: %p", pgsr),
+			 errhidestmt(true),
+			 errhidecontext(true)));
+
+	for (int i = 0; i < pgsr->iodepth; i++)
+	{
+		OutstandingRead *this_read = &pgsr->outstanding_reads[i];
+
+		if (this_read->in_progress)
+		{
+			pgaio_wait_for_io(this_read->aio, true);
+			this_read->in_progress = false;
+			this_read->done = true;
+		}
+
+		if (this_read->done)
+			pgsr->release_cb(pgsr->pgsr_private, this_read->read_private);
+
+		if (this_read->aio)
+		{
+			pgaio_release(this_read->aio);
+			this_read->aio = NULL;
+		}
+	}
+}
+
+static void
+pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
+{
+	uint32 off = (pgsr->prefetch_at) % pgsr->iodepth;
+	OutstandingRead *this_read = &pgsr->outstanding_reads[off];
+	PgStreamingReadNextStatus status;
+
+	Assert(!this_read->in_progress);
+	Assert(!this_read->done);
+
+	if (this_read->aio == NULL)
+	{
+		this_read->aio = pgaio_io_get();
+	}
+	else
+	{
+		pgaio_io_recycle(this_read->aio);
+	}
+
+#if 0
+	ereport(DEBUG2,
+			(errmsg("fetching into slot %d", off),
+			 errhidestmt(true),
+			 errhidecontext(true)));
+#endif
+
+	status = pgsr->determine_next_cb(pgsr->pgsr_private, this_read->aio, &this_read->read_private);
+
+	if (status == PGSR_NEXT_END)
+	{
+		pgsr->end_at = pgsr->prefetch_at;
+	}
+	else if (status == PGSR_NEXT_NO_IO)
+	{
+		Assert(this_read->read_private != 0);
+		this_read->done = true;
+		this_read->in_progress = false;
+		pgsr->prefetch_at++;
+	}
+	else
+	{
+		Assert(this_read->read_private != 0);
+		this_read->done = false;
+		this_read->in_progress = true;
+		pgsr->prefetch_at++;
+	}
+}
+
+static void
+pg_streaming_read_prefetch(PgStreamingRead *pgsr)
+{
+	uint32 min_issue;
+	uint32 pending = 0;
+
+	if (pgsr->end_at != -1)
+		return;
+
+	if (pgsr->current_window < pgsr->iodepth)
+	{
+		if (pgsr->current_window == 0)
+			pgsr->current_window = 4;
+		else
+			pgsr->current_window *= 2;
+
+		if (pgsr->current_window > pgsr->iodepth)
+			pgsr->current_window = pgsr->iodepth;
+
+		min_issue = 1;
+	}
+	else
+	{
+		min_issue = 64;
+	}
+
+	if (pgsr->scan_at + pgsr->current_window < pgsr->prefetch_at + min_issue)
+		return;
+
+#if 1
+	ereport(DEBUG3,
+			errmsg("checking prefetch at scan_at: %d, prefetch_at: %d, window: %d, fetching %d",
+				   pgsr->scan_at, pgsr->prefetch_at, pgsr->current_window,
+				   (pgsr->scan_at + pgsr->current_window) - pgsr->prefetch_at),
+			errhidestmt(true),
+			errhidecontext(true));
+#endif
+
+	while(pgsr->prefetch_at < pgsr->scan_at + pgsr->current_window)
+	{
+		pg_streaming_read_prefetch_one(pgsr);
+		pending++;
+
+		if (pending >= 16)
+		{
+			pgaio_submit_pending(true);
+			pending = 0;
+		}
+
+		if (pgsr->end_at != -1)
+			return;
+	}
+
+	if (pending > 0)
+		pgaio_submit_pending(true);
+}
+
+uintptr_t
+pg_streaming_read_get_next(PgStreamingRead *pgsr)
+{
+	uint32 off = (pgsr->scan_at) % pgsr->iodepth;
+	OutstandingRead *this_read = &pgsr->outstanding_reads[off];
+
+	if (pgsr->scan_at == pgsr->end_at)
+		return 0;
+
+	//if (pgsr->prefetch_at == 0)
+	pg_streaming_read_prefetch(pgsr);
+
+	Assert(pgsr->scan_at < pgsr->prefetch_at);
+	Assert(this_read->aio);
+	Assert(this_read->done || this_read->in_progress);
+
+	if (!this_read->done)
+	{
+		pgaio_wait_for_io(this_read->aio, true);
+		this_read->in_progress = false;
+		this_read->done = true;
+	}
+
+	pgsr->scan_at++;
+	this_read->done = false;
+
+	//pg_streaming_read_prefetch(pgsr);
+
+	return this_read->read_private;
+}

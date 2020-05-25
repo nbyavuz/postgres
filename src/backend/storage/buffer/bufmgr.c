@@ -715,11 +715,11 @@ ReadBufferWithoutRelcache(RelFileNode rnode, ForkNumber forkNum,
 							 mode, strategy, &hit);
 }
 
-static PgAioInProgress *
-ReadBufferInitRead(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
+static void
+ReadBufferInitRead(PgAioInProgress *aio,
+				   SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 				   Buffer buf, BufferDesc *bufHdr, int mode)
 {
-	PgAioInProgress* aio = pgaio_io_get();
 	Block		bufBlock;
 
 	//bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
@@ -742,33 +742,61 @@ ReadBufferInitRead(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 
 	smgrstartread(aio, smgr, forkNum, blockNum,
 				  bufBlock, buf, mode);
-
-	return aio;
 }
 
-PgAioInProgress*
+Buffer
 ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 				ReadBufferMode mode, BufferAccessStrategy strategy,
-				Buffer *buf)
+				bool *already_valid, PgAioInProgress **aiop)
 {
+	Buffer buf;
 	BufferDesc *bufHdr;
-	PgAioInProgress* aio;
 	bool hit;
+	bool release_io;
+	PgAioInProgress *aio;
 
-	if (mode != RBM_NORMAL || strategy != NULL || blockNum == P_NEW)
+	if (mode != RBM_NORMAL || blockNum == P_NEW)
 		elog(ERROR, "unsupported");
 
 	/* Open it at the smgr level if not already done */
 	RelationOpenSmgr(reln);
 
+	pgstat_count_buffer_read(reln);
+
 	bufHdr = ReadBuffer_start(reln->rd_smgr, reln->rd_rel->relpersistence, forkNum,
 							  blockNum, mode, strategy, &hit, false);
-	*buf = BufferDescriptorGetBuffer(bufHdr);
+	buf = BufferDescriptorGetBuffer(bufHdr);
 
 	if (hit)
-		return NULL;
+	{
+		pgstat_count_buffer_hit(reln);
+
+		//Assert(BufferIsPinned(buf));
+		*already_valid = true;
+		return buf;
+	}
+
+	*already_valid = false;
+
+	if (aiop == NULL)
+	{
+		release_io = true;
+		aio = pgaio_io_get();
+	}
+	else if(*aiop == NULL)
+	{
+		release_io = false;
+		*aiop = aio = pgaio_io_get();
+	}
+	else
+	{
+		release_io = false;
+		aio = *aiop;
+		pgaio_io_recycle(aio);
+	}
 
 	/*
+	 * FIXME: Not accurate anymore.
 	 * Decrement local pin, but keep shared pin. The latter will be released
 	 * upon completion of the IO. Otherwise the buffer could be recycled while
 	 * the IO is ongoing.
@@ -776,22 +804,33 @@ ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 	 * FIXME: Make this optional? It's only useful for fire-and-forget style
 	 * IO.
 	 */
+	if (!release_io)
+	{
+		uint32		buf_state;
+
+		buf_state = LockBufHdr(bufHdr);
+		buf_state += BUF_REFCOUNT_ONE;
+		UnlockBufHdr(bufHdr, buf_state);
+	}
+	else
 	{
 		PrivateRefCountEntry *ref;
 
-		ref = GetPrivateRefCountEntry(*buf, false);
+		ref = GetPrivateRefCountEntry(buf, false);
 		Assert(ref != NULL);
 		Assert(ref->refcount > 0);
 
-		ResourceOwnerForgetBuffer(CurrentResourceOwner, *buf);
+		ResourceOwnerForgetBuffer(CurrentResourceOwner, buf);
 		ref->refcount--;
 		ForgetPrivateRefCountEntry(ref);
 	}
 
-	aio = ReadBufferInitRead(reln->rd_smgr, forkNum, blockNum, *buf, bufHdr, mode);
-	pgaio_release(aio);
+	ReadBufferInitRead(aio, reln->rd_smgr, forkNum, blockNum, buf, bufHdr, mode);
 
-	return aio;
+	if (release_io)
+		pgaio_release(aio);
+
+	return buf;
 }
 
 static Buffer
@@ -4599,6 +4638,33 @@ TerminateSharedBufferIO(BufferDesc *buf, bool syncio, bool clear_dirty, uint32 s
 		InProgressBuf = NULL;
 
 	ConditionVariableBroadcast(BufferDescriptorGetIOCV(buf));
+
+
+	/* Support LockBufferForCleanup() */
+	if (!syncio && buf_state & BM_PIN_COUNT_WAITER)
+	{
+		/*
+		 * Acquire the buffer header lock, re-check that there's a waiter.
+		 * Another backend could have unpinned this buffer, and already
+		 * woken up the waiter.  There's no danger of the buffer being
+		 * replaced after we unpinned it above, as it's pinned by the
+		 * waiter.
+		 */
+		buf_state = LockBufHdr(buf);
+
+		if ((buf_state & BM_PIN_COUNT_WAITER) &&
+			BUF_STATE_GET_REFCOUNT(buf_state) == 1)
+		{
+			/* we just released the last pin other than the waiter's */
+			int			wait_backend_pid = buf->wait_backend_pid;
+
+			buf_state &= ~BM_PIN_COUNT_WAITER;
+			UnlockBufHdr(buf, buf_state);
+			ProcSendSignal(wait_backend_pid);
+		}
+		else
+			UnlockBufHdr(buf, buf_state);
+	}
 }
 
 /*

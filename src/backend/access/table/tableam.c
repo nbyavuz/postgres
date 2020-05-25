@@ -480,7 +480,6 @@ table_block_parallelscan_nextpage(Relation rel, ParallelBlockTableScanDesc pbsca
 	if (nallocated % PREFETCH_BATCH == 0 &&
 		(nallocated + PREFETCH_AHEAD < pbscan->phs_nblocks))
 	{
-		PgAioInProgress *io;
 		Buffer buf;
 		uint64 target = nallocated + pbscan->phs_startblock + PREFETCH_AHEAD;
 		int i;
@@ -488,12 +487,14 @@ table_block_parallelscan_nextpage(Relation rel, ParallelBlockTableScanDesc pbsca
 		for (i = 0; i < PREFETCH_BATCH && target < pbscan->phs_nblocks;
 			 i++, target++)
 		{
-			io = ReadBufferAsync(
+			bool already_valid;
+
+			buf = ReadBufferAsync(
 				rel, MAIN_FORKNUM,
 				target % pbscan->phs_nblocks,
-				RBM_NORMAL, NULL, &buf);
+				RBM_NORMAL, NULL, &already_valid, NULL);
 
-			if (!io)
+			if (already_valid)
 				ReleaseBuffer(buf);
 		}
 		pgaio_submit_pending(false);
