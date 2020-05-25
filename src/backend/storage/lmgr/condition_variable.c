@@ -47,8 +47,9 @@ ConditionVariableStartup(void)
 		new_event_set = CreateWaitEventSet(TopMemoryContext, 2);
 		AddWaitEventToSet(new_event_set, WL_LATCH_SET, PGINVALID_SOCKET,
 						  MyLatch, NULL);
-		AddWaitEventToSet(new_event_set, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
-						  NULL, NULL);
+		if (IsUnderPostmaster)
+			AddWaitEventToSet(new_event_set, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
+							  NULL, NULL);
 		/* Don't set cv_wait_event_set until we have a correct WES. */
 		cv_wait_event_set = new_event_set;
 	}
