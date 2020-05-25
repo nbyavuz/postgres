@@ -670,7 +670,7 @@ mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
  */
 PgAioInProgress *
 mdstartread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-			char *buffer, int bufno)
+			char *buffer, int bufno, int mode)
 {
 	off_t		seekpos;
 	MdfdVec    *v;
@@ -684,7 +684,71 @@ mdstartread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
 
-	return FileStartRead(v->mdfd_vfd, buffer, BLCKSZ, seekpos, bufno);
+	return FileStartRead(v->mdfd_vfd, buffer, BLCKSZ, seekpos, bufno, mode);
+}
+
+/*
+ *	mdread() -- Read the specified block from a relation.
+ */
+PgAioInProgress *
+mdstartwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+			char *buffer, int bufno, bool skipFsync)
+{
+	off_t		seekpos;
+	int			nbytes;
+	MdfdVec    *v;
+
+	/* This assert is too expensive to have on normally ... */
+#ifdef CHECK_WRITE_VS_EXTEND
+	Assert(blocknum < mdnblocks(reln, forknum));
+#endif
+
+	TRACE_POSTGRESQL_SMGR_MD_WRITE_START(forknum, blocknum,
+										 reln->smgr_rnode.node.spcNode,
+										 reln->smgr_rnode.node.dbNode,
+										 reln->smgr_rnode.node.relNode,
+										 reln->smgr_rnode.backend);
+
+	v = _mdfd_getseg(reln, forknum, blocknum, skipFsync,
+					 EXTENSION_FAIL | EXTENSION_CREATE_RECOVERY);
+
+	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+
+	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
+
+	return FileStartWrite(v->mdfd_vfd, buffer, BLCKSZ, seekpos, WAIT_EVENT_DATA_FILE_WRITE);
+
+#if 0
+	nbytes = ...;
+
+	TRACE_POSTGRESQL_SMGR_MD_WRITE_DONE(forknum, blocknum,
+										reln->smgr_rnode.node.spcNode,
+										reln->smgr_rnode.node.dbNode,
+										reln->smgr_rnode.node.relNode,
+										reln->smgr_rnode.backend,
+										nbytes,
+										BLCKSZ);
+
+	if (nbytes != BLCKSZ)
+	{
+		if (nbytes < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not write block %u in file \"%s\": %m",
+							blocknum, FilePathName(v->mdfd_vfd))));
+		/* short write: complain appropriately */
+		ereport(ERROR,
+				(errcode(ERRCODE_DISK_FULL),
+				 errmsg("could not write block %u in file \"%s\": wrote only %d of %d bytes",
+						blocknum,
+						FilePathName(v->mdfd_vfd),
+						nbytes, BLCKSZ),
+				 errhint("Check free disk space.")));
+	}
+
+	if (!skipFsync && !SmgrIsTemp(reln))
+		register_dirty_segment(reln, forknum, v);
+#endif
 }
 
 /*

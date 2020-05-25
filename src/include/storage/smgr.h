@@ -99,7 +99,10 @@ extern void smgrread(SMgrRelation reln, ForkNumber forknum,
 struct PgAioInProgress;
 extern struct PgAioInProgress* smgrstartread(SMgrRelation reln, ForkNumber forknum,
 											 BlockNumber blocknum, char *buffer,
-											 int bufno);
+											 int bufno, int mode);
+extern struct PgAioInProgress* smgrstartwrite(SMgrRelation reln, ForkNumber forknum,
+											 BlockNumber blocknum, char *buffer,
+											  int bufno, bool skipFsync);
 extern void smgrwrite(SMgrRelation reln, ForkNumber forknum,
 					  BlockNumber blocknum, char *buffer, bool skipFsync);
 extern void smgrwriteback(SMgrRelation reln, ForkNumber forknum,

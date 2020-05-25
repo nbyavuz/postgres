@@ -33,7 +33,9 @@ extern bool mdprefetch(SMgrRelation reln, ForkNumber forknum,
 extern void mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				   char *buffer);
 extern struct PgAioInProgress *mdstartread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-										   char *buffer, int bufno);
+										   char *buffer, int bufno, int mode);
+extern struct PgAioInProgress *mdstartwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+											char *buffer, int bufno, bool skipFsync);
 extern void mdwrite(SMgrRelation reln, ForkNumber forknum,
 					BlockNumber blocknum, char *buffer, bool skipFsync);
 extern void mdwriteback(SMgrRelation reln, ForkNumber forknum,

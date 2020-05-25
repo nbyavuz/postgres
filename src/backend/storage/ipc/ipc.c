@@ -27,7 +27,6 @@
 #ifdef PROFILE_PID_DIR
 #include "postmaster/autovacuum.h"
 #endif
-#include "storage/aio.h"
 #include "storage/dsm.h"
 #include "storage/ipc.h"
 #include "tcop/tcopprot.h"

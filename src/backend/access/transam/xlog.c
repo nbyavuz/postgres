@@ -2539,7 +2539,7 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 			do
 			{
 				errno = 0;
-#if 0
+#if 1
 				pgstat_report_wait_start(WAIT_EVENT_WAL_WRITE);
 				written = pg_pwrite(openLogFile, from, nleft, startoffset);
 				pgstat_report_wait_end();
@@ -2662,7 +2662,7 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 		 * fsync more than one file.
 		 */
 		if ((sync_method != SYNC_METHOD_OPEN &&
-			sync_method != SYNC_METHOD_OPEN_DSYNC) || true)
+			sync_method != SYNC_METHOD_OPEN_DSYNC))
 		{
 			if (openLogFile >= 0 &&
 				!XLByteInPrevSeg(LogwrtResult.Write, openLogSegNo,
@@ -10340,11 +10340,12 @@ get_sync_bit(int method)
 	 * after its written. Also, walreceiver performs unaligned writes, which
 	 * don't work with O_DIRECT, so it is required for correctness too.
 	 */
-#if 0
+#if 1
 	if (!XLogIsNeeded() && !AmWalReceiverProcess())
-		;
-#endif
+		o_direct_flag = PG_O_DIRECT;
+#else
 	o_direct_flag = PG_O_DIRECT;
+#endif
 
 	switch (method)
 	{

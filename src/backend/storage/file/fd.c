@@ -2042,14 +2042,14 @@ retry:
 #include "storage/aio.h"
 
 struct PgAioInProgress *
-FileStartRead(File file, char *buffer, int amount, off_t offset, int bufid)
+FileStartRead(File file, char *buffer, int amount, off_t offset, int bufid, int mode)
 {
 	int			returnCode;
 	Vfd		   *vfdP;
 
 	Assert(FileIsValid(file));
 
-	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %d %p",
+	DO_DB(elog(LOG, "FileStartRead: %d (%s) " INT64_FORMAT " %d %p",
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
 			   amount, buffer));
@@ -2060,7 +2060,7 @@ FileStartRead(File file, char *buffer, int amount, off_t offset, int bufid)
 
 	vfdP = &VfdCache[file];
 
-	return pgaio_start_buffer_read(vfdP->fd, offset, amount, buffer, bufid);
+	return pgaio_start_read_buffer(vfdP->fd, offset, amount, buffer, bufid, mode);
 }
 
 int
@@ -2159,6 +2159,28 @@ retry:
 	}
 
 	return returnCode;
+}
+
+struct PgAioInProgress *
+FileStartWrite(File file, char *buffer, int amount, off_t offset, int bufid)
+{
+	int			returnCode;
+	Vfd		   *vfdP;
+
+	Assert(FileIsValid(file));
+
+	DO_DB(elog(LOG, "FileStartWrite: %d (%s) " INT64_FORMAT " %d %p",
+			   file, VfdCache[file].fileName,
+			   (int64) offset,
+			   amount, buffer));
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return NULL;
+
+	vfdP = &VfdCache[file];
+
+	return pgaio_start_write_buffer(vfdP->fd, offset, amount, buffer, bufid);
 }
 
 int

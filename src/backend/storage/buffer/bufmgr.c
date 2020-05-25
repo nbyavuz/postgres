@@ -44,6 +44,7 @@
 #include "pgstat.h"
 #include "postmaster/bgwriter.h"
 #include "storage/aio.h"
+#include "storage/buf.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
@@ -465,8 +466,12 @@ static int	SyncOneBuffer(int buf_id, bool skip_recently_used,
 						  WritebackContext *wb_context);
 static void WaitIO(BufferDesc *buf);
 static bool StartBufferIO(BufferDesc *buf, bool forInput);
-static void TerminateBufferIO(BufferDesc *buf, bool clear_dirty,
-							  uint32 set_flag_bits);
+static void TerminateBufferIO(BufferDesc *buf, bool local, bool syncio,
+							  bool clear_dirty, uint32 set_flag_bits);
+static void TerminateSharedBufferIO(BufferDesc *buf,
+									bool sync_io,
+									bool clear_dirty,
+									uint32 set_flag_bits);
 static void shared_buffer_write_error_callback(void *arg);
 static void local_buffer_write_error_callback(void *arg);
 static BufferDesc *BufferAlloc(SMgrRelation smgr,
@@ -709,14 +714,44 @@ ReadBufferWithoutRelcache(RelFileNode rnode, ForkNumber forkNum,
 							 mode, strategy, &hit);
 }
 
+static PgAioInProgress *
+ReadBufferInitRead(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
+				   Buffer buf, BufferDesc *bufHdr, int mode)
+{
+	PgAioInProgress* aio;
+	Block		bufBlock;
+
+	//bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
+	if (BufferIsLocal(buf))
+		bufBlock = LocalBufHdrGetBlock(bufHdr);
+	else
+		bufBlock = BufHdrGetBlock(bufHdr);
+
+	/*
+	 * if we have gotten to this point, we have allocated a buffer for the
+	 * page but its contents are not yet valid.  IO_IN_PROGRESS is set for it,
+	 * if it's a shared buffer.
+	 */
+	Assert(!(pg_atomic_read_u32(&bufHdr->state) & BM_VALID));	/* spinlock not needed */
+
+	/* FIXME: improve */
+	InProgressBuf = NULL;
+
+	aio = smgrstartread(smgr, forkNum, blockNum,
+						bufBlock, buf, mode);
+	Assert(aio != NULL);
+
+	return aio;
+}
+
 PgAioInProgress*
 ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 				ReadBufferMode mode, BufferAccessStrategy strategy,
 				Buffer *buf)
 {
 	BufferDesc *bufHdr;
-	bool hit;
 	PgAioInProgress* aio;
+	bool hit;
 
 	if (mode != RBM_NORMAL || strategy != NULL || blockNum == P_NEW)
 		elog(ERROR, "unsupported");
@@ -731,15 +766,13 @@ ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 	if (hit)
 		return NULL;
 
-	InProgressBuf = NULL;
-
-	aio = smgrstartread(reln->rd_smgr, forkNum, blockNum,
-						BufHdrGetBlock(bufHdr), *buf);
-	Assert(aio != NULL);
-
 	/*
-	 * Decrement local pin, but keep shared. Shared will be released upon
-	 * completion.
+	 * Decrement local pin, but keep shared pin. The latter will be released
+	 * upon completion of the IO. Otherwise the buffer could be recycled while
+	 * the IO is ongoing.
+	 *
+	 * FIXME: Make this optional? It's only useful for fire-and-forget style
+	 * IO.
 	 */
 	{
 		PrivateRefCountEntry *ref;
@@ -752,6 +785,8 @@ ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 		ref->refcount--;
 		ForgetPrivateRefCountEntry(ref);
 	}
+
+	aio = ReadBufferInitRead(reln->rd_smgr, forkNum, blockNum, *buf, bufHdr, mode);
 
 	return aio;
 }
@@ -884,19 +919,9 @@ ReadBuffer_extend(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	}
 
 
-	if (isLocalBuf)
-	{
-		/* Only need to adjust flags */
-		uint32		buf_state = pg_atomic_read_u32(&bufHdr->state);
-
-		buf_state |= BM_VALID;
-		pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
-	}
-	else
-	{
-		/* Set BM_VALID, terminate IO, and wake up any waiters */
-		TerminateBufferIO(bufHdr, false, BM_VALID);
-	}
+	TerminateBufferIO(bufHdr, isLocalBuf,
+					  /* syncio = */ true, /* clear_dirty = */ false,
+					  BM_VALID);
 
 	return BufferDescriptorGetBuffer(bufHdr);
 }
@@ -915,7 +940,6 @@ ReadBuffer_start(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	/* Make sure we will have room to remember the buffer pin */
 	ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
-
 
 	TRACE_POSTGRESQL_BUFFER_READ_START(forkNum, blockNum,
 									   smgr->smgr_rnode.node.spcNode,
@@ -984,6 +1008,41 @@ ReadBuffer_start(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 		return bufHdr;
 	}
+	else if (mode == RBM_ZERO_AND_LOCK || mode == RBM_ZERO_AND_CLEANUP_LOCK)
+	{
+		/*
+		 * The caller intends to overwrite the page and just wants us to
+		 * allocate a buffer. Finish IO here, so sync/async don't have to
+		 * duplicate the logic.
+		 */
+
+		Block		bufBlock;
+
+		bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
+
+		MemSet((char *) bufBlock, 0, BLCKSZ);
+
+		/*
+		 * In RBM_ZERO_AND_LOCK mode, grab the buffer content lock before marking
+		 * the page as valid, to make sure that no other backend sees the zeroed
+		 * page before the caller has had a chance to initialize it.
+		 *
+		 * Since no-one else can be looking at the page contents yet, there is no
+		 * difference between an exclusive lock and a cleanup-strength lock. (Note
+		 * that we cannot use LockBuffer() or LockBufferForCleanup() here, because
+		 * they assert that the buffer is already valid.)
+		 */
+		if (!isLocalBuf)
+		{
+			LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_EXCLUSIVE);
+		}
+
+		TerminateBufferIO(bufHdr, isLocalBuf,
+						  /* syncio = */ true, /* clear_dirty = */ false,
+						  BM_VALID);
+
+		*hit = true;
+	}
 
 	return bufHdr;
 }
@@ -1024,30 +1083,6 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
 
-	/*
-	 * Read in the page, unless the caller intends to overwrite it and
-	 * just wants us to allocate a buffer.
-	 */
-	if (mode == RBM_ZERO_AND_LOCK || mode == RBM_ZERO_AND_CLEANUP_LOCK)
-	{
-		MemSet((char *) bufBlock, 0, BLCKSZ);
-
-		/*
-		 * In RBM_ZERO_AND_LOCK mode, grab the buffer content lock before marking
-		 * the page as valid, to make sure that no other backend sees the zeroed
-		 * page before the caller has had a chance to initialize it.
-		 *
-		 * Since no-one else can be looking at the page contents yet, there is no
-		 * difference between an exclusive lock and a cleanup-strength lock. (Note
-		 * that we cannot use LockBuffer() or LockBufferForCleanup() here, because
-		 * they assert that the buffer is already valid.)
-		 */
-		if (!isLocalBuf)
-		{
-			LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_EXCLUSIVE);
-		}
-	}
-	else
 	{
 		instr_time	io_start,
 			io_time;
@@ -1086,19 +1121,9 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 		}
 	}
 
-	if (isLocalBuf)
-	{
-		/* Only need to adjust flags */
-		uint32		buf_state = pg_atomic_read_u32(&bufHdr->state);
-
-		buf_state |= BM_VALID;
-		pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
-	}
-	else
-	{
-		/* Set BM_VALID, terminate IO, and wake up any waiters */
-		TerminateBufferIO(bufHdr, false, BM_VALID);
-	}
+	TerminateBufferIO(bufHdr, isLocalBuf,
+					  /* syncio = */ true, /* clear_dirty = */ false,
+					  BM_VALID);
 
 	VacuumPageMiss++;
 	if (VacuumCostActive)
@@ -1113,6 +1138,59 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 									  found);
 
 	return BufferDescriptorGetBuffer(bufHdr);
+}
+
+void
+ReadBufferCompleteRead(Buffer buffer, int mode, bool failed)
+{
+	BufferDesc *bufHdr;
+	bool		islocal = BufferIsLocal(buffer);
+
+	if (islocal)
+		bufHdr = GetLocalBufferDescriptor(-buffer - 1);
+	else
+		bufHdr = GetBufferDescriptor(buffer - 1);
+
+	/* FIXME: implement track_io_timing */
+
+	if (!failed)
+	{
+		Block		bufBlock;
+		BlockNumber blockNum = bufHdr->tag.blockNum;
+
+		bufBlock = BufferGetBlock(buffer);
+
+		/* check for garbage data */
+		if (!PageIsVerified((Page) bufBlock, blockNum))
+		{
+			RelFileNode rnode = bufHdr->tag.rnode;
+			BlockNumber forkNum = bufHdr->tag.forkNum;
+
+			failed = true;
+
+			if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
+			{
+				ereport(WARNING,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("invalid page in block %u of relation %s; zeroing out page",
+								blockNum,
+								relpathperm(rnode, forkNum))));
+				MemSet((char *) bufBlock, 0, BLCKSZ);
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("invalid page in block %u of relation %s",
+								blockNum,
+								relpathperm(rnode, forkNum))));
+			}
+		}
+	}
+
+	TerminateBufferIO(bufHdr, islocal,
+					  /* syncio = */ false, /* clear_dirty = */ false,
+					  failed ? BM_IO_ERROR : BM_VALID);
 }
 
 /*
@@ -2939,7 +3017,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	 * Mark the buffer as clean (unless BM_JUST_DIRTIED has become set) and
 	 * end the BM_IO_IN_PROGRESS state.
 	 */
-	TerminateBufferIO(buf, true, 0);
+	TerminateSharedBufferIO(buf, /* syncio = */ true, /* clear_dirty = */ true, 0);
 
 	TRACE_POSTGRESQL_BUFFER_FLUSH_DONE(buf->tag.forkNum,
 									   buf->tag.blockNum,
@@ -4246,8 +4324,26 @@ StartBufferIO(BufferDesc *buf, bool forInput)
 	return true;
 }
 
+static void
+TerminateBufferIO(BufferDesc *bufHdr, bool local, bool syncio,
+				  bool clear_dirty, uint32 set_flag_bits)
+{
+	if (local)
+	{
+		/* Only need to adjust flags */
+		uint32		buf_state = pg_atomic_read_u32(&bufHdr->state);
+
+		buf_state |= set_flag_bits;
+		pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
+	}
+	else
+	{
+		TerminateSharedBufferIO(bufHdr, syncio, clear_dirty, set_flag_bits);
+	}
+}
+
 /*
- * TerminateBufferIO: release a buffer we were doing I/O on
+ * TerminateSharedBufferIO: release a buffer we were doing I/O on
  *	(Assumptions)
  *	My process is executing IO for the buffer
  *	BM_IO_IN_PROGRESS bit is set for the buffer
@@ -4263,11 +4359,12 @@ StartBufferIO(BufferDesc *buf, bool forInput)
  * be 0, or BM_VALID if we just finished reading in the page.
  */
 static void
-TerminateBufferIO(BufferDesc *buf, bool clear_dirty, uint32 set_flag_bits)
+TerminateSharedBufferIO(BufferDesc *buf, bool syncio, bool clear_dirty, uint32 set_flag_bits)
 {
 	uint32		buf_state;
 
-	Assert(buf == InProgressBuf);
+	if (syncio)
+		Assert(buf == InProgressBuf);
 
 	buf_state = LockBufHdr(buf);
 
@@ -4278,9 +4375,14 @@ TerminateBufferIO(BufferDesc *buf, bool clear_dirty, uint32 set_flag_bits)
 		buf_state &= ~(BM_DIRTY | BM_CHECKPOINT_NEEDED);
 
 	buf_state |= set_flag_bits;
+
+	if (!syncio)
+		buf_state -= BUF_REFCOUNT_ONE;
+
 	UnlockBufHdr(buf, buf_state);
 
-	InProgressBuf = NULL;
+	if (syncio)
+		InProgressBuf = NULL;
 
 	ConditionVariableBroadcast(BufferDescriptorGetIOCV(buf));
 }
@@ -4334,7 +4436,7 @@ AbortBufferIO(void)
 				pfree(path);
 			}
 		}
-		TerminateBufferIO(buf, false, BM_IO_ERROR);
+		TerminateSharedBufferIO(buf, /* syncio = */ true, /* clear_dirty = */ false, BM_IO_ERROR);
 	}
 }
 

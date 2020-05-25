@@ -501,7 +501,7 @@ table_block_parallelscan_nextpage(Relation rel, ParallelBlockTableScanDesc pbsca
 	}
 	else
 	{
-		pgaio_drain_shared();
+		//pgaio_drain_shared();
 	}
 #endif
 

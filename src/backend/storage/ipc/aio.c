@@ -21,7 +21,7 @@
 
 #define PGAIO_VERBOSE
 
-#define PGAIO_SUBMIT_BATCH_SIZE 16
+#define PGAIO_SUBMIT_BATCH_SIZE 32
 #define PGAIO_BACKPRESSURE_LIMIT 500
 #define PGAIO_MAX_LOCAL_REAPED 32
 
@@ -50,7 +50,7 @@ typedef enum PgAioInProgressFlags
 } PgAioInProgressFlags;
 
 /* IO completion callback */
-typedef void (*PgAioCompletedCB)(PgAioInProgress *io);
+typedef bool (*PgAioCompletedCB)(PgAioInProgress *io);
 
 struct PgAioInProgress
 {
@@ -89,6 +89,7 @@ struct PgAioInProgress
 		struct
 		{
 			Buffer buf;
+			int mode;
 			int fd;
 			int already_done;
 			off_t offset;
@@ -98,6 +99,9 @@ struct PgAioInProgress
 		struct
 		{
 			Buffer buf;
+			int fd;
+			int already_done;
+			off_t offset;
 			struct iovec iovec;
 		} write_buffer;
 
@@ -120,11 +124,11 @@ static void pgaio_end_get_io(void);
 
 /* io completions */
 /* FIXME: parts of these probably don't belong here */
-static void pgaio_complete_nop(PgAioInProgress *io);
-static void pgaio_complete_flush_range(PgAioInProgress *io);
-static void pgaio_complete_read_buffer(PgAioInProgress *io);
-static void pgaio_complete_write_buffer(PgAioInProgress *io);
-static void pgaio_complete_write_wal(PgAioInProgress *io);
+static bool pgaio_complete_nop(PgAioInProgress *io);
+static bool pgaio_complete_flush_range(PgAioInProgress *io);
+static bool pgaio_complete_read_buffer(PgAioInProgress *io);
+static bool pgaio_complete_write_buffer(PgAioInProgress *io);
+static bool pgaio_complete_write_wal(PgAioInProgress *io);
 
 /* io_uring related functions */
 static void pgaio_put_io_locked(PgAioInProgress *io);
@@ -320,7 +324,7 @@ pgaio_start_flush_range(int fd, off_t offset, off_t nbytes)
 
 
 PgAioInProgress *
-pgaio_start_buffer_read(int fd, off_t offset, off_t nbytes, char* data, int buffno)
+pgaio_start_read_buffer(int fd, off_t offset, off_t nbytes, char* data, int buffno, int mode)
 {
 	PgAioInProgress *io;
 	//struct io_uring_sqe *sqe;
@@ -328,6 +332,7 @@ pgaio_start_buffer_read(int fd, off_t offset, off_t nbytes, char* data, int buff
 	io = pgaio_start_get_io(PGAIO_READ_BUFFER);
 
 	io->d.read_buffer.buf = buffno;
+	io->d.read_buffer.mode = mode;
 	io->d.read_buffer.fd = fd;
 	io->d.read_buffer.offset = offset;
 	io->d.read_buffer.already_done = 0;
@@ -350,7 +355,38 @@ pgaio_start_buffer_read(int fd, off_t offset, off_t nbytes, char* data, int buff
 	return io;
 }
 
-extern PgAioInProgress *
+PgAioInProgress *
+pgaio_start_write_buffer(int fd, off_t offset, off_t nbytes, char* data, int buffno)
+{
+	PgAioInProgress *io;
+	//struct io_uring_sqe *sqe;
+
+	io = pgaio_start_get_io(PGAIO_READ_BUFFER);
+
+	io->d.write_buffer.buf = buffno;
+	io->d.write_buffer.fd = fd;
+	io->d.write_buffer.offset = offset;
+	io->d.write_buffer.already_done = 0;
+	io->d.write_buffer.iovec.iov_base = data;
+	io->d.write_buffer.iovec.iov_len = nbytes;
+
+	pgaio_end_get_io();
+
+#ifdef PGAIO_VERBOSE
+	elog(DEBUG1, "start_buffer_write %zu:"
+		 "fd %d, off: %llu, bytes: %llu, buff: %d, data %p",
+		 io - aio_ctl->in_progress_io,
+		 fd,
+		 (unsigned long long) offset,
+		 (unsigned long long) nbytes,
+		 buffno,
+		 data);
+#endif
+
+	return io;
+}
+
+PgAioInProgress *
 pgaio_start_write_wal(int fd, off_t offset, off_t nbytes, char *data, bool no_reorder)
 {
 	PgAioInProgress *io;
@@ -407,11 +443,13 @@ pgaio_complete_ios(bool in_error)
 		if (!(io->flags & PGAIOIP_DONE))
 		{
 			PgAioCompletedCB cb;
+			bool done;
 
 			cb = completion_callbacks[io->type];
-			cb(io);
+			done = cb(io);
 
-			io->flags |= PGAIOIP_DONE;
+			if (done)
+				io->flags |= PGAIOIP_DONE;
 
 			/* signal state change */
 			ConditionVariableBroadcast(&io->cv);
@@ -426,7 +464,12 @@ pgaio_complete_ios(bool in_error)
 	START_CRIT_SECTION();
 	LWLockAcquire(SharedAIOLock, LW_EXCLUSIVE);
 	for (int i = 0; i < num_local_reaped; i++)
-		pgaio_put_io_locked(local_reaped_ios[i]);
+	{
+		PgAioInProgress *io = local_reaped_ios[i];
+
+		if (io->flags & PGAIOIP_DONE)
+			pgaio_put_io_locked(io);
+	}
 	num_local_reaped = 0;
 	LWLockRelease(SharedAIOLock);
 	END_CRIT_SECTION();
@@ -744,15 +787,17 @@ pgaio_put_io_locked(PgAioInProgress *io)
 					&io->node);
 }
 
-static void
+static bool
 pgaio_complete_nop(PgAioInProgress *io)
 {
 #ifdef PGAIO_VERBOSE
 	elog(DEBUG1, "completed nop");
 #endif
+
+	return true;
 }
 
-static void
+static bool
 pgaio_complete_flush_range(PgAioInProgress *io)
 {
 #ifdef PGAIO_VERBOSE
@@ -760,17 +805,15 @@ pgaio_complete_flush_range(PgAioInProgress *io)
 		 io - aio_ctl->in_progress_io,
 		 io->result < 0 ? strerror(-io->result) : "ok");
 #endif
+
+	return true;
 }
 
-static void
+static bool
 pgaio_complete_read_buffer(PgAioInProgress *io)
 {
-	BufferDesc *bufHdr = GetBufferDescriptor(io->d.read_buffer.buf - 1);
-	uint32		buf_state;
 	bool		failed = false;
-	RelFileNode rnode = bufHdr->tag.rnode;
-	BlockNumber forkNum = bufHdr->tag.forkNum;
-	BlockNumber blockNum = bufHdr->tag.blockNum;
+	Buffer		buffer = io->d.read_buffer.buf;
 
 #ifdef PGAIO_VERBOSE
 	elog(DEBUG1, "completed read_buffer: %zu, %d/%s, buf %d",
@@ -780,79 +823,66 @@ pgaio_complete_read_buffer(PgAioInProgress *io)
 		 io->d.read_buffer.buf);
 #endif
 
-	if (io->result < 0)
+	if (io->result != BLCKSZ)
 	{
-		if (io->result == EAGAIN || io->result == EINTR)
-		{
-			elog(WARNING, "need to implement retries");
-		}
+		RelFileNode rnode;
+		ForkNumber forkNum;
+		BlockNumber blockNum;
 
-		failed = true;
-		ereport(WARNING,
-				(errcode_for_file_access(),
-				 errmsg("could not read block %u in file \"%s\": %s",
-						blockNum,
-						relpathperm(rnode, forkNum),
-						strerror(-io->result))));
-	}
-	else if (io->result != BLCKSZ)
-	{
-		failed = true;
-		ereport(WARNING,
-				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("could not read block %u in file \"%s\": read only %d of %d bytes",
-						blockNum,
-						relpathperm(rnode, forkNum),
-						io->result, BLCKSZ)));
-	}
+		BufferGetTag(buffer, &rnode, &forkNum, &blockNum);
 
-	/* FIXME: needs to be in bufmgr.c */
-	{
-		Block		bufBlock;
-		RelFileNode rnode = bufHdr->tag.rnode;
-		BlockNumber forkNum = bufHdr->tag.forkNum;
-		BlockNumber blockNum = bufHdr->tag.blockNum;
-
-		bufBlock = BufferGetBlock(io->d.read_buffer.buf);
-
-		/* check for garbage data */
-		if (!PageIsVerified((Page) bufBlock, blockNum))
+		if (io->result < 0)
 		{
 			failed = true;
-			ereport(ERROR,
+
+			if (io->result == EAGAIN || io->result == EINTR)
+			{
+				elog(DEBUG1, "need to implement retries");
+			}
+			else
+			{
+				ereport(WARNING,
+						(errcode_for_file_access(),
+						 errmsg("could not read block %u in file \"%s\": %s",
+								blockNum,
+								relpathperm(rnode, forkNum),
+								strerror(-io->result))));
+			}
+		}
+		else
+		{
+
+			failed = true;
+			ereport(DEBUG1,
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("invalid page in block %u of relation %s",
+					 errmsg("could not read block %u in file \"%s\": read only %d of %d bytes (init: %d, cur: %d)",
 							blockNum,
-							relpathperm(rnode, forkNum))));
+							relpathperm(rnode, forkNum),
+							io->result, BLCKSZ,
+							io->initiatorProcIndex, MyProc->pgprocno)));
 		}
 	}
 
-	buf_state = LockBufHdr(bufHdr);
+	ReadBufferCompleteRead(io->d.read_buffer.buf, io->d.read_buffer.mode, failed);
 
-	Assert(buf_state & BM_IO_IN_PROGRESS);
-
-	buf_state &= ~(BM_IO_IN_PROGRESS | BM_IO_ERROR);
-	if (failed)
-		buf_state |= BM_IO_ERROR;
-	else
-		buf_state |= BM_VALID;
-
-	buf_state -= BUF_REFCOUNT_ONE;
-
-	UnlockBufHdr(bufHdr, buf_state);
-
-	ConditionVariableBroadcast(BufferDescriptorGetIOCV(bufHdr));
+	return true;
 }
 
-static void
+static bool
 pgaio_complete_write_buffer(PgAioInProgress *io)
 {
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG1, "completed write_buffer");
+	elog(DEBUG1, "completed write_buffer: %zu, %d/%s, buf %d",
+		 io - aio_ctl->in_progress_io,
+		 io->result,
+		 io->result < 0 ? strerror(-io->result) : "ok",
+		 io->d.write_buffer.buf);
 #endif
+
+	return true;
 }
 
-static void
+static bool
 pgaio_complete_write_wal(PgAioInProgress *io)
 {
 #ifdef PGAIO_VERBOSE
@@ -886,6 +916,8 @@ pgaio_complete_write_wal(PgAioInProgress *io)
 	}
 
 	/* FIXME: update xlog.c state */
+
+	return true;
 }
 
 
@@ -941,6 +973,15 @@ pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 								1,
 								io->d.read_buffer.offset);
 			break;
+		case PGAIO_WRITE_BUFFER:
+			io_uring_prep_writev(sqe,
+								 io->d.write_wal.fd,
+								 &io->d.write_wal.iovec,
+								 1,
+								 io->d.write_wal.offset);
+			if (io->d.write_wal.no_reorder)
+				sqe->flags = IOSQE_IO_DRAIN;
+			break;
 		case PGAIO_FLUSH_RANGE:
 			io_uring_prep_rw(IORING_OP_SYNC_FILE_RANGE,
 							 sqe,
@@ -959,7 +1000,6 @@ pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 			if (io->d.write_wal.no_reorder)
 				sqe->flags = IOSQE_IO_DRAIN;
 			break;
-		case PGAIO_WRITE_BUFFER:
 		case PGAIO_NOP:
 			elog(ERROR, "not yet");
 			break;

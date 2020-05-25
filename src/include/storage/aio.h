@@ -51,7 +51,9 @@ extern PgAioInProgress *pgaio_start_nop(void);
 extern PgAioInProgress *pgaio_start_fsync(int fd);
 
 struct BufferDesc;
-extern PgAioInProgress *pgaio_start_buffer_read(int fd, off_t offset, off_t nbytes,
+extern PgAioInProgress *pgaio_start_read_buffer(int fd, off_t offset, off_t nbytes,
+												char *data, int buffno, int mode);
+extern PgAioInProgress *pgaio_start_write_buffer(int fd, off_t offset, off_t nbytes,
 												char *data, int buffno);
 extern PgAioInProgress *pgaio_start_write_wal(int fd, off_t offset, off_t nbytes,
 											  char *data, bool no_reorder);
