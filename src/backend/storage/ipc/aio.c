@@ -1150,7 +1150,7 @@ pgaio_start_flush_range(PgAioInProgress *io, int fd, off_t offset, off_t nbytes)
 
 
 void
-pgaio_start_read_buffer(PgAioInProgress *io, int fd, off_t offset, off_t nbytes, char *bufdata, int buffno, int mode)
+pgaio_start_read_buffer(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, int buffno, int mode)
 {
 	pgaio_prepare_io(io, PGAIO_READ_BUFFER);
 
@@ -1177,7 +1177,7 @@ pgaio_start_read_buffer(PgAioInProgress *io, int fd, off_t offset, off_t nbytes,
 }
 
 void
-pgaio_start_write_buffer(PgAioInProgress *io, int fd, off_t offset, off_t nbytes, char *bufdata, int buffno)
+pgaio_start_write_buffer(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, int buffno)
 {
 	pgaio_prepare_io(io, PGAIO_WRITE_BUFFER);
 
@@ -1203,7 +1203,7 @@ pgaio_start_write_buffer(PgAioInProgress *io, int fd, off_t offset, off_t nbytes
 }
 
 void
-pgaio_start_write_wal(PgAioInProgress *io, int fd, off_t offset, off_t nbytes, char *bufdata, bool no_reorder)
+pgaio_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, bool no_reorder)
 {
 	pgaio_prepare_io(io, PGAIO_WRITE_WAL);
 
@@ -1475,8 +1475,7 @@ pgaio_complete_write_buffer(PgAioInProgress *io)
 		}
 	}
 
-	// FIXME: broken address in case of rewrite
-	ReadBufferCompleteWrite(io->d.read_buffer.buf, io->d.write_buffer.iovec.iov_base, failed);
+	ReadBufferCompleteWrite(io->d.read_buffer.buf, failed);
 
 	return true;
 }

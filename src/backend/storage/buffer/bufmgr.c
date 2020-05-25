@@ -1211,7 +1211,7 @@ ReadBufferCompleteRead(Buffer buffer, int mode, bool failed)
 }
 
 void
-ReadBufferCompleteWrite(Buffer buffer, char *dbuf, bool failed)
+ReadBufferCompleteWrite(Buffer buffer, bool failed)
 {
 	BufferDesc *bufHdr;
 	bool		islocal = BufferIsLocal(buffer);

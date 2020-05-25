@@ -54,12 +54,11 @@ extern void pgaio_start_nop(PgAioInProgress *io);
 extern void pgaio_start_fsync(PgAioInProgress *io, int fd, bool barrier);
 extern void pgaio_start_fdatasync(PgAioInProgress *io, int fd, bool barrier);
 
-struct BufferDesc;
-extern void pgaio_start_read_buffer(PgAioInProgress *io, int fd, off_t offset, off_t nbytes,
+extern void pgaio_start_read_buffer(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes,
 									char *bufdata, int buffno, int mode);
-extern void pgaio_start_write_buffer(PgAioInProgress *io, int fd, off_t offset, off_t nbytes,
+extern void pgaio_start_write_buffer(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes,
 									 char *bufdata, int buffno);
-extern void pgaio_start_write_wal(PgAioInProgress *io, int fd, off_t offset, off_t nbytes,
+extern void pgaio_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes,
 								  char *bufdata, bool no_reorder);
 extern void pgaio_release(PgAioInProgress *io);
 extern void pgaio_submit_pending(bool drain);
@@ -75,4 +74,5 @@ extern void pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb
 
 extern PgAioBounceBuffer *pgaio_bounce_buffer_get(void);
 extern char *pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb);
+
 #endif							/* AIO_H */
