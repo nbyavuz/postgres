@@ -462,8 +462,8 @@ static void PinBuffer_Locked(BufferDesc *buf);
 static void UnpinBuffer(BufferDesc *buf, bool fixOwner);
 static void BufferSync(int flags);
 static uint32 WaitBufHdrUnlocked(BufferDesc *buf);
-static int	SyncOneBuffer(int buf_id, bool skip_recently_used,
-						  WritebackContext *wb_context);
+static int	BgBufferSyncWriteOne(int buf_id, bool skip_recently_used,
+								 pg_streaming_write *pgsw);
 static void WaitIO(BufferDesc *buf);
 static bool StartBufferIO(BufferDesc *buf, bool forInput);
 static void TerminateBufferIO(BufferDesc *buf, bool local, bool syncio,
@@ -2486,6 +2486,8 @@ BgBufferSync(WritebackContext *wb_context)
 	long		new_strategy_delta;
 	uint32		new_recent_alloc;
 
+	pg_streaming_write *pgsw;
+
 	/*
 	 * Find out where the freelist clock sweep currently is, and how many
 	 * buffer allocations have happened since our last call.
@@ -2651,6 +2653,8 @@ BgBufferSync(WritebackContext *wb_context)
 		upcoming_alloc_est = min_scan_buffers + reusable_buffers_est;
 	}
 
+	pgsw = pg_streaming_write_alloc(128, wb_context, buffer_sync_complete);
+
 	/*
 	 * Now write out dirty reusable buffers, working forward from the
 	 * next_to_clean point, until we have lapped the strategy scan, or cleaned
@@ -2668,8 +2672,8 @@ BgBufferSync(WritebackContext *wb_context)
 	/* Execute the LRU scan */
 	while (num_to_scan > 0 && reusable_buffers < upcoming_alloc_est)
 	{
-		int			sync_state = SyncOneBuffer(next_to_clean, true,
-											   wb_context);
+		int			sync_state =
+			BgBufferSyncWriteOne(next_to_clean, true, pgsw);
 
 		if (++next_to_clean >= NBuffers)
 		{
@@ -2690,6 +2694,9 @@ BgBufferSync(WritebackContext *wb_context)
 		else if (sync_state & BUF_REUSABLE)
 			reusable_buffers++;
 	}
+
+	pg_streaming_write_wait_all(pgsw);
+	pg_streaming_write_free(pgsw);
 
 	BgWriterStats.m_buf_written_clean += num_written;
 
@@ -2746,14 +2753,17 @@ BgBufferSync(WritebackContext *wb_context)
  * Note: caller must have done ResourceOwnerEnlargeBuffers.
  */
 static int
-SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
+BgBufferSyncWriteOne(int buf_id, bool skip_recently_used,
+					 pg_streaming_write *pgsw)
 {
 	BufferDesc *bufHdr = GetBufferDescriptor(buf_id);
 	int			result = 0;
 	uint32		buf_state;
-	BufferTag	tag;
+	LWLock *content_lock;
+	PgAioInProgress *aio;
 
 	ReservePrivateRefCountEntry();
+	ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
 
 	/*
 	 * Check whether buffer needs writing.
@@ -2785,22 +2795,37 @@ SyncOneBuffer(int buf_id, bool skip_recently_used, WritebackContext *wb_context)
 		return result;
 	}
 
-	/*
-	 * Pin it, share-lock it, write it.  (FlushBuffer will do nothing if the
-	 * buffer is clean by the time we've locked it.)
-	 */
 	PinBuffer_Locked(bufHdr);
-	LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_SHARED);
 
-	FlushBuffer(bufHdr, NULL);
+	aio = pg_streaming_write_get_io(pgsw);
 
-	LWLockRelease(BufferDescriptorGetContentLock(bufHdr));
+	content_lock = BufferDescriptorGetContentLock(bufHdr);
 
-	tag = bufHdr->tag;
+	/*
+	 * If there are pre-existing IOs in-flight, we can't block on the
+	 * content lock, it could lead to a deadlock. So first wait for
+	 * outstanding IO, and then block on acquiring the lock.
+	 */
+	if (pg_streaming_write_inflight(pgsw) > 0 &&
+		LWLockConditionalAcquire(content_lock, LW_SHARED))
+	{
+	}
+	else
+	{
+		pg_streaming_write_wait_all(pgsw);
+		LWLockAcquire(content_lock, LW_SHARED);
+	}
 
-	UnpinBuffer(bufHdr, true);
-
-	ScheduleBufferTagForWriteback(wb_context, &tag);
+	if (AsyncFlushBuffer(aio, bufHdr, NULL))
+	{
+		pg_streaming_write_write(pgsw, aio, bufHdr);
+		result |= BUF_WRITTEN;
+	}
+	else
+	{
+		LWLockRelease(content_lock);
+		UnpinBuffer(bufHdr, true);
+	}
 
 	return result | BUF_WRITTEN;
 }
@@ -3219,6 +3244,8 @@ AsyncFlushBuffer(PgAioInProgress *aio, BufferDesc *buf, SMgrRelation reln)
 	char	   *bufToWrite;
 	uint32		buf_state;
 	PgAioBounceBuffer *bb;
+
+	Assert(LWLockHeldByMe(BufferDescriptorGetContentLock(buf)));
 
 	/*
 	 * Try to start an I/O operation.  If StartBufferIO returns false, then
