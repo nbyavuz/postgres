@@ -2105,7 +2105,6 @@ BufferSyncWriteOne(pg_streaming_write *pgsw, BufferDesc *bufHdr)
 
 		aio = pg_streaming_write_get_io(pgsw);
 
-
 		/*
 		 * If there are pre-existing IOs in-flight, we can't block on the
 		 * content lock, it could lead to a deadlock. So first wait for
@@ -2943,7 +2942,6 @@ CheckForBufferLeaks(void)
 			PrintBufferLeakWarning(res->buffer);
 			RefCountErrors++;
 		}
-
 	}
 
 	Assert(RefCountErrors == 0);

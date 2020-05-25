@@ -856,12 +856,25 @@ pgaio_submit_pending(bool drain)
 		return;
 	}
 
-	//pgaio_print_list(&local_pending_requests, NULL, offsetof(PgAioInProgress, system_node));
+#define COMBINE_ENABLED
 
+#ifdef COMBINE_ENABLED
+#if 0
+	ereport(LOG, errmsg("before combine"),
+			errhidestmt(true),
+			errhidecontext(true));
+	pgaio_print_list(&local_pending_requests, NULL, offsetof(PgAioInProgress, system_node));
+#endif
 	if (num_local_pending_requests > 1)
 		pgaio_combine_pending();
 
-	//pgaio_print_list(&local_pending_requests, NULL, offsetof(PgAioInProgress, system_node));
+#if 0
+	ereport(LOG, errmsg("after combine"),
+			errhidestmt(true),
+			errhidecontext(true));
+	pgaio_print_list(&local_pending_requests, NULL, offsetof(PgAioInProgress, system_node));
+#endif
+#endif
 
 	while (!dlist_is_empty(&local_pending_requests))
 	{

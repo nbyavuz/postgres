@@ -238,7 +238,7 @@ heap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *r
 
 	if (already_valid)
 	{
-		ereport(DEBUG2,
+		ereport(DEBUG4,
 				errmsg("pgsr %s: found block %d already in buf %d",
 					   NameStr(scan->rs_base.rs_rd->rd_rel->relname),
 					   blockno, buf),
@@ -248,7 +248,7 @@ heap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *r
 	}
 	else
 	{
-		ereport(DEBUG2,
+		ereport(DEBUG4,
 				errmsg("pgsr %s: fetching block %d into buf %d",
 					   NameStr(scan->rs_base.rs_rd->rd_rel->relname),
 					   blockno, buf),
@@ -480,14 +480,15 @@ heapgetpage(TableScanDesc sscan, BlockNumber page)
 	{
 		scan->rs_cbuf = pg_streaming_read_get_next(scan->pgsr);
 		Assert(BufferIsValid(scan->rs_cbuf));
-#if 0
-		ereport(LOG,
-			(errmsg("got buf %d block %d, expecting %d",
-					scan->rs_cbuf, BufferGetBlockNumber(scan->rs_cbuf), page),
-			 errhidestmt(true),
-			 errhidecontext(true)));
-#endif
-		Assert(BufferGetBlockNumber(scan->rs_cbuf) == page);
+		if (BufferGetBlockNumber(scan->rs_cbuf) != page)
+		{
+			ereport(WARNING,
+					(errmsg("got buf %d block %d, expecting %d",
+							scan->rs_cbuf, BufferGetBlockNumber(scan->rs_cbuf), page),
+					 errhidestmt(true),
+					 errhidecontext(true)));
+			Assert(BufferGetBlockNumber(scan->rs_cbuf) == page);
+		}
 	}
 	else
 	{

@@ -182,11 +182,6 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
 void
 pg_streaming_read_free(PgStreamingRead *pgsr)
 {
-	ereport(DEBUG2,
-			(errmsg("freeing pgsr: %p", pgsr),
-			 errhidestmt(true),
-			 errhidecontext(true)));
-
 	for (int i = 0; i < pgsr->iodepth; i++)
 	{
 		OutstandingRead *this_read = &pgsr->outstanding_reads[i];
