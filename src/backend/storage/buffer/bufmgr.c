@@ -1138,7 +1138,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 		UnlockBufHdr(bufHdr, buf_state);
 
 		aio = ReadBufferInitRead(smgr, forkNum, blockNum, buf, bufHdr, mode);
-		pgaio_wait_for_io(aio);
+		pgaio_wait_for_io(aio, true);
 		pgaio_release(aio);
 	}
 
@@ -3158,7 +3158,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 					   bufToWrite,
 					   BufferDescriptorGetBuffer(buf),
 					   false);
-		pgaio_wait_for_io(aio);
+		pgaio_wait_for_io(aio, true);
 		pgaio_release(aio);
 	}
 
@@ -4463,7 +4463,7 @@ WaitIO(BufferDesc *buf)
 
 		if (aio)
 		{
-			pgaio_wait_for_io(aio);
+			pgaio_wait_for_io(aio, false);
 			ConditionVariablePrepareToSleep(cv);
 		}
 

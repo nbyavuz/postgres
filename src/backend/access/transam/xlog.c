@@ -10449,7 +10449,7 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 				PgAioInProgress *aio = pgaio_io_get();
 
 				pgaio_start_fdatasync(aio, fd, true);
-				pgaio_wait_for_io(aio);
+				pgaio_wait_for_io(aio, true);
 				pgaio_release(aio);
 			}
 #else
@@ -10464,7 +10464,7 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 				PgAioInProgress *aio = pgaio_io_get();
 
 				pgaio_start_fdatasync(aio, fd, true);
-				pgaio_wait_for_io(aio);
+				pgaio_wait_for_io(aio, true);
 				pgaio_release(aio);
 			}
 			/* write synced it already */

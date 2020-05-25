@@ -48,6 +48,7 @@ extern void pgaio_at_abort(void);
  * management of checkpointer, for readahead)
  */
 extern PgAioInProgress *pgaio_io_get(void);
+extern void pgaio_io_recycle(PgAioInProgress *io);
 
 extern void pgaio_start_flush_range(PgAioInProgress *io, int fd, off_t offset, off_t nbytes);
 extern void pgaio_start_nop(PgAioInProgress *io);
@@ -66,7 +67,7 @@ extern void pgaio_submit_pending(bool drain);
 extern void pgaio_drain_shared(void);
 extern void pgaio_drain_outstanding(void);
 
-extern void pgaio_wait_for_io(PgAioInProgress *io);
+extern void pgaio_wait_for_io(PgAioInProgress *io, bool holding_reference);
 
 extern void pgaio_print_queues(void);
 
