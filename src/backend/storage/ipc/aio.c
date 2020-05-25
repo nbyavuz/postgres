@@ -179,7 +179,7 @@ struct PgAioInProgress
 			uint32 already_done;
 			char *bufdata;
 			bool no_reorder;
-			struct iovec iovec;
+			struct iovec iovec[PGAIO_MAX_COMBINE];
 		} write_wal;
 	} d;
 };
@@ -536,6 +536,25 @@ pgaio_split_complete(PgAioInProgress *io)
 				}
 				break;
 
+			case PGAIO_WRITE_WAL:
+				Assert(cur->d.write_wal.already_done == 0);
+
+				if (orig_result < 0)
+				{
+					cur->result = io->result;
+				}
+				else if (running_result >= cur->d.write_wal.nbytes)
+				{
+					cur->result = cur->d.write_wal.nbytes;
+					running_result -= cur->result;
+				}
+				else if (running_result < cur->d.write_wal.nbytes)
+				{
+					cur->result = running_result;
+					running_result = 0;
+				}
+				break;
+
 			default:
 				elog(PANIC, "merge for %d not supported yet", cur->type);
 		}
@@ -819,10 +838,29 @@ pgaio_can_be_combined(PgAioInProgress *last, PgAioInProgress *cur)
 			return true;
 
 		case PGAIO_WRITE_WAL:
-			return false;
+			if (last->d.write_wal.fd != cur->d.write_wal.fd)
+				return false;
+			if ((last->d.write_wal.offset + last->d.write_wal.nbytes) != cur->d.write_wal.offset)
+				return false;
+			if (last->d.write_wal.already_done != 0 || cur->d.write_wal.already_done != 0)
+				return false;
+			if (last->d.write_wal.no_reorder || cur->d.write_wal.no_reorder)
+				return false;
+			return true;
 	}
 
 	pg_unreachable();
+}
+
+static void
+pgaio_io_merge(PgAioInProgress *into, PgAioInProgress *tomerge)
+{
+	elog(DEBUG3, "merging %zu to %zu",
+		 tomerge - aio_ctl->in_progress_io,
+		 into - aio_ctl->in_progress_io);
+
+	into->merge_with = tomerge;
+	into->flags |= PGAIOIP_MERGE;
 }
 
 static void
@@ -859,17 +897,12 @@ pgaio_combine_pending(void)
 		{
 			combined++;
 
-			elog(DEBUG3, "merging %zu to %zu",
-				 cur - aio_ctl->in_progress_io,
-				 last - aio_ctl->in_progress_io);
-
 			dlist_delete_from(&local_pending_requests, &cur->system_node);
 			cur->local_pending = false;
 
 			num_local_pending_requests--;
-			last->merge_with = cur;
 
-			last->flags |= PGAIOIP_MERGE;
+			pgaio_io_merge(last, cur);
 		}
 		else
 		{
@@ -1803,17 +1836,11 @@ pgaio_complete_cqes(struct io_uring *ring, struct io_uring_cqe **cqes, int ready
 	}
 }
 
-static off_t
-prep_iov(struct iovec *iov, uint32 offset, uint32 nbytes, uint32 already_done, char *bufdata)
-{
-	iov->iov_base = bufdata + already_done;
-	iov->iov_len = nbytes - already_done;
-
-	return offset + already_done;
-}
-
+/*
+ * FIXME: These need to be deduplicated.
+ */
 static int
-prep_read_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
+prep_read_buffer_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
 {
 	PgAioInProgress *cur;
 	uint32 offset = io->d.read_buffer.offset;
@@ -1846,7 +1873,7 @@ prep_read_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
 }
 
 static int
-prep_write_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
+prep_write_buffer_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
 {
 	PgAioInProgress *cur;
 	uint32 offset = io->d.write_buffer.offset;
@@ -1878,9 +1905,40 @@ prep_write_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
 }
 
 static int
+prep_write_wal_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
+{
+	PgAioInProgress *cur;
+	uint32 offset = io->d.write_wal.offset;
+	int	niov = 0;
+	struct iovec *iov = io->d.write_wal.iovec;
+
+	cur = io;
+	while (cur)
+	{
+		offset += cur->d.write_wal.already_done;
+		iov->iov_base = cur->d.write_wal.bufdata + cur->d.write_wal.already_done;
+		iov->iov_len = cur->d.write_wal.nbytes - cur->d.write_wal.already_done;
+
+		niov++;
+		iov++;
+
+		if (niov > 0)
+			cur->flags |= PGAIOIP_INFLIGHT;
+
+		cur = cur->merge_with;
+	}
+
+	io_uring_prep_writev(sqe,
+						io->d.write_wal.fd,
+						io->d.write_wal.iovec,
+						niov,
+						offset);
+	return niov;
+}
+
+static int
 pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 {
-	off_t offset;
 	int submitted = 1;
 
 	switch (io->type)
@@ -1894,12 +1952,12 @@ pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 			break;
 
 		case PGAIO_READ_BUFFER:
-			submitted = prep_read_iov(io, sqe);
+			submitted = prep_read_buffer_iov(io, sqe);
 			//sqe->flags |= IOSQE_ASYNC;
 			break;
 
 		case PGAIO_WRITE_BUFFER:
-			submitted = prep_write_iov(io, sqe);
+			submitted = prep_write_buffer_iov(io, sqe);
 			break;
 
 		case PGAIO_FLUSH_RANGE:
@@ -1913,14 +1971,7 @@ pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 			break;
 
 		case PGAIO_WRITE_WAL:
-			offset = prep_iov(&io->d.write_wal.iovec,
-							  io->d.write_wal.offset,
-							  io->d.write_wal.nbytes,
-							  io->d.write_wal.already_done,
-							  io->d.write_wal.bufdata);
-			io_uring_prep_writev(sqe,
-								 io->d.write_wal.fd, &io->d.write_wal.iovec,
-								 1, offset);
+			submitted = prep_write_wal_iov(io, sqe);
 			if (io->d.write_wal.no_reorder)
 				sqe->flags = IOSQE_IO_DRAIN;
 			break;
@@ -2341,13 +2392,10 @@ static bool
 pgaio_complete_write_wal(PgAioInProgress *io)
 {
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "completed write_wal: %zu, %d/%s, offset: %d, nbytes: %d",
+	elog(DEBUG3, "completed write_wal: %zu, %d/%s",
 		 io - aio_ctl->in_progress_io,
 		 io->result,
-		 io->result < 0 ? strerror(-io->result) : "ok",
-		 (int)io->d.write_wal.offset,
-		 (int) io->d.write_wal.iovec.iov_len
-		);
+		 io->result < 0 ? strerror(-io->result) : "ok");
 #endif
 
 	if (io->result < 0)
@@ -2362,13 +2410,13 @@ pgaio_complete_write_wal(PgAioInProgress *io)
 				 errmsg("could not write to log file: %s",
 						strerror(-io->result))));
 	}
-	else if (io->result != io->d.write_wal.iovec.iov_len)
+	else if (io->result != (io->d.write_wal.nbytes - io->d.write_wal.already_done))
 	{
 		/* FIXME: implement retries for short writes */
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not write to log file: wrote only %d of %d bytes",
-						io->result, (int) io->d.write_wal.iovec.iov_len)));
+						io->result, (io->d.write_wal.nbytes - io->d.write_wal.already_done))));
 	}
 
 	/* FIXME: update xlog.c state */
