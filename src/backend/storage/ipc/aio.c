@@ -39,10 +39,16 @@
 
 #define PGAIO_VERBOSE
 
+
+/*
+ * FIXME: This is just so large because merging happens when submitting
+ * pending requests, rather than when staging them.
+ */
 #define PGAIO_SUBMIT_BATCH_SIZE 256
 #define PGAIO_BACKPRESSURE_LIMIT 1024
 #define PGAIO_MAX_LOCAL_REAPED 128
 #define PGAIO_MAX_COMBINE 16
+
 
 typedef enum PgAioAction
 {
@@ -126,6 +132,13 @@ struct PgAioInProgress
 	int32 result;
 
 	/*
+	 * FIXME: This is just used for a realy ugly hacky pgaio_wait_for_io(), to
+	 * deal with some edge-cases when waiting for an IO that's owned by
+	 * another backend (e.g. in WaitIO).
+	 */
+	pg_atomic_uint32 extra_refs;
+
+	/*
 	 * Membership in one of
 	 * PgAioCtl->unused,
 	 * PgAioPerBackend->unused,
@@ -144,13 +157,6 @@ struct PgAioInProgress
 	dlist_node io_node;
 
 	ConditionVariable cv;
-
-	/*
-	 * FIXME: This is just used for a realy ugly hacky pgaio_wait_for_io(), to
-	 * deal with some edge-cases when waiting for an IO that's owned by
-	 * another backend (e.g. in WaitIO).
-	 */
-	pg_atomic_uint32 extra_refs;
 
 	PgAioBounceBuffer *bb;
 
@@ -182,12 +188,11 @@ struct PgAioInProgress
 			uint32 offset;
 			uint32 nbytes;
 			uint32 already_done;
-			char *bufdata;
 			int fd;
+			char *bufdata;
 			Buffer buf;
 			AioBufferTag tag;
 			int mode;
-			struct iovec iovec[PGAIO_MAX_COMBINE];
 		} read_buffer;
 
 		struct
@@ -195,11 +200,10 @@ struct PgAioInProgress
 			uint32 offset;
 			uint32 nbytes;
 			uint32 already_done;
-			char *bufdata;
 			int fd;
+			char *bufdata;
 			Buffer buf;
 			AioBufferTag tag;
-			struct iovec iovec[PGAIO_MAX_COMBINE];
 		} write_buffer;
 
 		struct
@@ -210,7 +214,6 @@ struct PgAioInProgress
 			uint32 already_done;
 			char *bufdata;
 			bool no_reorder;
-			struct iovec iovec[PGAIO_MAX_COMBINE];
 		} write_wal;
 	} d;
 };
@@ -347,8 +350,6 @@ typedef struct PgAioCtl
 	PgAioInProgress in_progress_io[FLEXIBLE_ARRAY_MEMBER];
 } PgAioCtl;
 
-struct io_uring local_ring;
-
 /* general pgaio helper functions */
 static void pgaio_complete_ios(bool in_error);
 static void pgaio_recycle_completed(void);
@@ -358,7 +359,7 @@ static void pgaio_finish_io(PgAioInProgress *io);
 static void pgaio_bounce_buffer_release_locked(PgAioInProgress *io);
 
 /* io_uring related functions */
-static int pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe);
+static int pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec **iovs);
 static void pgaio_complete_cqes(struct io_uring *ring,
 								struct io_uring_cqe **cqes, int ready);
 
@@ -409,6 +410,12 @@ static int my_aio_id;
 /* FIXME: move into PgAioPerBackend / subsume into ->reaped */
 static dlist_head local_recycle_requests;
 
+
+/* io_uring local state */
+struct io_uring local_ring;
+
+#define PGAIO_URING_SUBMIT_MAX_IOVEC (PGAIO_SUBMIT_BATCH_SIZE * PGAIO_MAX_COMBINE)
+struct iovec pgaio_uring_submit_iovecs[PGAIO_URING_SUBMIT_MAX_IOVEC];
 
 static Size
 AioCtlShmemSize(void)
@@ -1156,6 +1163,7 @@ pgaio_submit_pending(bool drain)
 		int nios = 0;
 		int nsubmit = Min(my_aio->pending_count, PGAIO_SUBMIT_BATCH_SIZE);
 		int inflight_add = 0;
+		struct iovec *iovs = pgaio_uring_submit_iovecs;
 
 		Assert(nsubmit != 0 && nsubmit <= my_aio->pending_count);
 		LWLockAcquire(SharedAIOSubmissionLock, LW_EXCLUSIVE);
@@ -1176,7 +1184,7 @@ pgaio_submit_pending(bool drain)
 			Assert(io->flags & PGAIOIP_PENDING);
 
 			ios[nios] = io;
-			inflight_add += pgaio_sq_from_io(ios[nios], sqe[nios]);
+			inflight_add += pgaio_sq_from_io(ios[nios], sqe[nios], &iovs);
 
 			*(volatile PgAioIPFlags*) &io->flags =
 				(io->flags & ~PGAIOIP_PENDING) | PGAIOIP_INFLIGHT;
@@ -2148,22 +2156,20 @@ pgaio_complete_cqes(struct io_uring *ring, struct io_uring_cqe **cqes, int ready
  * FIXME: These need to be deduplicated.
  */
 static int
-prep_read_buffer_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
+prep_read_buffer_iov(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec *iovs)
 {
 	PgAioInProgress *cur;
 	uint32 offset = io->d.read_buffer.offset;
 	int	niov = 0;
-	struct iovec *iov = io->d.read_buffer.iovec;
 
 	cur = io;
 	while (cur)
 	{
 		offset += cur->d.write_buffer.already_done;
-		iov->iov_base = cur->d.read_buffer.bufdata + cur->d.read_buffer.already_done;
-		iov->iov_len = cur->d.read_buffer.nbytes - cur->d.read_buffer.already_done;
+		iovs[niov].iov_base = cur->d.read_buffer.bufdata + cur->d.read_buffer.already_done;
+		iovs[niov].iov_len = cur->d.read_buffer.nbytes - cur->d.read_buffer.already_done;
 
 		niov++;
-		iov++;
 
 		if (niov > 0)
 			cur->flags |= PGAIOIP_INFLIGHT;
@@ -2173,7 +2179,7 @@ prep_read_buffer_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
 
 	io_uring_prep_readv(sqe,
 						io->d.read_buffer.fd,
-						io->d.read_buffer.iovec,
+						iovs,
 						niov,
 						offset);
 
@@ -2181,22 +2187,20 @@ prep_read_buffer_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
 }
 
 static int
-prep_write_buffer_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
+prep_write_buffer_iov(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec *iovs)
 {
 	PgAioInProgress *cur;
 	uint32 offset = io->d.write_buffer.offset;
 	int	niov = 0;
-	struct iovec *iov = io->d.write_buffer.iovec;
 
 	cur = io;
 	while (cur)
 	{
 		offset += cur->d.write_buffer.already_done;
-		iov->iov_base = cur->d.write_buffer.bufdata + cur->d.write_buffer.already_done;
-		iov->iov_len = cur->d.write_buffer.nbytes - cur->d.write_buffer.already_done;
+		iovs[niov].iov_base = cur->d.write_buffer.bufdata + cur->d.write_buffer.already_done;
+		iovs[niov].iov_len = cur->d.write_buffer.nbytes - cur->d.write_buffer.already_done;
 
 		niov++;
-		iov++;
 
 		if (niov > 0)
 			cur->flags |= PGAIOIP_INFLIGHT;
@@ -2205,30 +2209,28 @@ prep_write_buffer_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
 	}
 
 	io_uring_prep_writev(sqe,
-						io->d.write_buffer.fd,
-						io->d.write_buffer.iovec,
-						niov,
-						offset);
+						 io->d.write_buffer.fd,
+						 iovs,
+						 niov,
+						 offset);
 	return niov;
 }
 
 static int
-prep_write_wal_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
+prep_write_wal_iov(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec *iovs)
 {
 	PgAioInProgress *cur;
 	uint32 offset = io->d.write_wal.offset;
 	int	niov = 0;
-	struct iovec *iov = io->d.write_wal.iovec;
 
 	cur = io;
 	while (cur)
 	{
 		offset += cur->d.write_wal.already_done;
-		iov->iov_base = cur->d.write_wal.bufdata + cur->d.write_wal.already_done;
-		iov->iov_len = cur->d.write_wal.nbytes - cur->d.write_wal.already_done;
+		iovs[niov].iov_base = cur->d.write_wal.bufdata + cur->d.write_wal.already_done;
+		iovs[niov].iov_len = cur->d.write_wal.nbytes - cur->d.write_wal.already_done;
 
 		niov++;
-		iov++;
 
 		if (niov > 0)
 			cur->flags |= PGAIOIP_INFLIGHT;
@@ -2238,14 +2240,14 @@ prep_write_wal_iov(PgAioInProgress *io, struct io_uring_sqe *sqe)
 
 	io_uring_prep_writev(sqe,
 						io->d.write_wal.fd,
-						io->d.write_wal.iovec,
+						iovs,
 						niov,
 						offset);
 	return niov;
 }
 
 static int
-pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
+pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec **iovs)
 {
 	int submitted = 1;
 
@@ -2260,12 +2262,14 @@ pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 			break;
 
 		case PGAIO_READ_BUFFER:
-			submitted = prep_read_buffer_iov(io, sqe);
+			submitted = prep_read_buffer_iov(io, sqe, *iovs);
+			*iovs += submitted;
 			//sqe->flags |= IOSQE_ASYNC;
 			break;
 
 		case PGAIO_WRITE_BUFFER:
-			submitted = prep_write_buffer_iov(io, sqe);
+			submitted = prep_write_buffer_iov(io, sqe, *iovs);
+			*iovs += submitted;
 			break;
 
 		case PGAIO_FLUSH_RANGE:
@@ -2279,7 +2283,8 @@ pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 			break;
 
 		case PGAIO_WRITE_WAL:
-			submitted = prep_write_wal_iov(io, sqe);
+			submitted = prep_write_wal_iov(io, sqe, *iovs);
+			*iovs += submitted;
 			if (io->d.write_wal.no_reorder)
 				sqe->flags = IOSQE_IO_DRAIN;
 			break;
