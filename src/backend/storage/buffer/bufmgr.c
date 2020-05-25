@@ -48,6 +48,7 @@
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
+#include "storage/lmgr.h"
 #include "storage/proc.h"
 #include "storage/smgr.h"
 #include "storage/standby.h"
@@ -1740,6 +1741,373 @@ retry:
 	 * Insert the buffer at the head of the list of free buffers.
 	 */
 	StrategyFreeBuffer(buf);
+}
+
+static bool
+bulk_extend_buffer_inval(BufferDesc *buf_hdr)
+{
+	/* can't change while we're holding the pin */
+	if (pg_atomic_read_u32(&buf_hdr->state) & BM_TAG_VALID)
+	{
+		uint32		hash;
+		LWLock	   *partition_lock;
+		BufferTag	tag;
+		uint32		buf_state;
+		uint32		old_flags;
+
+		/* have buffer pinned, so it's safe to read tag without lock */
+		tag = buf_hdr->tag;
+		hash = BufTableHashCode(&tag);
+		partition_lock = BufMappingPartitionLock(hash);
+
+		LWLockAcquire(partition_lock, LW_EXCLUSIVE);
+
+		/* lock the buffer header */
+		buf_state = LockBufHdr(buf_hdr);
+		old_flags = buf_state & BUF_FLAG_MASK;
+
+		/*
+		 * If somebody else pinned the buffer since, or even worse, dirtied it,
+		 * give up on this buffer: It's clearly in use.
+		 */
+		if (BUF_STATE_GET_REFCOUNT(buf_state) != 1 || (buf_state & BM_DIRTY))
+		{
+			UnlockBufHdr(buf_hdr, buf_state);
+			LWLockRelease(partition_lock);
+			UnpinBuffer(buf_hdr, true);
+
+			return false;
+		}
+
+		/*
+		 * Clear out the buffer's tag and flags.  We must do this to ensure that
+		 * linear scans of the buffer array don't think the buffer is valid.
+		 */
+		CLEAR_BUFFERTAG(buf_hdr->tag);
+		buf_state &= ~(BUF_FLAG_MASK | BUF_USAGECOUNT_MASK);
+		UnlockBufHdr(buf_hdr, buf_state);
+
+		if (old_flags & BM_TAG_VALID)
+			BufTableDelete(&tag, hash);
+
+		LWLockRelease(partition_lock);
+	}
+
+	return true;
+}
+
+
+typedef struct BulkExtendOneBuffer
+{
+	BufferDesc *buf_hdr;
+	dlist_node node;
+} BulkExtendOneBuffer;
+
+typedef struct BulkExtendBufferedState
+{
+	int acquired_buffers_count;
+	int pending_buffers_count;
+
+	dlist_head acquired_buffers;
+	dlist_head pending_buffers;
+
+	dlist_head allocated_buffers;
+
+	pg_streaming_write *pgsw;
+
+	BulkExtendOneBuffer ios[];
+} BulkExtendBufferedState;
+
+static void
+bulk_extend_undirty_complete(void *pgsw_private, void *write_private)
+{
+	BulkExtendBufferedState *be_state = (BulkExtendBufferedState * ) pgsw_private;
+	BulkExtendOneBuffer *ex_buf = (BulkExtendOneBuffer *) write_private;
+	BufferTag	tag;
+
+	LWLockRelease(BufferDescriptorGetContentLock(ex_buf->buf_hdr));
+
+	tag = ex_buf->buf_hdr->tag;
+	be_state->pending_buffers_count--;
+	dlist_delete(&ex_buf->node);
+
+	if (bulk_extend_buffer_inval(ex_buf->buf_hdr))
+	{
+		dlist_push_head(&be_state->acquired_buffers, &ex_buf->node);
+		be_state->acquired_buffers_count++;
+	}
+	else
+	{
+		dlist_push_tail(&be_state->allocated_buffers, &ex_buf->node);
+		UnpinBuffer(ex_buf->buf_hdr, true);
+	}
+
+	ScheduleBufferTagForWriteback(&BackendWritebackContext, &tag);
+}
+
+/*
+ * WIP interface to more efficient relation extension.
+ *
+ * Todo:
+ *
+ * - Write initialized buffers - otherwise we'll waste a lot of time doing
+ *   another set of memsets at PageInit(), as well as making PageIsVerified()
+ *   a lot more expensive (verifying all-zeroes).
+ * - De-duplication of work between concurrent extensions?
+ * - Chunking, to avoid pinning quite as many buffers at once
+ * - Strategy integration
+ * - cleanup
+ *
+ */
+extern Buffer
+BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAccessStrategy strategy)
+{
+	BulkExtendBufferedState *be_state;
+	bool		need_extension_lock = !RELATION_IS_LOCAL(relation);
+	BlockNumber start_nblocks;
+	SMgrRelation smgr;
+	BufferDesc *return_buf_hdr = NULL;
+	char relpersistence = relation->rd_rel->relpersistence;
+	dlist_iter iter;
+	BlockNumber extendto;
+	bool first;
+
+	RelationOpenSmgr(relation);
+	smgr = relation->rd_smgr;
+
+	be_state = palloc0(offsetof(BulkExtendBufferedState, ios) + sizeof(BulkExtendOneBuffer) * extendby);
+
+	dlist_init(&be_state->acquired_buffers);
+	dlist_init(&be_state->pending_buffers);
+	dlist_init(&be_state->allocated_buffers);
+
+	for (int i = 0; i < extendby; i++)
+	{
+		dlist_push_tail(&be_state->allocated_buffers, &be_state->ios[i].node);
+	}
+
+	be_state->pgsw = pg_streaming_write_alloc(128, be_state, bulk_extend_undirty_complete);
+
+	while (be_state->acquired_buffers_count < extendby)
+	{
+		uint32 cur_old_flags;
+		uint32 cur_buf_state;
+		BufferDesc *cur_buf_hdr;
+		BulkExtendOneBuffer *cur_ex_buf = NULL;
+		bool buffer_usable;
+		bool buffer_io;
+
+		/*
+		 * If there's buffers being written out that might or might not be
+		 * available, depending on whether they've concurrently been pinned,
+		 * wait for all of those to finish, and chek cagain.
+		 */
+		if ((be_state->acquired_buffers_count + be_state->pending_buffers_count) >= extendby)
+		{
+			pg_streaming_write_wait_all(be_state->pgsw);
+			continue;
+		}
+
+		Assert(!dlist_is_empty(&be_state->allocated_buffers));
+		cur_ex_buf = dlist_container(BulkExtendOneBuffer, node,
+									 dlist_pop_head_node(&be_state->allocated_buffers));
+
+		ReservePrivateRefCountEntry();
+		ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
+
+		cur_buf_hdr = StrategyGetBuffer(NULL, &cur_buf_state);
+		cur_ex_buf->buf_hdr = cur_buf_hdr;
+
+		Assert(BUF_STATE_GET_REFCOUNT(cur_buf_state) == 0);
+
+		/* Must copy buffer flags while we still hold the spinlock */
+		cur_old_flags = cur_buf_state & BUF_FLAG_MASK;
+
+		/* Pin the buffer and then release the buffer spinlock */
+		PinBuffer_Locked(cur_buf_hdr);
+
+		if (cur_old_flags & BM_DIRTY)
+		{
+			LWLock *content_lock;
+			PgAioInProgress *aio;
+
+			content_lock = BufferDescriptorGetContentLock(cur_buf_hdr);
+
+			/*
+			 * NB: this protect against deadlocks due to holding multiple
+			 * buffer locks, as well as avoids unnecessary blocking (see
+			 * BufferAlloc() for the latter).
+			 */
+			if (LWLockConditionalAcquire(content_lock, LW_SHARED))
+			{
+				aio = pg_streaming_write_get_io(be_state->pgsw);
+
+				// XXX: could use strategy reject logic here too
+				if (AsyncFlushBuffer(aio, cur_buf_hdr, NULL))
+				{
+					buffer_usable = true;
+					buffer_io = true;
+
+					pg_streaming_write_write(be_state->pgsw, aio, cur_ex_buf);
+				}
+				else
+				{
+					buffer_io = false;
+
+					if (!bulk_extend_buffer_inval(cur_buf_hdr))
+						buffer_usable = false;
+					else
+						buffer_usable = true;
+
+					LWLockRelease(content_lock);
+				}
+			}
+			else
+			{
+				/*
+				 * Someone else has locked the buffer, so give it up and loop
+				 * back to get another one.
+				 */
+				buffer_usable = false;
+				buffer_io = false;
+			}
+		}
+		else
+		{
+			/*
+			 * This buffer can be used, unless it's getting pinned
+			 * concurrently.
+			 */
+			buffer_io = false;
+
+			if (!bulk_extend_buffer_inval(cur_buf_hdr))
+				buffer_usable = false;
+			else
+				buffer_usable = true;
+		}
+
+		if (buffer_io)
+		{
+			dlist_push_tail(&be_state->pending_buffers, &cur_ex_buf->node);
+			be_state->pending_buffers_count++;
+		}
+		else if (buffer_usable)
+		{
+			dlist_push_head(&be_state->acquired_buffers, &cur_ex_buf->node);
+			be_state->acquired_buffers_count++;
+		}
+		else
+		{
+			UnpinBuffer(cur_ex_buf->buf_hdr, true);
+			dlist_push_tail(&be_state->allocated_buffers, &cur_ex_buf->node);
+		}
+	}
+
+	// FIXME: shouldn't be needed
+	pg_streaming_write_wait_all(be_state->pgsw);
+	pg_streaming_write_free(be_state->pgsw);
+
+	/*
+	 * Now we have our hands on N buffers that are guaranteed to be clean
+	 * (since they are pinned they cannot be reused by other backends).
+	 *
+	 * Now acquire extension lock, extend relation, and try to point the
+	 * victim buffers acquired above to the extended part of the relation.
+	 */
+	if (need_extension_lock)
+		LockRelationForExtension(relation, ExclusiveLock);
+
+	start_nblocks = smgrnblocks(relation->rd_smgr, MAIN_FORKNUM);
+	extendto = start_nblocks;
+
+	/*
+	 * Set up identities of all the new buffers. This way there cannot be race
+	 * conditions where other backends lock the returned page first.
+	 */
+	first = true;
+	dlist_foreach(iter, &be_state->acquired_buffers)
+	{
+		BulkExtendOneBuffer *ex_buf = dlist_container(BulkExtendOneBuffer, node, iter.cur);
+		BufferDesc *new_buf_hdr = ex_buf->buf_hdr;
+		BufferTag	new_tag;
+		uint32		new_hash;
+		int			existing_buf;
+		uint32		buf_state;
+		LWLock	   *partition_lock;
+
+		Assert(extendto < start_nblocks + extendby);
+		Assert(ex_buf->buf_hdr);
+
+		INIT_BUFFERTAG(new_tag, smgr->smgr_rnode.node, forkNum, extendto);
+		new_hash = BufTableHashCode(&new_tag);
+
+		partition_lock = BufMappingPartitionLock(new_hash);
+		LWLockAcquire(partition_lock, LW_EXCLUSIVE);
+
+		existing_buf = BufTableInsert(&new_tag, new_hash, new_buf_hdr->buf_id);
+		if (existing_buf >= 0)
+		{
+			/* FIXME: This is probably possible when extension fails due to ENOSPC or such */
+			elog(ERROR, "buffer beyond EOF");
+		}
+
+		/* lock to install new identity */
+		buf_state = LockBufHdr(new_buf_hdr);
+
+		buf_state |= BM_TAG_VALID | BM_IO_IN_PROGRESS | BUF_USAGECOUNT_ONE * BM_MAX_USAGE_COUNT;
+
+		if (relpersistence == RELPERSISTENCE_PERMANENT || forkNum == INIT_FORKNUM)
+			buf_state |= BM_PERMANENT;
+
+		new_buf_hdr->tag = new_tag;
+		UnlockBufHdr(new_buf_hdr, buf_state);
+
+		LWLockRelease(partition_lock);
+
+		if (first)
+		{
+			return_buf_hdr = ex_buf->buf_hdr;
+			first = false;
+		}
+
+		extendto++;
+	}
+	Assert(extendto == start_nblocks + extendby);
+
+	/* finally extend the relation */
+	smgrzeroextend(relation->rd_smgr, forkNum, start_nblocks,
+				   extendby, false);
+
+	/* Ensure taht the returned buffer cannot be reached by another backend first */
+	LWLockAcquire(BufferDescriptorGetContentLock(return_buf_hdr), LW_EXCLUSIVE);
+
+	/* Mark all buffers as having completed */
+	dlist_foreach(iter, &be_state->acquired_buffers)
+	{
+		BulkExtendOneBuffer *ex_buf = dlist_container(BulkExtendOneBuffer, node, iter.cur);
+		BufferDesc *new_buf_hdr = ex_buf->buf_hdr;
+		Block		new_buf_block;
+		uint32		buf_state;
+
+		new_buf_block = BufHdrGetBlock(new_buf_hdr);
+
+		/* new buffers are zero-filled */
+		memset((char *) __builtin_assume_aligned(new_buf_block, 4096), 0, BLCKSZ);
+
+		buf_state = LockBufHdr(new_buf_hdr);
+		buf_state &= ~(BM_IO_IN_PROGRESS | BM_IO_ERROR);
+		buf_state |= BM_VALID;
+		UnlockBufHdr(new_buf_hdr, buf_state);
+		ConditionVariableBroadcast(BufferDescriptorGetIOCV(new_buf_hdr));
+
+		if (new_buf_hdr != return_buf_hdr)
+			UnpinBuffer(new_buf_hdr, true);
+	}
+
+	if (need_extension_lock)
+		UnlockRelationForExtension(relation, ExclusiveLock);
+
+	return BufferDescriptorGetBuffer(return_buf_hdr);
 }
 
 /*

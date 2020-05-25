@@ -187,6 +187,9 @@ struct PgAioInProgress;
 extern Buffer ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 							  ReadBufferMode mode, BufferAccessStrategy strategy,
 							  bool *already_valid, struct PgAioInProgress** aio);
+extern Buffer BulkExtendBuffered(Relation relation, ForkNumber forkNum,
+								 int extendby,
+								 BufferAccessStrategy strategy);
 extern void ReleaseBuffer(Buffer buffer);
 extern void UnlockReleaseBuffer(Buffer buffer);
 extern void MarkBufferDirty(Buffer buffer);

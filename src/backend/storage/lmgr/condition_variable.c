@@ -31,7 +31,8 @@
 static ConditionVariable *cv_sleep_target = NULL;
 
 /* Reusable WaitEventSet. */
-static WaitEventSet *cv_wait_event_set = NULL;
+extern WaitEventSet *cv_wait_event_set;
+WaitEventSet *cv_wait_event_set = NULL;
 
 void
 ConditionVariableStartup(void)

@@ -457,6 +457,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 	pg_streaming_write *pgsw ;
 	BlockNumber latest;
 	BlockNumber curblocknum = blocknum;
+	int			remblocks = nblocks;
 
 	Assert(nblocks > 0);
 
@@ -482,12 +483,12 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 						InvalidBlockNumber)));
 #endif
 
-	while (nblocks > 0)
+	while (remblocks > 0)
 	{
 		int fd;
 		int ret;
 		int segstartblock = curblocknum % ((BlockNumber) RELSEG_SIZE);
-		int segendblock = (curblocknum % ((BlockNumber) RELSEG_SIZE)) + nblocks;
+		int segendblock = (curblocknum % ((BlockNumber) RELSEG_SIZE)) + remblocks;
 		off_t		seekpos;
 
 		if (segendblock > RELSEG_SIZE)
@@ -542,7 +543,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 
 		Assert(_mdnblocks(reln, forknum, v) <= ((BlockNumber) RELSEG_SIZE));
 
-		nblocks -= segendblock - segstartblock;
+		remblocks -= segendblock - segstartblock;
 		curblocknum += segendblock - segstartblock;
 	}
 
