@@ -700,9 +700,11 @@ pgaio_wait_for_io(PgAioInProgress *io)
 
 			/* ensure we're going to get woken up */
 			if (IsUnderPostmaster)
+			{
 				ConditionVariablePrepareToSleep(&io->cv);
-			PG_SETMASK(&BlockSig);
-			ResetLatch(MyLatch);
+				PG_SETMASK(&BlockSig);
+				ResetLatch(MyLatch);
+			}
 
 			if (!(io->flags & PGAIOIP_INFLIGHT))
 			{

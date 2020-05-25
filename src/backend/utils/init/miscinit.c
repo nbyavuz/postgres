@@ -187,7 +187,8 @@ SwitchToSharedLatch(void)
 	 */
 	SetLatch(MyLatch);
 
-	ConditionVariableStartup();
+	if (IsUnderPostmaster)
+		ConditionVariableStartup();
 }
 
 void
