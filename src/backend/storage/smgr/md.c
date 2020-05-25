@@ -441,6 +441,120 @@ mdextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	Assert(_mdnblocks(reln, forknum, v) <= ((BlockNumber) RELSEG_SIZE));
 }
 
+static void
+zeroextend_complete(void *pgsw_private, void *write_private)
+{
+	BlockNumber *latest = (BlockNumber *) write_private;
+}
+
+BlockNumber
+mdzeroextend(SMgrRelation reln, ForkNumber forknum,
+			 BlockNumber blocknum, int nblocks, bool skipFsync)
+{
+	int			nbytes;
+	MdfdVec    *v;
+	char	   *zerobuf = palloc_io_aligned(BLCKSZ, MCXT_ALLOC_ZERO);
+	pg_streaming_write *pgsw ;
+	BlockNumber latest;
+	BlockNumber curblocknum = blocknum;
+
+	Assert(nblocks > 0);
+
+	pgsw = pg_streaming_write_alloc(Min(32, nblocks), &latest, zeroextend_complete);
+
+	/* This assert is too expensive to have on normally ... */
+#ifdef CHECK_WRITE_VS_EXTEND
+	Assert(blocknum >= mdnblocks(reln, forknum));
+#endif
+
+	/*
+	 * If a relation manages to grow to 2^32-1 blocks, refuse to extend it any
+	 * more --- we mustn't create a block whose number actually is
+	 * InvalidBlockNumber.
+	 */
+	// FIXME
+#if 0
+	if (blocknum == InvalidBlockNumber)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("cannot extend file \"%s\" beyond %u blocks",
+						relpath(reln->smgr_rnode, forknum),
+						InvalidBlockNumber)));
+#endif
+
+	while (nblocks > 0)
+	{
+		int fd;
+		int ret;
+		int segstartblock = curblocknum % ((BlockNumber) RELSEG_SIZE);
+		int segendblock = (curblocknum % ((BlockNumber) RELSEG_SIZE)) + nblocks;
+		off_t		seekpos;
+
+		if (segendblock > RELSEG_SIZE)
+			segendblock = RELSEG_SIZE;
+
+		v = _mdfd_getseg(reln, forknum, curblocknum, skipFsync, EXTENSION_CREATE);
+
+		Assert(segstartblock < RELSEG_SIZE);
+		Assert(segendblock <= RELSEG_SIZE);
+
+		seekpos = (off_t) BLCKSZ * segstartblock;
+
+		fd = FileGetRawDesc(v->mdfd_vfd);
+		ret = posix_fallocate(fd,
+							  seekpos,
+							  (off_t) BLCKSZ * (segendblock - segstartblock));
+
+		if (ret != 0)
+			elog(ERROR, "fallocate failed: %m");
+
+		for (BlockNumber i = segstartblock; i < segendblock; i++)
+		{
+			PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
+			AioBufferTag tag = {.rnode = reln->smgr_rnode, .forkNum = forknum, .blockNum = i};
+
+			FileStartWrite(aio, v->mdfd_vfd, zerobuf, BLCKSZ, i * BLCKSZ, &tag, InvalidBuffer);
+
+			pg_streaming_write_write(pgsw, aio, (void*) &i);
+#if 0
+			if ((nbytes = FileWrite(v->mdfd_vfd, zerobuf, BLCKSZ,
+									i * BLCKSZ, WAIT_EVENT_DATA_FILE_EXTEND)) != BLCKSZ)
+			{
+				if (nbytes < 0)
+					ereport(ERROR,
+							(errcode_for_file_access(),
+							 errmsg("could not extend file \"%s\": %m",
+									FilePathName(v->mdfd_vfd)),
+							 errhint("Check free disk space.")));
+				/* short write: complain appropriately */
+				ereport(ERROR,
+						(errcode(ERRCODE_DISK_FULL),
+						 errmsg("could not extend file \"%s\": wrote only %d of %d bytes at block %u",
+								FilePathName(v->mdfd_vfd),
+								nbytes, BLCKSZ, blocknum),
+						 errhint("Check free disk space.")));
+			}
+#endif
+		}
+
+		if (!skipFsync && !SmgrIsTemp(reln))
+			register_dirty_segment(reln, forknum, v);
+
+		Assert(_mdnblocks(reln, forknum, v) <= ((BlockNumber) RELSEG_SIZE));
+
+		nblocks -= segendblock - segstartblock;
+		curblocknum += segendblock - segstartblock;
+	}
+
+	pg_streaming_write_wait_all(pgsw);
+	pg_streaming_write_free(pgsw);
+
+	pfree(zerobuf);
+
+	return blocknum + (nblocks - 1);
+}
+
+
 /*
  *	mdopenfork() -- Open one fork of the specified relation.
  *

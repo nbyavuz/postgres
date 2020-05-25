@@ -49,6 +49,8 @@ typedef struct f_smgr
 								bool isRedo);
 	void		(*smgr_extend) (SMgrRelation reln, ForkNumber forknum,
 								BlockNumber blocknum, char *buffer, bool skipFsync);
+	BlockNumber	(*smgr_zeroextend) (SMgrRelation reln, ForkNumber forknum,
+									BlockNumber blocknum, int nblocks, bool skipFsync);
 	bool		(*smgr_prefetch) (SMgrRelation reln, ForkNumber forknum,
 								  BlockNumber blocknum);
 	void		(*smgr_read) (SMgrRelation reln, ForkNumber forknum,
@@ -83,6 +85,7 @@ static const f_smgr smgrsw[] = {
 		.smgr_exists = mdexists,
 		.smgr_unlink = mdunlink,
 		.smgr_extend = mdextend,
+		.smgr_zeroextend = mdzeroextend,
 		.smgr_prefetch = mdprefetch,
 		.smgr_read = mdread,
 		.smgr_startread = mdstartread,
@@ -476,6 +479,14 @@ smgrextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 {
 	smgrsw[reln->smgr_which].smgr_extend(reln, forknum, blocknum,
 										 buffer, skipFsync);
+}
+
+BlockNumber
+smgrzeroextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+			   int nblocks, bool skipFsync)
+{
+	return smgrsw[reln->smgr_which].smgr_zeroextend(reln, forknum, blocknum,
+													nblocks, skipFsync);
 }
 
 /*
