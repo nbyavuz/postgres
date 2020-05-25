@@ -1976,6 +1976,10 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 	if (nbytes <= 0)
 		return;
 
+	/* no point */
+	if (VfdCache[file].fileFlags & O_DIRECT)
+		return;
+
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
 		return;

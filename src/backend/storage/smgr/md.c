@@ -118,8 +118,6 @@ static MemoryContext MdCxt;		/* context for all MdfdVec objects */
  */
 #define EXTENSION_DONT_CHECK_SIZE	(1 << 4)
 
-#define MD_OPEN_FLAGS O_RDWR | PG_BINARY | O_DIRECT
-
 /* local routines */
 static void mdunlinkfork(RelFileNodeBackend rnode, ForkNumber forkNum,
 						 bool isRedo);
@@ -142,6 +140,15 @@ static MdfdVec *_mdfd_getseg(SMgrRelation reln, ForkNumber forkno,
 static BlockNumber _mdnblocks(SMgrRelation reln, ForkNumber forknum,
 							  MdfdVec *seg);
 
+static inline int _mdfd_open_flags(void)
+{
+	int		flags = O_RDWR | PG_BINARY;
+
+	if (io_data_direct)
+		flags |= PG_O_DIRECT;
+
+	return flags;
+}
 
 /*
  *	mdinit() -- Initialize private state for magnetic disk storage manager.
@@ -203,14 +210,14 @@ mdcreate(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 
 	path = relpath(reln->smgr_rnode, forkNum);
 
-	fd = PathNameOpenFile(path, MD_OPEN_FLAGS | O_CREAT | O_EXCL);
+	fd = PathNameOpenFile(path, _mdfd_open_flags() | O_CREAT | O_EXCL);
 
 	if (fd < 0)
 	{
 		int			save_errno = errno;
 
 		if (isRedo)
-			fd = PathNameOpenFile(path, MD_OPEN_FLAGS);
+			fd = PathNameOpenFile(path, _mdfd_open_flags());
 		if (fd < 0)
 		{
 			/* be sure to report the error reported by create, not open */
@@ -317,7 +324,7 @@ mdunlinkfork(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
 		/* truncate(2) would be easier here, but Windows hasn't got it */
 		int			fd;
 
-		fd = OpenTransientFile(path, MD_OPEN_FLAGS);
+		fd = OpenTransientFile(path, _mdfd_open_flags());
 		if (fd >= 0)
 		{
 			int			save_errno;
@@ -461,7 +468,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 
 	Assert(nblocks > 0);
 
-	pgsw = pg_streaming_write_alloc(Min(32, nblocks), &latest, zeroextend_complete);
+	pgsw = pg_streaming_write_alloc(Min(256, nblocks), &latest, zeroextend_complete);
 
 	/* This assert is too expensive to have on normally ... */
 #ifdef CHECK_WRITE_VS_EXTEND
@@ -579,7 +586,7 @@ mdopenfork(SMgrRelation reln, ForkNumber forknum, int behavior)
 
 	path = relpath(reln->smgr_rnode, forknum);
 
-	fd = PathNameOpenFile(path, MD_OPEN_FLAGS);
+	fd = PathNameOpenFile(path, _mdfd_open_flags());
 
 	if (fd < 0)
 	{
@@ -1336,7 +1343,7 @@ _mdfd_openseg(SMgrRelation reln, ForkNumber forknum, BlockNumber segno,
 	fullpath = _mdfd_segpath(reln, forknum, segno);
 
 	/* open the file */
-	fd = PathNameOpenFile(fullpath, MD_OPEN_FLAGS | oflags);
+	fd = PathNameOpenFile(fullpath, _mdfd_open_flags() | oflags);
 
 	pfree(fullpath);
 
@@ -1540,7 +1547,7 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 		strlcpy(path, p, MAXPGPATH);
 		pfree(p);
 
-		file = PathNameOpenFile(path, MD_OPEN_FLAGS);
+		file = PathNameOpenFile(path, _mdfd_open_flags());
 		if (file < 0)
 			return -1;
 		need_to_close = true;

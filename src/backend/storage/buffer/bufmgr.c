@@ -151,6 +151,18 @@ int			checkpoint_flush_after = 0;
 int			bgwriter_flush_after = 0;
 int			backend_flush_after = 0;
 
+
+/*
+ * GUC variables related to the AIO subsystem.
+ *
+ * XXX: It's not that clear where these best belong? Particularly the WAL ones
+ * probably should move.
+ */
+bool		io_data_direct = 0;
+bool		io_data_force_async = 1;
+bool		io_wal_direct = 0;
+bool		io_wal_init_direct = 0;
+
 /* local state for StartBufferIO and related functions */
 static BufferDesc *InProgressBuf = NULL;
 static bool IsForInput;
@@ -1129,7 +1141,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
 	buf = BufferDescriptorGetBuffer(bufHdr);
 
-	if (isLocalBuf)
+	if (isLocalBuf || !io_data_force_async)
 	{
 		if (track_io_timing)
 			INSTR_TIME_SET_CURRENT(io_start);
@@ -3537,7 +3549,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	 */
 	bufToWrite = PageSetChecksumCopy((Page) bufBlock, buf->tag.blockNum, &bb);
 
-	if (0)
+	if (!io_data_force_async)
 	{
 		if (track_io_timing)
 			INSTR_TIME_SET_CURRENT(io_start);
