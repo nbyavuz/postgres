@@ -95,11 +95,12 @@ pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io, void *pr
 }
 
 void
-pg_streaming_write_wait(pg_streaming_write *pgsw, uint32 count)
+pg_streaming_write_wait(pg_streaming_write *pgsw, uint32 wait_for)
 {
-	Assert(count <= pgsw->iodepth);
+	Assert(wait_for <= pgsw->iodepth);
+	bool waited = false;
 
-	for (uint32 i = 0; i < count; i++)
+	for (uint32 i = 0; i < pgsw->iodepth; i++, wait_for--)
 	{
 		uint32 off = (i + pgsw->head) % pgsw->iodepth;
 		outstanding_write *this_write = &pgsw->outstanding_writes[off];
@@ -107,7 +108,14 @@ pg_streaming_write_wait(pg_streaming_write *pgsw, uint32 count)
 		if (!this_write->in_progress)
 			continue;
 
-		pgaio_wait_for_io(this_write->aio, true);
+		if (wait_for > 0)
+		{
+			pgaio_wait_for_io(this_write->aio, true);
+			waited = true;
+		}
+		else if (!pgaio_io_done(this_write->aio))
+			break;
+
 		pgaio_io_recycle(this_write->aio);
 		this_write->in_progress = false;
 		pgsw->inflight--;

@@ -51,6 +51,7 @@ extern void pgaio_at_commit(void);
 
 extern PgAioInProgress *pgaio_io_get(void);
 extern bool pgaio_io_success(PgAioInProgress *io);
+extern bool pgaio_io_done(PgAioInProgress *io);
 extern void pgaio_io_retry(PgAioInProgress *io);
 
 extern void pgaio_io_recycle(PgAioInProgress *io);
