@@ -29,5 +29,6 @@ OBJS = \
 	standby.o
 
 aio.o: override CPPFLAGS += $(LIBURING_CFLAGS)
+aio.bc: override CPPFLAGS += $(LIBURING_CFLAGS)
 
 include $(top_srcdir)/src/backend/common.mk
