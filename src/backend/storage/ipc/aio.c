@@ -1394,6 +1394,20 @@ pgaio_io_success(PgAioInProgress *io)
 	return true;
 }
 
+bool
+pgaio_io_done(PgAioInProgress *io)
+{
+	Assert(io->user_referenced);
+
+	if (io->flags & (PGAIOIP_IN_USE | PGAIOIP_INFLIGHT))
+		return false;
+
+	if (io->flags & (PGAIOIP_ONLY_USER | PGAIOIP_CALLBACK_CALLED | PGAIOIP_HARD_FAILURE | PGAIOIP_SOFT_FAILURE))
+		return true;
+
+	return false;
+}
+
 void
 pgaio_io_retry(PgAioInProgress *io)
 {
