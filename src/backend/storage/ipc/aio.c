@@ -19,6 +19,12 @@
 #include "storage/shmem.h"
 
 
+#define PGAIO_VERBOSE
+
+#define PGAIO_SUBMIT_BATCH_SIZE 16
+#define PGAIO_BACKPRESSURE_LIMIT 500
+#define PGAIO_MAX_LOCAL_REAPED 32
+
 typedef enum PgAioAction
 {
 	/* intentionally the zero value, to help catch zeroed memory etc */
@@ -96,32 +102,28 @@ struct PgAioInProgress
 	} d;
 };
 
-static void pgaio_put_io_locked(PgAioInProgress *io);
-static void pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe);
+/* general pgaio helper functions */
 static void pgaio_complete_ios(bool in_error);
 static void pgaio_backpressure(struct io_uring *ring, const char *loc);
+static PgAioInProgress* pgaio_start_get_io(PgAioAction action);
+static void pgaio_end_get_io(void);
 
-
+/* io completions */
+/* FIXME: parts of these probably don't belong here */
 static void pgaio_complete_nop(PgAioInProgress *io);
 static void pgaio_complete_flush_range(PgAioInProgress *io);
 static void pgaio_complete_read_buffer(PgAioInProgress *io);
 static void pgaio_complete_write_buffer(PgAioInProgress *io);
 
+/* io_uring related functions */
+static void pgaio_put_io_locked(PgAioInProgress *io);
+static void pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe);
+static void pgaio_complete_cqes(struct io_uring *ring, PgAioInProgress **ios,
+								struct io_uring_cqe **cqes, int ready);
 
-/*
- * To support EXEC_BACKEND environments, where we cannot rely on callback
- * addresses being equivalent across processes, completion actions are just
- * indices into a process local array of callbacks, indexed by the type of
- * action.  Also makes the shared memory entries a bit smaller, but that's not
- * a huge win.
- */
-static PgAioCompletedCB completion_callbacks[] =
-{
-	[PGAIO_NOP] = pgaio_complete_nop,
-	[PGAIO_FLUSH_RANGE] = pgaio_complete_flush_range,
-	[PGAIO_READ_BUFFER] = pgaio_complete_read_buffer,
-	[PGAIO_WRITE_BUFFER] = pgaio_complete_write_buffer,
-};
+static int __sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
+								unsigned flags, sigset_t *sig);
+
 
 typedef struct PgAioCtl
 {
@@ -159,6 +161,23 @@ typedef struct PgAioCtl
 } PgAioCtl;
 
 
+
+/*
+ * To support EXEC_BACKEND environments, where we cannot rely on callback
+ * addresses being equivalent across processes, completion actions are just
+ * indices into a process local array of callbacks, indexed by the type of
+ * action.  Also makes the shared memory entries a bit smaller, but that's not
+ * a huge win.
+ */
+static const PgAioCompletedCB completion_callbacks[] =
+{
+	[PGAIO_NOP] = pgaio_complete_nop,
+	[PGAIO_FLUSH_RANGE] = pgaio_complete_flush_range,
+	[PGAIO_READ_BUFFER] = pgaio_complete_read_buffer,
+	[PGAIO_WRITE_BUFFER] = pgaio_complete_write_buffer,
+};
+
+
 /* (future) GUC controlling global MAX number of in-progress IO entries */
 extern int max_aio_in_progress;
 int max_aio_in_progress = 2048;
@@ -178,28 +197,10 @@ static dlist_head local_pending_requests;
  * Requests completions received from the kernel. These are in global
  * variables so we can continue processing, if a completion callback fails.
  */
-#define MAX_LOCAL_REAPED 32
 int num_local_reaped = 0;
-struct io_uring_cqe *local_reaped_cqes[MAX_LOCAL_REAPED];
-PgAioInProgress *local_reaped_ios[MAX_LOCAL_REAPED];
+struct io_uring_cqe *local_reaped_cqes[PGAIO_MAX_LOCAL_REAPED];
+PgAioInProgress *local_reaped_ios[PGAIO_MAX_LOCAL_REAPED];
 
-
-# ifndef __NR_io_uring_enter
-#  define __NR_io_uring_enter		426
-# endif
-
-static int
-__sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
-			 unsigned flags, sigset_t *sig)
-{
-	return syscall(__NR_io_uring_enter, fd, to_submit, min_complete,
-			flags, sig, _NSIG / 8);
-}
-
-#define PGAIO_VERBOSE
-
-#define PGAIO_SUBMIT_BATCH_SIZE 16
-#define PGAIO_BACKPRESSURE_LIMIT 500
 
 
 Size
@@ -248,20 +249,11 @@ AioShmemInit(void)
 void
 pgaio_postmaster_init(void)
 {
-#if 0
-	int ret;
-
-	Assert(shared_ring.ring_fd == -1);
-
-	ret = io_uring_queue_init(512, &shared_ring, 0);
-	if (ret < 0)
-		elog(ERROR, "io_uring_queue_init failed: %s", strerror(-ret));
-
-	//pgaio_test_fsync(1);
-#endif
 	dlist_init(&local_pending_requests);
 	num_local_pending_requests = 0;
 	num_local_reaped = 0;
+
+	// XXX: could create a local queue here.
 }
 
 void
@@ -272,6 +264,8 @@ pgaio_postmaster_child_init(void)
 	dlist_init(&local_pending_requests);
 	num_local_pending_requests = 0;
 	num_local_reaped = 0;
+
+	// XXX: could create a local queue here.
 }
 
 void
@@ -287,39 +281,74 @@ pgaio_at_abort(void)
 	pgaio_submit_pending();
 }
 
-static void
-pgaio_complete_cqes(struct io_uring *ring, PgAioInProgress **ios, struct io_uring_cqe **cqes, int ready)
+
+
+PgAioInProgress *
+pgaio_start_flush_range(int fd, off_t offset, off_t nbytes)
 {
-	for (int i = 0; i < ready; i++)
-	{
-		struct io_uring_cqe *cqe = cqes[i];
-		PgAioInProgress *io;
+	PgAioInProgress *io;
+	//struct io_uring_sqe *sqe;
 
-		ios[i] = io = io_uring_cqe_get_data(cqe);
-		Assert(ios[i] != NULL);
-		ios[i]->result = cqe->res;
+	io = pgaio_start_get_io(PGAIO_FLUSH_RANGE);
 
-		Assert(io->flags & PGAIOIP_INFLIGHT);
-		Assert(io->flags & PGAIOIP_IN_USE);
-		Assert(!(io->flags == PGAIOIP_IDLE));
-		io->flags &= ~PGAIOIP_INFLIGHT;
+	io->d.flush_range.fd = fd;
+	io->d.flush_range.offset = offset;
+	io->d.flush_range.nbytes = nbytes;
 
-		if (cqe->res < 0)
-		{
-			elog(WARNING, "cqe: u: %p s: %d/%s f: %u",
-				 io_uring_cqe_get_data(cqe),
-				 cqe->res,
-				 cqe->res < 0 ? strerror(-cqe->res) : "",
-				 cqe->flags);
-		}
+	pgaio_end_get_io();
 
-		io_uring_cqe_seen(ring, cqe);
+#ifdef PGAIO_VERBOSE
+	elog(DEBUG1, "start_flush_range %zu: %d, %llu, %llu",
+		 io - aio_ctl->in_progress_io,
+		 fd, (unsigned long long) offset, (unsigned long long) nbytes);
+#endif
 
-		/* delete from PgAioCtl->inflight */
-		dlist_delete(&io->node);
-	}
-	//io_uring_cq_advance(ring, ready);
+	return io;
 }
+
+
+PgAioInProgress *
+pgaio_start_buffer_read(int fd, off_t offset, off_t nbytes, char* data, int buffno)
+{
+	PgAioInProgress *io;
+	//struct io_uring_sqe *sqe;
+
+	io = pgaio_start_get_io(PGAIO_READ_BUFFER);
+
+	io->d.read_buffer.buf = buffno;
+	io->d.read_buffer.fd = fd;
+	io->d.read_buffer.offset = offset;
+	io->d.read_buffer.already_done = 0;
+	io->d.read_buffer.iovec.iov_base = data;
+	io->d.read_buffer.iovec.iov_len = nbytes;
+
+	pgaio_end_get_io();
+
+#ifdef PGAIO_VERBOSE
+	elog(DEBUG1, "start_buffer_read %zu:"
+		 "fd %d, off: %llu, bytes: %llu, buff: %d, data %p",
+		 io - aio_ctl->in_progress_io,
+		 fd,
+		 (unsigned long long) offset,
+		 (unsigned long long) nbytes,
+		 buffno,
+		 data);
+#endif
+
+	return io;
+}
+
+PgAioInProgress *
+pgaio_start_nop(void)
+{
+	PgAioInProgress *io;
+
+	io = pgaio_start_get_io(PGAIO_NOP);
+	pgaio_end_get_io();
+
+	return io;
+}
+
 
 static void
 pgaio_complete_ios(bool in_error)
@@ -378,7 +407,7 @@ pgaio_drain_and_unlock(struct io_uring *ring)
 		num_local_reaped =
 			io_uring_peek_batch_cqe(ring,
 									local_reaped_cqes,
-									MAX_LOCAL_REAPED);
+									PGAIO_MAX_LOCAL_REAPED);
 
 		pgaio_complete_cqes(ring,
 							local_reaped_ios,
@@ -446,16 +475,6 @@ pgaio_drain_outstanding(void)
 
 	while (outstanding > 0)
 	{
-#if 0
-		int ret = __sys_io_uring_enter(aio_ctl->shared_ring.ring_fd,
-									   0, 1,
-									   IORING_ENTER_GETEVENTS, NULL);
-		if (ret != 0 && errno != EINTR)
-			elog(WARNING, "unexpected: %d/%s", ret, strerror(-ret));
-
-		pgaio_drain(&aio_ctl->shared_ring, false);
-
-#else
 		LWLockAcquire(SharedAIOLock, LW_EXCLUSIVE);
 
 		outstanding = aio_ctl->outstanding;
@@ -476,7 +495,6 @@ pgaio_drain_outstanding(void)
 			pgaio_drain(&aio_ctl->shared_ring, true);
 
 		LWLockRelease(SharedAIOLock);
-#endif
 	}
 }
 
@@ -792,6 +810,47 @@ pgaio_complete_write_buffer(PgAioInProgress *io)
 #endif
 }
 
+
+/* --------------------------------------------------------------------------------
+ * io_uring related code
+ * --------------------------------------------------------------------------------
+ */
+
+static void
+pgaio_complete_cqes(struct io_uring *ring, PgAioInProgress **ios, struct io_uring_cqe **cqes, int ready)
+{
+	for (int i = 0; i < ready; i++)
+	{
+		struct io_uring_cqe *cqe = cqes[i];
+		PgAioInProgress *io;
+
+		ios[i] = io = io_uring_cqe_get_data(cqe);
+		Assert(ios[i] != NULL);
+		ios[i]->result = cqe->res;
+
+		Assert(io->flags & PGAIOIP_INFLIGHT);
+		Assert(io->flags & PGAIOIP_IN_USE);
+		Assert(!(io->flags == PGAIOIP_IDLE));
+		io->flags &= ~PGAIOIP_INFLIGHT;
+
+		if (cqe->res < 0)
+		{
+			elog(WARNING, "cqe: u: %p s: %d/%s f: %u",
+				 io_uring_cqe_get_data(cqe),
+				 cqe->res,
+				 cqe->res < 0 ? strerror(-cqe->res) : "",
+				 cqe->flags);
+		}
+
+		io_uring_cqe_seen(ring, cqe);
+
+		/* delete from PgAioCtl->inflight */
+		dlist_delete(&io->node);
+	}
+	//io_uring_cq_advance(ring, ready);
+}
+
+
 static void
 pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 {
@@ -824,68 +883,15 @@ pgaio_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe)
 	io_uring_sqe_set_data(sqe, io);
 }
 
-PgAioInProgress *
-pgaio_start_flush_range(int fd, off_t offset, off_t nbytes)
+static int
+__sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
+			 unsigned flags, sigset_t *sig)
 {
-	PgAioInProgress *io;
-	//struct io_uring_sqe *sqe;
 
-	io = pgaio_start_get_io(PGAIO_FLUSH_RANGE);
+# ifndef __NR_io_uring_enter
+#  define __NR_io_uring_enter		426
+# endif
 
-	io->d.flush_range.fd = fd;
-	io->d.flush_range.offset = offset;
-	io->d.flush_range.nbytes = nbytes;
-
-	pgaio_end_get_io();
-
-#ifdef PGAIO_VERBOSE
-	elog(DEBUG1, "start_flush_range %zu: %d, %llu, %llu",
-		 io - aio_ctl->in_progress_io,
-		 fd, (unsigned long long) offset, (unsigned long long) nbytes);
-#endif
-
-	return io;
-}
-
-
-PgAioInProgress *
-pgaio_start_buffer_read(int fd, off_t offset, off_t nbytes, char* data, int buffno)
-{
-	PgAioInProgress *io;
-	//struct io_uring_sqe *sqe;
-
-	io = pgaio_start_get_io(PGAIO_READ_BUFFER);
-
-	io->d.read_buffer.buf = buffno;
-	io->d.read_buffer.fd = fd;
-	io->d.read_buffer.offset = offset;
-	io->d.read_buffer.already_done = 0;
-	io->d.read_buffer.iovec.iov_base = data;
-	io->d.read_buffer.iovec.iov_len = nbytes;
-
-	pgaio_end_get_io();
-
-#ifdef PGAIO_VERBOSE
-	elog(DEBUG1, "start_buffer_read %zu:"
-		 "fd %d, off: %llu, bytes: %llu, buff: %d, data %p",
-		 io - aio_ctl->in_progress_io,
-		 fd,
-		 (unsigned long long) offset,
-		 (unsigned long long) nbytes,
-		 buffno,
-		 data);
-#endif
-
-	return io;
-}
-
-PgAioInProgress *
-pgaio_start_nop(void)
-{
-	PgAioInProgress *io;
-
-	io = pgaio_start_get_io(PGAIO_NOP);
-	pgaio_end_get_io();
-
-	return io;
+	return syscall(__NR_io_uring_enter, fd, to_submit, min_complete,
+			flags, sig, _NSIG / 8);
 }
