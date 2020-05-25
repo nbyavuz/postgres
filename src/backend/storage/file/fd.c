@@ -468,8 +468,7 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 	 */
 #if USE_LIBURING
 	{
-		pgaio_start_flush_range(fd, offset, nbytes);
-
+		pgaio_release(pgaio_start_flush_range(fd, offset, nbytes));
 		return;
 	}
 #endif
@@ -1166,7 +1165,7 @@ LruDelete(File file)
 
 	vfdP = &VfdCache[file];
 
-	pgaio_submit_pending();
+	pgaio_submit_pending(false);
 
 	/*
 	 * Close the file.  We aren't expecting this to fail; if it does, better
@@ -1848,7 +1847,7 @@ FileClose(File file)
 
 	if (!FileIsNotOpen(file))
 	{
-		pgaio_submit_pending();
+		pgaio_submit_pending(false);
 
 		/* close the file */
 		if (close(vfdP->fd) != 0)
@@ -2563,7 +2562,7 @@ FreeDesc(AllocateDesc *desc)
 			result = closedir(desc->desc.dir);
 			break;
 		case AllocateDescRawFD:
-			pgaio_submit_pending();
+			pgaio_submit_pending(false);
 			result = close(desc->desc.fd);
 			break;
 		default:
@@ -2632,7 +2631,7 @@ CloseTransientFile(int fd)
 	/* Only get here if someone passes us a file not in allocatedDescs */
 	elog(WARNING, "fd passed to CloseTransientFile was not obtained from OpenTransientFile");
 
-	pgaio_submit_pending();
+	pgaio_submit_pending(false);
 
 	return close(fd);
 }

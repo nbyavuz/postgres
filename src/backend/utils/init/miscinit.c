@@ -38,6 +38,7 @@
 #include "postmaster/autovacuum.h"
 #include "postmaster/postmaster.h"
 #include "storage/aio.h"
+#include "storage/condition_variable.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -185,6 +186,8 @@ SwitchToSharedLatch(void)
 	 * condition before waiting for the latch, but a bit care can't hurt.
 	 */
 	SetLatch(MyLatch);
+
+	ConditionVariableStartup();
 }
 
 void

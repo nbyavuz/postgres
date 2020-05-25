@@ -787,6 +787,7 @@ ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 	}
 
 	aio = ReadBufferInitRead(reln->rd_smgr, forkNum, blockNum, *buf, bufHdr, mode);
+	pgaio_release(aio);
 
 	return aio;
 }
@@ -1060,6 +1061,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	Block		bufBlock;
 	bool		isLocalBuf = SmgrIsTemp(smgr);
 	BufferDesc *bufHdr;
+	Buffer		buf;
 	instr_time	io_start, io_time;
 
 	if (blockNum == P_NEW)
@@ -1083,43 +1085,60 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	Assert(!(pg_atomic_read_u32(&bufHdr->state) & BM_VALID));	/* spinlock not needed */
 
 	bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
+	buf = BufferDescriptorGetBuffer(bufHdr);
 
-	if (track_io_timing)
-		INSTR_TIME_SET_CURRENT(io_start);
-
-	smgrread(smgr, forkNum, blockNum, (char *) bufBlock);
-
-	if (track_io_timing)
+	if (isLocalBuf)
 	{
-		INSTR_TIME_SET_CURRENT(io_time);
-		INSTR_TIME_SUBTRACT(io_time, io_start);
-		pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
-		INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
-	}
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
 
-	/* check for garbage data */
-	if (!PageIsVerified((Page) bufBlock, blockNum))
-	{
-		if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
+		smgrread(smgr, forkNum, blockNum, (char *) bufBlock);
+
+		if (track_io_timing)
 		{
-			ereport(WARNING,
-					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("invalid page in block %u of relation %s; zeroing out page",
-							blockNum,
-							relpath(smgr->smgr_rnode, forkNum))));
-			MemSet((char *) bufBlock, 0, BLCKSZ);
+			INSTR_TIME_SET_CURRENT(io_time);
+			INSTR_TIME_SUBTRACT(io_time, io_start);
+			pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
+			INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
 		}
-		else
-			ereport(ERROR,
-					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("invalid page in block %u of relation %s",
-							blockNum,
-							relpath(smgr->smgr_rnode, forkNum))));
-	}
 
-	TerminateBufferIO(bufHdr, isLocalBuf,
-					  /* syncio = */ true, /* clear_dirty = */ false,
-					  BM_VALID);
+		/* check for garbage data */
+		if (!PageIsVerified((Page) bufBlock, blockNum))
+		{
+			if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("invalid page in block %u of relation %s; zeroing out page",
+								blockNum,
+								relpath(smgr->smgr_rnode, forkNum))));
+				MemSet((char *) bufBlock, 0, BLCKSZ);
+			}
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("invalid page in block %u of relation %s",
+								blockNum,
+								relpath(smgr->smgr_rnode, forkNum))));
+		}
+
+		TerminateBufferIO(bufHdr, isLocalBuf,
+						  /* syncio = */ true, /* clear_dirty = */ false,
+						  BM_VALID);
+	}
+	else
+	{
+		PgAioInProgress* aio;
+		uint32		buf_state;
+
+		buf_state = LockBufHdr(bufHdr);
+		buf_state += BUF_REFCOUNT_ONE;
+		UnlockBufHdr(bufHdr, buf_state);
+
+		aio = ReadBufferInitRead(smgr, forkNum, blockNum, buf, bufHdr, mode);
+		pgaio_wait_for_io(aio);
+		pgaio_release(aio);
+	}
 
 	VacuumPageMiss++;
 	if (VacuumCostActive)
@@ -4249,8 +4268,13 @@ WaitIO(BufferDesc *buf)
 	for (;;)
 	{
 		uint32		buf_state;
+		PgAioInProgress *aio = buf->io_in_progress;
 
-		pgaio_drain_outstanding();
+		if (aio)
+		{
+			pgaio_wait_for_io(aio);
+			ConditionVariablePrepareToSleep(cv);
+		}
 
 		/*
 		 * It may not be necessary to acquire the spinlock to check the flag
@@ -4259,6 +4283,8 @@ WaitIO(BufferDesc *buf)
 		 */
 		buf_state = LockBufHdr(buf);
 		UnlockBufHdr(buf, buf_state);
+
+		Assert(!aio || !(buf_state & BM_IO_IN_PROGRESS));
 
 		if (!(buf_state & BM_IO_IN_PROGRESS))
 			break;
@@ -4373,7 +4399,10 @@ TerminateSharedBufferIO(BufferDesc *buf, bool syncio, bool clear_dirty, uint32 s
 	buf_state |= set_flag_bits;
 
 	if (!syncio)
+	{
 		buf_state -= BUF_REFCOUNT_ONE;
+		buf->io_in_progress = NULL;
+	}
 
 	UnlockBufHdr(buf, buf_state);
 
@@ -4757,7 +4786,7 @@ IssuePendingWritebacks(WritebackContext *context)
 	context->nr_pending = 0;
 
 	if (i > 0)
-		pgaio_submit_pending();
+		pgaio_submit_pending(true);
 }
 
 

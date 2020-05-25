@@ -215,8 +215,7 @@ pg_prewarm(PG_FUNCTION_ARGS)
 			++blocks_done;
 		}
 
-		pgaio_submit_pending();
-		pgaio_drain_outstanding();
+		pgaio_submit_pending(true);
 	}
 
 	/* Close relation, release lock. */

@@ -2576,9 +2576,14 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 					 startidx, curridx, lastpartialidx
 					);
 
-				pgaio_start_write_wal(openLogFile, startoffset, nleft, from,
-									  lastpartialidx == curridx);
-				pgaio_submit_pending();
+				{
+					PgAioInProgress *aio;
+
+					aio = pgaio_start_write_wal(openLogFile, startoffset, nleft, from,
+												lastpartialidx == curridx);
+					pgaio_submit_pending(false);
+					paio_release(aio);
+				}
 
 				written = nleft;
 
@@ -10439,14 +10444,29 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 #endif
 #ifdef HAVE_FDATASYNC
 		case SYNC_METHOD_FDATASYNC:
-			pgaio_drain_outstanding();
+#if 1
+			{
+				PgAioInProgress *aio;
+
+				aio = pgaio_start_fdatasync(fd, true);
+				pgaio_wait_for_io(aio);
+				pgaio_release(aio);
+			}
+#else
 			if (pg_fdatasync(fd) != 0)
 				msg = _("could not fdatasync file \"%s\": %m");
+#endif
 			break;
 #endif
 		case SYNC_METHOD_OPEN:
 		case SYNC_METHOD_OPEN_DSYNC:
-			pgaio_drain_outstanding();
+			{
+				PgAioInProgress *aio;
+
+				aio = pgaio_start_fdatasync(fd, true);
+				pgaio_wait_for_io(aio);
+				pgaio_release(aio);
+			}
 			/* write synced it already */
 			break;
 		default:

@@ -48,7 +48,8 @@ extern void pgaio_at_abort(void);
  */
 extern PgAioInProgress *pgaio_start_flush_range(int fd, off_t offset, off_t nbytes);
 extern PgAioInProgress *pgaio_start_nop(void);
-extern PgAioInProgress *pgaio_start_fsync(int fd);
+extern PgAioInProgress *pgaio_start_fsync(int fd, bool barrier);
+extern PgAioInProgress *pgaio_start_fdatasync(int fd, bool barrier);
 
 struct BufferDesc;
 extern PgAioInProgress *pgaio_start_read_buffer(int fd, off_t offset, off_t nbytes,
@@ -57,10 +58,12 @@ extern PgAioInProgress *pgaio_start_write_buffer(int fd, off_t offset, off_t nby
 												char *data, int buffno);
 extern PgAioInProgress *pgaio_start_write_wal(int fd, off_t offset, off_t nbytes,
 											  char *data, bool no_reorder);
-
-extern void pgaio_submit_pending(void);
+extern void pgaio_release(PgAioInProgress *io);
+extern void pgaio_submit_pending(bool drain);
 
 extern void pgaio_drain_shared(void);
 extern void pgaio_drain_outstanding(void);
+
+extern void pgaio_wait_for_io(PgAioInProgress *io);
 
 #endif							/* AIO_H */

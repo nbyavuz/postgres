@@ -496,12 +496,12 @@ table_block_parallelscan_nextpage(Relation rel, ParallelBlockTableScanDesc pbsca
 			if (!io)
 				ReleaseBuffer(buf);
 		}
-		pgaio_submit_pending();
+		pgaio_submit_pending(false);
 		//elog(LOG, "issued %d prefetches at %lu", i, nallocated);
 	}
 	else
 	{
-		//pgaio_drain_shared();
+		pgaio_drain_shared();
 	}
 #endif
 
