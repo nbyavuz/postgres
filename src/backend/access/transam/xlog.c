@@ -10473,8 +10473,19 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 	switch (sync_method)
 	{
 		case SYNC_METHOD_FSYNC:
+#if 1
+			if (enableFsync)
+			{
+				PgAioInProgress *aio = pgaio_io_get();
+
+				pgaio_start_fsync(aio, fd, false);
+				pgaio_wait_for_io(aio, true);
+				pgaio_release(aio);
+			}
+#else
 			if (pg_fsync_no_writethrough(fd) != 0)
 				msg = _("could not fsync file \"%s\": %m");
+#endif
 			break;
 #ifdef HAVE_FSYNC_WRITETHROUGH
 		case SYNC_METHOD_FSYNC_WRITETHROUGH:
@@ -10489,7 +10500,7 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 			{
 				PgAioInProgress *aio = pgaio_io_get();
 
-				pgaio_start_fdatasync(aio, fd, true);
+				pgaio_start_fdatasync(aio, fd, false);
 				pgaio_wait_for_io(aio, true);
 				pgaio_release(aio);
 			}
@@ -10501,13 +10512,6 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 #endif
 		case SYNC_METHOD_OPEN:
 		case SYNC_METHOD_OPEN_DSYNC:
-			{
-				PgAioInProgress *aio = pgaio_io_get();
-
-				pgaio_start_fdatasync(aio, fd, true);
-				pgaio_wait_for_io(aio, true);
-				pgaio_release(aio);
-			}
 			/* write synced it already */
 			break;
 		default:
