@@ -1058,6 +1058,21 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 	}
 }
 
+int
+mdfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off)
+{
+	MdfdVec    *v = mdopenfork(reln, forknum, EXTENSION_FAIL);
+
+	v = _mdfd_getseg(reln, forknum, blocknum, false,
+					 EXTENSION_FAIL);
+
+	*off = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+
+	Assert(*off < (off_t) BLCKSZ * RELSEG_SIZE);
+
+	return FileGetRawDesc(v->mdfd_vfd);
+}
+
 /*
  * register_unlink_segment() -- Schedule a file to be deleted after next checkpoint
  */

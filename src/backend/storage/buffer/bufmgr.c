@@ -1060,6 +1060,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	Block		bufBlock;
 	bool		isLocalBuf = SmgrIsTemp(smgr);
 	BufferDesc *bufHdr;
+	instr_time	io_start, io_time;
 
 	if (blockNum == P_NEW)
 		return ReadBuffer_extend(smgr, relpersistence, forkNum,
@@ -1083,42 +1084,37 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
 
+	if (track_io_timing)
+		INSTR_TIME_SET_CURRENT(io_start);
+
+	smgrread(smgr, forkNum, blockNum, (char *) bufBlock);
+
+	if (track_io_timing)
 	{
-		instr_time	io_start,
-			io_time;
+		INSTR_TIME_SET_CURRENT(io_time);
+		INSTR_TIME_SUBTRACT(io_time, io_start);
+		pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
+		INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
+	}
 
-		if (track_io_timing)
-			INSTR_TIME_SET_CURRENT(io_start);
-
-		smgrread(smgr, forkNum, blockNum, (char *) bufBlock);
-
-		if (track_io_timing)
+	/* check for garbage data */
+	if (!PageIsVerified((Page) bufBlock, blockNum))
+	{
+		if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
 		{
-			INSTR_TIME_SET_CURRENT(io_time);
-			INSTR_TIME_SUBTRACT(io_time, io_start);
-			pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
-			INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
+			ereport(WARNING,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("invalid page in block %u of relation %s; zeroing out page",
+							blockNum,
+							relpath(smgr->smgr_rnode, forkNum))));
+			MemSet((char *) bufBlock, 0, BLCKSZ);
 		}
-
-		/* check for garbage data */
-		if (!PageIsVerified((Page) bufBlock, blockNum))
-		{
-			if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
-			{
-				ereport(WARNING,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg("invalid page in block %u of relation %s; zeroing out page",
-								blockNum,
-								relpath(smgr->smgr_rnode, forkNum))));
-				MemSet((char *) bufBlock, 0, BLCKSZ);
-			}
-			else
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_CORRUPTED),
-						 errmsg("invalid page in block %u of relation %s",
-								blockNum,
-								relpath(smgr->smgr_rnode, forkNum))));
-		}
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("invalid page in block %u of relation %s",
+							blockNum,
+							relpath(smgr->smgr_rnode, forkNum))));
 	}
 
 	TerminateBufferIO(bufHdr, isLocalBuf,

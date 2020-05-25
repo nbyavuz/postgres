@@ -111,6 +111,7 @@ extern BlockNumber smgrnblocks(SMgrRelation reln, ForkNumber forknum);
 extern void smgrtruncate(SMgrRelation reln, ForkNumber *forknum,
 						 int nforks, BlockNumber *nblocks);
 extern void smgrimmedsync(SMgrRelation reln, ForkNumber forknum);
+extern int smgrfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off);
 extern void AtEOXact_SMgr(void);
 
 #endif							/* SMGR_H */

@@ -67,6 +67,7 @@ typedef struct f_smgr
 	void		(*smgr_truncate) (SMgrRelation reln, ForkNumber forknum,
 								  BlockNumber nblocks);
 	void		(*smgr_immedsync) (SMgrRelation reln, ForkNumber forknum);
+	int			(*smgr_fd) (SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off);
 } f_smgr;
 
 static const f_smgr smgrsw[] = {
@@ -88,6 +89,7 @@ static const f_smgr smgrsw[] = {
 		.smgr_nblocks = mdnblocks,
 		.smgr_truncate = mdtruncate,
 		.smgr_immedsync = mdimmedsync,
+		.smgr_fd = mdfd,
 	}
 };
 
@@ -634,6 +636,12 @@ void
 smgrimmedsync(SMgrRelation reln, ForkNumber forknum)
 {
 	smgrsw[reln->smgr_which].smgr_immedsync(reln, forknum);
+}
+
+int
+smgrfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off)
+{
+	return smgrsw[reln->smgr_which].smgr_fd(reln, forknum, blocknum, off);
 }
 
 /*

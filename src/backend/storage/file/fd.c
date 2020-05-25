@@ -2275,7 +2275,14 @@ FilePathName(File file)
 int
 FileGetRawDesc(File file)
 {
+	int			returnCode;
+
 	Assert(FileIsValid(file));
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return returnCode;
+
 	return VfdCache[file].fd;
 }
 
