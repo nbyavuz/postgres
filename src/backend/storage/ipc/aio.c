@@ -594,7 +594,7 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 
 		total = pgaio_drain(ring, false);
 
-		elog(DEBUG3, "backpressure drain at %s: cqr before/after: %d/%d, inflight b/a: %d/%d, outstanding b/a: %d/%d, processed %d",
+		elog(DEBUG2, "backpressure drain at %s: cqr before/after: %d/%d, inflight b/a: %d/%d, outstanding b/a: %d/%d, processed %d",
 			 loc,
 			 cqr_before, io_uring_cq_ready(ring),
 			 inflight_before, pg_atomic_read_u32(&aio_ctl->inflight),
@@ -640,7 +640,7 @@ pgaio_backpressure(struct io_uring *ring, const char *loc)
 
 			cqr_after = io_uring_cq_ready(ring);
 #if 1
-			elog(DEBUG3, "backpressure wait at %s waited for %d, "
+			elog(DEBUG2, "backpressure wait at %s waited for %d, "
 				 "for inflight b/a: %d/%d, outstanding b/a: %d/%d, "
 				 "cqr before %d after %d "
 				 "space left: %d, sq ready: %d",
@@ -842,6 +842,19 @@ pgaio_release(PgAioInProgress *io)
 	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 	pgaio_put_io_locked(io);
 	LWLockRelease(SharedAIOCtlLock);
+}
+
+void
+pgaio_print_queues(void)
+{
+	ereport(LOG,
+			errmsg("shared queue: space: %d ready: %d, we think: %d inflight",
+				   io_uring_sq_space_left(&aio_ctl->shared_ring),
+				   io_uring_cq_ready(&aio_ctl->shared_ring),
+				   pg_atomic_read_u32(&aio_ctl->inflight)),
+			errhidestmt(true),
+			errhidecontext(true)
+		);
 }
 
 /* --------------------------------------------------------------------------------
@@ -1108,6 +1121,15 @@ pgaio_start_fdatasync(int fd, bool barrier)
 	io->d.fsync.datasync = true;
 	pgaio_end_get_io();
 
+#ifdef PGAIO_VERBOSE
+	elog(DEBUG2, "start_fsync %zu:"
+		 "fd %d, is_barrier: %d, is_datasync: %d",
+		 io - aio_ctl->in_progress_io,
+		 fd,
+		 barrier,
+		 true);
+#endif
+
 	return io;
 }
 
@@ -1125,7 +1147,8 @@ static bool
 pgaio_complete_fsync(PgAioInProgress *io)
 {
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG2, "completed fsync");
+	elog(DEBUG2, "completed fsync: %zu",
+		 io - aio_ctl->in_progress_io);
 #endif
 	if (io->result != 0)
 		elog(PANIC, "fsync needs better error handling");

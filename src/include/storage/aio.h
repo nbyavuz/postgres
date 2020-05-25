@@ -66,4 +66,6 @@ extern void pgaio_drain_outstanding(void);
 
 extern void pgaio_wait_for_io(PgAioInProgress *io);
 
+extern void pgaio_print_queues(void);
+
 #endif							/* AIO_H */
