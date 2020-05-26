@@ -117,7 +117,7 @@ extern TableScanDesc heap_beginscan(Relation relation, Snapshot snapshot,
 									uint32 flags);
 extern void heap_setscanlimits(TableScanDesc scan, BlockNumber startBlk,
 							   BlockNumber numBlks);
-extern void heapgetpage(TableScanDesc scan, BlockNumber page);
+extern void heapgetpage(TableScanDesc scan, BlockNumber page, Buffer buffer);
 extern void heap_rescan(TableScanDesc scan, ScanKey key, bool set_params,
 						bool allow_strat, bool allow_sync, bool allow_pagemode);
 extern void heap_endscan(TableScanDesc scan);

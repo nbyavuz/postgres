@@ -223,12 +223,14 @@ heap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *r
 		blockno = ++scan->rs_prefetch_block;
 		if (blockno >= scan->rs_nblocks)
 			blockno = 0;
-		if (blockno == scan->rs_startblock)
+		if (blockno == scan->rs_startblock ||
+			(scan->rs_numblocks != InvalidBlockNumber &&
+			 --scan->rs_numblocks == 0))
 		{
+			*read_private = 0;
 			return PGSR_NEXT_END;
 		}
 	}
-
 
 	buf = ReadBufferAsync(scan->rs_base.rs_rd, MAIN_FORKNUM, blockno,
 						  RBM_NORMAL, scan->rs_strategy, &already_valid,
@@ -237,25 +239,46 @@ heap_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *r
 	*read_private = (uintptr_t) buf;
 
 	if (already_valid)
-	{
-		ereport(DEBUG4,
-				errmsg("pgsr %s: found block %d already in buf %d",
-					   NameStr(scan->rs_base.rs_rd->rd_rel->relname),
-					   blockno, buf),
-				errhidestmt(true),
-				errhidecontext(true));
 		return PGSR_NEXT_NO_IO;
-	}
 	else
-	{
-		ereport(DEBUG4,
-				errmsg("pgsr %s: fetching block %d into buf %d",
-					   NameStr(scan->rs_base.rs_rd->rd_rel->relname),
-					   blockno, buf),
-				errhidestmt(true),
-				errhidecontext(true));
 		return PGSR_NEXT_IO;
+}
+
+static PgStreamingReadNextStatus
+heap_pgsr_next_parallel(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
+{
+	HeapScanDesc scan = (HeapScanDesc) pgsr_private;
+	ParallelBlockTableScanDesc pbscan =
+		(ParallelBlockTableScanDesc) scan->rs_base.rs_parallel;
+	ParallelBlockTableScanWork pbscanwork =
+		(ParallelBlockTableScanWork) scan->rs_base.rs_parallel_work;
+	BlockNumber blockno;
+	Buffer buf;
+	bool already_valid;
+
+	Assert(scan->rs_inited);
+	Assert(scan->rs_base.rs_parallel);
+	Assert(scan->rs_nblocks > 0);
+
+	blockno = table_block_parallelscan_nextpage(scan->rs_base.rs_rd,
+												pbscanwork, pbscan);
+
+	/* Other processes might have already finished the scan. */
+	if (blockno == InvalidBlockNumber)
+	{
+		*read_private = 0;
+		return PGSR_NEXT_END;
 	}
+
+	buf = ReadBufferAsync(scan->rs_base.rs_rd, MAIN_FORKNUM, blockno,
+						  RBM_NORMAL, scan->rs_strategy, &already_valid,
+						  &aio);
+	*read_private = (uintptr_t) buf;
+
+	if (already_valid)
+		return PGSR_NEXT_NO_IO;
+	else
+		return PGSR_NEXT_IO;
 }
 
 static void
@@ -276,12 +299,22 @@ heap_pgsr_release(uintptr_t pgsr_private, uintptr_t read_private)
 }
 
 static PgStreamingRead *
-heap_pgsr_alloc(HeapScanDesc scan)
+heap_pgsr_single_alloc(HeapScanDesc scan)
 {
 	int iodepth = Max(Min(128, NBuffers / 128), 1);
 
 	return pg_streaming_read_alloc(iodepth, (uintptr_t) scan,
 								   heap_pgsr_next_single,
+								   heap_pgsr_release);
+}
+
+static PgStreamingRead *
+heap_pgsr_parallel_alloc(HeapScanDesc scan)
+{
+	int iodepth = Max(Min(128, NBuffers / 128), 1);
+
+	return pg_streaming_read_alloc(iodepth, (uintptr_t) scan,
+								   heap_pgsr_next_parallel,
 								   heap_pgsr_release);
 }
 
@@ -411,11 +444,18 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 		scan->pgsr = NULL;
 	}
 
-	if ((scan->rs_base.rs_flags & SO_TYPE_SEQSCAN) &&
-		!scan->rs_base.rs_parallel && !RelationUsesLocalBuffers(scan->rs_base.rs_rd))
-		scan->pgsr = heap_pgsr_alloc(scan);
-	else
-		scan->pgsr = NULL;
+	/*
+	 * FIXME: This probably should be done in the !rs_inited blocks instead.
+	 */
+	scan->pgsr = NULL;
+	if (!RelationUsesLocalBuffers(scan->rs_base.rs_rd) &&
+		(scan->rs_base.rs_flags & SO_TYPE_SEQSCAN))
+	{
+		if (scan->rs_base.rs_parallel)
+			scan->pgsr = heap_pgsr_parallel_alloc(scan);
+		else
+			scan->pgsr = heap_pgsr_single_alloc(scan);
+	}
 }
 
 /*
@@ -448,7 +488,7 @@ heap_setscanlimits(TableScanDesc sscan, BlockNumber startBlk, BlockNumber numBlk
  * which tuples on the page are visible.
  */
 void
-heapgetpage(TableScanDesc sscan, BlockNumber page)
+heapgetpage(TableScanDesc sscan, BlockNumber page, Buffer pgsr_buffer)
 {
 	HeapScanDesc scan = (HeapScanDesc) sscan;
 	Buffer		buffer;
@@ -476,22 +516,15 @@ heapgetpage(TableScanDesc sscan, BlockNumber page)
 	 */
 	CHECK_FOR_INTERRUPTS();
 
-	if (scan->pgsr)
+	if (BufferIsValid(pgsr_buffer))
 	{
-		scan->rs_cbuf = pg_streaming_read_get_next(scan->pgsr);
-		Assert(BufferIsValid(scan->rs_cbuf));
-		if (BufferGetBlockNumber(scan->rs_cbuf) != page)
-		{
-			ereport(WARNING,
-					(errmsg("got buf %d block %d, expecting %d",
-							scan->rs_cbuf, BufferGetBlockNumber(scan->rs_cbuf), page),
-					 errhidestmt(true),
-					 errhidecontext(true)));
-			Assert(BufferGetBlockNumber(scan->rs_cbuf) == page);
-		}
+		Assert(scan->pgsr);
+		scan->rs_cbuf = pgsr_buffer;
 	}
 	else
 	{
+		Assert(!scan->pgsr);
+
 		/* read page using selected strategy */
 		scan->rs_cbuf = ReadBufferExtended(scan->rs_base.rs_rd, MAIN_FORKNUM, page,
 										   RBM_NORMAL, scan->rs_strategy);
@@ -543,9 +576,16 @@ heapgetpage(TableScanDesc sscan, BlockNumber page)
 	 */
 	all_visible = PageIsAllVisible(dp) && !snapshot->takenDuringRecovery;
 
-	for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(dp, lineoff);
-		 lineoff <= lines;
-		 lineoff++, lpp++)
+//#define FASTORDER
+#ifdef FASTORDER
+    for (lineoff = lines, lpp = PageGetItemId(dp, lineoff);
+         lineoff >= FirstOffsetNumber;
+         lineoff--, lpp--)
+#else
+    for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(dp, lineoff);
+          lineoff <= lines;
+          lineoff++, lpp++)
+#endif
 	{
 		if (ItemIdIsNormal(lpp))
 		{
@@ -609,6 +649,7 @@ heapgettup(HeapScanDesc scan,
 	Snapshot	snapshot = scan->rs_base.rs_snapshot;
 	bool		backward = ScanDirectionIsBackward(dir);
 	BlockNumber page;
+	Buffer		pgsr_buf = InvalidBuffer;
 	bool		finished;
 	Page		dp;
 	int			lines;
@@ -621,8 +662,15 @@ heapgettup(HeapScanDesc scan,
 	 */
 	if (ScanDirectionIsForward(dir))
 	{
+		/*
+		 * FIXME: This logic badly needs to be consolidated into one
+		 * place. Instead of having logic at the top and bottom of heapgettup
+		 * and heapgettup_pagemode() each.
+		 */
 		if (!scan->rs_inited)
 		{
+			scan->rs_inited = true;
+
 			/*
 			 * return null immediately if relation is empty
 			 */
@@ -632,7 +680,38 @@ heapgettup(HeapScanDesc scan,
 				tuple->t_data = NULL;
 				return;
 			}
-			if (scan->rs_base.rs_parallel != NULL)
+			if (scan->pgsr)
+			{
+				ParallelBlockTableScanDesc pbscan =
+				(ParallelBlockTableScanDesc) scan->rs_base.rs_parallel;
+				ParallelBlockTableScanWork pbscanwork =
+				(ParallelBlockTableScanWork) scan->rs_base.rs_parallel_work;
+
+				if (scan->rs_base.rs_parallel != NULL)
+				{
+					table_block_parallelscan_startblock_init(scan->rs_base.rs_rd, pbscanwork, pbscan);
+				}
+
+				pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
+
+				/* Other processes might have already finished the scan. */
+				if (scan->rs_base.rs_parallel != NULL)
+				{
+					if (!BufferIsValid(pgsr_buf))
+					{
+						Assert(!BufferIsValid(scan->rs_cbuf));
+						tuple->t_data = NULL;
+						return;
+					}
+					page = BufferGetBlockNumber(pgsr_buf);
+				}
+				else
+				{
+					Assert(BufferGetBlockNumber(pgsr_buf) == scan->rs_startblock);
+					page = scan->rs_startblock; /* crosscheck */
+				}
+			}
+			else if (scan->rs_base.rs_parallel != NULL)
 			{
 				ParallelBlockTableScanDesc pbscan =
 				(ParallelBlockTableScanDesc) scan->rs_base.rs_parallel;
@@ -655,8 +734,8 @@ heapgettup(HeapScanDesc scan,
 			}
 			else
 				page = scan->rs_startblock; /* first page */
-			scan->rs_inited = true;
-			heapgetpage((TableScanDesc) scan, page);
+
+			heapgetpage((TableScanDesc) scan, page, pgsr_buf);
 			lineoff = FirstOffsetNumber;	/* first offnum */
 		}
 		else
@@ -711,7 +790,7 @@ heapgettup(HeapScanDesc scan,
 				page = scan->rs_startblock - 1;
 			else
 				page = scan->rs_nblocks - 1;
-			heapgetpage((TableScanDesc) scan, page);
+			heapgetpage((TableScanDesc) scan, page, InvalidBuffer);
 		}
 		else
 		{
@@ -753,7 +832,7 @@ heapgettup(HeapScanDesc scan,
 
 		page = ItemPointerGetBlockNumber(&(tuple->t_self));
 		if (page != scan->rs_cblock)
-			heapgetpage((TableScanDesc) scan, page);
+			heapgetpage((TableScanDesc) scan, page, InvalidBuffer);
 
 		/* Since the tuple was previously fetched, needn't lock page here */
 		dp = BufferGetPage(scan->rs_cbuf);
@@ -828,6 +907,7 @@ heapgettup(HeapScanDesc scan,
 		 * it's time to move to the next.
 		 */
 		LockBuffer(scan->rs_cbuf, BUFFER_LOCK_UNLOCK);
+		pgsr_buf = InvalidBuffer;
 
 		/*
 		 * advance to next/prior page and detect end of scan
@@ -839,6 +919,20 @@ heapgettup(HeapScanDesc scan,
 			if (page == 0)
 				page = scan->rs_nblocks;
 			page--;
+		}
+		else if (scan->pgsr)
+		{
+			pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
+
+			if (BufferIsValid(pgsr_buf))
+			{
+				page = BufferGetBlockNumber(pgsr_buf);
+				/* FIXME: add crosscheck for block number */
+				/* FIXME: ss_report_location */
+				finished = false;
+			}
+			else
+				finished = true;
 		}
 		else if (scan->rs_base.rs_parallel != NULL)
 		{
@@ -889,7 +983,7 @@ heapgettup(HeapScanDesc scan,
 			return;
 		}
 
-		heapgetpage((TableScanDesc) scan, page);
+		heapgetpage((TableScanDesc) scan, page, pgsr_buf);
 
 		LockBuffer(scan->rs_cbuf, BUFFER_LOCK_SHARE);
 
@@ -932,6 +1026,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 	HeapTuple	tuple = &(scan->rs_ctup);
 	bool		backward = ScanDirectionIsBackward(dir);
 	BlockNumber page;
+	Buffer		pgsr_buf = InvalidBuffer;
 	bool		finished;
 	Page		dp;
 	int			lines;
@@ -947,6 +1042,8 @@ heapgettup_pagemode(HeapScanDesc scan,
 	{
 		if (!scan->rs_inited)
 		{
+			scan->rs_inited = true;
+
 			/*
 			 * return null immediately if relation is empty
 			 */
@@ -956,7 +1053,38 @@ heapgettup_pagemode(HeapScanDesc scan,
 				tuple->t_data = NULL;
 				return;
 			}
-			if (scan->rs_base.rs_parallel != NULL)
+			if (scan->pgsr)
+			{
+				ParallelBlockTableScanDesc pbscan =
+				(ParallelBlockTableScanDesc) scan->rs_base.rs_parallel;
+				ParallelBlockTableScanWork pbscanwork =
+				(ParallelBlockTableScanWork) scan->rs_base.rs_parallel_work;
+
+				if (scan->rs_base.rs_parallel != NULL)
+				{
+					table_block_parallelscan_startblock_init(scan->rs_base.rs_rd, pbscanwork, pbscan);
+				}
+
+				pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
+
+				/* Other processes might have already finished the scan. */
+				if (scan->rs_base.rs_parallel != NULL)
+				{
+					if (!BufferIsValid(pgsr_buf))
+					{
+						Assert(!BufferIsValid(scan->rs_cbuf));
+						tuple->t_data = NULL;
+						return;
+					}
+					page = BufferGetBlockNumber(pgsr_buf);
+				}
+				else
+				{
+					Assert(BufferGetBlockNumber(pgsr_buf) == scan->rs_startblock);
+					page = scan->rs_startblock; /* crosscheck */
+				}
+			}
+			else if (scan->rs_base.rs_parallel != NULL)
 			{
 				ParallelBlockTableScanDesc pbscan =
 				(ParallelBlockTableScanDesc) scan->rs_base.rs_parallel;
@@ -979,8 +1107,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 			}
 			else
 				page = scan->rs_startblock; /* first page */
-			scan->rs_inited = true;
-			heapgetpage((TableScanDesc) scan, page);
+			heapgetpage((TableScanDesc) scan, page, pgsr_buf);
 			lineindex = 0;
 		}
 		else
@@ -1032,7 +1159,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 				page = scan->rs_startblock - 1;
 			else
 				page = scan->rs_nblocks - 1;
-			heapgetpage((TableScanDesc) scan, page);
+			heapgetpage((TableScanDesc) scan, page, InvalidBuffer);
 		}
 		else
 		{
@@ -1071,7 +1198,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 
 		page = ItemPointerGetBlockNumber(&(tuple->t_self));
 		if (page != scan->rs_cblock)
-			heapgetpage((TableScanDesc) scan, page);
+			heapgetpage((TableScanDesc) scan, page, InvalidBuffer);
 
 		/* Since the tuple was previously fetched, needn't lock page here */
 		dp = BufferGetPage(scan->rs_cbuf);
@@ -1137,6 +1264,8 @@ heapgettup_pagemode(HeapScanDesc scan,
 				++lineindex;
 		}
 
+		pgsr_buf = InvalidBuffer;
+
 		/*
 		 * if we get here, it means we've exhausted the items on this page and
 		 * it's time to move to the next.
@@ -1148,6 +1277,20 @@ heapgettup_pagemode(HeapScanDesc scan,
 			if (page == 0)
 				page = scan->rs_nblocks;
 			page--;
+		}
+		else if (scan->pgsr)
+		{
+			pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
+
+			if (BufferIsValid(pgsr_buf))
+			{
+				page = BufferGetBlockNumber(pgsr_buf);
+				/* FIXME: add crosscheck for block number */
+				/* FIXME: ss_report_location */
+				finished = false;
+			}
+			else
+				finished = true;
 		}
 		else if (scan->rs_base.rs_parallel != NULL)
 		{
@@ -1198,7 +1341,7 @@ heapgettup_pagemode(HeapScanDesc scan,
 			return;
 		}
 
-		heapgetpage((TableScanDesc) scan, page);
+		heapgetpage((TableScanDesc) scan, page, pgsr_buf);
 
 		dp = BufferGetPage(scan->rs_cbuf);
 		TestForOldSnapshot(scan->rs_base.rs_snapshot, scan->rs_base.rs_rd, dp);
