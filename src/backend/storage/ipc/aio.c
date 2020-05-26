@@ -45,7 +45,7 @@
  * pending requests, rather than when staging them.
  */
 #define PGAIO_SUBMIT_BATCH_SIZE 256
-#define PGAIO_BACKPRESSURE_LIMIT 1024
+#define PGAIO_BACKPRESSURE_LIMIT (max_aio_in_flight - 128)
 #define PGAIO_MAX_LOCAL_REAPED 128
 #define PGAIO_MAX_COMBINE 16
 
@@ -406,7 +406,11 @@ static const PgAioCompletedCB completion_callbacks[] =
 
 /* (future) GUC controlling global MAX number of in-progress IO entries */
 extern int max_aio_in_progress;
-int max_aio_in_progress = 4096;
+extern int max_aio_in_flight;
+extern int max_aio_bounce_buffers;
+int max_aio_in_progress = 32768; /* XXX: Multiple of MaxBackends instead? */
+int max_aio_in_flight = 4096;
+int max_aio_bounce_buffers = 1024;
 
 /* global list of in-progress IO */
 static PgAioCtl *aio_ctl;
@@ -451,7 +455,7 @@ static Size
 AioBounceShmemSize(void)
 {
 	return add_size(BLCKSZ /* alignment padding */,
-					mul_size(BLCKSZ, max_aio_in_progress));
+					mul_size(BLCKSZ, max_aio_bounce_buffers));
 }
 
 Size
@@ -515,7 +519,7 @@ AioShmemInit(void)
 			Assert(!found);
 			buffers = (PgAioBounceBuffer *) TYPEALIGN(BLCKSZ, (uintptr_t) p);
 
-			for (int i = 0; i < max_aio_in_progress; i++)
+			for (int i = 0; i < max_aio_bounce_buffers; i++)
 			{
 				PgAioBounceBuffer *bb = &buffers[i];
 
@@ -527,7 +531,7 @@ AioShmemInit(void)
 		{
 			int ret;
 
-			ret = io_uring_queue_init(max_aio_in_progress, &aio_ctl->shared_ring, 0);
+			ret = io_uring_queue_init(max_aio_in_flight, &aio_ctl->shared_ring, 0);
 			if (ret < 0)
 				elog(ERROR, "io_uring_queue_init failed: %s", strerror(-ret));
 		}
