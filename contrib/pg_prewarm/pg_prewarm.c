@@ -356,8 +356,6 @@ pg_prewarm(PG_FUNCTION_ARGS)
 			r = (Page) pg_streaming_read_get_next(pgsr);
 			if (r == 0)
 				elog(ERROR, "prefetch ended early");
-			if (PageIsEmpty(r))
-				elog(ERROR, "page empty");
 
 			++blocks_done;
 		}
