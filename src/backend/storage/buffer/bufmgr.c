@@ -856,6 +856,13 @@ ReadBuffer_extend(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	*hit = false;
 
+	TRACE_POSTGRESQL_BUFFER_READ_START(forkNum, blockNum,
+									   smgr->smgr_rnode.node.spcNode,
+									   smgr->smgr_rnode.node.dbNode,
+									   smgr->smgr_rnode.node.relNode,
+									   smgr->smgr_rnode.backend,
+									   true);
+
 	/* Make sure we will have room to remember the buffer pin */
 	ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
 
@@ -1000,7 +1007,7 @@ ReadBuffer_start(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 									   smgr->smgr_rnode.node.dbNode,
 									   smgr->smgr_rnode.node.relNode,
 									   smgr->smgr_rnode.backend,
-									   isExtend);
+									   false);
 
 	if (isLocalBuf)
 	{
@@ -1044,7 +1051,7 @@ ReadBuffer_start(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 										  smgr->smgr_rnode.node.dbNode,
 										  smgr->smgr_rnode.node.relNode,
 										  smgr->smgr_rnode.backend,
-										  isExtend,
+										  false,
 										  found);
 
 		/*
@@ -1202,8 +1209,8 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 									  smgr->smgr_rnode.node.dbNode,
 									  smgr->smgr_rnode.node.relNode,
 									  smgr->smgr_rnode.backend,
-									  isExtend,
-									  found);
+									  false,
+									  false);
 
 	return BufferDescriptorGetBuffer(bufHdr);
 }
