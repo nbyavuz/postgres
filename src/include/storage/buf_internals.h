@@ -185,7 +185,7 @@ typedef struct BufferDesc
 
 	int			wait_backend_pid;	/* backend PID of pin-count waiter */
 	int			freeNext;		/* link in freelist chain */
-
+	uint32		io_in_progress;
 	LWLock		content_lock;	/* to lock access to buffer contents */
 } BufferDesc;
 

@@ -9,6 +9,7 @@ top_builddir = ../../../..
 include $(top_builddir)/src/Makefile.global
 
 OBJS = \
+	aio.o \
 	barrier.o \
 	dsm.o \
 	dsm_impl.o \
@@ -26,5 +27,7 @@ OBJS = \
 	sinval.o \
 	sinvaladt.o \
 	standby.o
+
+aio.o: override CPPFLAGS += $(LIBURING_CFLAGS)
 
 include $(top_srcdir)/src/backend/common.mk

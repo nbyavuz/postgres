@@ -96,6 +96,10 @@ extern bool smgrprefetch(SMgrRelation reln, ForkNumber forknum,
 						 BlockNumber blocknum);
 extern void smgrread(SMgrRelation reln, ForkNumber forknum,
 					 BlockNumber blocknum, char *buffer);
+struct PgAioInProgress;
+extern struct PgAioInProgress* smgrstartread(SMgrRelation reln, ForkNumber forknum,
+											 BlockNumber blocknum, char *buffer,
+											 int bufno);
 extern void smgrwrite(SMgrRelation reln, ForkNumber forknum,
 					  BlockNumber blocknum, char *buffer, bool skipFsync);
 extern void smgrwriteback(SMgrRelation reln, ForkNumber forknum,

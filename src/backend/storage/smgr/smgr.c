@@ -53,6 +53,9 @@ typedef struct f_smgr
 								  BlockNumber blocknum);
 	void		(*smgr_read) (SMgrRelation reln, ForkNumber forknum,
 							  BlockNumber blocknum, char *buffer);
+	struct PgAioInProgress* (*smgr_startread) (SMgrRelation reln, ForkNumber forknum,
+											 BlockNumber blocknum, char *buffer,
+											 int bufno);
 	void		(*smgr_write) (SMgrRelation reln, ForkNumber forknum,
 							   BlockNumber blocknum, char *buffer, bool skipFsync);
 	void		(*smgr_writeback) (SMgrRelation reln, ForkNumber forknum,
@@ -76,6 +79,7 @@ static const f_smgr smgrsw[] = {
 		.smgr_extend = mdextend,
 		.smgr_prefetch = mdprefetch,
 		.smgr_read = mdread,
+		.smgr_startread = mdstartread,
 		.smgr_write = mdwrite,
 		.smgr_writeback = mdwriteback,
 		.smgr_nblocks = mdnblocks,
@@ -492,6 +496,13 @@ smgrread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 char *buffer)
 {
 	smgrsw[reln->smgr_which].smgr_read(reln, forknum, blocknum, buffer);
+}
+
+struct PgAioInProgress*
+smgrstartread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+			  char *buffer, int bufno)
+{
+	return smgrsw[reln->smgr_which].smgr_startread(reln, forknum, blocknum, buffer, bufno);
 }
 
 /*

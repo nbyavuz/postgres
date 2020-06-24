@@ -25,6 +25,7 @@
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "optimizer/plancat.h"
+#include "storage/aio.h"
 #include "storage/bufmgr.h"
 #include "storage/shmem.h"
 #include "storage/smgr.h"
@@ -472,6 +473,37 @@ table_block_parallelscan_nextpage(Relation rel, ParallelBlockTableScanDesc pbsca
 		page = InvalidBlockNumber;	/* all blocks have been allocated */
 	else
 		page = (nallocated + pbscan->phs_startblock) % pbscan->phs_nblocks;
+
+#if 1
+#define PREFETCH_AHEAD ((4 * 1024 * 1024) / 8192)
+#define PREFETCH_BATCH 32
+	if (nallocated % PREFETCH_BATCH == 0 &&
+		(nallocated + PREFETCH_AHEAD < pbscan->phs_nblocks))
+	{
+		PgAioInProgress *io;
+		Buffer buf;
+		uint64 target = nallocated + pbscan->phs_startblock + PREFETCH_AHEAD;
+		int i;
+
+		for (i = 0; i < PREFETCH_BATCH && target < pbscan->phs_nblocks;
+			 i++, target++)
+		{
+			io = ReadBufferAsync(
+				rel, MAIN_FORKNUM,
+				target % pbscan->phs_nblocks,
+				RBM_NORMAL, NULL, &buf);
+
+			if (!io)
+				ReleaseBuffer(buf);
+		}
+		pgaio_submit_pending();
+		//elog(LOG, "issued %d prefetches at %lu", i, nallocated);
+	}
+	else
+	{
+		pgaio_drain_shared();
+	}
+#endif
 
 	/*
 	 * Report scan location.  Normally, we report the current page number.

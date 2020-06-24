@@ -18,6 +18,7 @@
 #include "access/relation.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "storage/aio.h"
 #include "storage/bufmgr.h"
 #include "storage/smgr.h"
 #include "utils/acl.h"
@@ -33,7 +34,8 @@ typedef enum
 {
 	PREWARM_PREFETCH,
 	PREWARM_READ,
-	PREWARM_BUFFER
+	PREWARM_BUFFER,
+	PREWARM_BUFFER_AIO
 } PrewarmType;
 
 static PGAlignedBlock blockbuffer;
@@ -86,6 +88,8 @@ pg_prewarm(PG_FUNCTION_ARGS)
 		ptype = PREWARM_READ;
 	else if (strcmp(ttype, "buffer") == 0)
 		ptype = PREWARM_BUFFER;
+	else if (strcmp(ttype, "buffer_aio") == 0)
+		ptype = PREWARM_BUFFER_AIO;
 	else
 	{
 		ereport(ERROR,
@@ -196,6 +200,23 @@ pg_prewarm(PG_FUNCTION_ARGS)
 			ReleaseBuffer(buf);
 			++blocks_done;
 		}
+	}
+	else if (ptype == PREWARM_BUFFER_AIO)
+	{
+		for (block = first_block; block <= last_block; ++block)
+		{
+			Buffer		buf;
+			PgAioInProgress *io;
+
+			CHECK_FOR_INTERRUPTS();
+			io = ReadBufferAsync(rel, forkNumber, block, RBM_NORMAL, NULL, &buf);
+			if (!io)
+				ReleaseBuffer(buf);
+			++blocks_done;
+		}
+
+		pgaio_submit_pending();
+		pgaio_drain_outstanding();
 	}
 
 	/* Close relation, release lock. */

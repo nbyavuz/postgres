@@ -92,6 +92,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "portability/mem.h"
+#include "storage/aio.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "utils/guc.h"
@@ -465,6 +466,13 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 	 * We compile all alternatives that are supported on the current platform,
 	 * to find portability problems more easily.
 	 */
+#if USE_LIBURING
+	{
+		pgaio_start_flush_range(fd, offset, nbytes);
+
+		return;
+	}
+#endif
 #if defined(HAVE_SYNC_FILE_RANGE)
 	{
 		int			rc;
@@ -1010,7 +1018,11 @@ tryAgain:
 	fd = open(fileName, fileFlags, fileMode);
 
 	if (fd >= 0)
+	{
+		//elog(DEBUG1, "opening file %s fd %d", fileName, fd);
+
 		return fd;				/* success! */
+	}
 
 	if (errno == EMFILE || errno == ENFILE)
 	{
@@ -1153,6 +1165,8 @@ LruDelete(File file)
 			   file, VfdCache[file].fileName));
 
 	vfdP = &VfdCache[file];
+
+	pgaio_submit_pending();
 
 	/*
 	 * Close the file.  We aren't expecting this to fail; if it does, better
@@ -1834,6 +1848,8 @@ FileClose(File file)
 
 	if (!FileIsNotOpen(file))
 	{
+		pgaio_submit_pending();
+
 		/* close the file */
 		if (close(vfdP->fd) != 0)
 		{
@@ -2021,6 +2037,30 @@ retry:
 	}
 
 	return returnCode;
+}
+
+#include "storage/aio.h"
+
+struct PgAioInProgress *
+FileStartRead(File file, char *buffer, int amount, off_t offset, int bufid)
+{
+	int			returnCode;
+	Vfd		   *vfdP;
+
+	Assert(FileIsValid(file));
+
+	DO_DB(elog(LOG, "FileRead: %d (%s) " INT64_FORMAT " %d %p",
+			   file, VfdCache[file].fileName,
+			   (int64) offset,
+			   amount, buffer));
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return NULL;
+
+	vfdP = &VfdCache[file];
+
+	return pgaio_start_buffer_read(vfdP->fd, offset, amount, buffer, bufid);
 }
 
 int
@@ -2494,6 +2534,7 @@ FreeDesc(AllocateDesc *desc)
 			result = closedir(desc->desc.dir);
 			break;
 		case AllocateDescRawFD:
+			pgaio_submit_pending();
 			result = close(desc->desc.fd);
 			break;
 		default:
@@ -2561,6 +2602,8 @@ CloseTransientFile(int fd)
 
 	/* Only get here if someone passes us a file not in allocatedDescs */
 	elog(WARNING, "fd passed to CloseTransientFile was not obtained from OpenTransientFile");
+
+	pgaio_submit_pending();
 
 	return close(fd);
 }

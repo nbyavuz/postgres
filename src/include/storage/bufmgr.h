@@ -183,6 +183,10 @@ extern Buffer ReadBufferExtended(Relation reln, ForkNumber forkNum,
 extern Buffer ReadBufferWithoutRelcache(RelFileNode rnode,
 										ForkNumber forkNum, BlockNumber blockNum,
 										ReadBufferMode mode, BufferAccessStrategy strategy);
+struct PgAioInProgress;
+extern struct PgAioInProgress* ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
+											   ReadBufferMode mode, BufferAccessStrategy strategy,
+											   Buffer *buf);
 extern void ReleaseBuffer(Buffer buffer);
 extern void UnlockReleaseBuffer(Buffer buffer);
 extern void MarkBufferDirty(Buffer buffer);

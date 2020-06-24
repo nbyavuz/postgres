@@ -32,6 +32,7 @@
 #include "pg_trace.h"
 #include "pgstat.h"
 #include "postmaster/bgwriter.h"
+#include "storage/aio.h"
 #include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "storage/md.h"
@@ -117,6 +118,7 @@ static MemoryContext MdCxt;		/* context for all MdfdVec objects */
  */
 #define EXTENSION_DONT_CHECK_SIZE	(1 << 4)
 
+#define MD_OPEN_FLAGS O_RDWR | PG_BINARY | O_DIRECT
 
 /* local routines */
 static void mdunlinkfork(RelFileNodeBackend rnode, ForkNumber forkNum,
@@ -201,14 +203,14 @@ mdcreate(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 
 	path = relpath(reln->smgr_rnode, forkNum);
 
-	fd = PathNameOpenFile(path, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
+	fd = PathNameOpenFile(path, MD_OPEN_FLAGS | O_CREAT | O_EXCL);
 
 	if (fd < 0)
 	{
 		int			save_errno = errno;
 
 		if (isRedo)
-			fd = PathNameOpenFile(path, O_RDWR | PG_BINARY);
+			fd = PathNameOpenFile(path, MD_OPEN_FLAGS);
 		if (fd < 0)
 		{
 			/* be sure to report the error reported by create, not open */
@@ -315,7 +317,7 @@ mdunlinkfork(RelFileNodeBackend rnode, ForkNumber forkNum, bool isRedo)
 		/* truncate(2) would be easier here, but Windows hasn't got it */
 		int			fd;
 
-		fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
+		fd = OpenTransientFile(path, MD_OPEN_FLAGS);
 		if (fd >= 0)
 		{
 			int			save_errno;
@@ -460,7 +462,7 @@ mdopenfork(SMgrRelation reln, ForkNumber forknum, int behavior)
 
 	path = relpath(reln->smgr_rnode, forknum);
 
-	fd = PathNameOpenFile(path, O_RDWR | PG_BINARY);
+	fd = PathNameOpenFile(path, MD_OPEN_FLAGS);
 
 	if (fd < 0)
 	{
@@ -657,6 +659,26 @@ mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 							blocknum, FilePathName(v->mdfd_vfd),
 							nbytes, BLCKSZ)));
 	}
+}
+
+/*
+ *	mdread() -- Read the specified block from a relation.
+ */
+PgAioInProgress *
+mdstartread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+			char *buffer, int bufno)
+{
+	off_t		seekpos;
+	MdfdVec    *v;
+
+	v = _mdfd_getseg(reln, forknum, blocknum, false,
+					 EXTENSION_FAIL | EXTENSION_CREATE_RECOVERY);
+
+	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+
+	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
+
+	return FileStartRead(v->mdfd_vfd, buffer, BLCKSZ, seekpos, bufno);
 }
 
 /*
@@ -1120,7 +1142,7 @@ _mdfd_openseg(SMgrRelation reln, ForkNumber forknum, BlockNumber segno,
 	fullpath = _mdfd_segpath(reln, forknum, segno);
 
 	/* open the file */
-	fd = PathNameOpenFile(fullpath, O_RDWR | PG_BINARY | oflags);
+	fd = PathNameOpenFile(fullpath, MD_OPEN_FLAGS | oflags);
 
 	pfree(fullpath);
 
@@ -1324,7 +1346,7 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 		strlcpy(path, p, MAXPGPATH);
 		pfree(p);
 
-		file = PathNameOpenFile(path, O_RDWR | PG_BINARY);
+		file = PathNameOpenFile(path, MD_OPEN_FLAGS);
 		if (file < 0)
 			return -1;
 		need_to_close = true;

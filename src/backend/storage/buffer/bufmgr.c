@@ -43,6 +43,7 @@
 #include "pg_trace.h"
 #include "pgstat.h"
 #include "postmaster/bgwriter.h"
+#include "storage/aio.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
@@ -452,6 +453,9 @@ static Buffer ReadBuffer_common(SMgrRelation reln, char relpersistence,
 								ForkNumber forkNum, BlockNumber blockNum,
 								ReadBufferMode mode, BufferAccessStrategy strategy,
 								bool *hit);
+static BufferDesc *ReadBuffer_start(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
+				 BlockNumber blockNum, ReadBufferMode mode,
+				 BufferAccessStrategy strategy, bool *hit, bool isLocalBuf);
 static bool PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy);
 static void PinBuffer_Locked(BufferDesc *buf);
 static void UnpinBuffer(BufferDesc *buf, bool fixOwner);
@@ -705,106 +709,85 @@ ReadBufferWithoutRelcache(RelFileNode rnode, ForkNumber forkNum,
 							 mode, strategy, &hit);
 }
 
-
-/*
- * ReadBuffer_common -- common logic for all ReadBuffer variants
- *
- * *hit is set to true if the request was satisfied from shared buffer cache.
- */
-static Buffer
-ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
-				  BlockNumber blockNum, ReadBufferMode mode,
-				  BufferAccessStrategy strategy, bool *hit)
+PgAioInProgress*
+ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
+				ReadBufferMode mode, BufferAccessStrategy strategy,
+				Buffer *buf)
 {
 	BufferDesc *bufHdr;
-	Block		bufBlock;
+	bool hit;
+	PgAioInProgress* aio;
+
+	if (mode != RBM_NORMAL || strategy != NULL || blockNum == P_NEW)
+		elog(ERROR, "unsupported");
+
+	/* Open it at the smgr level if not already done */
+	RelationOpenSmgr(reln);
+
+	bufHdr = ReadBuffer_start(reln->rd_smgr, reln->rd_rel->relpersistence, forkNum,
+							  blockNum, mode, strategy, &hit, false);
+	*buf = BufferDescriptorGetBuffer(bufHdr);
+
+	if (hit)
+		return NULL;
+
+	InProgressBuf = NULL;
+
+	aio = smgrstartread(reln->rd_smgr, forkNum, blockNum,
+						BufHdrGetBlock(bufHdr), *buf);
+	Assert(aio != NULL);
+
+	/*
+	 * Decrement local pin, but keep shared. Shared will be released upon
+	 * completion.
+	 */
+	{
+		PrivateRefCountEntry *ref;
+
+		ref = GetPrivateRefCountEntry(*buf, false);
+		Assert(ref != NULL);
+		Assert(ref->refcount > 0);
+
+		ResourceOwnerForgetBuffer(CurrentResourceOwner, *buf);
+		ref->refcount--;
+		ForgetPrivateRefCountEntry(ref);
+	}
+
+	return aio;
+}
+
+static Buffer
+ReadBuffer_extend(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
+				  BlockNumber blockNum, ReadBufferMode mode,
+				  BufferAccessStrategy strategy, bool *hit, bool isLocalBuf)
+{
 	bool		found;
-	bool		isExtend;
-	bool		isLocalBuf = SmgrIsTemp(smgr);
+	BufferDesc *bufHdr;
+	Block		bufBlock;
 
 	*hit = false;
 
 	/* Make sure we will have room to remember the buffer pin */
 	ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
 
-	isExtend = (blockNum == P_NEW);
-
-	TRACE_POSTGRESQL_BUFFER_READ_START(forkNum, blockNum,
-									   smgr->smgr_rnode.node.spcNode,
-									   smgr->smgr_rnode.node.dbNode,
-									   smgr->smgr_rnode.node.relNode,
-									   smgr->smgr_rnode.backend,
-									   isExtend);
-
-	/* Substitute proper block number if caller asked for P_NEW */
-	if (isExtend)
-		blockNum = smgrnblocks(smgr, forkNum);
+	/* Substitute proper block number */
+	blockNum = smgrnblocks(smgr, forkNum);
 
 	if (isLocalBuf)
 	{
 		bufHdr = LocalBufferAlloc(smgr, forkNum, blockNum, &found);
-		if (found)
-			pgBufferUsage.local_blks_hit++;
-		else if (isExtend)
-			pgBufferUsage.local_blks_written++;
-		else if (mode == RBM_NORMAL || mode == RBM_NORMAL_NO_LOG ||
-				 mode == RBM_ZERO_ON_ERROR)
-			pgBufferUsage.local_blks_read++;
+		pgBufferUsage.local_blks_written++;
 	}
 	else
 	{
-		/*
-		 * lookup the buffer.  IO_IN_PROGRESS is set if the requested block is
-		 * not currently in memory.
-		 */
 		bufHdr = BufferAlloc(smgr, relpersistence, forkNum, blockNum,
 							 strategy, &found);
-		if (found)
-			pgBufferUsage.shared_blks_hit++;
-		else if (isExtend)
-			pgBufferUsage.shared_blks_written++;
-		else if (mode == RBM_NORMAL || mode == RBM_NORMAL_NO_LOG ||
-				 mode == RBM_ZERO_ON_ERROR)
-			pgBufferUsage.shared_blks_read++;
+		pgBufferUsage.shared_blks_written++;
 	}
 
-	/* At this point we do NOT hold any locks. */
-
-	/* if it was already in the buffer pool, we're done */
 	if (found)
 	{
-		if (!isExtend)
-		{
-			/* Just need to update stats before we exit */
-			*hit = true;
-			VacuumPageHit++;
-
-			if (VacuumCostActive)
-				VacuumCostBalance += VacuumCostPageHit;
-
-			TRACE_POSTGRESQL_BUFFER_READ_DONE(forkNum, blockNum,
-											  smgr->smgr_rnode.node.spcNode,
-											  smgr->smgr_rnode.node.dbNode,
-											  smgr->smgr_rnode.node.relNode,
-											  smgr->smgr_rnode.backend,
-											  isExtend,
-											  found);
-
-			/*
-			 * In RBM_ZERO_AND_LOCK mode the caller expects the page to be
-			 * locked on return.
-			 */
-			if (!isLocalBuf)
-			{
-				if (mode == RBM_ZERO_AND_LOCK)
-					LWLockAcquire(BufferDescriptorGetContentLock(bufHdr),
-								  LW_EXCLUSIVE);
-				else if (mode == RBM_ZERO_AND_CLEANUP_LOCK)
-					LockBufferForCleanup(BufferDescriptorGetBuffer(bufHdr));
-			}
-
-			return BufferDescriptorGetBuffer(bufHdr);
-		}
+		Block		bufBlock;
 
 		/*
 		 * We get here only in the corner case where we are trying to extend
@@ -857,13 +840,10 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 				UnlockBufHdr(bufHdr, buf_state);
 			} while (!StartBufferIO(bufHdr, true));
 		}
+
 	}
 
 	/*
-	 * if we have gotten to this point, we have allocated a buffer for the
-	 * page but its contents are not yet valid.  IO_IN_PROGRESS is set for it,
-	 * if it's a shared buffer.
-	 *
 	 * Note: if smgrextend fails, we will end up with a buffer that is
 	 * allocated but not marked BM_VALID.  P_NEW will still select the same
 	 * block number (because the relation didn't get any longer on disk) and
@@ -875,67 +855,17 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 
 	bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
 
-	if (isExtend)
-	{
-		/* new buffers are zero-filled */
-		MemSet((char *) bufBlock, 0, BLCKSZ);
-		/* don't set checksum for all-zero page */
-		smgrextend(smgr, forkNum, blockNum, (char *) bufBlock, false);
+	/* new buffers are zero-filled */
+	MemSet((char *) bufBlock, 0, BLCKSZ);
+	/* don't set checksum for all-zero page */
+	smgrextend(smgr, forkNum, blockNum, (char *) bufBlock, false);
 
-		/*
-		 * NB: we're *not* doing a ScheduleBufferTagForWriteback here;
-		 * although we're essentially performing a write. At least on linux
-		 * doing so defeats the 'delayed allocation' mechanism, leading to
-		 * increased file fragmentation.
-		 */
-	}
-	else
-	{
-		/*
-		 * Read in the page, unless the caller intends to overwrite it and
-		 * just wants us to allocate a buffer.
-		 */
-		if (mode == RBM_ZERO_AND_LOCK || mode == RBM_ZERO_AND_CLEANUP_LOCK)
-			MemSet((char *) bufBlock, 0, BLCKSZ);
-		else
-		{
-			instr_time	io_start,
-						io_time;
-
-			if (track_io_timing)
-				INSTR_TIME_SET_CURRENT(io_start);
-
-			smgrread(smgr, forkNum, blockNum, (char *) bufBlock);
-
-			if (track_io_timing)
-			{
-				INSTR_TIME_SET_CURRENT(io_time);
-				INSTR_TIME_SUBTRACT(io_time, io_start);
-				pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
-				INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
-			}
-
-			/* check for garbage data */
-			if (!PageIsVerified((Page) bufBlock, blockNum))
-			{
-				if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
-				{
-					ereport(WARNING,
-							(errcode(ERRCODE_DATA_CORRUPTED),
-							 errmsg("invalid page in block %u of relation %s; zeroing out page",
-									blockNum,
-									relpath(smgr->smgr_rnode, forkNum))));
-					MemSet((char *) bufBlock, 0, BLCKSZ);
-				}
-				else
-					ereport(ERROR,
-							(errcode(ERRCODE_DATA_CORRUPTED),
-							 errmsg("invalid page in block %u of relation %s",
-									blockNum,
-									relpath(smgr->smgr_rnode, forkNum))));
-			}
-		}
-	}
+	/*
+	 * NB: we're *not* doing a ScheduleBufferTagForWriteback here;
+	 * although we're essentially performing a write. At least on linux
+	 * doing so defeats the 'delayed allocation' mechanism, leading to
+	 * increased file fragmentation.
+	 */
 
 	/*
 	 * In RBM_ZERO_AND_LOCK mode, grab the buffer content lock before marking
@@ -951,6 +881,209 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 		!isLocalBuf)
 	{
 		LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_EXCLUSIVE);
+	}
+
+
+	if (isLocalBuf)
+	{
+		/* Only need to adjust flags */
+		uint32		buf_state = pg_atomic_read_u32(&bufHdr->state);
+
+		buf_state |= BM_VALID;
+		pg_atomic_unlocked_write_u32(&bufHdr->state, buf_state);
+	}
+	else
+	{
+		/* Set BM_VALID, terminate IO, and wake up any waiters */
+		TerminateBufferIO(bufHdr, false, BM_VALID);
+	}
+
+	return BufferDescriptorGetBuffer(bufHdr);
+}
+
+static BufferDesc *
+ReadBuffer_start(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
+				 BlockNumber blockNum, ReadBufferMode mode,
+				 BufferAccessStrategy strategy, bool *hit, bool isLocalBuf)
+{
+	BufferDesc *bufHdr;
+	bool		found;
+
+	Assert(blockNum != P_NEW);
+
+	*hit = false;
+
+	/* Make sure we will have room to remember the buffer pin */
+	ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
+
+
+	TRACE_POSTGRESQL_BUFFER_READ_START(forkNum, blockNum,
+									   smgr->smgr_rnode.node.spcNode,
+									   smgr->smgr_rnode.node.dbNode,
+									   smgr->smgr_rnode.node.relNode,
+									   smgr->smgr_rnode.backend,
+									   isExtend);
+
+	if (isLocalBuf)
+	{
+		bufHdr = LocalBufferAlloc(smgr, forkNum, blockNum, &found);
+		if (found)
+			pgBufferUsage.local_blks_hit++;
+		else if (mode == RBM_NORMAL || mode == RBM_NORMAL_NO_LOG ||
+				 mode == RBM_ZERO_ON_ERROR)
+			pgBufferUsage.local_blks_read++;
+	}
+	else
+	{
+		/*
+		 * lookup the buffer.  IO_IN_PROGRESS is set if the requested block is
+		 * not currently in memory.
+		 */
+		bufHdr = BufferAlloc(smgr, relpersistence, forkNum, blockNum,
+							 strategy, &found);
+		if (found)
+			pgBufferUsage.shared_blks_hit++;
+		else if (mode == RBM_NORMAL || mode == RBM_NORMAL_NO_LOG ||
+				 mode == RBM_ZERO_ON_ERROR)
+			pgBufferUsage.shared_blks_read++;
+	}
+
+
+	/* At this point we do NOT hold any locks. */
+
+	/* if it was already in the buffer pool, we're done */
+	if (found)
+	{
+		/* Just need to update stats before we exit */
+		*hit = true;
+		VacuumPageHit++;
+
+		if (VacuumCostActive)
+			VacuumCostBalance += VacuumCostPageHit;
+
+		TRACE_POSTGRESQL_BUFFER_READ_DONE(forkNum, blockNum,
+										  smgr->smgr_rnode.node.spcNode,
+										  smgr->smgr_rnode.node.dbNode,
+										  smgr->smgr_rnode.node.relNode,
+										  smgr->smgr_rnode.backend,
+										  isExtend,
+										  found);
+
+		/*
+		 * In RBM_ZERO_AND_LOCK mode the caller expects the page to be
+		 * locked on return.
+		 */
+		if (!isLocalBuf)
+		{
+			if (mode == RBM_ZERO_AND_LOCK)
+				LWLockAcquire(BufferDescriptorGetContentLock(bufHdr),
+							  LW_EXCLUSIVE);
+			else if (mode == RBM_ZERO_AND_CLEANUP_LOCK)
+				LockBufferForCleanup(BufferDescriptorGetBuffer(bufHdr));
+		}
+
+		return bufHdr;
+	}
+
+	return bufHdr;
+}
+
+/*
+ * ReadBuffer_common -- common logic for all ReadBuffer variants
+ *
+ * *hit is set to true if the request was satisfied from shared buffer cache.
+ */
+static Buffer
+ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
+				  BlockNumber blockNum, ReadBufferMode mode,
+				  BufferAccessStrategy strategy, bool *hit)
+{
+	Block		bufBlock;
+	bool		isLocalBuf = SmgrIsTemp(smgr);
+	BufferDesc *bufHdr;
+
+	if (blockNum == P_NEW)
+		return ReadBuffer_extend(smgr, relpersistence, forkNum,
+								 blockNum, mode, strategy,
+								 hit, isLocalBuf);
+
+
+	bufHdr = ReadBuffer_start(smgr, relpersistence, forkNum,
+							  blockNum, mode, strategy,
+							  hit, isLocalBuf);
+
+	if (*hit)
+		return BufferDescriptorGetBuffer(bufHdr);
+
+	/*
+	 * if we have gotten to this point, we have allocated a buffer for the
+	 * page but its contents are not yet valid.  IO_IN_PROGRESS is set for it,
+	 * if it's a shared buffer.
+	 */
+	Assert(!(pg_atomic_read_u32(&bufHdr->state) & BM_VALID));	/* spinlock not needed */
+
+	bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
+
+	/*
+	 * Read in the page, unless the caller intends to overwrite it and
+	 * just wants us to allocate a buffer.
+	 */
+	if (mode == RBM_ZERO_AND_LOCK || mode == RBM_ZERO_AND_CLEANUP_LOCK)
+	{
+		MemSet((char *) bufBlock, 0, BLCKSZ);
+
+		/*
+		 * In RBM_ZERO_AND_LOCK mode, grab the buffer content lock before marking
+		 * the page as valid, to make sure that no other backend sees the zeroed
+		 * page before the caller has had a chance to initialize it.
+		 *
+		 * Since no-one else can be looking at the page contents yet, there is no
+		 * difference between an exclusive lock and a cleanup-strength lock. (Note
+		 * that we cannot use LockBuffer() or LockBufferForCleanup() here, because
+		 * they assert that the buffer is already valid.)
+		 */
+		if (!isLocalBuf)
+		{
+			LWLockAcquire(BufferDescriptorGetContentLock(bufHdr), LW_EXCLUSIVE);
+		}
+	}
+	else
+	{
+		instr_time	io_start,
+			io_time;
+
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
+
+		smgrread(smgr, forkNum, blockNum, (char *) bufBlock);
+
+		if (track_io_timing)
+		{
+			INSTR_TIME_SET_CURRENT(io_time);
+			INSTR_TIME_SUBTRACT(io_time, io_start);
+			pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
+			INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
+		}
+
+		/* check for garbage data */
+		if (!PageIsVerified((Page) bufBlock, blockNum))
+		{
+			if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
+			{
+				ereport(WARNING,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("invalid page in block %u of relation %s; zeroing out page",
+								blockNum,
+								relpath(smgr->smgr_rnode, forkNum))));
+				MemSet((char *) bufBlock, 0, BLCKSZ);
+			}
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("invalid page in block %u of relation %s",
+								blockNum,
+								relpath(smgr->smgr_rnode, forkNum))));
+		}
 	}
 
 	if (isLocalBuf)
@@ -1018,6 +1151,8 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	BufferDesc *buf;
 	bool		valid;
 	uint32		buf_state;
+
+	Assert(blockNum != P_NEW);
 
 	/* create a tag so we can lookup the buffer */
 	INIT_BUFFERTAG(newTag, smgr->smgr_rnode.node, forkNum, blockNum);
@@ -1819,6 +1954,8 @@ BufferSync(int flags)
 					CHECKPOINT_FLUSH_ALL))))
 		mask |= BM_PERMANENT;
 
+	elog(DEBUG1, "checkpoint looking at buffers");
+
 	/*
 	 * Loop over all buffers, and mark the ones that need to be written with
 	 * BM_CHECKPOINT_NEEDED.  Count them as we go (num_to_scan), so that we
@@ -1874,6 +2011,8 @@ BufferSync(int flags)
 
 	TRACE_POSTGRESQL_BUFFER_SYNC_START(NBuffers, num_to_scan);
 
+	elog(DEBUG1, "checkpoint predicts to write %u buffers", num_to_scan);
+
 	/*
 	 * Sort buffers that need to be written to reduce the likelihood of random
 	 * IO. The sorting is also important for the implementation of balancing
@@ -1885,6 +2024,8 @@ BufferSync(int flags)
 		  ckpt_buforder_comparator);
 
 	num_spaces = 0;
+
+	elog(DEBUG1, "checkpoint done sorting");
 
 	/*
 	 * Allocate progress status for each tablespace with buffers that need to
@@ -1970,6 +2111,9 @@ BufferSync(int flags)
 	}
 
 	binaryheap_build(ts_heap);
+
+	elog(DEBUG1, "checkpoint done heaping");
+
 
 	/*
 	 * Iterate through to-be-checkpointed buffers and write the ones (still)
@@ -4032,6 +4176,8 @@ WaitIO(BufferDesc *buf)
 	{
 		uint32		buf_state;
 
+		pgaio_drain_outstanding();
+
 		/*
 		 * It may not be necessary to acquire the spinlock to check the flag
 		 * here, but since this test is essential for correctness, we'd better
@@ -4152,6 +4298,8 @@ void
 AbortBufferIO(void)
 {
 	BufferDesc *buf = InProgressBuf;
+
+	pgaio_at_abort();
 
 	if (buf)
 	{
@@ -4509,6 +4657,9 @@ IssuePendingWritebacks(WritebackContext *context)
 	}
 
 	context->nr_pending = 0;
+
+	if (i > 0)
+		pgaio_submit_pending();
 }
 
 
