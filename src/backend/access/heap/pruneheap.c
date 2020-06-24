@@ -221,7 +221,7 @@ heap_page_prune(Relation relation, Buffer buffer, TransactionId OldestXmin,
 		ItemId		itemid;
 
 		itemid = PageGetItemId(page, offnum);
-		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid))
+		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid) || !ItemIdHasStorage(itemid))
 			continue;
 
 		__builtin_prefetch((HeapTupleHeader) PageGetItem(page, itemid));
