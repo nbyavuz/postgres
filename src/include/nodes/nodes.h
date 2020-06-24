@@ -282,6 +282,7 @@ typedef enum NodeTag
 	T_AllocSetContext,
 	T_SlabContext,
 	T_GenerationContext,
+	T_AlignedAllocRedirectContext,
 
 	/*
 	 * TAGS FOR VALUE NODES (value.h)
