@@ -345,7 +345,9 @@ typedef struct VacuumScanState
 
 	BlockNumber nblocks_for_skip;
 	BlockNumber blkno;
-	Buffer vmbuffer;
+
+	Buffer vmbuffer_prefetch;
+	Buffer vmbuffer_data;
 } VacuumScanState;
 
 /* A few variables that don't seem worth passing around as parameters */
@@ -758,7 +760,7 @@ vacuum_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t 
 
 			vmskipflags = visibilitymap_get_status(vss->relation,
 												   vss->blkno,
-												   &vss->vmbuffer);
+												   &vss->vmbuffer_prefetch);
 			if (vss->aggressive)
 			{
 				if ((vmskipflags & VISIBILITYMAP_ALL_FROZEN) == 0)
@@ -783,7 +785,9 @@ vacuum_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t 
 			 * know whether it was all-frozen, so we have to recheck; but
 			 * in this case an approximate answer is OK.
 			 */
-			if (vss->aggressive || VM_ALL_FROZEN(vss->relation, vss->blkno, &vss->vmbuffer))
+			if (vss->aggressive || VM_ALL_FROZEN(vss->relation,
+												 vss->blkno,
+												 &vss->vmbuffer_prefetch))
 				vss->vacrelstats->frozenskipped_pages++;
 
 			vacuum_delay_point();
@@ -914,7 +918,8 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 	vss.disable_page_skipping = (params->options & VACOPT_DISABLE_PAGE_SKIPPING) != 0;
 	vss.nblocks = nblocks;
 	vss.blkno = 0;
-	vss.vmbuffer = InvalidBuffer;
+	vss.vmbuffer_prefetch = InvalidBuffer;
+	vss.vmbuffer_data = InvalidBuffer;
 
 	/* see note above about forcing scanning of last page */
 	if (nblocks > 0 && should_attempt_truncation(params, vacrelstats))
@@ -1021,7 +1026,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 
 	while (true)
 	{
-		Buffer		buf = pg_streaming_read_get_next(pgsr);
+		Buffer		buf;
 		BlockNumber blkno;
 		Page		page;
 		OffsetNumber offnum,
@@ -1037,6 +1042,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 		bool		has_dead_tuples;
 		TransactionId visibility_cutoff_xid = InvalidTransactionId;
 
+		buf = pg_streaming_read_get_next(pgsr);
 		if (!BufferIsValid(buf))
 			break;
 
@@ -1049,13 +1055,26 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 								 blkno, InvalidOffsetNumber);
 
 		/*
+		 * Pin the visibility map page in case we need to mark the page
+		 * all-visible.  In most cases this will be very cheap, because we'll
+		 * already have the correct page pinned anyway.  However, it's
+		 * possible that (a) next_unskippable_block is covered by a different
+		 * VM page than the current block or (b) we released our pin and did a
+		 * cycle of index vacuuming.
+		 *
+		 * FIXME: This needs to be updated based on the fact that there's now
+		 * two different pins.
+		 */
+		visibilitymap_pin(onerel, blkno, &vss.vmbuffer_data);
+
+		/*
 		 * Normally, the fact that we can't skip this block must mean that
 		 * it's not all-visible.  But in an aggressive vacuum we know only
 		 * that it's not all-frozen, so it might still be all-visible.
 		 *
 		 * FIXME: deduplicate
 		 */
-		if (aggressive && VM_ALL_VISIBLE(onerel, blkno, &vss.vmbuffer))
+		if (aggressive && VM_ALL_VISIBLE(onerel, blkno, &vss.vmbuffer_data))
 			all_visible_according_to_vm = true;
 
 		vacuum_delay_point();
@@ -1073,10 +1092,16 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 			 * correctness, but we do it anyway to avoid holding the pin
 			 * across a lengthy, unrelated operation.
 			 */
-			if (BufferIsValid(vss.vmbuffer))
+			if (BufferIsValid(vss.vmbuffer_data))
 			{
-				ReleaseBuffer(vss.vmbuffer);
-				vss.vmbuffer = InvalidBuffer;
+				ReleaseBuffer(vss.vmbuffer_data);
+				vss.vmbuffer_data = InvalidBuffer;
+			}
+
+			if (BufferIsValid(vss.vmbuffer_prefetch))
+			{
+				ReleaseBuffer(vss.vmbuffer_prefetch);
+				vss.vmbuffer_prefetch = InvalidBuffer;
 			}
 
 			/* Work on all the indexes, then the heap */
@@ -1105,16 +1130,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 										 PROGRESS_VACUUM_PHASE_SCAN_HEAP);
 		}
 
-		/*
-		 * Pin the visibility map page in case we need to mark the page
-		 * all-visible.  In most cases this will be very cheap, because we'll
-		 * already have the correct page pinned anyway.  However, it's
-		 * possible that (a) next_unskippable_block is covered by a different
-		 * VM page than the current block or (b) we released our pin and did a
-		 * cycle of index vacuuming.
-		 *
-		 */
-		visibilitymap_pin(onerel, blkno, &vss.vmbuffer);
+		visibilitymap_pin(onerel, blkno, &vss.vmbuffer_data);
 
 		/* We need buffer cleanup lock so that we can prune HOT chains. */
 		if (!ConditionalLockBufferForCleanup(buf))
@@ -1247,7 +1263,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 
 				PageSetAllVisible(page);
 				visibilitymap_set(onerel, blkno, buf, InvalidXLogRecPtr,
-								  vss.vmbuffer, InvalidTransactionId,
+								  vss.vmbuffer_data, InvalidTransactionId,
 								  VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN);
 				END_CRIT_SECTION();
 			}
@@ -1546,7 +1562,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 			if (nindexes == 0)
 			{
 				/* Remove tuples from heap if the table has no index */
-				lazy_vacuum_page(onerel, blkno, buf, 0, vacrelstats, &vss.vmbuffer);
+				lazy_vacuum_page(onerel, blkno, buf, 0, vacrelstats, &vss.vmbuffer_data);
 				vacuumed_pages++;
 				has_dead_tuples = false;
 			}
@@ -1612,7 +1628,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 			PageSetAllVisible(page);
 			MarkBufferDirty(buf);
 			visibilitymap_set(onerel, blkno, buf, InvalidXLogRecPtr,
-							  vss.vmbuffer, visibility_cutoff_xid, flags);
+							  vss.vmbuffer_data, visibility_cutoff_xid, flags);
 		}
 
 		/*
@@ -1623,11 +1639,11 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 		 * that something bad has happened.
 		 */
 		else if (all_visible_according_to_vm && !PageIsAllVisible(page)
-				 && VM_ALL_VISIBLE(onerel, blkno, &vss.vmbuffer))
+				 && VM_ALL_VISIBLE(onerel, blkno, &vss.vmbuffer_data))
 		{
 			elog(WARNING, "page is not marked all-visible but visibility map bit is set in relation \"%s\" page %u",
 				 vacrelstats->relname, blkno);
-			visibilitymap_clear(onerel, blkno, vss.vmbuffer,
+			visibilitymap_clear(onerel, blkno, vss.vmbuffer_data,
 								VISIBILITYMAP_VALID_BITS);
 		}
 
@@ -1652,7 +1668,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 				 vacrelstats->relname, blkno);
 			PageClearAllVisible(page);
 			MarkBufferDirty(buf);
-			visibilitymap_clear(onerel, blkno, vss.vmbuffer,
+			visibilitymap_clear(onerel, blkno, vss.vmbuffer_data,
 								VISIBILITYMAP_VALID_BITS);
 		}
 
@@ -1662,7 +1678,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 		 * all_visible is true, so we must check both.
 		 */
 		else if (all_visible_according_to_vm && all_visible && all_frozen &&
-				 !VM_ALL_FROZEN(onerel, blkno, &vss.vmbuffer))
+				 !VM_ALL_FROZEN(onerel, blkno, &vss.vmbuffer_data))
 		{
 			/*
 			 * We can pass InvalidTransactionId as the cutoff XID here,
@@ -1670,7 +1686,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 			 * conflicts.
 			 */
 			visibilitymap_set(onerel, blkno, buf, InvalidXLogRecPtr,
-							  vss.vmbuffer, InvalidTransactionId,
+							  vss.vmbuffer_data, InvalidTransactionId,
 							  VISIBILITYMAP_ALL_FROZEN);
 		}
 
@@ -1721,10 +1737,16 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 	/*
 	 * Release any remaining pin on visibility map page.
 	 */
-	if (BufferIsValid(vss.vmbuffer))
+	if (BufferIsValid(vss.vmbuffer_data))
 	{
-		ReleaseBuffer(vss.vmbuffer);
-		vss.vmbuffer = InvalidBuffer;
+		ReleaseBuffer(vss.vmbuffer_data);
+		vss.vmbuffer_data = InvalidBuffer;
+	}
+
+	if (BufferIsValid(vss.vmbuffer_prefetch))
+	{
+		ReleaseBuffer(vss.vmbuffer_prefetch);
+		vss.vmbuffer_prefetch = InvalidBuffer;
 	}
 
 	/* If any tuples need to be deleted, perform final vacuum cycle */
