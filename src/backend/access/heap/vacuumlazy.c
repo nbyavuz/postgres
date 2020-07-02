@@ -752,6 +752,8 @@ vacuum_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t 
 	if (vss->blkno == vss->nblocks)
 		return PGSR_NEXT_END;
 
+	Assert(vss->blkno < vss->nblocks);
+
 	if (!vss->disable_page_skipping)
 	{
 		while (vss->blkno < vss->nblocks_for_skip)
@@ -798,12 +800,15 @@ vacuum_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t 
 	if (vss->blkno == vss->nblocks)
 		return PGSR_NEXT_END;
 
+	Assert(vss->blkno < vss->nblocks);
+
 	buf = ReadBufferAsync(vss->relation, MAIN_FORKNUM, vss->blkno++,
 						  RBM_NORMAL, vac_strategy, &already_valid,
 						  &aio);
 
-	*read_private = (uintptr_t) buf;
+	BufferCheckOneLocalPin(buf);
 
+	*read_private = (uintptr_t) buf;
 
 	if (already_valid)
 		return PGSR_NEXT_NO_IO;
@@ -929,8 +934,8 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 		int iodepth = Max(Min(128, NBuffers / 128), 1);
 
 		pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) &vss,
-									  vacuum_pgsr_next_single,
-									  vacuum_pgsr_release);
+									   vacuum_pgsr_next_single,
+									   vacuum_pgsr_release);
 	}
 
 	/*
@@ -1045,6 +1050,8 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 		buf = pg_streaming_read_get_next(pgsr);
 		if (!BufferIsValid(buf))
 			break;
+
+		BufferCheckOneLocalPin(buf);
 
 		// FIXME: should have more efficient way to determine this.
 		blkno = BufferGetBlockNumber(buf);
