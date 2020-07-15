@@ -331,7 +331,7 @@ necessary.
 Note that while it is certain that two concurrent executions of
 GetSnapshotData will compute the same xmin for their own snapshots, there is
 no such guarantee for the horizons computed by ComputeXidHorizons.  This is
-because we allow XID-less transactions to clear their MyPgXact->xmin
+because we allow XID-less transactions to clear their MyProc->xmin
 asynchronously (without taking ProcArrayLock), so one execution might see
 what had been the oldest xmin, and another not.  This is OK since the
 thresholds need only be a valid lower bound.  As noted above, we are already
