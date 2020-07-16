@@ -14,6 +14,7 @@
 #ifndef AIO_H
 #define AIO_H
 
+#include "access/xlogdefs.h"
 #include "common/relpath.h"
 #include "storage/block.h"
 #include "storage/buf.h"
@@ -32,6 +33,22 @@ typedef struct PgAioIoRef
 	uint32 generation_lower;
 } PgAioIoRef;
 
+/* Enum for aio_type GUC. */
+enum AioType {
+	AIOTYPE_WORKER = 0,
+	AIOTYPE_LIBURING,
+};
+
+/* We'll default to bgworker. */
+#define DEFAULT_AIO_TYPE AIOTYPE_WORKER
+
+/* GUCs */
+extern int aio_type;
+extern int aio_workers;
+extern int aio_worker_queue_size;
+
+extern int MyAioWorkerId;
+
 /* initialization */
 extern void pgaio_postmaster_init(void);
 extern Size AioShmemSize(void);
@@ -41,6 +58,8 @@ extern void pgaio_postmaster_child_init(void);
 
 extern void pgaio_at_abort(void);
 extern void pgaio_at_commit(void);
+
+extern bool IsAioWorker(void);
 
 /*
  * XXX: Add flags to the initiation functions that govern:
@@ -123,7 +142,8 @@ extern void pgaio_io_start_write_wal(PgAioInProgress *io, int fd,
 extern void pgaio_io_start_write_generic(PgAioInProgress *io, int fd,
 										 uint64 offset, uint32 nbytes,
 										 char *bufdata, bool no_reorder);
-extern void pgaio_io_start_fsync_wal(PgAioInProgress *io, int fd, bool barrier,
+extern void pgaio_io_start_fsync_wal(PgAioInProgress *io, int fd,
+									 bool barrier,
 									 bool datasync_only, uint32 sync_no);
 
 extern void pgaio_io_retry(PgAioInProgress *io);
@@ -142,6 +162,7 @@ extern PgAioBounceBuffer *pgaio_bounce_buffer_get(void);
 extern void pgaio_bounce_buffer_release(PgAioBounceBuffer *bb);
 extern char *pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb);
 
+extern void AioWorkerMain(void);
 
 /*
  * Helpers. In aio_util.c.

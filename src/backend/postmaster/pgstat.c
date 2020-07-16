@@ -54,6 +54,7 @@
 #include "postmaster/postmaster.h"
 #include "replication/slot.h"
 #include "replication/walsender.h"
+#include "storage/aio.h"
 #include "storage/backendid.h"
 #include "storage/dsm.h"
 #include "storage/fd.h"
@@ -110,13 +111,12 @@
 /* ----------
  * Total number of backends including auxiliary
  *
- * We reserve a slot for each possible BackendId, plus one for each
- * possible auxiliary process type.  (This scheme assumes there is not
- * more than one of any auxiliary process type at a time.) MaxBackends
- * includes autovacuum workers and background workers as well.
+ * We reserve a slot for each possible BackendId, plus one for each possible
+ * auxiliary process type, except for AIO workers that get a plurality.
+ * MaxBackends includes autovacuum workers and background workers as well.
  * ----------
  */
-#define NumBackendStatSlots (MaxBackends + NUM_AUXPROCTYPES)
+#define NumBackendStatSlots (MaxBackends + MAX_AIO_WORKERS + NUM_AUXPROCTYPES)
 
 
 /* ----------
@@ -3054,11 +3054,13 @@ pgstat_initialize(void)
 		 * Assign the MyBEEntry for an auxiliary process.  Since it doesn't
 		 * have a BackendId, the slot is statically allocated based on the
 		 * auxiliary process type (MyAuxProcType).  Backends use slots indexed
-		 * in the range from 1 to MaxBackends (inclusive), so we use
-		 * MaxBackends + AuxBackendType + 1 as the index of the slot for an
-		 * auxiliary process.
+		 * in the range from 1 to MaxBackends (inclusive), so we use slots
+		 * beyond that.
 		 */
-		MyBEEntry = &BackendStatusArray[MaxBackends + MyAuxProcType];
+		if (AmAioWorkerProcess())
+			MyBEEntry = &BackendStatusArray[MaxBackends + MyAioWorkerId];
+		else
+			MyBEEntry = &BackendStatusArray[MaxBackends + MAX_AIO_WORKERS + MyAuxProcType];
 	}
 
 	/*
@@ -3815,6 +3817,9 @@ pgstat_get_wait_activity(WaitEventActivity w)
 
 	switch (w)
 	{
+		case WAIT_EVENT_AIO_WORKER_MAIN:
+			event_name = "AioWorkerMain";
+			break;
 		case WAIT_EVENT_ARCHIVER_MAIN:
 			event_name = "ArchiverMain";
 			break;

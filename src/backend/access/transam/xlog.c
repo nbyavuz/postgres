@@ -610,6 +610,7 @@ typedef struct XLBlockPageStatus
 
 typedef struct XLogIO
 {
+	TimeLineID tli;
 	XLogRecPtr upto; /* covers LSNs <= */
 	bool in_progress;
 	PgAioIoRef aio_ref;
@@ -1988,6 +1989,7 @@ WALInsertLockUpdateInsertingAt(XLogRecPtr insertingAt)
 						insertingAt);
 }
 
+#if UNUSED
 static bool
 XLogInsertionsKnownFinished(XLogRecPtr upto)
 {
@@ -2003,6 +2005,7 @@ XLogInsertionsKnownFinished(XLogRecPtr upto)
 	else
 		return false;
 }
+#endif
 
 /*
  * Wait for any WAL insertions < upto to finish.
@@ -2970,6 +2973,7 @@ XLogIOQueueAdd(XLogIOQueue *queue, PgAioInProgress *aio, XLogRecPtr upto)
 	Assert(!pgaio_io_ref_valid(&io->aio_ref));
 	Assert(io->upto == 0);
 
+	io->tli = ThisTimeLineID;
 	io->upto = upto;
 	io->in_progress = true;
 	pgaio_io_ref(aio, &io->aio_ref);
@@ -5033,6 +5037,52 @@ XLogFileOpen(XLogSegNo segno)
 				 errmsg("could not open file \"%s\": %m", path)));
 
 	return fd;
+}
+
+static int
+XLogFileForIO(XLogIO *xio)
+{
+	/*
+	 * XXX It's a bit ugly that we use the global timeline ID here
+	 */
+
+	if (xio->tli != ThisTimeLineID ||
+		openLogFile < 0 ||
+		!XLByteInPrevSeg(xio->upto, openLogSegNo, wal_segment_size))
+	{
+		if (openLogFile >= 0)
+			XLogFileClose();
+
+		if (xio->tli != ThisTimeLineID)
+		{
+			Assert(AmAioWorkerProcess());
+			ThisTimeLineID = xio->tli;
+		}
+
+		XLByteToPrevSeg(xio->upto, openLogSegNo, wal_segment_size);
+		openLogFile = XLogFileOpen(openLogSegNo);
+		ReserveExternalFD();
+	}
+
+	return openLogFile;
+}
+
+/*
+ * Return a file descriptor given a write number.
+ */
+int
+XLogFileForWriteNo(uint32 write_no)
+{
+	return XLogFileForIO(&XLogCtl->writes->ios[write_no]);
+}
+
+/*
+ * Return a file descriptor given a flush number.
+ */
+int
+XLogFileForFlushNo(uint32 flush_no)
+{
+	return XLogFileForIO(&XLogCtl->flushes->ios[flush_no]);
 }
 
 /*

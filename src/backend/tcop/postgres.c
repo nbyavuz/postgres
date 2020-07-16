@@ -3098,6 +3098,8 @@ ProcessInterrupts(void)
 			 */
 			proc_exit(1);
 		}
+		else if (IsAioWorker())
+			proc_exit(0);
 		else if (RecoveryConflictPending && RecoveryConflictRetryable)
 		{
 			pgstat_report_recovery_conflict(RecoveryConflictReason);
@@ -3718,6 +3720,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 				break;
 
 			case 'T':
+			case 'Z':
 				/* ignored for consistency with the postmaster */
 				break;
 

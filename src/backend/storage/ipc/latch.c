@@ -1080,7 +1080,7 @@ WaitEventAdjustEpoll(WaitEventSet *set, WaitEvent *event, int action)
 	rc = epoll_ctl(set->epoll_fd, action, event->fd, &epoll_ev);
 
 	if (rc < 0)
-		ereport(ERROR,
+		ereport(PANIC,
 				(errcode_for_socket_access(),
 		/* translator: %s is a syscall name, such as "poll()" */
 				 errmsg("%s failed: %m",
