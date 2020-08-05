@@ -2572,9 +2572,9 @@ WalWriteLockAcquireFor(XLogRecPtr wait_write_pos, XLogRecPtr wait_flush_pos)
 			SpinLockRelease(&XLogCtl->wait_lock);
 			in_list = true;
 		}
-		else if (!IsUnderPostmaster)
+		else if (IsUnderPostmaster)
 		{
-			(void) WaitLatch(MyLatch, WL_LATCH_SET, -1,
+			(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, -1,
 							 wait_write_pos > cur_write_pos ? WAIT_EVENT_WAL_WAIT_WRITE :
 							 WAIT_EVENT_WAL_WAIT_FLUSH);
 			ResetLatch(MyLatch);
@@ -2583,11 +2583,11 @@ WalWriteLockAcquireFor(XLogRecPtr wait_write_pos, XLogRecPtr wait_flush_pos)
 
 	if (in_list && (
 		MyProc->xlog_write_wait != InvalidXLogRecPtr ||
-		MyProc->xlog_write_wait != InvalidXLogRecPtr))
+		MyProc->xlog_flush_wait != InvalidXLogRecPtr))
 	{
 		SpinLockAcquire(&XLogCtl->wait_lock);
 		if (MyProc->xlog_write_wait != InvalidXLogRecPtr ||
-			MyProc->xlog_write_wait != InvalidXLogRecPtr)
+			MyProc->xlog_flush_wait != InvalidXLogRecPtr)
 		{
 			proclist_delete(&XLogCtl->wait_list, MyProc->pgprocno, xlogFlushLink);
 		}
