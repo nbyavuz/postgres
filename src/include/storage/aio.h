@@ -20,6 +20,8 @@
 #include "storage/relfilenode.h"
 #include "lib/ilist.h"
 
+#include "access/xlogdefs.h"
+
 typedef struct PgAioInProgress PgAioInProgress;
 typedef struct PgAioBounceBuffer PgAioBounceBuffer;
 
@@ -93,7 +95,11 @@ extern void pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag 
 										char *bufdata, int buffno);
 extern void pgaio_io_start_write_wal(PgAioInProgress *io, int fd,
 									 uint32 offset, uint32 nbytes,
-									 char *bufdata, bool no_reorder);
+									 char *bufdata, bool no_reorder,
+									 XLogRecPtr start);
+extern void pgaio_io_start_write_generic(PgAioInProgress *io, int fd,
+										 uint32 offset, uint32 nbytes,
+										 char *bufdata, bool no_reorder);
 
 extern void pgaio_io_retry(PgAioInProgress *io);
 extern void pgaio_submit_pending(bool drain);

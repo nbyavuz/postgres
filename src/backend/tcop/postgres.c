@@ -1630,7 +1630,7 @@ exec_bind_message(StringInfo input_message)
 	portal_name = pq_getmsgstring(input_message);
 	stmt_name = pq_getmsgstring(input_message);
 
-	ereport(DEBUG2,
+	ereport(DEBUG5,
 			(errmsg("bind %s to %s",
 					*portal_name ? portal_name : "<unnamed>",
 					*stmt_name ? stmt_name : "<unnamed>")));
@@ -3866,6 +3866,7 @@ PostgresMain(int argc, char *argv[],
 		pqsignal(SIGPIPE, SIG_IGN);
 		pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 		pqsignal(SIGUSR2, SIG_IGN);
+		pqsignal(SIGURG, latch_sigurg_handler);
 		pqsignal(SIGFPE, FloatExceptionHandler);
 
 		/*

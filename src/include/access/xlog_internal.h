@@ -315,6 +315,9 @@ extern XLogRecPtr RequestXLogSwitch(bool mark_unimportant);
 
 extern void GetOldestRestartPoint(XLogRecPtr *oldrecptr, TimeLineID *oldtli);
 
+struct PgAioInProgress;
+extern void XLogWriteComplete(struct PgAioInProgress *aio, XLogRecPtr start, uint32 nbytes);
+
 /*
  * Exported for the functions in timeline.c and xlogarchive.c.  Only valid
  * in the startup process.

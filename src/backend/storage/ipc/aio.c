@@ -30,6 +30,7 @@
 #include "nodes/execnodes.h"
 #include "nodes/memnodes.h"
 #include "pgstat.h"
+#include "access/xlog_internal.h"
 #include "storage/aio.h"
 #include "storage/buf.h"
 #include "storage/buf_internals.h"
@@ -69,8 +70,10 @@ typedef enum PgAioAction
 	PGAIO_FLUSH_RANGE,
 
 	PGAIO_READ_BUFFER,
+	/* FIXME: unify */
 	PGAIO_WRITE_BUFFER,
 	PGAIO_WRITE_WAL,
+	PGAIO_WRITE_GENERIC,
 } PgAioAction;
 
 typedef enum PgAioInProgressFlags
@@ -227,7 +230,18 @@ struct PgAioInProgress
 			uint32 already_done;
 			char *bufdata;
 			bool no_reorder;
+			XLogRecPtr start;
 		} write_wal;
+
+		struct
+		{
+			int fd;
+			uint32 offset;
+			uint32 nbytes;
+			uint32 already_done;
+			char *bufdata;
+			bool no_reorder;
+		} write_generic;
 	} d;
 };
 
@@ -394,6 +408,7 @@ static bool pgaio_complete_flush_range(PgAioInProgress *io);
 static bool pgaio_complete_read_buffer(PgAioInProgress *io);
 static bool pgaio_complete_write_buffer(PgAioInProgress *io);
 static bool pgaio_complete_write_wal(PgAioInProgress *io);
+static bool pgaio_complete_write_generic(PgAioInProgress *io);
 
 
 static MemoryContext aio_retry_context;
@@ -413,6 +428,7 @@ static const PgAioCompletedCB completion_callbacks[] =
 	[PGAIO_READ_BUFFER] = pgaio_complete_read_buffer,
 	[PGAIO_WRITE_BUFFER] = pgaio_complete_write_buffer,
 	[PGAIO_WRITE_WAL] = pgaio_complete_write_wal,
+	[PGAIO_WRITE_GENERIC] = pgaio_complete_write_generic,
 };
 
 
@@ -765,6 +781,25 @@ pgaio_uncombine_one(PgAioInProgress *io)
 				}
 				break;
 
+			case PGAIO_WRITE_GENERIC:
+				Assert(cur->d.write_generic.already_done == 0);
+
+				if (orig_result < 0)
+				{
+					cur->result = io->result;
+				}
+				else if (running_result >= cur->d.write_generic.nbytes)
+				{
+					cur->result = cur->d.write_generic.nbytes;
+					running_result -= cur->result;
+				}
+				else if (running_result < cur->d.write_generic.nbytes)
+				{
+					cur->result = running_result;
+					running_result = 0;
+				}
+				break;
+
 			default:
 				elog(PANIC, "merge for %d not supported yet", cur->type);
 		}
@@ -1102,6 +1137,7 @@ pgaio_can_be_combined(PgAioInProgress *last, PgAioInProgress *cur)
 			return true;
 
 		case PGAIO_WRITE_WAL:
+			return false;
 			if (last->d.write_wal.fd != cur->d.write_wal.fd)
 				return false;
 			if ((last->d.write_wal.offset + last->d.write_wal.nbytes) != cur->d.write_wal.offset)
@@ -1109,6 +1145,17 @@ pgaio_can_be_combined(PgAioInProgress *last, PgAioInProgress *cur)
 			if (last->d.write_wal.already_done != 0 || cur->d.write_wal.already_done != 0)
 				return false;
 			if (last->d.write_wal.no_reorder || cur->d.write_wal.no_reorder)
+				return false;
+			return true;
+
+		case PGAIO_WRITE_GENERIC:
+			if (last->d.write_generic.fd != cur->d.write_generic.fd)
+				return false;
+			if ((last->d.write_generic.offset + last->d.write_generic.nbytes) != cur->d.write_generic.offset)
+				return false;
+			if (last->d.write_generic.already_done != 0 || cur->d.write_generic.already_done != 0)
+				return false;
+			if (last->d.write_generic.no_reorder || cur->d.write_generic.no_reorder)
 				return false;
 			return true;
 	}
@@ -1119,9 +1166,12 @@ pgaio_can_be_combined(PgAioInProgress *last, PgAioInProgress *cur)
 static void
 pgaio_io_merge(PgAioInProgress *into, PgAioInProgress *tomerge)
 {
-	elog(DEBUG3, "merging %zu to %zu",
-		 tomerge - aio_ctl->in_progress_io,
-		 into - aio_ctl->in_progress_io);
+	ereport(DEBUG3,
+			errmsg("merging %zu to %zu",
+				   tomerge - aio_ctl->in_progress_io,
+				   into - aio_ctl->in_progress_io),
+			errhidestmt(true),
+			errhidecontext(true));
 
 	into->merge_with = tomerge;
 	into->flags |= PGAIOIP_MERGE;
@@ -1175,7 +1225,10 @@ pgaio_combine_pending(void)
 
 		if (combined >= PGAIO_MAX_COMBINE)
 		{
-			elog(DEBUG3, "max combine at %d", combined);
+			ereport(DEBUG3,
+					errmsg("max combine at %d", combined),
+					errhidestmt(true),
+					errhidecontext(true));
 			last = NULL;
 			combined = 1;
 		}
@@ -1230,7 +1283,10 @@ pgaio_submit_pending(bool drain)
 	my_aio->issued_total_count += total_submitted;
 
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "submitted %d (orig %d)", total_submitted, orig_total);
+	ereport(DEBUG3,
+			errmsg("submitted %d (orig %d)", total_submitted, orig_total),
+			errhidestmt(true),
+			errhidecontext(true));
 #endif
 
 	RESUME_INTERRUPTS();
@@ -1336,8 +1392,11 @@ pgaio_io_wait_internal(PgAioInProgress *io, bool holding_reference, bool in_erro
 	PgAioContext *context;
 
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "waiting for %zu",
-		 io - aio_ctl->in_progress_io);
+	ereport(DEBUG3,
+			errmsg("waiting for %zu",
+				   io - aio_ctl->in_progress_io),
+			errhidestmt(true),
+			errhidecontext(true));
 #endif
 
 	init_flags = *(volatile PgAioIPFlags*) &io->flags;
@@ -1365,7 +1424,7 @@ again:
 		 * wait for the callback to have been called. But if the backend might
 		 * want to recycle the IO, that's not good enough.
 		 */
-		done_flags |= PGAIOIP_SHARED_CALLBACK_CALLED;
+		//done_flags |= PGAIOIP_SHARED_CALLBACK_CALLED;
 
 		/* possible due to racyness */
 		done_flags |= PGAIOIP_UNUSED;
@@ -1922,6 +1981,8 @@ pgaio_io_action_string(PgAioAction a)
 			return "write_buffer";
 		case PGAIO_WRITE_WAL:
 			return "write_wal";
+		case PGAIO_WRITE_GENERIC:
+			return "write_generic";
 	}
 
 	pg_unreachable();
@@ -2000,6 +2061,15 @@ pgaio_io_action_desc(PgAioInProgress *io, StringInfo s)
 							 io->d.write_wal.already_done,
 							 io->d.write_wal.bufdata,
 							 io->d.write_wal.no_reorder);
+			break;
+		case PGAIO_WRITE_GENERIC:
+			appendStringInfo(s, "fd: %d, offset: %d, nbytes: %d, already_done: %d, bufdata: %p, no-reorder: %d",
+							 io->d.write_generic.fd,
+							 (int) io->d.write_generic.offset,
+							 (int) io->d.write_generic.nbytes,
+							 io->d.write_generic.already_done,
+							 io->d.write_generic.bufdata,
+							 io->d.write_generic.no_reorder);
 			break;
 		default:
 			break;
@@ -2368,7 +2438,8 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint32 wait_eve
 	{
 		ConditionVariablePrepareToSleep(&io->cv);
 		ResetLatch(MyLatch);
-		PG_SETMASK(&BlockSig);
+		//PG_SETMASK(&BlockSig);
+		MyLatch->maybe_sleeping = true;
 	}
 
 	/*
@@ -2380,8 +2451,12 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint32 wait_eve
 	{
 
 #ifdef PGAIO_VERBOSE
-		elog(DEBUG3, "sys enter %zu, ready %d ",
-			 io - aio_ctl->in_progress_io, io_uring_cq_ready(&context->io_uring_ring));
+		ereport(DEBUG3,
+				errmsg("sys enter %zu, ready %d ",
+					   io - aio_ctl->in_progress_io,
+					   io_uring_cq_ready(&context->io_uring_ring)),
+				errhidestmt(true),
+				errhidecontext(true));
 #endif
 
 		/* wait for one io to be completed */
@@ -2389,7 +2464,7 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint32 wait_eve
 		pgstat_report_wait_start(wait_event_info);
 		ret = __sys_io_uring_enter(context->io_uring_ring.ring_fd,
 								   0, 1,
-								   IORING_ENTER_GETEVENTS, &UnBlockSig);
+								   IORING_ENTER_GETEVENTS, &SleepSig);
 		pgstat_report_wait_end();
 
 		if (ret < 0 && errno == EINTR)
@@ -2402,8 +2477,10 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint32 wait_eve
 
 	if (IsUnderPostmaster)
 	{
-		PG_SETMASK(&UnBlockSig);
+		//PG_SETMASK(&UnBlockSig);
 		ConditionVariableCancelSleep();
+		Assert(MyLatch->maybe_sleeping);
+		MyLatch->maybe_sleeping = false;
 	}
 }
 
@@ -2532,6 +2609,36 @@ prep_write_wal_iov(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec *
 }
 
 static int
+prep_write_generic_iov(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec *iovs)
+{
+	PgAioInProgress *cur;
+	uint32 offset = io->d.write_generic.offset;
+	int	niov = 0;
+
+	cur = io;
+	while (cur)
+	{
+		offset += cur->d.write_generic.already_done;
+		iovs[niov].iov_base = cur->d.write_generic.bufdata + cur->d.write_generic.already_done;
+		iovs[niov].iov_len = cur->d.write_generic.nbytes - cur->d.write_generic.already_done;
+
+		niov++;
+
+		if (niov > 0)
+			cur->flags |= PGAIOIP_INFLIGHT;
+
+		cur = cur->merge_with;
+	}
+
+	io_uring_prep_writev(sqe,
+						io->d.write_generic.fd,
+						iovs,
+						niov,
+						offset);
+	return niov;
+}
+
+static int
 pgaio_uring_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec **iovs)
 {
 	int submitted = 1;
@@ -2571,6 +2678,13 @@ pgaio_uring_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iov
 			submitted = prep_write_wal_iov(io, sqe, *iovs);
 			*iovs += submitted;
 			if (io->d.write_wal.no_reorder)
+				sqe->flags = IOSQE_IO_DRAIN;
+			break;
+
+		case PGAIO_WRITE_GENERIC:
+			submitted = prep_write_generic_iov(io, sqe, *iovs);
+			*iovs += submitted;
+			if (io->d.write_generic.no_reorder)
 				sqe->flags = IOSQE_IO_DRAIN;
 			break;
 
@@ -2642,14 +2756,17 @@ pgaio_io_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd,
 	pgaio_finish_io(io);
 
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "start_buffer_read %zu: "
-		 "fd %d, off: %llu, bytes: %llu, buff: %d, data %p",
-		 io - aio_ctl->in_progress_io,
-		 fd,
-		 (unsigned long long) offset,
-		 (unsigned long long) nbytes,
-		 buffno,
-		 bufdata);
+	ereport(DEBUG3,
+			errmsg("start_read_buffer %zu: "
+				   "fd %d, off: %llu, bytes: %llu, buff: %d, data %p",
+				   io - aio_ctl->in_progress_io,
+				   fd,
+				   (unsigned long long) offset,
+				   (unsigned long long) nbytes,
+				   buffno,
+				   bufdata),
+		 errhidestmt(true),
+		 errhidecontext(true));
 #endif
 }
 
@@ -2669,19 +2786,22 @@ pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd
 	pgaio_finish_io(io);
 
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "start_buffer_write %zu: "
-		 "fd %d, off: %llu, bytes: %llu, buff: %d, data %p",
-		 io - aio_ctl->in_progress_io,
-		 fd,
-		 (unsigned long long) offset,
-		 (unsigned long long) nbytes,
-		 buffno,
-		 bufdata);
+	ereport(DEBUG3,
+			errmsg("start_write_buffer %zu: "
+				   "fd %d, off: %llu, bytes: %llu, buff: %d, data %p",
+				   io - aio_ctl->in_progress_io,
+				   fd,
+				   (unsigned long long) offset,
+				   (unsigned long long) nbytes,
+				   buffno,
+				   bufdata),
+			errhidestmt(true),
+			errhidecontext(true));
 #endif
 }
 
 void
-pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, bool no_reorder)
+pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, bool no_reorder, XLogRecPtr start)
 {
 	pgaio_prepare_io(io, PGAIO_WRITE_WAL);
 
@@ -2691,18 +2811,51 @@ pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbyt
 	io->d.write_wal.nbytes = nbytes;
 	io->d.write_wal.bufdata = bufdata;
 	io->d.write_wal.already_done = 0;
+	io->d.write_wal.start = start;
 
 	pgaio_finish_io(io);
 
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "start_write_wal %zu:"
-		 "fd %d, off: %llu, bytes: %llu, no_reorder: %d, data %p",
-		 io - aio_ctl->in_progress_io,
-		 fd,
-		 (unsigned long long) offset,
-		 (unsigned long long) nbytes,
-		 no_reorder,
-		 bufdata);
+	ereport(DEBUG3,
+			errmsg("start_write_wal %zu:"
+				   "fd %d, off: %llu, bytes: %llu, no_reorder: %d, data %p",
+				   io - aio_ctl->in_progress_io,
+				   fd,
+				   (unsigned long long) offset,
+				   (unsigned long long) nbytes,
+				   no_reorder,
+				   bufdata),
+			errhidestmt(true),
+			errhidecontext(true));
+#endif
+}
+
+void
+pgaio_io_start_write_generic(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, bool no_reorder)
+{
+	pgaio_prepare_io(io, PGAIO_WRITE_GENERIC);
+
+	io->d.write_generic.fd = fd;
+	io->d.write_generic.no_reorder = no_reorder;
+	io->d.write_generic.offset = offset;
+	io->d.write_generic.nbytes = nbytes;
+	io->d.write_generic.bufdata = bufdata;
+	io->d.write_generic.already_done = 0;
+
+	pgaio_finish_io(io);
+
+#ifdef PGAIO_VERBOSE
+	ereport(DEBUG3,
+			errmsg("start_write_generic %zu:"
+				   "fd %d, off: %llu, bytes: %llu, no_reorder: %d, data %p",
+				   io - aio_ctl->in_progress_io,
+				   fd,
+				   (unsigned long long) offset,
+				   (unsigned long long) nbytes,
+				   no_reorder,
+				   bufdata),
+			errhidestmt(true),
+			errhidecontext(true));
 #endif
 }
 
@@ -2802,12 +2955,14 @@ pgaio_complete_read_buffer(PgAioInProgress *io)
 #endif
 
 #ifdef PGAIO_VERBOSE
-	elog(io->flags & PGAIOIP_RETRY ? DEBUG1 : DEBUG3,
-		 "completed read_buffer: %zu, %d/%s, buf %d",
-		 io - aio_ctl->in_progress_io,
-		 io->result,
-		 io->result < 0 ? strerror(-io->result) : "ok",
-		 io->d.read_buffer.buf);
+	ereport(io->flags & PGAIOIP_RETRY ? DEBUG1 : DEBUG3,
+			errmsg("completed read_buffer: %zu, %d/%s, buf %d",
+				   io - aio_ctl->in_progress_io,
+				   io->result,
+				   io->result < 0 ? strerror(-io->result) : "ok",
+				   io->d.read_buffer.buf),
+			errhidestmt(true),
+			errhidecontext(true));
 #endif
 
 	if (io->result != (io->d.read_buffer.nbytes - io->d.read_buffer.already_done))
@@ -2897,11 +3052,14 @@ pgaio_complete_write_buffer(PgAioInProgress *io)
 	bool		done;
 
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "completed write_buffer: %zu, %d/%s, buf %d",
-		 io - aio_ctl->in_progress_io,
-		 io->result,
-		 io->result < 0 ? strerror(-io->result) : "ok",
-		 io->d.write_buffer.buf);
+	ereport(DEBUG3,
+			errmsg("completed write_buffer: %zu, %d/%s, buf %d",
+				   io - aio_ctl->in_progress_io,
+				   io->result,
+				   io->result < 0 ? strerror(-io->result) : "ok",
+				   io->d.write_buffer.buf),
+			errhidestmt(true),
+			errhidecontext(true));
 #endif
 
 	if (io->result != (io->d.write_buffer.nbytes - io->d.write_buffer.already_done))
@@ -2988,10 +3146,13 @@ static bool
 pgaio_complete_write_wal(PgAioInProgress *io)
 {
 #ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "completed write_wal: %zu, %d/%s",
-		 io - aio_ctl->in_progress_io,
-		 io->result,
-		 io->result < 0 ? strerror(-io->result) : "ok");
+	ereport(DEBUG3,
+			errmsg("completed write_wal: %zu, %d/%s",
+				   io - aio_ctl->in_progress_io,
+				   io->result,
+				   io->result < 0 ? strerror(-io->result) : "ok"),
+			errhidestmt(true),
+			errhidecontext(true));
 #endif
 
 	if (io->result < 0)
@@ -3015,7 +3176,46 @@ pgaio_complete_write_wal(PgAioInProgress *io)
 						io->result, (io->d.write_wal.nbytes - io->d.write_wal.already_done))));
 	}
 
-	/* FIXME: update xlog.c state */
+	XLogWriteComplete(io, io->d.write_wal.start, io->d.write_wal.nbytes);
+
+	return true;
+}
+
+
+static bool
+pgaio_complete_write_generic(PgAioInProgress *io)
+{
+#ifdef PGAIO_VERBOSE
+	ereport(DEBUG3,
+			errmsg("completed write_generic: %zu, %d/%s",
+				   io - aio_ctl->in_progress_io,
+				   io->result,
+				   io->result < 0 ? strerror(-io->result) : "ok"),
+			errhidestmt(true),
+			errhidecontext(true));
+#endif
+
+	if (io->result < 0)
+	{
+		if (io->result == EAGAIN || io->result == EINTR)
+		{
+			elog(WARNING, "need to implement retries");
+		}
+
+		ereport(PANIC,
+				(errcode_for_file_access(),
+				 errmsg("could not write to log file: %s",
+						strerror(-io->result))));
+	}
+	else if (io->result != (io->d.write_generic.nbytes - io->d.write_generic.already_done))
+	{
+		/* FIXME: implement retries for short writes */
+		/* FIXME: not WAL */
+		ereport(PANIC,
+				(errcode_for_file_access(),
+				 errmsg("could not write to log file: wrote only %d of %d bytes",
+						io->result, (io->d.write_generic.nbytes - io->d.write_generic.already_done))));
+	}
 
 	return true;
 }
