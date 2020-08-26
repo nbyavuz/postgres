@@ -54,6 +54,4 @@ XactTruncationLock					44
 WrapLimitsVacuumLock				46
 NotifyQueueTailLock					47
 SharedAIOCtlLock					48
-SharedAIOSubmissionLock					49
-SharedAIOCompletionLock					50
-WALSyncLock						51
+WALSyncLock						49
