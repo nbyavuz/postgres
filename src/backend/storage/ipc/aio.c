@@ -1,14 +1,14 @@
 /*
- *
- * Should-be state:
- *
- * - PG IOs acquired using dedicated lock
- * - PG IOs get queued in local submission queues
- * - PG IOs converted into uring IOs, submitted to shared ring, under
- *   submission lock
- * - uring completions are reaped under completion lock, PG IOs extracted,
- *   uring IOs are recycled
- * - PG IO completions are run
+ * Big picture changes:
+ * - backend local recycleable IOs
+ * - merging of IOs when submitting individual IOs, not when submitting all pending IOs
+ * - reorganization of shared callback system, so there's an underlying
+ *   "write" operation that's used both by WAL, generic, ...  writes.
+ * - Consider not exposing PgAioInProgress* at all, instead expose a PgAioReference { uint32 io; uint64 generation; }
+ *   which would make it a lot less problematic to immediate reuse IOs.
+ * - Shrink size of PgAioInProgress
+ * - refcount bounc buffers / redesign
+ * - get rid of the current backpressure logic
  */
 #include "postgres.h"
 
