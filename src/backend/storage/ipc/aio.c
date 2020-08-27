@@ -3357,8 +3357,16 @@ pg_stat_get_aios(PG_FUNCTION_ARGS)
 
 		values[ 3] = Int32GetDatum(io->ring);
 
-		owner_pid = ProcGlobal->allProcs[io->owner_id].pid;
-		values[ 4] = Int32GetDatum(owner_pid);
+		owner_id = io->owner_id;
+		if (owner_id != INVALID_PGPROCNO)
+		{
+			owner_pid = ProcGlobal->allProcs[io->owner_id].pid;
+			values[ 4] = Int32GetDatum(owner_pid);
+		}
+		else
+		{
+			nulls[ 4] = true;
+		}
 
 		values[ 5] = Int64GetDatum(io->generation);
 
