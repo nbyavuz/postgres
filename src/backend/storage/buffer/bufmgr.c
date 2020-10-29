@@ -4586,7 +4586,7 @@ TestForOldSnapshot_impl(Snapshot snapshot, Relation relation)
 bool
 CheckBuffer(SMgrRelation smgr, ForkNumber forknum, BlockNumber blkno)
 {
-	char		buffer[BLCKSZ];
+	PGAlignedBlock buffer;
 	BufferTag	buf_tag;		/* identity of requested block */
 	uint32		buf_hash;		/* hash value for buf_tag */
 	LWLock	   *partLock;		/* buffer partition lock for the buffer */
@@ -4619,21 +4619,18 @@ CheckBuffer(SMgrRelation smgr, ForkNumber forknum, BlockNumber blkno)
 		 */
 		bufdesc = GetBufferDescriptor(buf_id);
 
-		LWLockAcquire(BufferDescriptorGetIOLock(bufdesc), LW_SHARED);
 		buf_state = LockBufHdr(bufdesc);
 		UnlockBufHdr(bufdesc, buf_state);
 
 		/* If the page is dirty or invalid, skip it */
 		if ((buf_state & BM_DIRTY) != 0 || (buf_state & BM_TAG_VALID) == 0)
 		{
-			LWLockRelease(BufferDescriptorGetIOLock(bufdesc));
 			LWLockRelease(partLock);
 			return true;
 		}
 
 		/* Read the buffer from disk, with the I/O lock still held */
-		smgrread(smgr, forknum, blkno, buffer);
-		LWLockRelease(BufferDescriptorGetIOLock(bufdesc));
+		smgrread(smgr, forknum, blkno, buffer.data);
 	}
 	else
 	{
@@ -4641,11 +4638,11 @@ CheckBuffer(SMgrRelation smgr, ForkNumber forknum, BlockNumber blkno)
 		 * Simply read the buffer.  There's no risk of modification on it as
 		 * we are holding the buffer pool partition mapping lock.
 		 */
-		smgrread(smgr, forknum, blkno, buffer);
+		smgrread(smgr, forknum, blkno, buffer.data);
 	}
 
 	/* buffer lookup done, so now do its check */
 	LWLockRelease(partLock);
 
-	return PageIsVerifiedExtended(buffer, blkno, PIV_REPORT_STAT);
+	return PageIsVerifiedExtended(buffer.data, blkno, PIV_REPORT_STAT);
 }
