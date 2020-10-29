@@ -96,7 +96,7 @@ extern void pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag 
 extern void pgaio_io_start_write_wal(PgAioInProgress *io, int fd,
 									 uint32 offset, uint32 nbytes,
 									 char *bufdata, bool no_reorder,
-									 XLogRecPtr start);
+									 uint32 write_no);
 extern void pgaio_io_start_write_generic(PgAioInProgress *io, int fd,
 										 uint32 offset, uint32 nbytes,
 										 char *bufdata, bool no_reorder);

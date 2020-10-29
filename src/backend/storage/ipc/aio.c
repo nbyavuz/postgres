@@ -230,7 +230,7 @@ struct PgAioInProgress
 			uint32 already_done;
 			char *bufdata;
 			bool no_reorder;
-			XLogRecPtr start;
+			uint32 write_no;
 		} write_wal;
 
 		struct
@@ -1463,7 +1463,7 @@ again:
 		 * wait for the callback to have been called. But if the backend might
 		 * want to recycle the IO, that's not good enough.
 		 */
-		//done_flags |= PGAIOIP_SHARED_CALLBACK_CALLED;
+		done_flags |= PGAIOIP_SHARED_CALLBACK_CALLED;
 
 		/* possible due to racyness */
 		done_flags |= PGAIOIP_UNUSED;
@@ -2840,7 +2840,7 @@ pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd
 }
 
 void
-pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, bool no_reorder, XLogRecPtr start)
+pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, bool no_reorder, uint32 write_no)
 {
 	pgaio_prepare_io(io, PGAIO_WRITE_WAL);
 
@@ -2850,7 +2850,7 @@ pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbyt
 	io->d.write_wal.nbytes = nbytes;
 	io->d.write_wal.bufdata = bufdata;
 	io->d.write_wal.already_done = 0;
-	io->d.write_wal.start = start;
+	io->d.write_wal.write_no = write_no;
 
 	pgaio_finish_io(io);
 
@@ -3215,7 +3215,7 @@ pgaio_complete_write_wal(PgAioInProgress *io)
 						io->result, (io->d.write_wal.nbytes - io->d.write_wal.already_done))));
 	}
 
-	XLogWriteComplete(io, io->d.write_wal.start, io->d.write_wal.nbytes);
+	XLogWriteComplete(io, io->d.write_wal.write_no);
 
 	return true;
 }
@@ -3379,6 +3379,7 @@ pg_stat_get_aios(PG_FUNCTION_ARGS)
 		PgAioInProgress *io = &aio_ctl->in_progress_io[i];
 		Datum		values[PG_STAT_GET_AIOS_COLS];
 		bool		nulls[PG_STAT_GET_AIOS_COLS];
+		uint32		owner_id;
 		int			owner_pid;
 		PgAioInProgressFlags flags = io->flags;
 

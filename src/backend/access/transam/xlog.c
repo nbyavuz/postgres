@@ -603,9 +603,31 @@ typedef struct XLogCtlInsert
 typedef struct XLBlockPageStatus
 {
 	XLogRecPtr lsn;		/* 1st byte ptr-s + XLOG_BLCKSZ */
+	uint32 io;
+} XLBlockPageStatus;
+
+typedef struct XLogIO
+{
+	XLogRecPtr upto; /* covers LSNs <= */
 	bool in_progress;
 	PgAioInProgress *aio;
-} XLBlockPageStatus;
+} XLogIO;
+
+/*
+ * ios[(head - 1) % num_ios] contains head element
+ * ios[tail % num_ios] contains tail element
+ *
+ * therefore the queue is empty if head == tail and full if tail + 1 == head.
+ *
+ * This is done so both full and empty queues can be represented well.
+ */
+typedef struct XLogIOQueue
+{
+	uint16 num_ios;
+	uint16 tail;
+	uint16 next;
+	XLogIO ios[];
+} XLogIOQueue;
 
 /*
  * Total shared-memory state for XLOG.
@@ -637,10 +659,8 @@ typedef struct XLogCtlData
 	 */
 	XLogwrtResult LogwrtResult;
 
-	pg_atomic_uint64 write_pos;
-	pg_atomic_uint64 flush_pos;
-	proclist_head wait_list;
-	slock_t wait_lock;
+	XLogIOQueue *writes;
+	XLogIOQueue *flushes;
 
 	/*
 	 * Latest initialized page in the cache (last byte position + 1).
@@ -923,7 +943,7 @@ static XLogRecPtr XLogGetReplicationSlotMinimumLSN(void);
 
 static void AdvanceXLInsertBuffer(XLogRecPtr upto, bool opportunistic);
 static bool XLogCheckpointNeeded(XLogSegNo new_segno);
-static void XLogWrite(XLogwrtRqst WriteRqst, bool flexible);
+static bool XLogWrite(XLogwrtRqst WriteRqst, bool flexible);
 static bool InstallXLogFileSegment(XLogSegNo *segno, char *tmppath,
 								   bool find_free, XLogSegNo max_segno,
 								   bool use_lock);
@@ -989,9 +1009,6 @@ static void WALInsertLockAcquire(void);
 static void WALInsertLockAcquireExclusive(void);
 static void WALInsertLockRelease(void);
 static void WALInsertLockUpdateInsertingAt(XLogRecPtr insertingAt);
-
-static bool WalWriteLockAcquireFor(XLogRecPtr wait_write_pos, XLogRecPtr wait_flush_pos);
-static void WalWriteLockRelease(void);
 
 /*
  * Insert an XLOG record represented by an already-constructed chain of data
@@ -2245,52 +2262,16 @@ AdvanceXLInsertBuffer(XLogRecPtr upto, bool opportunistic)
 					Assert(XLogInsertionsKnownFinished(OldPageRqstPtr));
 				}
 
-#if 0
-				LWLockAcquire(WALWriteLock, LW_EXCLUSIVE);
-
-				LogwrtResult = XLogCtl->LogwrtResult;
-				if (LogwrtResult.WriteDone >= OldPageRqstPtr)
-				{
-					/* OK, someone wrote it already */
-					LWLockRelease(WALWriteLock);
-				}
-				else
-				{
-					/* Have to write it ourselves */
-					TRACE_POSTGRESQL_WAL_BUFFER_WRITE_DIRTY_START();
-					WriteRqst.WriteInit = 0;
-					WriteRqst.WriteDone = OldPageRqstPtr;
-					WriteRqst.FlushInit = 0;
-					WriteRqst.FlushDone = 0;
-					XLogWrite(WriteRqst, false);
-					LWLockRelease(WALWriteLock);
-					WalStats.m_wal_buffers_full++;
-					TRACE_POSTGRESQL_WAL_BUFFER_WRITE_DIRTY_DONE();
-				}
-
-#else
-				if (WalWriteLockAcquireFor(OldPageRqstPtr, InvalidXLogRecPtr))
-				{
-					LogwrtResult = XLogCtl->LogwrtResult;
-
-					if (LogwrtResult.WriteDone >= OldPageRqstPtr)
-					{
-						/* OK, someone wrote it already */
-					}
-					else
-					{
-						/* Have to write it ourselves */
-						TRACE_POSTGRESQL_WAL_BUFFER_WRITE_DIRTY_START();
-						WriteRqst.WriteInit = 0;
-						WriteRqst.WriteDone = OldPageRqstPtr;
-						WriteRqst.FlushInit = 0;
-						WriteRqst.FlushDone = 0;
-						XLogWrite(WriteRqst, false);
-						TRACE_POSTGRESQL_WAL_BUFFER_WRITE_DIRTY_DONE();
-					}
-					WalWriteLockRelease();
-				}
-#endif
+				/* Have to write it ourselves */
+				// FIXME: trace event wrong
+				TRACE_POSTGRESQL_WAL_BUFFER_WRITE_DIRTY_START();
+				WriteRqst.WriteInit = 0;
+				WriteRqst.WriteDone = OldPageRqstPtr;
+				WriteRqst.FlushInit = 0;
+				WriteRqst.FlushDone = 0;
+				XLogWrite(WriteRqst, false);
+				WalStats.m_wal_buffers_full++;
+				TRACE_POSTGRESQL_WAL_BUFFER_WRITE_DIRTY_DONE();
 
 				/* Re-acquire WALBufMappingLock and retry */
 				LWLockAcquire(WALBufMappingLock, LW_EXCLUSIVE);
@@ -2493,271 +2474,196 @@ XLogCheckpointNeeded(XLogSegNo new_segno)
 }
 
 static void
-UpdateXLogWriteProgress(XLogRecPtr write_pos, XLogRecPtr flush_pos)
+XLogIOQueueCheck(XLogIOQueue *queue)
 {
-	proclist_mutable_iter iter;
-	int wake_procnos[128];
-	int wake_num = 0;
-
-	pg_atomic_write_u64(&XLogCtl->write_pos, write_pos);
-	pg_atomic_write_u64(&XLogCtl->flush_pos, flush_pos);
+#if 1
+	XLogRecPtr upto = 0;
 
 	Assert(LWLockHeldByMe(WALWriteLock));
 
-	ereport(DEBUG2,
-			errmsg("updating progress to write pos %X/%X, flush pos %X/%X",
-				   (uint32) (write_pos >> 32),
-				   (uint32) write_pos,
-				   (uint32) (flush_pos >> 32),
-				   (uint32) flush_pos),
-			errhidestmt(true),
-			errhidecontext(true));
-
-release_more:
-	SpinLockAcquire(&XLogCtl->wait_lock);
-
-	proclist_foreach_modify(iter, &XLogCtl->wait_list, xlogFlushLink)
+	for (uint16 cur = queue->tail; cur != queue->next; cur++)
 	{
-		PGPROC	   *waiter = GetPGProcByNumber(iter.cur);
+		XLogIO *curio = &queue->ios[cur % queue->num_ios];
 
-		Assert(waiter->xlog_write_wait ||
-			   waiter->xlog_flush_wait);
-
-		if (write_pos >= waiter->xlog_write_wait &&
-			flush_pos >= waiter->xlog_flush_wait)
-		{
-			waiter->xlog_write_wait = InvalidXLogRecPtr;
-			waiter->xlog_flush_wait = InvalidXLogRecPtr;
-
-			proclist_delete(&XLogCtl->wait_list, iter.cur, xlogFlushLink);
-
-			wake_procnos[wake_num++] = iter.cur;
-		}
-
-		if (wake_num == lengthof(wake_procnos))
-			break;
+		Assert(curio->upto != 0);
+		Assert(upto < curio->upto);
+		upto = curio->upto;
 	}
-
-	SpinLockRelease(&XLogCtl->wait_lock);
-
-	for (int i = 0; i < wake_num; i++)
-	{
-		PGPROC	   *waiter = GetPGProcByNumber(wake_procnos[i]);
-
-		SetLatch(&waiter->procLatch);
-	}
-
-	if (wake_num == lengthof(wake_procnos))
-		goto release_more;
-}
-
-static bool
-WalWriteLockAcquireFor(XLogRecPtr wait_write_pos, XLogRecPtr wait_flush_pos)
-{
-	bool acquired_lock = false;
-	XLogRecPtr cur_write_pos;
-	XLogRecPtr cur_flush_pos;
-	bool in_list = false;
-
-	/* can be sure to be woken up now if another process flushes */
-	while (true)
-	{
-		cur_write_pos = pg_atomic_read_u64(&XLogCtl->write_pos);
-		cur_flush_pos = pg_atomic_read_u64(&XLogCtl->flush_pos);
-
-		if (wait_write_pos <= cur_write_pos &&
-			wait_flush_pos <= cur_flush_pos)
-		{
-			break;
-		}
-
-		if (MyProc->xlog_write_wait == InvalidXLogRecPtr &&
-			MyProc->xlog_flush_wait == InvalidXLogRecPtr)
-		{
-			in_list = false;
-		}
-
-		if (LWLockConditionalAcquire(WALWriteLock, LW_EXCLUSIVE))
-		{
-			acquired_lock = true;
-			break;
-		}
-
-		if (!in_list)
-		{
-			SpinLockAcquire(&XLogCtl->wait_lock);
-			MyProc->xlog_write_wait = wait_write_pos;
-			MyProc->xlog_flush_wait = wait_flush_pos;
-			proclist_push_tail(&XLogCtl->wait_list, MyProc->pgprocno, xlogFlushLink);
-			SpinLockRelease(&XLogCtl->wait_lock);
-			in_list = true;
-		}
-		else if (IsUnderPostmaster)
-		{
-			(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, -1,
-							 wait_write_pos > cur_write_pos ? WAIT_EVENT_WAL_WAIT_WRITE :
-							 WAIT_EVENT_WAL_WAIT_FLUSH);
-			ResetLatch(MyLatch);
-		}
-		else
-		{
-			/* XXX: hopefully unreachable? */
-		}
-	}
-
-	if (in_list && (
-		MyProc->xlog_write_wait != InvalidXLogRecPtr ||
-		MyProc->xlog_flush_wait != InvalidXLogRecPtr))
-	{
-		SpinLockAcquire(&XLogCtl->wait_lock);
-		if (MyProc->xlog_write_wait != InvalidXLogRecPtr ||
-			MyProc->xlog_flush_wait != InvalidXLogRecPtr)
-		{
-			proclist_delete(&XLogCtl->wait_list, MyProc->pgprocno, xlogFlushLink);
-		}
-		SpinLockRelease(&XLogCtl->wait_lock);
-	}
-
-#if 0
-	SpinLockAcquire(&XLogCtl->info_lck);
-	LogwrtResult = XLogCtl->LogwrtResult;
-	SpinLockRelease(&XLogCtl->info_lck);
-#else
-	LogwrtResult.WriteInit = cur_write_pos;
-	LogwrtResult.WriteDone = cur_write_pos;
-	LogwrtResult.FlushInit = cur_flush_pos;
-	LogwrtResult.FlushDone = cur_flush_pos;
 #endif
-	return acquired_lock;
-}
-
-static void
-WalWriteLockRelease(void)
-{
-	proclist_mutable_iter iter;
-	int wake_procnos[128];
-	int wake_num = 0;
-	bool woke_writer = false;
-	XLogRecPtr cur_write_pos = pg_atomic_read_u64(&XLogCtl->write_pos);
-	XLogRecPtr cur_flush_pos = pg_atomic_read_u64(&XLogCtl->flush_pos);
-
-	Assert(LWLockHeldByMe(WALWriteLock));
-
-	//elog(LOG, "releasing write lock");
-	LWLockRelease(WALWriteLock);
-
-release_more:
-	SpinLockAcquire(&XLogCtl->wait_lock);
-
-	proclist_foreach_modify(iter, &XLogCtl->wait_list, xlogFlushLink)
-	{
-		PGPROC	   *waiter = GetPGProcByNumber(iter.cur);
-		bool		wake = true;
-
-		Assert(waiter->xlog_write_wait ||
-			   waiter->xlog_flush_wait);
-
-		if (cur_write_pos >= waiter->xlog_write_wait &&
-			cur_flush_pos >= waiter->xlog_flush_wait)
-		{
-			wake = true;
-		}
-		else if (!woke_writer)
-		{
-			wake = true;
-			woke_writer = true;
-		}
-
-		if (wake)
-		{
-			waiter->xlog_write_wait = InvalidXLogRecPtr;
-			waiter->xlog_flush_wait = InvalidXLogRecPtr;
-
-			proclist_delete(&XLogCtl->wait_list, iter.cur, xlogFlushLink);
-			wake_procnos[wake_num++] = iter.cur;
-		}
-
-		if (wake_num == lengthof(wake_procnos))
-			break;
-	}
-
-	SpinLockRelease(&XLogCtl->wait_lock);
-
-	for (int i = 0; i < wake_num; i++)
-	{
-		PGPROC	   *waiter = GetPGProcByNumber(wake_procnos[i]);
-
-		SetLatch(&waiter->procLatch);
-	}
-
-	if (wake_num == lengthof(wake_procnos))
-		goto release_more;
 }
 
 void
-XLogWriteComplete(PgAioInProgress *aio, XLogRecPtr start, uint32 nbytes)
+XLogWriteComplete(PgAioInProgress *aio, uint32 write_no)
 {
-	int firstidx = XLogRecPtrToBufIdx(start - (start % XLOG_BLCKSZ));
-	int lastidx = XLogRecPtrToBufIdx(start - (start % XLOG_BLCKSZ) + nbytes - 1);
-	int curridx;
+	XLogIOQueue *writes = XLogCtl->writes;
+	XLogIO *io;
 
-	for (curridx = firstidx; ; curridx = NextBufIdx(curridx))
-	{
-		XLBlockPageStatus *currblock = &XLogCtl->xlblocks[curridx];
+	Assert(write_no < writes->num_ios);
+	io = &writes->ios[write_no];
 
-		Assert(currblock->in_progress);
-		Assert(currblock->aio == aio);
-
-		currblock->in_progress = false;
-		currblock->aio = NULL;
-
-		if (curridx == lastidx)
-			break;
-	}
-
+	Assert(io->in_progress);
+	io->in_progress = false;
 	pg_write_barrier();
+	io->aio = NULL;
 }
 
+
 static void
-XLogWaitIO(XLogRecPtr cur, XLogRecPtr to)
+XLogWriteQueueUpdate(bool has_exclusive)
 {
-	int curridx = XLogRecPtrToBufIdx(cur);
-	int lastidx = XLogRecPtrToBufIdx(to);
+	XLogIOQueue *writes = XLogCtl->writes;
+	XLogRecPtr upto = 0;
 
-	for (; ; curridx = NextBufIdx(curridx))
+	Assert(LWLockHeldByMe(WALWriteLock));
+
+	for (uint16 cur = writes->tail; cur != writes->next; cur++)
 	{
-		XLBlockPageStatus *currblock = &XLogCtl->xlblocks[curridx];
-		PgAioInProgress *aio = currblock->aio;
+		XLogIO *curio = &writes->ios[cur % writes->num_ios];
 
-		pg_read_barrier();
+		if (curio->in_progress)
+			break;
 
-		if (currblock->in_progress)
+		Assert(upto < curio->upto);
+		upto = curio->upto;
+
+		if (has_exclusive)
 		{
-			Assert(aio);
-			pgaio_io_wait(aio, false);
-			pg_read_barrier();
-			Assert(!currblock->in_progress);
+			elog(DEBUG3, "updating write queue tail from %d to %d, lsn %X/%X",
+				 writes->tail, cur + 1,
+				 (uint32)(upto << 32), (uint32) upto);
+			Assert(curio->upto != 0);
+			curio->upto = 0;
+
+			writes->tail = cur + 1;
+		}
+	}
+
+	if (upto != 0)
+	{
+		SpinLockAcquire(&XLogCtl->info_lck);
+
+		Assert(!has_exclusive ||
+			   upto <= XLogCtl->LogwrtResult.WriteInit);
+		Assert(!has_exclusive ||
+			   upto >= XLogCtl->LogwrtResult.WriteDone);
+
+		if (upto > XLogCtl->LogwrtResult.WriteDone)
+			XLogCtl->LogwrtResult.WriteDone = upto;
+
+		if (sync_method == SYNC_METHOD_OPEN ||
+			sync_method == SYNC_METHOD_OPEN_DSYNC)
+		{
+			Assert(!has_exclusive ||
+				   upto <= XLogCtl->LogwrtResult.FlushInit);
+			Assert(!has_exclusive ||
+				   upto >= XLogCtl->LogwrtResult.FlushDone);
+
+			if (upto > XLogCtl->LogwrtResult.FlushDone)
+				XLogCtl->LogwrtResult.FlushDone = upto;
 		}
 
-		if (curridx == lastidx)
-			break;
+		LogwrtResult = XLogCtl->LogwrtResult;
+		SpinLockRelease(&XLogCtl->info_lck);
 	}
+	else if (!has_exclusive)
+	{
+		SpinLockAcquire(&XLogCtl->info_lck);
+		LogwrtResult = XLogCtl->LogwrtResult;
+		SpinLockRelease(&XLogCtl->info_lck);
+	}
+
+	XLogIOQueueCheck(XLogCtl->writes);
+}
+
+static bool
+XLogIOQueueWaitFor(XLogIOQueue *queue, XLogRecPtr lsn, bool has_exclusive)
+{
+	PgAioInProgress *aios[128];
+	uint32 waitcount = 0;
+
+	Assert(LWLockHeldByMe(WALWriteLock));
+
+	for (uint16 cur = queue->tail; cur != queue->next; cur++)
+	{
+		XLogIO *curio = &queue->ios[cur % queue->num_ios];
+		PgAioInProgress *aio;
+
+		Assert(curio->upto != 0);
+
+		aio = curio->aio;
+		pg_read_barrier();
+
+		if (curio->in_progress)
+		{
+			aios[waitcount++] = aio;
+		}
+		else
+		{
+			//elog(LOG, "not in progress");
+		}
+
+		if (lsn < curio->upto)
+		{
+			//elog(LOG, "break too large: %d", cur);
+			break;
+		}
+	}
+
+	if (waitcount == 0)
+	{
+		//elog(LOG, "no waits");
+		XLogWriteQueueUpdate(has_exclusive);
+		return false;
+	}
+
+	LWLockRelease(WALWriteLock);
+
+	//elog(LOG, "waiting for %d", waitcount);
+	for (int i = 0; i < waitcount; i++)
+		pgaio_io_wait(aios[i], false);
+
+	return true;
 }
 
 /*
- * Write and/or fsync the log at least as far as WriteRqst indicates.
- *
- * If flexible == true, we don't have to write as far as WriteRqst, but
- * may stop at any convenient boundary (such as a cache or logfile boundary).
- * This option allows us to avoid uselessly issuing multiple writes when a
- * single one would do.
- *
- * Must be called with WALWriteLock held. WaitXLogInsertionsToFinish(WriteRqst)
- * must be called before grabbing the lock, to make sure the data is ready to
- * write.
+ * Expects WALWriteLock to be held. If IO needs to be waited for first,
+ * WALWriteLock is released and true is returned after waiting. false is
+ * returned otherwise.
  */
-static void
-XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
+static bool
+XLogIOQueueEnsureOne(XLogIOQueue *queue)
+{
+	Assert(LWLockHeldByMeInMode(WALWriteLock, LW_EXCLUSIVE));
+
+	Assert((uint16)(queue->next - queue->tail) <= queue->num_ios);
+
+	if ((uint16)(queue->next - queue->tail) == queue->num_ios)
+	{
+		XLogIO *io = &queue->ios[queue->tail % queue->num_ios];
+		PgAioInProgress *aio = io->aio;
+
+		pg_read_barrier();
+		elog(DEBUG3, "queue full, checking whether to wait: %d",
+			 queue->tail % queue->num_ios);
+
+		if (io->in_progress)
+		{
+			LWLockRelease(WALWriteLock);
+
+			elog(DEBUG3, "waiting for full queue to empty");
+			pgaio_io_wait(aio, false);
+
+			return true;
+		}
+	}
+
+	XLogWriteQueueUpdate(true);
+
+	return false;
+}
+
+static bool
+XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
 {
 	bool		ispartialpage;
 	bool		last_iteration;
@@ -2767,51 +2673,11 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 	int			npages;
 	int			startidx;
 	uint32		startoffset;
-	PgAioInProgress *aio = NULL;
 //#define TOO_VERBOSE
 #ifdef TOO_VERBOSE
 	int			lastpartialidx;
 #endif
 	XLogRecPtr startwrite;
-
-	/* We should always be inside a critical section here */
-	Assert(CritSectionCount > 0);
-
-	Assert(XLogInsertionsKnownFinished(WriteRqst.WriteDone));
-
-	/*
-	 * Update local LogwrtResult (caller probably did this already, but...)
-	 */
-	LogwrtResult = XLogCtl->LogwrtResult;
-
-	if (WriteRqst.WriteInit < WriteRqst.WriteDone)
-		WriteRqst.WriteInit = WriteRqst.WriteDone;
-
-	if (WriteRqst.FlushInit < WriteRqst.FlushDone)
-		WriteRqst.FlushInit = WriteRqst.FlushDone;
-
-	/* need to complete all writes before flushing them */
-	if (WriteRqst.FlushInit < WriteRqst.WriteDone)
-		WriteRqst.FlushInit = WriteRqst.WriteDone;
-
-#if 0
-	ereport(DEBUG1,
-			errmsg("xlog write cur/target: "
-				   "WriteInit: %X/%X->%X/%X "
-				   "WriteDone: %X/%X->%X/%X "
-				   "FlushInit: %X/%X->%X/%X "
-				   "FlushDone: %X/%X->%X/%X ",
-				   (uint32) (WriteRqst.WriteInit >> 32), (uint32) (WriteRqst.WriteInit),
-				   (uint32) (LogwrtResult.WriteInit >> 32), (uint32) (LogwrtResult.WriteInit),
-				   (uint32) (WriteRqst.WriteDone >> 32), (uint32) (WriteRqst.WriteDone),
-				   (uint32) (LogwrtResult.WriteDone >> 32), (uint32) (LogwrtResult.WriteDone),
-				   (uint32) (WriteRqst.FlushInit >> 32), (uint32) (WriteRqst.FlushInit),
-				   (uint32) (LogwrtResult.FlushInit >> 32), (uint32) (LogwrtResult.FlushInit),
-				   (uint32) (WriteRqst.FlushDone >> 32), (uint32) (WriteRqst.FlushDone),
-				   (uint32) (LogwrtResult.FlushDone >> 32), (uint32) (LogwrtResult.FlushDone)),
-			errhidestmt(true),
-			errhidecontext(true));
-#endif
 
 	/*
 	 * Since successive pages in the xlog cache are consecutively allocated,
@@ -2844,8 +2710,8 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 		 * if we're passed a bogus WriteRqst.Write that is past the end of the
 		 * last page that's been initialized by AdvanceXLInsertBuffer.
 		 */
-		XLBlockPageStatus *currblock = &XLogCtl->xlblocks[curridx];
-		XLogRecPtr	PageEndPtr = currblock->lsn;
+		XLogRecPtr	PageEndPtr = XLogCtl->xlblocks[curridx].lsn;
+		XLogRecPtr write_upto;
 		bool large_enough_write;
 
 		if (LogwrtResult.WriteInit >= PageEndPtr)
@@ -2854,12 +2720,37 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 				 (uint32) LogwrtResult.WriteInit,
 				 (uint32) (PageEndPtr >> 32), (uint32) PageEndPtr);
 
-		/* Advance LogwrtResult.Write to end of current buffer page */
 		ispartialpage = WriteRqst.WriteInit < PageEndPtr;
+
 		if (ispartialpage)
-			LogwrtResult.WriteInit = WriteRqst.WriteInit;
+		{
+			XLogRecPtr newinsertpos = (XLogRecPtr)
+				pg_atomic_read_u64(&XLogCtl->Insert.knownCompletedUpto);
+
+			if (WriteRqst.WriteInit < newinsertpos)
+			{
+				WriteRqst.WriteInit = newinsertpos;
+				ispartialpage = WriteRqst.WriteInit < PageEndPtr;
+				//elog(LOG, "last ditch 1, new partial %d", ispartialpage);
+			}
+
+			if (ispartialpage)
+			{
+				newinsertpos = WaitXLogInsertionsToFinish(newinsertpos);
+				if (WriteRqst.WriteInit < newinsertpos)
+				{
+					WriteRqst.WriteInit = newinsertpos;
+					ispartialpage = WriteRqst.WriteInit < PageEndPtr;
+					//elog(LOG, "last ditch 2, new partial %d", ispartialpage);
+				}
+			}
+
+		}
+
+		if (ispartialpage)
+			write_upto = WriteRqst.WriteInit;
 		else
-			LogwrtResult.WriteInit = PageEndPtr;
+			write_upto = PageEndPtr;
 
 		if (!XLByteInPrevSeg(PageEndPtr, openLogSegNo, wal_segment_size))
 		{
@@ -2893,36 +2784,16 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 			startidx = curridx;
 			startwrite = PageEndPtr - XLOG_BLCKSZ;
 			startoffset = XLogSegmentOffset(startwrite,	wal_segment_size);
+
+			/*
+			 * Make sure there's space in the write queue.
+			 */
+			if (XLogIOQueueEnsureOne(XLogCtl->writes))
+			{
+				goto write_out_wait;
+			}
 		}
 		npages++;
-
-		/*
-		 * If the previous write was a partial page write, we need to wait for
-		 * it to finish. Otherwise the writes may get reordered (in the OS, or
-		 * in the device). Which obviously will corrupt the WAL.
-		 *
-		 * FIXME: replace with no_reorder=true when issuing IO?
-		 * FIXME: Don't do under locks at least?
-		 */
-		if (currblock->in_progress)
-		{
-			Assert(aio == NULL);
-			pgaio_io_wait(currblock->aio, false);
-			Assert(currblock->aio == NULL);
-
-			ereport(DEBUG3,
-					errmsg("waiting for partial write"),
-					errhidestmt(true),
-					errhidecontext(true));
-		}
-
-		/* FIXME: recycle, enforce IO depth */
-		if (aio == NULL)
-			aio = pgaio_io_get();
-
-		Assert(currblock->aio == NULL);
-		currblock->aio = aio;
-		currblock->in_progress = true;
 
 		/*
 		 * Dump the set if this will be the last loop iteration, or if we are
@@ -2935,43 +2806,157 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 		finishing_seg = !ispartialpage &&
 			(startoffset + npages * XLOG_BLCKSZ) >= wal_segment_size;
 
-		large_enough_write = 0;//npages >= 8;
+		large_enough_write = npages >= io_wal_target_blocks;
 
 		if (last_iteration ||
 			curridx == XLogCtl->XLogCacheBlck ||
 			finishing_seg ||
 			large_enough_write)
 		{
+			XLogIOQueue *writes = XLogCtl->writes;
 			char	   *from;
 			Size		nbytes;
+			PgAioInProgress *aio;
+			bool prevent_reordering = false;
+
+			/*
+			 * If the previous write was a partial page write, we need to wait for
+			 * it to finish. Otherwise the writes may get reordered (in the OS, or
+			 * in the device). Which obviously will corrupt the WAL.
+			 *
+			 * FIXME: replace with no_reorder=true when issuing IO?
+			 */
+			if (false && writes->tail + 1 != writes->next)
+			{
+				XLogIO *io = &writes->ios[(writes->next - 1) % writes->num_ios];
+				PgAioInProgress *aio = io->aio;
+
+				pg_read_barrier();
+
+				if (io->upto > startwrite && io->in_progress)
+				{
+#if 0
+					XLogRecPtr upto = io->upto;
+
+					LWLockRelease(WALWriteLock);
+
+					ereport(DEBUG1,
+							errmsg("waiting for partial write: %X/%X, so I can write from %X/%X to %X/%X",
+								   (uint32)(upto << 32), (uint32)upto,
+								   (uint32)(startwrite << 32), (uint32)startwrite,
+								   (uint32)(write_upto << 32), (uint32)write_upto),
+							errhidestmt(true),
+							errhidecontext(true));
+
+					pgaio_io_wait(aio, false);
+
+					goto write_out_wait;
+#else
+					prevent_reordering = true;
+#endif
+
+				}
+			}
 
 			/* OK to write the page(s) */
 			from = XLogCtl->pages + startidx * (Size) XLOG_BLCKSZ;
 			nbytes = npages * (Size) XLOG_BLCKSZ;
 
+#if 0
+			write_upto = Min(LogwrtResult.WriteInit,
+							 startwrite + nbytes);
+#endif
+
 #ifdef TOO_VERBOSE
+			XLogRecPtr newinsertpos = (XLogRecPtr)
+				pg_atomic_read_u64(&XLogCtl->Insert.knownCompletedUpto);
+
+			newinsertpos = WaitXLogInsertionsToFinish(newinsertpos);
+
 			ereport(DEBUG1,
-					errmsg("writing from %X/%X to %X/%X "
-						   "large: %d, startidx: %d, curridx: %d, lastpartial %d (%d), nbytes: %zu",
+					errmsg("writing from %X/%X to min %X/%X init %X/%X "
+						   "large: %d, startidx: %d, curridx: %d, lastpartial %d (%d), nbytes: %zu, new insert %X/%X",
 						   (uint32) (startwrite >> 32),
 						   (uint32) startwrite,
+						   (uint32) (write_upto >> 32),
+						   (uint32) write_upto,
 						   (uint32) (LogwrtResult.WriteInit >> 32),
 						   (uint32) LogwrtResult.WriteInit,
 						   large_enough_write,
 						   startidx, curridx,
 						   lastpartialidx, ispartialpage,
-						   nbytes),
+						   nbytes,
+						   (uint32) (newinsertpos << 32), (uint32) newinsertpos),
 					errhidestmt(true),
 					errhidecontext(true));
 #endif
 
-			pgaio_io_start_write_wal(aio, openLogFile, startoffset,
-									 nbytes, from, false,
-									 startwrite);
+			Assert(write_upto > LogwrtResult.WriteInit);
+
+#if 0
+			if (ispartialpage)
+			{
+				XLogRecPtr compl = pg_atomic_read_u64(&XLogCtl->Insert.knownCompletedUpto);
+
+				ereport(DEBUG2,
+						errmsg("performing partial write: from %X/%X to %X/%X (compl %X/%X)",
+							   (uint32)(startwrite << 32), (uint32)startwrite,
+							   (uint32)(write_upto << 32), (uint32)write_upto,
+							   (uint32)(compl << 32), (uint32)compl),
+						errhidestmt(true),
+						errhidecontext(true));
+
+			}
+			else
+			{
+				ereport(DEBUG2,
+						errmsg("performing non-partial write: from %X/%X to %X/%X",
+							   (uint32)(startwrite << 32), (uint32)startwrite,
+							   (uint32)(write_upto << 32), (uint32)write_upto),
+						errhidestmt(true),
+						errhidecontext(true));
+			}
+#endif
+			{
+				XLogIO *io = &writes->ios[writes->next % writes->num_ios];
+
+				Assert((uint16)(writes->next - writes->tail) < writes->num_ios);
+				Assert(io->aio == NULL);
+				Assert(io->upto == 0);
+
+				/* FIXME: recycle */
+				aio = pgaio_io_get();
+
+				io->upto = write_upto;
+				io->in_progress = true;
+				io->aio = aio;
+
+				pgaio_io_start_write_wal(aio, openLogFile, startoffset,
+										 nbytes, from, prevent_reordering,
+										 io - XLogCtl->writes->ios);
+
+				XLogCtl->writes->next++;
+				//pgaio_submit_pending(false);
+
+				XLogIOQueueCheck(XLogCtl->writes);
+			}
 			from += nbytes;
 			startoffset += nbytes;
+
 			pgaio_io_release(aio);
 			aio = NULL;
+
+			LogwrtResult.WriteInit = write_upto;
+
+			if (sync_method == SYNC_METHOD_OPEN ||
+				sync_method == SYNC_METHOD_OPEN_DSYNC)
+			{
+				LogwrtResult.FlushInit = LogwrtResult.WriteInit;
+			}
+
+			SpinLockAcquire(&XLogCtl->info_lck);
+			XLogCtl->LogwrtResult = LogwrtResult;
+			SpinLockRelease(&XLogCtl->info_lck);
 
 			npages = 0;
 
@@ -2990,27 +2975,35 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 			 */
 			if (finishing_seg)
 			{
-				/* FIXME */
-				ereport(LOG,
-						errmsg("waiting for segment write"),
-						errhidestmt(true),
-						errhidecontext(true));
+				if ((sync_method != SYNC_METHOD_OPEN &&
+					 sync_method != SYNC_METHOD_OPEN_DSYNC))
+				{
+					ereport(ERROR, errmsg("not right now"));
 
-				XLogWaitIO(startwrite, LogwrtResult.WriteInit);
-				LogwrtResult.WriteDone = LogwrtResult.WriteInit;
+					/* FIXME */
+					ereport(LOG,
+							errmsg("waiting for segment write"),
+							errhidestmt(true),
+							errhidecontext(true));
 
-				issue_xlog_fsync(openLogFile, openLogSegNo);
+					/*
+					 * FIXME: obviously we need to actually wait here, this is
+					 * broken.
+					 */
+					//XLogWaitIO(startwrite, LogwrtResult.WriteInit);
+					LogwrtResult.WriteDone = LogwrtResult.WriteInit;
 
-				LogwrtResult.FlushInit = LogwrtResult.WriteInit;
-				LogwrtResult.FlushDone = LogwrtResult.WriteInit;
+					issue_xlog_fsync(openLogFile, openLogSegNo);
 
-				UpdateXLogWriteProgress(LogwrtResult.WriteDone, LogwrtResult.FlushDone);
+					LogwrtResult.FlushInit = LogwrtResult.WriteInit;
+					LogwrtResult.FlushDone = LogwrtResult.WriteInit;
 
-				/* signal that we need to wakeup walsenders later */
-				WalSndWakeupRequest();
+					/* signal that we need to wakeup walsenders later */
+					WalSndWakeupRequest();
 
-				if (XLogArchivingActive())
-					XLogArchiveNotifySeg(openLogSegNo);
+					if (XLogArchivingActive())
+						XLogArchiveNotifySeg(openLogSegNo);
+				}
 
 				XLogCtl->lastSegSwitchTime = (pg_time_t) time(NULL);
 				XLogCtl->lastSegSwitchLSN = LogwrtResult.FlushDone;
@@ -3038,7 +3031,10 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 		curridx = NextBufIdx(curridx);
 
 		/* If flexible, break out of loop as soon as we wrote something */
-		if (flexible && npages == 0)
+		if (flexible && npages == 0 &&
+			(last_iteration ||
+			 curridx == XLogCtl->XLogCacheBlck ||
+			 finishing_seg))
 		{
 			WriteRqst.WriteInit = Min(WriteRqst.WriteInit, LogwrtResult.WriteInit);
 			WriteRqst.WriteDone = Min(WriteRqst.WriteDone, WriteRqst.WriteInit);
@@ -3051,66 +3047,377 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 	Assert(npages == 0);
 	Assert(WriteRqst.WriteInit <= LogwrtResult.WriteInit);
 
-	pgaio_submit_pending(true);
+	/* don't drain while we hold lock */
+	pgaio_submit_pending(false);
 
+	return false;
+
+write_out_wait:
+	/* don't drain while we hold lock */
+	pgaio_submit_pending(false);
+	return true;
+}
+
+static bool
+XLogWriteIssueFlushes(XLogwrtRqst WriteRqst, bool flexible)
+{
 	/*
-	 * If we need to wait for writes to have finished, do so.
-	 *
-	 * FIXME: needs to be without lock!
+	 * Could get here without having written ourselves, in which case we might
+	 * have no open file or the wrong one.  However, we do not need to fsync
+	 * more than one file.
 	 */
-	Assert(LogwrtResult.WriteInit >= WriteRqst.WriteDone);
-	if (LogwrtResult.WriteDone < WriteRqst.WriteDone)
+	if ((sync_method != SYNC_METHOD_OPEN &&
+		 sync_method != SYNC_METHOD_OPEN_DSYNC))
 	{
-		ereport(DEBUG2,
-				errmsg("waiting for write, is %X/%X till %X/%X",
-					   (uint32)(LogwrtResult.WriteDone << 32), (uint32) LogwrtResult.WriteDone,
-					   (uint32)(WriteRqst.WriteDone << 32), (uint32) WriteRqst.WriteDone),
-				errhidestmt(true),
-				errhidecontext(true));
-		XLogWaitIO(LogwrtResult.WriteDone, WriteRqst.WriteDone);
-		LogwrtResult.WriteDone = WriteRqst.WriteDone;
-		UpdateXLogWriteProgress(LogwrtResult.WriteDone, LogwrtResult.FlushDone);
-	}
-
-	/*
-	 * If asked to flush, do so
-	 */
-	if (LogwrtResult.FlushDone < WriteRqst.FlushDone &&
-		LogwrtResult.FlushDone < LogwrtResult.WriteDone)
-
-	{
-		/*
-		 * Could get here without iterating above loop, in which case we might
-		 * have no open file or the wrong one.  However, we do not need to
-		 * fsync more than one file.
-		 */
-		if ((sync_method != SYNC_METHOD_OPEN &&
-			sync_method != SYNC_METHOD_OPEN_DSYNC))
+		elog(ERROR, "not supported right now");
+		if (openLogFile >= 0 &&
+			!XLByteInPrevSeg(LogwrtResult.WriteDone, openLogSegNo,
+							 wal_segment_size))
+			XLogFileClose();
+		if (openLogFile < 0)
 		{
-			if (openLogFile >= 0 &&
-				!XLByteInPrevSeg(LogwrtResult.WriteDone, openLogSegNo,
-								 wal_segment_size))
-				XLogFileClose();
-			if (openLogFile < 0)
-			{
-				XLByteToPrevSeg(LogwrtResult.WriteDone, openLogSegNo,
-								wal_segment_size);
-				openLogFile = XLogFileOpen(openLogSegNo);
-				ReserveExternalFD();
-			}
-
-			issue_xlog_fsync(openLogFile, openLogSegNo);
+			XLByteToPrevSeg(LogwrtResult.WriteDone, openLogSegNo,
+							wal_segment_size);
+			openLogFile = XLogFileOpen(openLogSegNo);
+			ReserveExternalFD();
 		}
 
-		/* signal that we need to wakeup walsenders later */
-		WalSndWakeupRequest();
+		if (XLogIOQueueEnsureOne(XLogCtl->flushes))
+			return true;
+
+		issue_xlog_fsync(openLogFile, openLogSegNo);
 
 		LogwrtResult.FlushInit = LogwrtResult.WriteDone;
 		LogwrtResult.FlushDone = LogwrtResult.FlushInit;
 
-		UpdateXLogWriteProgress(LogwrtResult.WriteDone, LogwrtResult.FlushDone);
+		SpinLockAcquire(&XLogCtl->info_lck);
+		XLogCtl->LogwrtResult = LogwrtResult;
+		SpinLockRelease(&XLogCtl->info_lck);
 
+		/* signal that we need to wakeup walsenders later */
+		// FIXME: also when using O_[D]SYNC?
+		WalSndWakeupRequest();
 	}
+
+	return false;
+}
+
+/*
+ * FIXME
+ */
+static bool
+XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
+{
+	bool		performed_io = false;
+	bool		holding_lock = false;
+	XLogRecPtr	orig_write_init;
+	bool		only_wait;
+
+	/* normalize request */
+	if (WriteRqst.WriteInit < WriteRqst.WriteDone)
+		WriteRqst.WriteInit = WriteRqst.WriteDone;
+
+	if (WriteRqst.WriteDone < WriteRqst.FlushDone)
+		WriteRqst.WriteDone = WriteRqst.FlushDone;
+
+	if (WriteRqst.FlushInit < WriteRqst.FlushDone)
+		WriteRqst.FlushInit = WriteRqst.FlushDone;
+
+#if 0
+	/* need to complete all writes before flushing them */
+	if (WriteRqst.FlushInit < WriteRqst.WriteDone)
+		WriteRqst.FlushInit = WriteRqst.WriteDone;
+#endif
+
+	Assert(XLogInsertionsKnownFinished(WriteRqst.WriteDone));
+
+	orig_write_init = WriteRqst.WriteInit;
+
+	START_CRIT_SECTION();
+
+xlogwrite_again:
+	Assert(!holding_lock);
+
+	SpinLockAcquire(&XLogCtl->info_lck);
+	LogwrtResult = XLogCtl->LogwrtResult;
+	SpinLockRelease(&XLogCtl->info_lck);
+
+	if (WriteRqst.WriteInit <= LogwrtResult.WriteInit &&
+		WriteRqst.WriteDone <= LogwrtResult.WriteDone &&
+		WriteRqst.FlushInit <= LogwrtResult.FlushInit &&
+		WriteRqst.FlushDone <= LogwrtResult.FlushDone)
+	{
+		END_CRIT_SECTION();
+		return performed_io;
+	}
+
+
+	if (WriteRqst.WriteInit <= LogwrtResult.WriteInit &&
+		WriteRqst.FlushInit <= LogwrtResult.FlushInit)
+	{
+		only_wait = true;
+	}
+	else
+		only_wait = false;
+
+
+	if (only_wait)
+	{
+		LWLockAcquire(WALWriteLock, LW_SHARED);
+		holding_lock = true;
+
+		LogwrtResult = XLogCtl->LogwrtResult;
+	}
+	else if (!LWLockAcquireOrWait(WALWriteLock, LW_EXCLUSIVE))
+	{
+		holding_lock = false;
+		goto xlogwrite_again;
+	}
+	else
+	{
+		LogwrtResult = XLogCtl->LogwrtResult;
+		holding_lock = true;
+	}
+
+	XLogWriteQueueUpdate(!only_wait);
+
+	/* Quite possible write request has already been fulfilled. */
+	if (WriteRqst.WriteInit <= LogwrtResult.WriteInit &&
+		WriteRqst.WriteDone <= LogwrtResult.WriteDone &&
+		WriteRqst.FlushInit <= LogwrtResult.FlushInit &&
+		WriteRqst.FlushDone <= LogwrtResult.FlushDone)
+	{
+		Assert(holding_lock);
+		LWLockRelease(WALWriteLock);
+		holding_lock = false;
+
+		END_CRIT_SECTION();
+		return performed_io;
+	}
+
+	/*
+	 * Write more than necessary. Reduces overall IO.
+	 */
+	if (LogwrtResult.WriteInit < WriteRqst.WriteInit)
+	{
+		XLogRecPtr	insertpos,
+			insertpos_before;
+
+		Assert(!only_wait);
+
+		insertpos_before = (XLogRecPtr)
+			pg_atomic_read_u64(&XLogCtl->Insert.knownCompletedUpto);
+
+		Assert(WriteRqst.WriteInit <= insertpos_before);
+
+		SpinLockAcquire(&XLogCtl->info_lck);
+		if (insertpos_before < XLogCtl->LogwrtRqst.WriteInit)
+			insertpos_before = XLogCtl->LogwrtRqst.WriteInit;
+		SpinLockRelease(&XLogCtl->info_lck);
+
+		insertpos = WaitXLogInsertionsToFinish(insertpos_before);
+
+		Assert(WriteRqst.WriteInit <= insertpos);
+
+		/*
+		 * FIXME: Limit how much more than this backend's WAL to write.
+		 */
+
+		if ((insertpos - insertpos % XLOG_BLCKSZ) >= orig_write_init)
+		{
+			insertpos -= insertpos % XLOG_BLCKSZ;
+
+			ereport(DEBUG3,
+					errmsg("avoid partial for rqst %X/%X (orig %X/%X) increased to %X/%X",
+						   (uint32)(WriteRqst.WriteInit << 32), (uint32) WriteRqst.WriteInit,
+						   (uint32)(orig_write_init << 32), (uint32) orig_write_init,
+						   (uint32)(insertpos << 32), (uint32) insertpos),
+					errhidestmt(true),
+					errhidecontext(true));
+		}
+
+		if (insertpos != WriteRqst.WriteInit)
+		{
+			ereport(DEBUG3,
+					errmsg("advancing from WriteInit %X/%X (orig %X/%X) to %X/%X, before %X/%X",
+						   (uint32)(WriteRqst.WriteInit << 32), (uint32) WriteRqst.WriteInit,
+						   (uint32)(orig_write_init << 32), (uint32) orig_write_init,
+						   (uint32)(insertpos << 32), (uint32) insertpos,
+						   (uint32)(insertpos_before << 32), (uint32) insertpos_before),
+					errhidestmt(true),
+					errhidecontext(true));
+			WriteRqst.WriteInit = insertpos;
+		}
+	}
+
+	if (only_wait)
+		Assert(LWLockHeldByMeInMode(WALWriteLock, LW_SHARED));
+	else
+		Assert(LWLockHeldByMeInMode(WALWriteLock, LW_EXCLUSIVE));
+
+	/*
+	 * If we need to initiate writes, do so. But if there are too many IOs
+	 * already in progress, we need to wait for some IO to finish. In that
+	 * case we retry, because it's somewhat likely that somebody else was able
+	 * to initiate IO before we got woken up.
+	 */
+	if (LogwrtResult.WriteInit < WriteRqst.WriteInit)
+	{
+		Assert(!only_wait);
+
+#if 0
+		{
+			XLogRecPtr	reserved_upto = XLogBytePosToEndRecPtr(XLogCtl->Insert.CurrBytePos);
+			XLogRecPtr	completed = WaitXLogInsertionsToFinish(WriteRqst.WriteInit);
+
+			ereport(DEBUG1,
+					errmsg("xlog write write cur/target: "
+						   "WriteInit: %X/%X->%X/%X: %u, "
+						   "WriteDone: %X/%X->%X/%X, "
+						   "FlushInit: %X/%X->%X/%X, "
+						   "FlushDone: %X/%X->%X/%X, "
+						   "Reserved: %X/%X, "
+						   "Completed: %X/%X, "
+						   "Reserved - Completed: %lu, "
+						   "Completed - prev WriteInit: %lu, "
+						   "Completed - new WriteInit: %lu, ",
+						   (uint32) (LogwrtResult.WriteInit >> 32), (uint32) (LogwrtResult.WriteInit),
+						   (uint32) (WriteRqst.WriteInit >> 32), (uint32) (WriteRqst.WriteInit),
+						   (uint32) (WriteRqst.WriteInit - LogwrtResult.WriteInit),
+
+						   (uint32) (LogwrtResult.WriteDone >> 32), (uint32) (LogwrtResult.WriteDone),
+						   (uint32) (WriteRqst.WriteDone >> 32), (uint32) (WriteRqst.WriteDone),
+
+						   (uint32) (LogwrtResult.FlushInit >> 32), (uint32) (LogwrtResult.FlushInit),
+						   (uint32) (WriteRqst.FlushInit >> 32), (uint32) (WriteRqst.FlushInit),
+
+						   (uint32) (LogwrtResult.FlushDone >> 32), (uint32) (LogwrtResult.FlushDone),
+						   (uint32) (WriteRqst.FlushDone >> 32), (uint32) (WriteRqst.FlushDone),
+
+						   (uint32) (reserved_upto >> 32), (uint32) reserved_upto,
+						   (uint32) (completed >> 32), (uint32) completed,
+						   reserved_upto - completed,
+						   completed - LogwrtResult.WriteInit,
+						   completed - WriteRqst.WriteInit),
+					errhidestmt(true),
+					errhidecontext(true));
+		}
+#endif
+
+		if (XLogWriteIssueWrites(WriteRqst, flexible))
+		{
+			holding_lock = false;
+			goto xlogwrite_again;
+		}
+#if 0
+		ereport(LOG,
+				errmsg("write done"),
+				errhidestmt(true),
+				errhidecontext(true));
+#endif
+
+#if 0
+		static uint64 partial_writes = 0;
+		static uint64 nonpartial_writes = 0;
+
+		if ((WriteRqst.WriteInit % XLOG_BLCKSZ) != 0)
+		{
+			XLogRecPtr	reserved_upto = XLogBytePosToEndRecPtr(XLogCtl->Insert.CurrBytePos);
+
+			partial_writes++;
+			ereport(DEBUG1,
+					errmsg("xlog partial write: WriteInit: %X/%X, self %X/%X, reserved %X/%X reserved diff: %d, %zu/%zu",
+						   (uint32) (WriteRqst.WriteInit >> 32), (uint32) (WriteRqst.WriteInit),
+						   (uint32) (orig_write_init >> 32), (uint32) (orig_write_init),
+						   (uint32) (reserved_upto >> 32), (uint32) (reserved_upto),
+						   (orig_write_init / XLOG_BLCKSZ) != (reserved_upto / XLOG_BLCKSZ),
+						   partial_writes, nonpartial_writes),
+					errhidestmt(true),
+					errhidecontext(true));
+
+		}
+		else
+		{
+			nonpartial_writes++;
+		}
+#endif
+
+		performed_io = true;
+
+		if (flexible)
+		{
+			if (WriteRqst.WriteInit >= LogwrtResult.WriteInit)
+				WriteRqst.WriteInit = LogwrtResult.WriteInit;
+			if (WriteRqst.WriteDone >= LogwrtResult.WriteInit)
+				WriteRqst.WriteDone = LogwrtResult.WriteInit;
+			if (WriteRqst.FlushInit >= LogwrtResult.WriteInit)
+				WriteRqst.FlushInit = LogwrtResult.WriteInit;
+			if (WriteRqst.FlushDone >= WriteRqst.FlushInit)
+				WriteRqst.FlushDone = WriteRqst.FlushInit;
+		}
+	}
+
+	Assert(WriteRqst.WriteInit <= LogwrtResult.WriteInit);
+
+	/*
+	 * If we need to wait for writes to complete, do so. We do that by waiting
+	 * for the oldest IO to finish after releasing the write lock. The reason
+	 * for doing so is that that is the completion that needs to be seen first
+	 * "system wide". And later IOs might actually be issued in a different
+	 * AIO context, therefore we wouldn't be guaranteed to see its completion
+	 * if we e.g. waited for the last IO.
+	 */
+	if (LogwrtResult.WriteDone < WriteRqst.WriteDone)
+	{
+		if (XLogIOQueueWaitFor(XLogCtl->writes, WriteRqst.WriteDone, !only_wait))
+		{
+			holding_lock = false;
+			goto xlogwrite_again;
+		}
+
+		Assert(WriteRqst.WriteDone <= LogwrtResult.WriteDone);
+	}
+
+	Assert(WriteRqst.WriteDone <= LogwrtResult.WriteDone);
+
+	/*
+	 * If we need to issue flushes, do so. Pretty much the same as the write
+	 * case above.
+	 *
+	 * Note that when flexible is true, we might not be able to initiate any
+	 * flushes, because not enough was written.
+	 */
+	if (LogwrtResult.FlushInit < WriteRqst.FlushInit)
+	{
+		Assert(!only_wait);
+
+		if (XLogWriteIssueFlushes(WriteRqst, flexible))
+		{
+			holding_lock = false;
+			goto xlogwrite_again;
+		}
+
+		performed_io = true;
+
+		Assert(flexible ||
+			   WriteRqst.FlushInit >= LogwrtResult.FlushInit);
+	}
+
+	/*
+	 * Wait for all required flushes to complete.
+	 */
+	if (!flexible &&
+		(WriteRqst.FlushDone < LogwrtResult.FlushDone))
+	{
+		if (XLogIOQueueWaitFor(XLogCtl->flushes, LogwrtResult.FlushDone, !only_wait))
+		{
+			holding_lock = false;
+			goto xlogwrite_again;
+		}
+	}
+
+	Assert(flexible ||
+		   WriteRqst.FlushDone <= LogwrtResult.FlushDone);
 
 	/*
 	 * Update shared-memory status
@@ -3132,6 +3439,12 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 			XLogCtl->LogwrtRqst.FlushDone = LogwrtResult.FlushDone;
 		SpinLockRelease(&XLogCtl->info_lck);
 	}
+
+	Assert(holding_lock);
+	LWLockRelease(WALWriteLock);
+
+	END_CRIT_SECTION();
+	return performed_io;
 }
 
 /*
@@ -3298,8 +3611,7 @@ UpdateMinRecoveryPoint(XLogRecPtr lsn, bool force)
 /*
  * Ensure that all XLOG data through the given position is flushed to disk.
  *
- * NOTE: this differs from XLogWrite mainly in that the WALWriteLock is not
- * already held, and we try to avoid acquiring it if possible.
+ * NOTE: FIXME
  */
 void
 XLogFlush(XLogRecPtr record)
@@ -3352,170 +3664,58 @@ XLogFlush(XLogRecPtr record)
 	 */
 	for (;;)
 	{
-		XLogRecPtr	insert_pos;
-		XLogRecPtr	flush_pos;
-		XLogRecPtr	write_pos;
-		XLogRecPtr	start_wait_at;
+#if 0
+		XLogRecPtr	insertpos;
+#endif
 
+#if 0
 		/* read LogwrtResult and update local state */
 		SpinLockAcquire(&XLogCtl->info_lck);
-#if 1
 		if (WriteRqstPtr < XLogCtl->LogwrtRqst.WriteInit)
 			WriteRqstPtr = XLogCtl->LogwrtRqst.WriteInit;
 		else if (WriteRqstPtr > XLogCtl->LogwrtRqst.WriteInit)
 			XLogCtl->LogwrtRqst.WriteInit = WriteRqstPtr;
-#endif
 		SpinLockRelease(&XLogCtl->info_lck);
-
-		write_pos = pg_atomic_read_u64(&XLogCtl->write_pos);
-		flush_pos = pg_atomic_read_u64(&XLogCtl->flush_pos);
-
+#endif
 		/* done already? */
-		if (record <= flush_pos)
+		if (record <= LogwrtResult.FlushDone)
 			return;
 
 		/*
 		 * Before actually performing the write, wait for all in-flight
 		 * insertions to the pages we're about to write to finish.
 		 */
-		insert_pos = WaitXLogInsertionsToFinish(WriteRqstPtr);
+		WaitXLogInsertionsToFinish(WriteRqstPtr);
 
-		write_pos = pg_atomic_read_u64(&XLogCtl->write_pos);
-		flush_pos = pg_atomic_read_u64(&XLogCtl->flush_pos);
+#if 0
 
-		if (record <= flush_pos)
-			return;
-
-		start_wait_at  = flush_pos;
-
-#if 1
-		if (!WalWriteLockAcquireFor(record, record))
-		{
-			flush_pos = pg_atomic_read_u64(&XLogCtl->flush_pos);
-			ereport(DEBUG2,
-					errmsg("done waiting, without getting lock, now %X/%X, started waiting %X/%X",
-						   (uint32) (flush_pos >> 32), (uint32) flush_pos,
-						   (uint32) (start_wait_at >> 32), (uint32) start_wait_at),
-					errhidestmt(true),
-					errhidecontext(true));
-			break;
-		}
-#else
-
-		/*
-		 * Try to get the write lock. If we can't get it immediately, wait
-		 * until it's released, and recheck if we still need to do the flush
-		 * or if the backend that held the lock did it for us already. This
-		 * helps to maintain a good rate of group committing when the system
-		 * is bottlenecked by the speed of fsyncing.
-		 */
-		if (!LWLockAcquireOrWait(WALWriteLock, LW_EXCLUSIVE))
-		{
-			/*
-			 * The lock is now free, but we didn't acquire it yet. Before we
-			 * do, loop back to check if someone else flushed the record for
-			 * us already.
-			 */
-			continue;
-		}
-#endif
-		write_pos = pg_atomic_read_u64(&XLogCtl->write_pos);
-		flush_pos = pg_atomic_read_u64(&XLogCtl->flush_pos);
-
-		LogwrtResult = XLogCtl->LogwrtResult;
-
-		/* Got the lock; recheck whether request is satisfied */
-		if (record <= flush_pos)
-		{
-			WalWriteLockRelease();
-			ereport(DEBUG1,
-					errmsg("got lock unnecessarily, now %X/%X, started waiting %X/%X",
-						   (uint32) (flush_pos >> 32), (uint32) flush_pos,
-						   (uint32) (start_wait_at >> 32), (uint32) start_wait_at),
-					errhidestmt(true),
-					errhidecontext(true));
-			break;
-		}
-		else
-		{
-			ereport(DEBUG2,
-					errmsg("got lock, flush now %X/%X, need  %X/%X, started waiting %X/%X",
-						   (uint32) (flush_pos >> 32), (uint32) flush_pos,
-						   (uint32) (record >> 32), (uint32) record,
-						   (uint32) (start_wait_at >> 32), (uint32) start_wait_at),
-					errhidestmt(true),
-					errhidecontext(true));
-		}
-
-		Assert(record > LogwrtResult.FlushDone);
-
-		/*
-		 * Sleep before flush! By adding a delay here, we may give further
-		 * backends the opportunity to join the backlog of group commit
-		 * followers; this can significantly improve transaction throughput,
-		 * at the risk of increasing transaction latency.
-		 *
-		 * We do not sleep if enableFsync is not turned on, nor if there are
-		 * fewer than CommitSiblings other backends with active transactions.
-		 */
-		if (CommitDelay > 0 && enableFsync &&
-			MinimumActiveBackends(CommitSiblings))
-		{
-			pg_usleep(CommitDelay);
-		}
-
-#if 1
 		/*
 		 * Check the furthest others have ensured they can write to. If they
 		 * are also in XLogFlush(), they've all done their respective
 		 * WaitXLogInsertionsToFinish(), and thus updated
 		 * XLogCtl->Insert.completedUpto.
 		 */
-		insert_pos = (XLogRecPtr)
+		insertpos = (XLogRecPtr)
 			pg_atomic_read_u64(&XLogCtl->Insert.knownCompletedUpto);
-#endif
-
 		/*
 		 * FIXME: Limit how much more than this backend's WAL to write.
 		 */
-		if ((insert_pos - record) > XLOG_BLCKSZ)
+		if ((insertpos - record) > XLOG_BLCKSZ)
 		{
-			insert_pos -= insert_pos % XLOG_BLCKSZ;
+			insertpos -= insertpos % XLOG_BLCKSZ;
 		}
 
-		Assert(insert_pos >= record);
+		Assert(insertpos >= record);
 
-		/* try to write/flush later additions to XLOG as well */
-		WriteRqst.WriteInit = insert_pos;
+#endif
+
+		WriteRqst.WriteInit = record;
 		WriteRqst.WriteDone = record;
 		WriteRqst.FlushInit = record;
 		WriteRqst.FlushDone = record;
 
-		START_CRIT_SECTION();
+		// FIXME: reimplement commit delay
 		XLogWrite(WriteRqst, false);
-		END_CRIT_SECTION();
-
-		/* done */
-		WalWriteLockRelease();
-
-#if 1
-		ereport((WriteRqst.WriteInit % XLOG_BLCKSZ) == 0 ? DEBUG3 : DEBUG1,
-				errmsg("write\n"
-					   "\tinit: %X/%X, done %X/%X\n"
-					   "\tflush init %X/%X, done %X/%X\n"
-					   "\tfor %X/%X\n"
-					   "\tinsert_pos: %X/%X\n"
-					   "\tbatch bytes: %u",
-					   (uint32) (WriteRqst.WriteInit >> 32), (uint32) WriteRqst.WriteInit,
-					   (uint32) (WriteRqst.WriteDone >> 32), (uint32) WriteRqst.WriteDone,
-					   (uint32) (WriteRqst.FlushInit >> 32), (uint32) WriteRqst.FlushInit,
-					   (uint32) (WriteRqst.FlushDone >> 32), (uint32) WriteRqst.FlushDone,
-					   (uint32) (record >> 32), (uint32) record,
-					   (uint32) (insert_pos >> 32), (uint32) insert_pos,
-					   (uint32) (insert_pos - record)),
-				errhidestmt(true),
-				errhidecontext(true));
-#endif
 
 		break;
 	}
@@ -3604,7 +3804,6 @@ XLogBackgroundFlush(void)
 		WriteRqst.WriteInit = XLogCtl->asyncXactLSN;
 		SpinLockRelease(&XLogCtl->info_lck);
 		flexible = false;		/* ensure it all gets written */
-		elog(LOG, "inflexible");
 	}
 
 	/*
@@ -3670,31 +3869,10 @@ XLogBackgroundFlush(void)
 			 (uint32) (LogwrtResult.FlushDone >> 32), (uint32) LogwrtResult.FlushDone);
 #endif
 
-	START_CRIT_SECTION();
-
 	/* now wait for any in-progress insertions to finish and get write lock */
 	WaitXLogInsertionsToFinish(WriteRqst.WriteInit);
 
-	/* FIXME: shouldn't the second param be WriteRqst. ? */
-	if ((true && WalWriteLockAcquireFor(WriteRqst.WriteInit, LogwrtResult.FlushDone)) ||
-		(false && (LWLockAcquire(WALWriteLock, LW_EXCLUSIVE),1)))
-	{
-		bool wrote = false;
-
-		LogwrtResult = XLogCtl->LogwrtResult;
-		if (WriteRqst.WriteInit > LogwrtResult.WriteInit ||
-			WriteRqst.FlushInit > LogwrtResult.FlushInit)
-		{
-			XLogWrite(WriteRqst, flexible);
-			wrote = true;
-		}
-		WalWriteLockRelease();
-
-		if (0)
-			elog(LOG, "background flush got lock and wrote: %d ", wrote);
-	}
-
-	END_CRIT_SECTION();
+	XLogWrite(WriteRqst, flexible);
 
 	/* wake up walsenders now that we've released heavily contended locks */
 	WalSndWakeupProcessRequests();
@@ -5643,6 +5821,22 @@ LocalProcessControlFile(bool reset)
 	ReadControlFile();
 }
 
+
+static size_t
+XLogIOQueueSize(void)
+{
+	size_t sz;
+
+	sz = sizeof(XLogIOQueue);
+	sz =
+		add_size(sz,
+				 mul_size(mul_size(sizeof(XLogIO), io_wal_concurrency),
+						  2));
+
+	return sz;
+}
+
+
 /*
  * Initialization of shared memory for XLOG
  */
@@ -5677,6 +5871,8 @@ XLOGShmemSize(void)
 	size = add_size(size, XLOG_BLCKSZ);
 	/* and the buffers themselves */
 	size = add_size(size, mul_size(XLOG_BLCKSZ, XLOGbuffers));
+
+	size = add_size(size, XLogIOQueueSize());
 
 	/*
 	 * Note: we don't count ControlFileData, it comes out of the "slop factor"
@@ -5793,10 +5989,21 @@ XLOGShmemInit(void)
 	InitSharedLatch(&XLogCtl->recoveryWakeupLatch);
 
 	pg_atomic_init_u64(&XLogCtl->Insert.knownCompletedUpto, 0);
-	pg_atomic_init_u64(&XLogCtl->write_pos, 0);
-	pg_atomic_init_u64(&XLogCtl->flush_pos, 0);
-	SpinLockInit(&XLogCtl->wait_lock);
-	proclist_init(&XLogCtl->wait_list);
+
+	{
+		size_t sz = sizeof(XLogIOQueue) +
+			sizeof(XLogIO) * io_wal_concurrency;
+
+		XLogCtl->writes = ShmemAlloc(sz);
+		memset(XLogCtl->writes, 0, sz);
+		XLogCtl->writes->num_ios = io_wal_concurrency;
+		// FIXME: check whether lock is needed and initialize if so
+
+		XLogCtl->flushes = ShmemAlloc(sz);
+		memset(XLogCtl->flushes, 0, sz);
+		XLogCtl->flushes->num_ios = io_wal_concurrency;
+		// DITO
+	}
 }
 
 /*
@@ -8323,9 +8530,6 @@ StartupXLOG(void)
 	XLogCtl->LogwrtRqst.WriteDone = EndOfLog;
 	XLogCtl->LogwrtRqst.FlushInit = EndOfLog;
 	XLogCtl->LogwrtRqst.FlushDone = EndOfLog;
-
-	pg_atomic_write_u64(&XLogCtl->flush_pos, EndOfLog);
-	pg_atomic_write_u64(&XLogCtl->write_pos, EndOfLog);
 
 	/*
 	 * Update full_page_writes in shared memory and write an XLOG_FPW_CHANGE
