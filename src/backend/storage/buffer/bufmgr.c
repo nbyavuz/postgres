@@ -738,6 +738,17 @@ ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 	if (mode != RBM_NORMAL || blockNum == P_NEW)
 		elog(ERROR, "unsupported");
 
+	/*
+	 * Don't support AIO for local buffers yet, so just fall back to operating
+	 * synchronously. This is important because otherwise callers would all
+	 * need to have a non-prefetching fallback implementation.
+	 */
+	if (RelationUsesLocalBuffers(reln))
+	{
+		*already_valid = true;
+		return ReadBufferExtended(reln, forkNum, blockNum, mode, strategy);
+	}
+
 	/* Open it at the smgr level if not already done */
 	RelationOpenSmgr(reln);
 
