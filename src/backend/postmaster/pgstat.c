@@ -4089,6 +4089,9 @@ pgstat_get_wait_io(WaitEventIO w)
 		case WAIT_EVENT_BUFFILE_TRUNCATE:
 			event_name = "BufFileTruncate";
 			break;
+		case WAIT_EVENT_BUFFILE_WAITIO:
+			event_name = "BufFileWaitIO";
+			break;
 		case WAIT_EVENT_CONTROL_FILE_READ:
 			event_name = "ControlFileRead";
 			break;
