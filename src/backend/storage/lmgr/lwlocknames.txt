@@ -53,3 +53,7 @@ XactTruncationLock					44
 # 45 was XactTruncationLock until removal of BackendRandomLock
 WrapLimitsVacuumLock				46
 NotifyQueueTailLock					47
+SharedAIOCtlLock					48
+SharedAIOSubmissionLock					49
+SharedAIOCompletionLock					50
+WALSyncLock						51
