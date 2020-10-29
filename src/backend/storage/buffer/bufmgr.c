@@ -2244,6 +2244,8 @@ PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy)
 	bool		result;
 	PrivateRefCountEntry *ref;
 
+	Assert(!BufferIsLocal(b));
+
 	ref = GetPrivateRefCountEntry(b, true);
 
 	if (ref == NULL)
@@ -2390,6 +2392,8 @@ UnpinBuffer(BufferDesc *buf, bool fixOwner)
 {
 	PrivateRefCountEntry *ref;
 	Buffer		b = BufferDescriptorGetBuffer(buf);
+
+	Assert(!BufferIsLocal(b));
 
 	/* not moving as we're likely deleting it soon anyway */
 	ref = GetPrivateRefCountEntry(b, false);
@@ -5210,6 +5214,8 @@ LockBufHdr(BufferDesc *desc)
 {
 	SpinDelayStatus delayStatus;
 	uint32		old_buf_state;
+
+	Assert(!BufferIsLocal(BufferDescriptorGetBuffer(desc)));
 
 	init_local_spin_delay(&delayStatus);
 
