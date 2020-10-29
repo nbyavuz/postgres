@@ -17,6 +17,7 @@
 
 #include "port/atomics.h"
 #include "storage/buf.h"
+#include "storage/aio.h"
 #include "storage/bufmgr.h"
 #include "storage/condition_variable.h"
 #include "storage/latch.h"
@@ -186,6 +187,7 @@ typedef struct BufferDesc
 	int			wait_backend_pid;	/* backend PID of pin-count waiter */
 	int			freeNext;		/* link in freelist chain */
 
+	PgAioIoRef	io_in_progress;
 	LWLock		content_lock;	/* to lock access to buffer contents */
 } BufferDesc;
 
@@ -304,6 +306,10 @@ extern CkptSortItem *CkptBufferIds;
 extern void WritebackContextInit(WritebackContext *context, int *max_pending);
 extern void IssuePendingWritebacks(WritebackContext *context);
 extern void ScheduleBufferTagForWriteback(WritebackContext *context, BufferTag *tag);
+
+extern void ReadBufferCompleteRead(Buffer buffer, const AioBufferTag *tag, char *bufdata, int mode, bool failed);
+extern void ReadBufferCompleteWrite(Buffer buffer, bool failed, bool release_lock);
+
 
 /* freelist.c */
 extern BufferDesc *StrategyGetBuffer(BufferAccessStrategy strategy,
