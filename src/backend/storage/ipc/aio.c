@@ -66,7 +66,9 @@ typedef enum PgAioAction
 	PGAIO_INVALID = 0,
 
 	PGAIO_NOP,
+	/* FIXME: unify */
 	PGAIO_FSYNC,
+	PGAIO_FSYNC_WAL,
 	PGAIO_FLUSH_RANGE,
 
 	PGAIO_READ_BUFFER,
@@ -191,6 +193,14 @@ struct PgAioInProgress
 			bool barrier;
 			bool datasync;
 		} fsync;
+
+		struct
+		{
+			int fd;
+			bool barrier;
+			bool datasync;
+			uint32 flush_no;
+		} fsync_wal;
 
 		struct
 		{
@@ -404,6 +414,7 @@ static int __sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complet
 /* io completions */
 static bool pgaio_complete_nop(PgAioInProgress *io);
 static bool pgaio_complete_fsync(PgAioInProgress *io);
+static bool pgaio_complete_fsync_wal(PgAioInProgress *io);
 static bool pgaio_complete_flush_range(PgAioInProgress *io);
 static bool pgaio_complete_read_buffer(PgAioInProgress *io);
 static bool pgaio_complete_write_buffer(PgAioInProgress *io);
@@ -424,6 +435,7 @@ static const PgAioCompletedCB completion_callbacks[] =
 {
 	[PGAIO_NOP] = pgaio_complete_nop,
 	[PGAIO_FSYNC] = pgaio_complete_fsync,
+	[PGAIO_FSYNC_WAL] = pgaio_complete_fsync_wal,
 	[PGAIO_FLUSH_RANGE] = pgaio_complete_flush_range,
 	[PGAIO_READ_BUFFER] = pgaio_complete_read_buffer,
 	[PGAIO_WRITE_BUFFER] = pgaio_complete_write_buffer,
@@ -1166,6 +1178,9 @@ pgaio_can_be_combined(PgAioInProgress *last, PgAioInProgress *cur)
 		case PGAIO_NOP:
 		case PGAIO_FLUSH_RANGE:
 		case PGAIO_FSYNC:
+		case PGAIO_FSYNC_WAL:
+			return false;
+
 		case PGAIO_WRITE_BUFFER:
 			if (last->d.write_buffer.fd != cur->d.write_buffer.fd)
 				return false;
@@ -2014,6 +2029,8 @@ pgaio_io_action_string(PgAioAction a)
 			return "flush_range";
 		case PGAIO_FSYNC:
 			return "fsync";
+		case PGAIO_FSYNC_WAL:
+			return "fsync_wal";
 		case PGAIO_READ_BUFFER:
 			return "read_buffer";
 		case PGAIO_WRITE_BUFFER:
@@ -2066,6 +2083,13 @@ pgaio_io_action_desc(PgAioInProgress *io, StringInfo s)
 							 io->d.fsync.fd,
 							 io->d.fsync.datasync,
 							 io->d.fsync.barrier);
+			break;
+		case PGAIO_FSYNC_WAL:
+			appendStringInfo(s, "fd: %d, datasync: %d, barrier: %d, flush_no: %d",
+							 io->d.fsync_wal.fd,
+							 io->d.fsync_wal.datasync,
+							 io->d.fsync_wal.barrier,
+							 io->d.fsync_wal.flush_no);
 			break;
 		case PGAIO_FLUSH_RANGE:
 			appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %llu",
@@ -2692,6 +2716,14 @@ pgaio_uring_sq_from_io(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iov
 				sqe->flags |= IOSQE_IO_DRAIN;
 			break;
 
+		case PGAIO_FSYNC_WAL:
+			io_uring_prep_fsync(sqe,
+								io->d.fsync_wal.fd,
+								io->d.fsync_wal.datasync ? IORING_FSYNC_DATASYNC : 0);
+			if (io->d.fsync.barrier)
+				sqe->flags |= IOSQE_IO_DRAIN;
+			break;
+
 		case PGAIO_READ_BUFFER:
 			submitted = prep_read_buffer_iov(io, sqe, *iovs);
 			*iovs += submitted;
@@ -2943,6 +2975,27 @@ pgaio_io_start_fdatasync(PgAioInProgress *io, int fd, bool barrier)
 #endif
 }
 
+void
+pgaio_io_start_fsync_wal(PgAioInProgress *io, int fd, bool barrier, bool datasync_only, uint32 flush_no)
+{
+	pgaio_prepare_io(io, PGAIO_FSYNC_WAL);
+	io->d.fsync_wal.fd = fd;
+	io->d.fsync_wal.barrier = barrier;
+	io->d.fsync_wal.datasync = datasync_only;
+	io->d.fsync_wal.flush_no = flush_no;
+	pgaio_finish_io(io);
+
+#ifdef PGAIO_VERBOSE
+	elog(DEBUG3, "start_fsync_wal %zu:"
+		 "fd %d, is_barrier: %d, is_datasync: %d, flush_no: %d",
+		 io - aio_ctl->in_progress_io,
+		 fd,
+		 barrier,
+		 datasync_only,
+		 flush_no);
+#endif
+}
+
 static bool
 pgaio_complete_nop(PgAioInProgress *io)
 {
@@ -2963,6 +3016,20 @@ pgaio_complete_fsync(PgAioInProgress *io)
 	if (io->result != 0)
 		elog(PANIC, "fsync needs better error handling");
 
+	return true;
+}
+
+static bool
+pgaio_complete_fsync_wal(PgAioInProgress *io)
+{
+#ifdef PGAIO_VERBOSE
+	elog(DEBUG3, "completed fsync_wal: %zu",
+		 io - aio_ctl->in_progress_io);
+#endif
+	if (io->result != 0)
+		elog(PANIC, "fsync_wal needs better error handling");
+
+	XLogFlushComplete(io, io->d.fsync_wal.flush_no);
 	return true;
 }
 

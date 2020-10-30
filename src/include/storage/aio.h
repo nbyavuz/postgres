@@ -100,6 +100,8 @@ extern void pgaio_io_start_write_wal(PgAioInProgress *io, int fd,
 extern void pgaio_io_start_write_generic(PgAioInProgress *io, int fd,
 										 uint32 offset, uint32 nbytes,
 										 char *bufdata, bool no_reorder);
+extern void pgaio_io_start_fsync_wal(PgAioInProgress *io, int fd, bool barrier,
+									 bool datasync_only, uint32 sync_no);
 
 extern void pgaio_io_retry(PgAioInProgress *io);
 extern void pgaio_submit_pending(bool drain);
