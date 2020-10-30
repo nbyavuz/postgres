@@ -630,6 +630,39 @@ pgaio_postmaster_child_init_local(void)
 }
 
 static void
+pgaio_postmaster_before_child_exit(int code, Datum arg)
+{
+	elog(LOG, "before shmem exit: start");
+
+	/*
+	 * This is a very dirty hack to work around the issue that linux 5.10
+	 * cancels IO requests issued by this process when the process exits.
+	 */
+	while (pg_atomic_read_u32(&my_aio->inflight) != 0)
+	{
+		int waited = 0;
+
+		for (int i = 0; i < max_aio_in_progress; i++)
+		{
+			PgAioInProgress *io = &aio_ctl->in_progress_io[i];
+
+			if (io->owner_id == my_aio_id)
+			{
+				pgaio_io_wait(io, false);
+				waited++;
+				elog(DEBUG2, "waited for in-progress IO %zu",
+					 io - aio_ctl->in_progress_io);
+			}
+		}
+
+		if (waited == 0)
+			elog(DEBUG2, "waited for inflight IOs to finish, without success");
+	}
+
+	elog(DEBUG2, "before shmem exit: end");
+}
+
+static void
 pgaio_postmaster_child_exit(int code, Datum arg)
 {
 	/* FIXME: handle unused */
@@ -639,7 +672,12 @@ pgaio_postmaster_child_exit(int code, Datum arg)
 	Assert(my_aio->pending_count == 0);
 	Assert(dlist_is_empty(&my_aio->pending));
 
+	Assert(pg_atomic_read_u32(&my_aio->inflight) == 0);
+
 	Assert(dlist_is_empty(&my_aio->reaped));
+
+	Assert(my_aio->local_completed_count == 0);
+	Assert(dlist_is_empty(&my_aio->local_completed));
 
 	Assert(my_aio->foreign_completed_count == 0);
 	Assert(dlist_is_empty(&my_aio->foreign_completed));
@@ -657,6 +695,7 @@ pgaio_postmaster_child_init(void)
 
 	dlist_init(&local_recycle_requests);
 
+	before_shmem_exit(pgaio_postmaster_before_child_exit, 0);
 	on_shmem_exit(pgaio_postmaster_child_exit, 0);
 
 	Assert(my_aio->unused_count == 0);
@@ -2975,7 +3014,7 @@ pgaio_complete_read_buffer(PgAioInProgress *io)
 
 		if (io->result < 0)
 		{
-			if (io->result == EAGAIN || io->result == EINTR)
+			if (io->result == -EAGAIN || io->result == -EINTR)
 			{
 				elog(PANIC, "need to implement retries for failed requests");
 			}
@@ -3157,7 +3196,7 @@ pgaio_complete_write_wal(PgAioInProgress *io)
 
 	if (io->result < 0)
 	{
-		if (io->result == EAGAIN || io->result == EINTR)
+		if (io->result == -EAGAIN || io->result == -EINTR)
 		{
 			elog(WARNING, "need to implement retries");
 		}
@@ -3197,7 +3236,7 @@ pgaio_complete_write_generic(PgAioInProgress *io)
 
 	if (io->result < 0)
 	{
-		if (io->result == EAGAIN || io->result == EINTR)
+		if (io->result == -EAGAIN || io->result == -EINTR)
 		{
 			elog(WARNING, "need to implement retries");
 		}
