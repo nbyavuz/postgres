@@ -3173,15 +3173,21 @@ write_out_wait:
 static bool
 XLogWriteIssueFlushes(XLogwrtRqst WriteRqst)
 {
-	/*
-	 * Could get here without having written ourselves, in which case we might
-	 * have no open file or the wrong one.  However, we do not need to fsync
-	 * more than one file.
-	 */
-	if ((sync_method != SYNC_METHOD_OPEN &&
-		 sync_method != SYNC_METHOD_OPEN_DSYNC &&
-		 enableFsync))
+	/* shouldn't even get here */
+	Assert(sync_method != SYNC_METHOD_OPEN &&
+		   sync_method != SYNC_METHOD_OPEN_DSYNC);
+
+	if (!enableFsync)
 	{
+		LogwrtResult.FlushDone = LogwrtResult.FlushInit = LogwrtResult.WriteDone;
+	}
+	else
+	{
+		/*
+		 * Could get here without having written ourselves, in which case we might
+		 * have no open file or the wrong one.  However, we do not need to fsync
+		 * more than one file.
+		 */
 		if (openLogFile >= 0 &&
 			!XLByteInPrevSeg(LogwrtResult.WriteDone, openLogSegNo,
 							 wal_segment_size))
@@ -3223,15 +3229,15 @@ XLogWriteIssueFlushes(XLogwrtRqst WriteRqst)
 
 			XLogIOQueueCheck(XLogCtl->flushes);
 		}
-
-		SpinLockAcquire(&XLogCtl->info_lck);
-		XLogCtl->LogwrtResult = LogwrtResult;
-		SpinLockRelease(&XLogCtl->info_lck);
-
-		/* signal that we need to wakeup walsenders later */
-		// FIXME: also when using O_[D]SYNC?
-		WalSndWakeupRequest();
 	}
+
+	SpinLockAcquire(&XLogCtl->info_lck);
+	XLogCtl->LogwrtResult = LogwrtResult;
+	SpinLockRelease(&XLogCtl->info_lck);
+
+	/* signal that we need to wakeup walsenders later */
+	// FIXME: also when using O_[D]SYNC?
+	WalSndWakeupRequest();
 
 	return false;
 }
@@ -11442,7 +11448,9 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 {
 	PgAioInProgress *aio;
 
-	if (!enableFsync)
+	if (!enableFsync ||
+		sync_method == SYNC_METHOD_OPEN ||
+		sync_method == SYNC_METHOD_OPEN_DSYNC)
 		return;
 
 
