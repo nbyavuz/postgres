@@ -1010,6 +1010,8 @@ static void WALInsertLockAcquireExclusive(void);
 static void WALInsertLockRelease(void);
 static void WALInsertLockUpdateInsertingAt(XLogRecPtr insertingAt);
 
+static void start_xlog_fsync(PgAioInProgress *aio, int fd, XLogSegNo segno);
+
 /*
  * Insert an XLOG record represented by an already-constructed chain of data
  * chunks.  This is a low-level routine; to construct the WAL record header
@@ -2507,6 +2509,23 @@ XLogWriteComplete(PgAioInProgress *aio, uint32 write_no)
 	io->aio = NULL;
 }
 
+void
+XLogFlushComplete(struct PgAioInProgress *aio, uint32 flush_no)
+{
+	XLogIOQueue *flushes = XLogCtl->flushes;
+	XLogIO *io;
+
+	Assert(sync_method != SYNC_METHOD_OPEN &&
+		   sync_method != SYNC_METHOD_OPEN_DSYNC);
+
+	Assert(flush_no < flushes->num_ios);
+	io = &flushes->ios[flush_no];
+
+	Assert(io->in_progress);
+	io->in_progress = false;
+	pg_write_barrier();
+	io->aio = NULL;
+}
 
 static void
 XLogWriteQueueUpdate(bool has_exclusive)
@@ -2575,8 +2594,63 @@ XLogWriteQueueUpdate(bool has_exclusive)
 	XLogIOQueueCheck(XLogCtl->writes);
 }
 
+static void
+XLogFlushQueueUpdate(bool has_exclusive)
+{
+	XLogIOQueue *flushes = XLogCtl->flushes;
+	XLogRecPtr upto = 0;
+
+	Assert(LWLockHeldByMe(WALWriteLock));
+
+	for (uint16 cur = flushes->tail; cur != flushes->next; cur++)
+	{
+		XLogIO *curio = &flushes->ios[cur % flushes->num_ios];
+
+		if (curio->in_progress)
+			break;
+
+		Assert(upto < curio->upto);
+		upto = curio->upto;
+
+		if (has_exclusive)
+		{
+			elog(DEBUG3, "updating flush queue tail from %d to %d, lsn %X/%X",
+				 flushes->tail, cur + 1,
+				 (uint32)(upto << 32), (uint32) upto);
+			Assert(curio->upto != 0);
+			curio->upto = 0;
+
+			flushes->tail = cur + 1;
+		}
+	}
+
+	if (upto != 0)
+	{
+		SpinLockAcquire(&XLogCtl->info_lck);
+
+		Assert(!has_exclusive ||
+			   upto <= XLogCtl->LogwrtResult.FlushInit);
+		Assert(!has_exclusive ||
+			   upto >= XLogCtl->LogwrtResult.FlushDone);
+
+		if (upto > XLogCtl->LogwrtResult.FlushDone)
+			XLogCtl->LogwrtResult.FlushDone = upto;
+
+		LogwrtResult = XLogCtl->LogwrtResult;
+		SpinLockRelease(&XLogCtl->info_lck);
+	}
+	else if (!has_exclusive)
+	{
+		SpinLockAcquire(&XLogCtl->info_lck);
+		LogwrtResult = XLogCtl->LogwrtResult;
+		SpinLockRelease(&XLogCtl->info_lck);
+	}
+
+	XLogIOQueueCheck(XLogCtl->flushes);
+}
+
 static bool
-XLogIOQueueWaitFor(XLogIOQueue *queue, XLogRecPtr lsn, bool has_exclusive)
+XLogIOQueueWaitFor(XLogIOQueue *queue, XLogRecPtr lsn, bool wait_locked)
 {
 	PgAioInProgress *aios[128];
 	uint32 waitcount = 0;
@@ -2612,11 +2686,11 @@ XLogIOQueueWaitFor(XLogIOQueue *queue, XLogRecPtr lsn, bool has_exclusive)
 	if (waitcount == 0)
 	{
 		//elog(LOG, "no waits");
-		XLogWriteQueueUpdate(has_exclusive);
 		return false;
 	}
 
-	LWLockRelease(WALWriteLock);
+	if (!wait_locked)
+		LWLockRelease(WALWriteLock);
 
 	//elog(LOG, "waiting for %d", waitcount);
 	for (int i = 0; i < waitcount; i++)
@@ -2657,13 +2731,32 @@ XLogIOQueueEnsureOne(XLogIOQueue *queue)
 		}
 	}
 
-	XLogWriteQueueUpdate(true);
-
 	return false;
 }
 
+static void
+XLogIOQueueAdd(XLogIOQueue *queue, PgAioInProgress *aio, XLogRecPtr upto)
+{
+	XLogIO *io;
+
+	/* gotta have space, use XLogIOQueueEnsureOne */
+	Assert((uint16)(queue->next - queue->tail) != queue->num_ios);
+
+	io = &queue->ios[queue->next % queue->num_ios];
+
+	Assert(io->aio == NULL);
+	Assert(io->upto == 0);
+
+	io->upto = upto;
+	io->in_progress = true;
+	io->aio = aio;
+	queue->next++;
+
+	XLogIOQueueCheck(XLogCtl->writes);
+}
+
 static bool
-XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
+XLogWriteIssueWrites(XLogwrtRqst *WriteRqst, bool flexible)
 {
 	bool		ispartialpage;
 	bool		last_iteration;
@@ -2703,11 +2796,11 @@ XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
 	lastpartialidx = curridx;
 #endif
 
-	while (LogwrtResult.WriteInit < WriteRqst.WriteInit)
+	while (LogwrtResult.WriteInit < WriteRqst->WriteInit)
 	{
 		/*
 		 * Make sure we're not ahead of the insert process.  This could happen
-		 * if we're passed a bogus WriteRqst.Write that is past the end of the
+		 * if we're passed a bogus WriteRqst->Write that is past the end of the
 		 * last page that's been initialized by AdvanceXLInsertBuffer.
 		 */
 		XLogRecPtr	PageEndPtr = XLogCtl->xlblocks[curridx].lsn;
@@ -2720,27 +2813,27 @@ XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
 				 (uint32) LogwrtResult.WriteInit,
 				 (uint32) (PageEndPtr >> 32), (uint32) PageEndPtr);
 
-		ispartialpage = WriteRqst.WriteInit < PageEndPtr;
+		ispartialpage = WriteRqst->WriteInit < PageEndPtr;
 
 		if (ispartialpage)
 		{
 			XLogRecPtr newinsertpos = (XLogRecPtr)
 				pg_atomic_read_u64(&XLogCtl->Insert.knownCompletedUpto);
 
-			if (WriteRqst.WriteInit < newinsertpos)
+			if (WriteRqst->WriteInit < newinsertpos)
 			{
-				WriteRqst.WriteInit = newinsertpos;
-				ispartialpage = WriteRqst.WriteInit < PageEndPtr;
+				WriteRqst->WriteInit = newinsertpos;
+				ispartialpage = WriteRqst->WriteInit < PageEndPtr;
 				//elog(LOG, "last ditch 1, new partial %d", ispartialpage);
 			}
 
 			if (ispartialpage)
 			{
 				newinsertpos = WaitXLogInsertionsToFinish(newinsertpos);
-				if (WriteRqst.WriteInit < newinsertpos)
+				if (WriteRqst->WriteInit < newinsertpos)
 				{
-					WriteRqst.WriteInit = newinsertpos;
-					ispartialpage = WriteRqst.WriteInit < PageEndPtr;
+					WriteRqst->WriteInit = newinsertpos;
+					ispartialpage = WriteRqst->WriteInit < PageEndPtr;
 					//elog(LOG, "last ditch 2, new partial %d", ispartialpage);
 				}
 			}
@@ -2748,7 +2841,7 @@ XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
 		}
 
 		if (ispartialpage)
-			write_upto = WriteRqst.WriteInit;
+			write_upto = WriteRqst->WriteInit;
 		else
 			write_upto = PageEndPtr;
 
@@ -2792,6 +2885,17 @@ XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
 			{
 				goto write_out_wait;
 			}
+			XLogWriteQueueUpdate(true);
+
+			/*
+			 * And also in the fsync queue, as we do not want to wait
+			 * additionally when doing an end-of-segment sync.
+			 */
+			if (XLogIOQueueEnsureOne(XLogCtl->flushes))
+			{
+				goto write_out_wait;
+			}
+			XLogFlushQueueUpdate(true);
 		}
 		npages++;
 
@@ -2801,7 +2905,7 @@ XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
 		 * contiguous in memory), or if we are at the end of the logfile
 		 * segment.
 		 */
-		last_iteration = WriteRqst.WriteInit <= PageEndPtr;
+		last_iteration = WriteRqst->WriteInit <= PageEndPtr;
 
 		finishing_seg = !ispartialpage &&
 			(startoffset + npages * XLOG_BLCKSZ) >= wal_segment_size;
@@ -2826,7 +2930,7 @@ XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
 			 *
 			 * FIXME: replace with no_reorder=true when issuing IO?
 			 */
-			if (false && writes->tail + 1 != writes->next)
+			if (writes->tail + 1 != writes->next)
 			{
 				XLogIO *io = &writes->ios[(writes->next - 1) % writes->num_ios];
 				PgAioInProgress *aio = io->aio;
@@ -2835,12 +2939,12 @@ XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
 
 				if (io->upto > startwrite && io->in_progress)
 				{
-#if 0
+#if 1
 					XLogRecPtr upto = io->upto;
 
 					LWLockRelease(WALWriteLock);
 
-					ereport(DEBUG1,
+					ereport(DEBUG3,
 							errmsg("waiting for partial write: %X/%X, so I can write from %X/%X to %X/%X",
 								   (uint32)(upto << 32), (uint32)upto,
 								   (uint32)(startwrite << 32), (uint32)startwrite,
@@ -2917,29 +3021,17 @@ XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
 						errhidecontext(true));
 			}
 #endif
-			{
-				XLogIO *io = &writes->ios[writes->next % writes->num_ios];
 
-				Assert((uint16)(writes->next - writes->tail) < writes->num_ios);
-				Assert(io->aio == NULL);
-				Assert(io->upto == 0);
+			/* FIXME: recycle */
+			aio = pgaio_io_get();
+			pgaio_io_start_write_wal(aio, openLogFile, startoffset,
+									 nbytes, from, prevent_reordering,
+									 XLogCtl->writes->next % XLogCtl->writes->num_ios);
 
-				/* FIXME: recycle */
-				aio = pgaio_io_get();
+			XLogIOQueueAdd(XLogCtl->writes, aio, write_upto);
 
-				io->upto = write_upto;
-				io->in_progress = true;
-				io->aio = aio;
+			//pgaio_submit_pending(false);
 
-				pgaio_io_start_write_wal(aio, openLogFile, startoffset,
-										 nbytes, from, prevent_reordering,
-										 io - XLogCtl->writes->ios);
-
-				XLogCtl->writes->next++;
-				//pgaio_submit_pending(false);
-
-				XLogIOQueueCheck(XLogCtl->writes);
-			}
 			from += nbytes;
 			startoffset += nbytes;
 
@@ -2975,35 +3067,55 @@ XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
 			 */
 			if (finishing_seg)
 			{
-				if ((sync_method != SYNC_METHOD_OPEN &&
-					 sync_method != SYNC_METHOD_OPEN_DSYNC))
-				{
-					ereport(ERROR, errmsg("not right now"));
+				pgaio_submit_pending(false);
 
-					/* FIXME */
+				if (LogwrtResult.FlushInit < LogwrtResult.WriteInit &&
+					sync_method != SYNC_METHOD_OPEN &&
+					sync_method != SYNC_METHOD_OPEN_DSYNC &&
+					enableFsync)
+				{
 					ereport(LOG,
-							errmsg("waiting for segment write"),
+							errmsg("waiting for end-of-segment writes"),
 							errhidestmt(true),
 							errhidecontext(true));
 
-					/*
-					 * FIXME: obviously we need to actually wait here, this is
-					 * broken.
-					 */
-					//XLogWaitIO(startwrite, LogwrtResult.WriteInit);
-					LogwrtResult.WriteDone = LogwrtResult.WriteInit;
+					/* wait holding lock, for now */
+					XLogIOQueueWaitFor(XLogCtl->writes,
+									   LogwrtResult.WriteInit,
+									   true);
+					XLogWriteQueueUpdate(true);
+					Assert(LogwrtResult.WriteDone == LogwrtResult.WriteInit);
 
-					issue_xlog_fsync(openLogFile, openLogSegNo);
+					{
+						bool fdatasync = false;
 
-					LogwrtResult.FlushInit = LogwrtResult.WriteInit;
-					LogwrtResult.FlushDone = LogwrtResult.WriteInit;
+#ifdef HAVE_FDATASYNC
+						if (sync_method == SYNC_METHOD_FDATASYNC)
+							fdatasync = true;
+#endif
+						aio = pgaio_io_get();
+						pgaio_io_start_fsync_wal(aio, openLogFile,
+												 /* barrier = */ false,
+												 fdatasync,
+												 XLogCtl->flushes->next % XLogCtl->flushes->num_ios);
+						XLogIOQueueAdd(XLogCtl->flushes, aio, LogwrtResult.WriteInit);
+						LogwrtResult.FlushInit = LogwrtResult.WriteInit;
+						pgaio_io_release(aio);
 
-					/* signal that we need to wakeup walsenders later */
-					WalSndWakeupRequest();
+						XLogIOQueueCheck(XLogCtl->flushes);
+						pgaio_submit_pending(false);
+					}
 
-					if (XLogArchivingActive())
-						XLogArchiveNotifySeg(openLogSegNo);
+					SpinLockAcquire(&XLogCtl->info_lck);
+					XLogCtl->LogwrtResult = LogwrtResult;
+					SpinLockRelease(&XLogCtl->info_lck);
 				}
+
+				/* signal that we need to wakeup walsenders later */
+				WalSndWakeupRequest();
+
+				if (XLogArchivingActive())
+					XLogArchiveNotifySeg(openLogSegNo);
 
 				XLogCtl->lastSegSwitchTime = (pg_time_t) time(NULL);
 				XLogCtl->lastSegSwitchLSN = LogwrtResult.FlushDone;
@@ -3036,16 +3148,16 @@ XLogWriteIssueWrites(XLogwrtRqst WriteRqst, bool flexible)
 			 curridx == XLogCtl->XLogCacheBlck ||
 			 finishing_seg))
 		{
-			WriteRqst.WriteInit = Min(WriteRqst.WriteInit, LogwrtResult.WriteInit);
-			WriteRqst.WriteDone = Min(WriteRqst.WriteDone, WriteRqst.WriteInit);
-			WriteRqst.FlushInit = Min(WriteRqst.FlushInit, WriteRqst.WriteInit);
-			WriteRqst.FlushDone = Min(WriteRqst.FlushDone, WriteRqst.FlushInit);
+			WriteRqst->WriteInit = Min(WriteRqst->WriteInit, LogwrtResult.WriteInit);
+			WriteRqst->WriteDone = Min(WriteRqst->WriteDone, WriteRqst->WriteInit);
+			WriteRqst->FlushInit = Min(WriteRqst->FlushInit, WriteRqst->WriteDone);
+			WriteRqst->FlushDone = Min(WriteRqst->FlushDone, WriteRqst->FlushInit);
 			break;
 		}
 	}
 
 	Assert(npages == 0);
-	Assert(WriteRqst.WriteInit <= LogwrtResult.WriteInit);
+	Assert(WriteRqst->WriteInit <= LogwrtResult.WriteInit);
 
 	/* don't drain while we hold lock */
 	pgaio_submit_pending(false);
@@ -3059,7 +3171,7 @@ write_out_wait:
 }
 
 static bool
-XLogWriteIssueFlushes(XLogwrtRqst WriteRqst, bool flexible)
+XLogWriteIssueFlushes(XLogwrtRqst WriteRqst)
 {
 	/*
 	 * Could get here without having written ourselves, in which case we might
@@ -3067,13 +3179,16 @@ XLogWriteIssueFlushes(XLogwrtRqst WriteRqst, bool flexible)
 	 * more than one file.
 	 */
 	if ((sync_method != SYNC_METHOD_OPEN &&
-		 sync_method != SYNC_METHOD_OPEN_DSYNC))
+		 sync_method != SYNC_METHOD_OPEN_DSYNC &&
+		 enableFsync))
 	{
-		elog(ERROR, "not supported right now");
 		if (openLogFile >= 0 &&
 			!XLByteInPrevSeg(LogwrtResult.WriteDone, openLogSegNo,
 							 wal_segment_size))
+		{
 			XLogFileClose();
+		}
+
 		if (openLogFile < 0)
 		{
 			XLByteToPrevSeg(LogwrtResult.WriteDone, openLogSegNo,
@@ -3085,10 +3200,29 @@ XLogWriteIssueFlushes(XLogwrtRqst WriteRqst, bool flexible)
 		if (XLogIOQueueEnsureOne(XLogCtl->flushes))
 			return true;
 
-		issue_xlog_fsync(openLogFile, openLogSegNo);
+		XLogFlushQueueUpdate(true);
 
-		LogwrtResult.FlushInit = LogwrtResult.WriteDone;
-		LogwrtResult.FlushDone = LogwrtResult.FlushInit;
+		{
+			PgAioInProgress *aio;
+			bool fdatasync = false;
+
+#ifdef HAVE_FDATASYNC
+			if (sync_method == SYNC_METHOD_FDATASYNC)
+				fdatasync = true;
+#endif
+			aio = pgaio_io_get();
+			pgaio_io_start_fsync_wal(aio, openLogFile,
+									 /* barrier = */ false,
+									 fdatasync,
+									 XLogCtl->flushes->next % XLogCtl->flushes->num_ios);
+			XLogIOQueueAdd(XLogCtl->flushes, aio, LogwrtResult.WriteDone);
+			LogwrtResult.FlushInit = LogwrtResult.WriteDone;
+			pgaio_io_release(aio);
+
+			pgaio_submit_pending(false);
+
+			XLogIOQueueCheck(XLogCtl->flushes);
+		}
 
 		SpinLockAcquire(&XLogCtl->info_lck);
 		XLogCtl->LogwrtResult = LogwrtResult;
@@ -3210,11 +3344,12 @@ xlogwrite_again:
 
 		Assert(WriteRqst.WriteInit <= insertpos_before);
 
+#if 0
 		SpinLockAcquire(&XLogCtl->info_lck);
 		if (insertpos_before < XLogCtl->LogwrtRqst.WriteInit)
 			insertpos_before = XLogCtl->LogwrtRqst.WriteInit;
 		SpinLockRelease(&XLogCtl->info_lck);
-
+#endif
 		insertpos = WaitXLogInsertionsToFinish(insertpos_before);
 
 		Assert(WriteRqst.WriteInit <= insertpos);
@@ -3304,7 +3439,7 @@ xlogwrite_again:
 		}
 #endif
 
-		if (XLogWriteIssueWrites(WriteRqst, flexible))
+		if (XLogWriteIssueWrites(&WriteRqst, flexible))
 		{
 			holding_lock = false;
 			goto xlogwrite_again;
@@ -3369,16 +3504,22 @@ xlogwrite_again:
 	 */
 	if (LogwrtResult.WriteDone < WriteRqst.WriteDone)
 	{
-		if (XLogIOQueueWaitFor(XLogCtl->writes, WriteRqst.WriteDone, !only_wait))
+		if (XLogIOQueueWaitFor(XLogCtl->writes, WriteRqst.WriteDone, false))
 		{
 			holding_lock = false;
 			goto xlogwrite_again;
 		}
 
+		XLogWriteQueueUpdate(!only_wait);
 		Assert(WriteRqst.WriteDone <= LogwrtResult.WriteDone);
 	}
 
 	Assert(WriteRqst.WriteDone <= LogwrtResult.WriteDone);
+
+	if (flexible && WriteRqst.FlushInit > WriteRqst.WriteDone)
+	{
+		WriteRqst.FlushInit = WriteRqst.WriteDone;
+	}
 
 	/*
 	 * If we need to issue flushes, do so. Pretty much the same as the write
@@ -3390,8 +3531,9 @@ xlogwrite_again:
 	if (LogwrtResult.FlushInit < WriteRqst.FlushInit)
 	{
 		Assert(!only_wait);
+		Assert(LogwrtResult.WriteDone > LogwrtResult.FlushInit);
 
-		if (XLogWriteIssueFlushes(WriteRqst, flexible))
+		if (XLogWriteIssueFlushes(WriteRqst))
 		{
 			holding_lock = false;
 			goto xlogwrite_again;
@@ -3400,20 +3542,22 @@ xlogwrite_again:
 		performed_io = true;
 
 		Assert(flexible ||
-			   WriteRqst.FlushInit >= LogwrtResult.FlushInit);
+			   WriteRqst.FlushInit <= LogwrtResult.FlushInit);
 	}
 
 	/*
 	 * Wait for all required flushes to complete.
 	 */
 	if (!flexible &&
-		(WriteRqst.FlushDone < LogwrtResult.FlushDone))
+		(LogwrtResult.FlushDone < WriteRqst.FlushDone))
 	{
-		if (XLogIOQueueWaitFor(XLogCtl->flushes, LogwrtResult.FlushDone, !only_wait))
+		if (XLogIOQueueWaitFor(XLogCtl->flushes, WriteRqst.FlushDone, false))
 		{
 			holding_lock = false;
 			goto xlogwrite_again;
 		}
+
+		XLogFlushQueueUpdate(!only_wait);
 	}
 
 	Assert(flexible ||
@@ -11252,57 +11396,28 @@ assign_xlog_sync_method(int new_sync_method, void *extra)
 	}
 }
 
-
-/*
- * Issue appropriate kind of fsync (if any) for an XLOG output file.
- *
- * 'fd' is a file descriptor for the XLOG file to be fsync'd.
- * 'segno' is for error reporting purposes.
- */
-void
-issue_xlog_fsync(int fd, XLogSegNo segno)
+static void
+start_xlog_fsync(PgAioInProgress *aio, int fd, XLogSegNo segno)
 {
-	char	   *msg = NULL;
+	if (!enableFsync)
+		return;
 
-	pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
 	switch (sync_method)
 	{
 		case SYNC_METHOD_FSYNC:
-#if 1
-			if (enableFsync)
-			{
-				PgAioInProgress *aio = pgaio_io_get();
-
-				pgaio_io_start_fsync(aio, fd, false);
-				pgaio_io_wait(aio, true);
-				pgaio_io_release(aio);
-			}
-#else
-			if (pg_fsync_no_writethrough(fd) != 0)
-				msg = _("could not fsync file \"%s\": %m");
-#endif
+			pgaio_io_start_fsync(aio, fd, false);
 			break;
+
 #ifdef HAVE_FSYNC_WRITETHROUGH
 		case SYNC_METHOD_FSYNC_WRITETHROUGH:
 			if (pg_fsync_writethrough(fd) != 0)
 				msg = _("could not fsync write-through file \"%s\": %m");
 			break;
 #endif
+
 #ifdef HAVE_FDATASYNC
 		case SYNC_METHOD_FDATASYNC:
-#if 1
-			if (enableFsync)
-			{
-				PgAioInProgress *aio = pgaio_io_get();
-
-				pgaio_io_start_fdatasync(aio, fd, false);
-				pgaio_io_wait(aio, true);
-				pgaio_io_release(aio);
-			}
-#else
-			if (pg_fdatasync(fd) != 0)
-				msg = _("could not fdatasync file \"%s\": %m");
-#endif
+			pgaio_io_start_fdatasync(aio, fd, false);
 			break;
 #endif
 		case SYNC_METHOD_OPEN:
@@ -11313,20 +11428,30 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 			elog(PANIC, "unrecognized wal_sync_method: %d", sync_method);
 			break;
 	}
+}
 
-	/* PANIC if failed to fsync */
-	if (msg)
-	{
-		char		xlogfname[MAXFNAMELEN];
-		int			save_errno = errno;
 
-		XLogFileName(xlogfname, ThisTimeLineID, segno,
-					 wal_segment_size);
-		errno = save_errno;
-		ereport(PANIC,
-				(errcode_for_file_access(),
-				 errmsg(msg, xlogfname)));
-	}
+/*
+ * Issue appropriate kind of fsync (if any) for an XLOG output file.
+ *
+ * 'fd' is a file descriptor for the XLOG file to be fsync'd.
+ * 'segno' is for error reporting purposes.
+ */
+void
+issue_xlog_fsync(int fd, XLogSegNo segno)
+{
+	PgAioInProgress *aio;
+
+	if (!enableFsync)
+		return;
+
+
+	pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
+
+	aio = pgaio_io_get();
+	start_xlog_fsync(aio, fd, segno);
+	pgaio_io_wait(aio, true);
+	pgaio_io_release(aio);
 
 	pgstat_report_wait_end();
 }
