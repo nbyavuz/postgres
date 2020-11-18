@@ -309,7 +309,7 @@ typedef struct PgAioPerBackend
 	 * been processed (but they may have completed without the completions
 	 * having been processed).
 	 */
-	pg_atomic_uint32 inflight;
+	pg_atomic_uint32 inflight_count;
 
 	/*
 	 * Requests where we've received a kernel completion, but haven't yet
@@ -553,7 +553,7 @@ AioShmemInit(void)
 			dlist_init(&bs->unused);
 			dlist_init(&bs->outstanding);
 			dlist_init(&bs->pending);
-			pg_atomic_init_u32(&bs->inflight, 0);
+			pg_atomic_init_u32(&bs->inflight_count, 0);
 			dlist_init(&bs->reaped);
 
 			dlist_init(&bs->foreign_completed);
@@ -664,7 +664,7 @@ pgaio_postmaster_before_child_exit(int code, Datum arg)
 	 * This is a very dirty hack to work around the issue that linux 5.10
 	 * cancels IO requests issued by this process when the process exits.
 	 */
-	while (pg_atomic_read_u32(&my_aio->inflight) != 0)
+	while (pg_atomic_read_u32(&my_aio->inflight_count) != 0)
 	{
 		int waited = 0;
 
@@ -698,7 +698,7 @@ pgaio_postmaster_child_exit(int code, Datum arg)
 	Assert(my_aio->pending_count == 0);
 	Assert(dlist_is_empty(&my_aio->pending));
 
-	Assert(pg_atomic_read_u32(&my_aio->inflight) == 0);
+	Assert(pg_atomic_read_u32(&my_aio->inflight_count) == 0);
 
 	Assert(dlist_is_empty(&my_aio->reaped));
 
@@ -912,7 +912,7 @@ pgaio_uncombine(void)
 		 * FIXME: this should a) probably not be here, b) only once for all
 		 * the received IOs.
 		 */
-		pg_atomic_fetch_sub_u32(&aio_ctl->backend_state[io->owner_id].inflight,
+		pg_atomic_fetch_sub_u32(&aio_ctl->backend_state[io->owner_id].inflight_count,
 								extracted);
 	}
 }
@@ -1366,7 +1366,7 @@ pgaio_backpressure(PgAioContext *context, const char *loc)
 
 	while (true)
 	{
-		uint32 inflight_before = pg_atomic_read_u32(&my_aio->inflight);
+		uint32 inflight_before = pg_atomic_read_u32(&my_aio->inflight_count);
 
 		if (inflight_before < PGAIO_BACKPRESSURE_LIMIT)
 			break;
@@ -1385,14 +1385,14 @@ pgaio_backpressure(PgAioContext *context, const char *loc)
 				 ", used b/a: %d/%d, processed %d",
 				 loc,
 				 cqr_before, io_uring_cq_ready(&context->io_uring_ring),
-				 inflight_before, pg_atomic_read_u32(&my_aio->inflight),
+				 inflight_before, pg_atomic_read_u32(&my_aio->inflight_count),
 				 used_before, aio_ctl->used_count,
 				 total);
 
 		}
 
 		/* recheck */
-		inflight_before = pg_atomic_read_u32(&my_aio->inflight);
+		inflight_before = pg_atomic_read_u32(&my_aio->inflight_count);
 		if (inflight_before < PGAIO_BACKPRESSURE_LIMIT)
 			break;
 		{
@@ -1436,7 +1436,7 @@ pgaio_backpressure(PgAioContext *context, const char *loc)
 				 "cqr before %d after %d "
 				 "space left: %d, sq ready: %d",
 				 loc, waitfor,
-				 inflight_before, pg_atomic_read_u32(&my_aio->inflight),
+				 inflight_before, pg_atomic_read_u32(&my_aio->inflight_count),
 				 used_before, aio_ctl->used_count,
 				 cqr_before, io_uring_cq_ready(&context->io_uring_ring),
 				 io_uring_sq_space_left(&context->io_uring_ring),
@@ -1666,7 +1666,7 @@ pgaio_io_get(void)
 	{
 		LWLockRelease(SharedAIOCtlLock);
 		elog(DEBUG1, "needed to drain while getting IO (used %d inflight %d)",
-			 aio_ctl->used_count, pg_atomic_read_u32(&my_aio->inflight));
+			 aio_ctl->used_count, pg_atomic_read_u32(&my_aio->inflight_count));
 
 		/*
 		 * FIXME: should we wait for IO instead?
@@ -1998,7 +1998,7 @@ pgaio_print_queues(void)
 	{
 		PgAioPerBackend *bs = &aio_ctl->backend_state[procno];
 
-		inflight_backend += pg_atomic_read_u32(&bs->inflight);
+		inflight_backend += pg_atomic_read_u32(&bs->inflight_count);
 	}
 
 	inflight_context = palloc0(sizeof(uint32) * aio_ctl->backend_state_count);
@@ -2420,7 +2420,7 @@ pgaio_uring_submit(bool drain)
 		{
 			int ret;
 
-			pg_atomic_add_fetch_u32(&my_aio->inflight, inflight_add);
+			pg_atomic_add_fetch_u32(&my_aio->inflight_count, inflight_add);
 			my_aio->submissions_total_count++;
 
 	again:
@@ -3412,7 +3412,7 @@ pg_stat_get_aio_backends(PG_FUNCTION_ARGS)
 		values[ 3] = Int64GetDatum(bs->submissions_total_count);
 		values[ 4] = Int64GetDatum(bs->foreign_completed_total_count);
 		values[ 5] = Int64GetDatum(bs->retry_total_count);
-		values[ 6] = Int64GetDatum(pg_atomic_read_u32(&bs->inflight));
+		values[ 6] = Int64GetDatum(pg_atomic_read_u32(&bs->inflight_count));
 		values[ 7] = Int32GetDatum(bs->unused_count);
 		values[ 8] = Int32GetDatum(bs->outstanding_count);
 		values[ 9] = Int32GetDatum(bs->pending_count);
