@@ -4224,18 +4224,23 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 		}
 		else
 		{
+#if 1
+			PgAioBounceBuffer *bb;
+			char	   *zerobuf;
+			bb = pgaio_bounce_buffer_get();
+			zerobuf = pgaio_bounce_buffer_buffer(bb);
+			memset(zerobuf, 0, BLCKSZ);
+
+			StaticAssertStmt(BLCKSZ == XLOG_BLCKSZ, "mismatch not supported");
+#endif
+
 			for (nbytes = 0; nbytes < wal_segment_size; nbytes += XLOG_BLCKSZ)
 			{
 #if 1
 				PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
 
-				/*
-				 * FIXME: This is kinda incorrect, because zbuffer isn't
-				 * guaranteed to be the same / at the same location in all
-				 * processes. So retries wouldn't work right. But since we
-				 * don't implement those for wal writes yet...
-				 */
-				pgaio_io_start_write_generic(aio, fd, nbytes, XLOG_BLCKSZ, zbuffer.data, false);
+				pgaio_assoc_bounce_buffer(aio, bb);
+				pgaio_io_start_write_generic(aio, fd, nbytes, XLOG_BLCKSZ, zerobuf, false);
 				pg_streaming_write_write(pgsw, aio, NULL);
 #else
 				errno = 0;
