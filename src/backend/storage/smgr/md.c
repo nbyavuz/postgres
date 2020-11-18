@@ -460,7 +460,8 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 			 BlockNumber blocknum, int nblocks, bool skipFsync)
 {
 	MdfdVec    *v;
-	char	   *zerobuf = palloc_io_aligned(BLCKSZ, MCXT_ALLOC_ZERO);
+	PgAioBounceBuffer *bb;
+	char	   *zerobuf;
 	pg_streaming_write *pgsw ;
 	BlockNumber latest;
 	BlockNumber curblocknum = blocknum;
@@ -469,6 +470,10 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 	Assert(nblocks > 0);
 
 	pgsw = pg_streaming_write_alloc(Min(256, nblocks), &latest, zeroextend_complete);
+
+	bb = pgaio_bounce_buffer_get();
+	zerobuf = pgaio_bounce_buffer_buffer(bb);
+	memset(zerobuf, 0, BLCKSZ);
 
 	/* This assert is too expensive to have on normally ... */
 #ifdef CHECK_WRITE_VS_EXTEND
@@ -521,6 +526,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 			PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
 			AioBufferTag tag = {.rnode = reln->smgr_rnode, .forkNum = forknum, .blockNum = i};
 
+			pgaio_assoc_bounce_buffer(aio, bb);
 			FileStartWrite(aio, v->mdfd_vfd, zerobuf, BLCKSZ, i * BLCKSZ, &tag, InvalidBuffer);
 
 			pg_streaming_write_write(pgsw, aio, (void*) &i);
@@ -560,8 +566,6 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 
 	pg_streaming_write_wait_all(pgsw);
 	pg_streaming_write_free(pgsw);
-
-	pfree(zerobuf);
 
 	return blocknum + (nblocks - 1);
 }
