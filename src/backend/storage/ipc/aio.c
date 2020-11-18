@@ -256,11 +256,9 @@ struct PgAioInProgress
 /* typedef in header */
 struct PgAioBounceBuffer
 {
-	union
-	{
-		char buffer[BLCKSZ];
-		dlist_node node;
-	} d;
+	pg_atomic_uint32 refcount;
+	dlist_node node;
+	char *buffer;
 };
 
 /*
@@ -492,8 +490,16 @@ AioCtlBackendShmemSize(void)
 static Size
 AioBounceShmemSize(void)
 {
-	return add_size(BLCKSZ /* alignment padding */,
-					mul_size(BLCKSZ, max_aio_bounce_buffers));
+	Size		sz;
+
+	/* PgAioBounceBuffer itself */
+	sz = mul_size(sizeof(PgAioBounceBuffer), max_aio_bounce_buffers);
+
+	/* and the associated buffer */
+	sz = add_size(sz,
+				  mul_size(BLCKSZ, add_size(max_aio_bounce_buffers, 1)));
+
+	return sz;
 }
 
 static Size
@@ -557,18 +563,28 @@ AioShmemInit(void)
 		{
 			char *p;
 			PgAioBounceBuffer *buffers;
+			char *blocks;
 
 			dlist_init(&aio_ctl->bounce_buffers);
-			p = ShmemInitStruct("PgAioBounceBuffers", AioBounceShmemSize(), &found);
+			buffers = ShmemInitStruct("PgAioBounceBuffers",
+									   sizeof(PgAioBounceBuffer) * max_aio_bounce_buffers,
+									   &found);
 			Assert(!found);
-			buffers = (PgAioBounceBuffer *) TYPEALIGN(BLCKSZ, (uintptr_t) p);
+
+			p = ShmemInitStruct("PgAioBounceBufferBlocks",
+								BLCKSZ * (max_aio_bounce_buffers + 1),
+								&found);
+			Assert(!found);
+			blocks = (char *) TYPEALIGN(BLCKSZ, (uintptr_t) p);
 
 			for (int i = 0; i < max_aio_bounce_buffers; i++)
 			{
 				PgAioBounceBuffer *bb = &buffers[i];
 
-				memset(bb, 0, BLCKSZ);
-				dlist_push_tail(&aio_ctl->bounce_buffers, &bb->d.node);
+				bb->buffer = blocks + i * BLCKSZ;
+				memset(bb->buffer, 0, BLCKSZ);
+				pg_atomic_init_u32(&bb->refcount, 0);
+				dlist_push_tail(&aio_ctl->bounce_buffers, &bb->node);
 			}
 		}
 
@@ -2249,7 +2265,9 @@ pgaio_bounce_buffer_get(void)
 		{
 			dlist_node *node = dlist_pop_head_node(&aio_ctl->bounce_buffers);
 
-			bb = dlist_container(PgAioBounceBuffer, d.node, node);
+			bb = dlist_container(PgAioBounceBuffer, node, node);
+
+			Assert(pg_atomic_read_u32(&bb->refcount) == 0);
 		}
 		LWLockRelease(SharedAIOCtlLock);
 
@@ -2268,19 +2286,24 @@ pgaio_bounce_buffer_get(void)
 static void
 pgaio_bounce_buffer_release_locked(PgAioInProgress *io)
 {
+	PgAioBounceBuffer *bb = io->bb;
+
 	Assert(LWLockHeldByMe(SharedAIOCtlLock));
 
-	if (!io->bb)
+	if (!bb)
 		return;
 
-	dlist_push_tail(&aio_ctl->bounce_buffers, &io->bb->d.node);
 	io->bb = NULL;
+	if (pg_atomic_sub_fetch_u32(&bb->refcount, 1) != 0)
+		return;
+
+	dlist_push_tail(&aio_ctl->bounce_buffers, &bb->node);
 }
 
 char *
 pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb)
 {
-	return bb->d.buffer;
+	return bb->buffer;
 }
 
 void
@@ -2292,6 +2315,7 @@ pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb)
 	Assert(io->user_referenced);
 
 	io->bb = bb;
+	pg_atomic_fetch_add_u32(&bb->refcount, 1);
 }
 
 /*
@@ -2808,6 +2832,8 @@ pgaio_io_start_flush_range(PgAioInProgress *io, int fd, off_t offset, off_t nbyt
 void
 pgaio_io_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes, char *bufdata, int buffno, int mode)
 {
+	Assert(ShmemAddrIsValid(bufdata));
+
 	pgaio_prepare_io(io, PGAIO_READ_BUFFER);
 
 	io->d.read_buffer.buf = buffno;
@@ -2839,6 +2865,8 @@ pgaio_io_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd,
 void
 pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes, char *bufdata, int buffno)
 {
+	Assert(ShmemAddrIsValid(bufdata));
+
 	pgaio_prepare_io(io, PGAIO_WRITE_BUFFER);
 
 	io->d.write_buffer.buf = buffno;
@@ -2869,6 +2897,8 @@ pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd
 void
 pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, bool no_reorder, uint32 write_no)
 {
+	Assert(ShmemAddrIsValid(bufdata));
+
 	pgaio_prepare_io(io, PGAIO_WRITE_WAL);
 
 	io->d.write_wal.fd = fd;
@@ -2899,6 +2929,8 @@ pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbyt
 void
 pgaio_io_start_write_generic(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, bool no_reorder)
 {
+	Assert(ShmemAddrIsValid(bufdata));
+
 	pgaio_prepare_io(io, PGAIO_WRITE_GENERIC);
 
 	io->d.write_generic.fd = fd;
