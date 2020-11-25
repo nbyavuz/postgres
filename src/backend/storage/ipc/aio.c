@@ -2604,6 +2604,7 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint32 wait_eve
 		ConditionVariablePrepareToSleep(&io->cv);
 		ResetLatch(MyLatch);
 		MyLatch->maybe_sleeping = true;
+		pg_memory_barrier();
 	}
 
 	/*
