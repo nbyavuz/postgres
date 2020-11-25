@@ -1536,13 +1536,6 @@ again:
 
 	if (!holding_reference)
 	{
-		/*
-		 * If we're not possibly trying to reuse the IO, it's sufficient to
-		 * wait for the callback to have been called. But if the backend might
-		 * want to recycle the IO, that's not good enough.
-		 */
-		done_flags |= PGAIOIP_SHARED_CALLBACK_CALLED;
-
 		/* possible due to racyness */
 		done_flags |= PGAIOIP_UNUSED;
 
