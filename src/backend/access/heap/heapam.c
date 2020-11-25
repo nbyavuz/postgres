@@ -1538,6 +1538,12 @@ heap_endscan(TableScanDesc sscan)
 	if (BufferIsValid(scan->rs_cbuf))
 		ReleaseBuffer(scan->rs_cbuf);
 
+	if (scan->pgsr)
+	{
+		pg_streaming_read_free(scan->pgsr);
+		scan->pgsr = NULL;
+	}
+
 	/*
 	 * decrement relation reference count and free scan descriptor storage
 	 */
@@ -1551,12 +1557,6 @@ heap_endscan(TableScanDesc sscan)
 
 	if (scan->rs_base.rs_flags & SO_TEMP_SNAPSHOT)
 		UnregisterSnapshot(scan->rs_base.rs_snapshot);
-
-	if (scan->pgsr)
-	{
-		pg_streaming_read_free(scan->pgsr);
-		scan->pgsr = NULL;
-	}
 
 	pfree(scan);
 }
