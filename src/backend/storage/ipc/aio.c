@@ -793,7 +793,12 @@ pgaio_at_abort(void)
 		pgaio_io_release(io);
 	}
 
-	Assert(dlist_is_empty(&my_aio->issued));
+	while (!dlist_is_empty(&my_aio->issued))
+	{
+		PgAioInProgress *io = dlist_head_element(PgAioInProgress, owner_node, &my_aio->issued);
+
+		pgaio_io_release(io);
+	}
 }
 
 void
@@ -811,12 +816,19 @@ pgaio_at_commit(void)
 	{
 		PgAioInProgress *io = dlist_head_element(PgAioInProgress, owner_node, &my_aio->outstanding);
 
-		elog(WARNING, "leaked io %zu", io - aio_ctl->in_progress_io);
+		elog(WARNING, "leaked outstanding io %zu", io - aio_ctl->in_progress_io);
 
 		pgaio_io_release(io);
 	}
 
-	Assert(dlist_is_empty(&my_aio->issued));
+	while (!dlist_is_empty(&my_aio->issued))
+	{
+		PgAioInProgress *io = dlist_head_element(PgAioInProgress, owner_node, &my_aio->issued);
+
+		elog(WARNING, "leaked issued io %zu", io - aio_ctl->in_progress_io);
+
+		pgaio_io_release(io);
+	}
 }
 
 static int
