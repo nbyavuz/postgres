@@ -932,7 +932,7 @@ static void XLogFileClose(void);
 static void PreallocXlogFiles(XLogRecPtr endptr);
 static void RemoveTempXlogFiles(void);
 static void RemoveOldXlogFiles(XLogSegNo segno, XLogRecPtr lastredoptr, XLogRecPtr endptr);
-static void RemoveXlogFile(const char *segname, XLogRecPtr lastredoptr, XLogRecPtr endptr);
+static void RemoveXlogFile(const char *segname, XLogSegNo *endlogSegNo, XLogSegNo recycleSegNo);
 static void UpdateLastRemovedPtr(char *filename);
 static void ValidateXLOGDirectoryStructure(void);
 static void CleanupBackupHistory(void);
@@ -4096,6 +4096,14 @@ RemoveOldXlogFiles(XLogSegNo segno, XLogRecPtr lastredoptr, XLogRecPtr endptr)
 	DIR		   *xldir;
 	struct dirent *xlde;
 	char		lastoff[MAXFNAMELEN];
+	XLogSegNo       endlogSegNo;
+	XLogSegNo       recycleSegNo;
+
+	/*
+	 * Initialize info about where to try to recycle to.
+	 */
+	XLByteToSeg(endptr, endlogSegNo, wal_segment_size);
+	recycleSegNo = XLOGfileslop(lastredoptr);
 
 	/*
 	 * Construct a filename of the last segment to be kept. The timeline ID
@@ -4134,7 +4142,7 @@ RemoveOldXlogFiles(XLogSegNo segno, XLogRecPtr lastredoptr, XLogRecPtr endptr)
 				/* Update the last removed location in shared memory first */
 				UpdateLastRemovedPtr(xlde->d_name);
 
-				RemoveXlogFile(xlde->d_name, lastredoptr, endptr);
+				RemoveXlogFile(xlde->d_name, &endlogSegNo, recycleSegNo);
 			}
 		}
 	}
@@ -4164,13 +4172,21 @@ RemoveNonParentXlogFiles(XLogRecPtr switchpoint, TimeLineID newTLI)
 	struct dirent *xlde;
 	char		switchseg[MAXFNAMELEN];
 	XLogSegNo	endLogSegNo;
+	XLogSegNo	switchLogSegNo;
+	XLogSegNo	recycleSegNo;
 
-	XLByteToPrevSeg(switchpoint, endLogSegNo, wal_segment_size);
+	/*
+	 * Initialize info about where to begin the work. This will recycle,
+	 * somewhat arbitrarily, 10 future segments.
+	 */
+	XLByteToPrevSeg(switchpoint, switchLogSegNo, wal_segment_size);
+	XLByteToSeg(switchpoint, endLogSegNo, wal_segment_size);
+	recycleSegNo = endLogSegNo + 10;
 
 	/*
 	 * Construct a filename of the last segment to be kept.
 	 */
-	XLogFileName(switchseg, newTLI, endLogSegNo, wal_segment_size);
+	XLogFileName(switchseg, newTLI, switchLogSegNo, wal_segment_size);
 
 	elog(DEBUG2, "attempting to remove WAL segments newer than log file %s",
 		 switchseg);
@@ -4198,7 +4214,7 @@ RemoveNonParentXlogFiles(XLogRecPtr switchpoint, TimeLineID newTLI)
 			 * - but seems safer to let them be archived and removed later.
 			 */
 			if (!XLogArchiveIsReady(xlde->d_name))
-				RemoveXlogFile(xlde->d_name, InvalidXLogRecPtr, switchpoint);
+				RemoveXlogFile(xlde->d_name, &endLogSegNo, recycleSegNo);
 		}
 	}
 
@@ -4208,36 +4224,22 @@ RemoveNonParentXlogFiles(XLogRecPtr switchpoint, TimeLineID newTLI)
 /*
  * Recycle or remove a log file that's no longer needed.
  *
- * endptr is current (or recent) end of xlog, and lastredoptr is the
- * redo pointer of the last checkpoint. These are used to determine
- * whether we want to recycle rather than delete no-longer-wanted log files.
- * If lastredoptr is not known, pass invalid, and the function will recycle,
- * somewhat arbitrarily, 10 future segments.
+ * segname is the name of the segment to recycle or remove. endlogSegNo
+ * is the segment number of the current (or recent) end of WAL. recycleSegNo
+ * is the segment number to recycle up to.
+ *
+ * endlogSegNo gets incremented if the segment is recycled so as it is not
+ * checked again with future callers of this function.
  */
 static void
-RemoveXlogFile(const char *segname, XLogRecPtr lastredoptr, XLogRecPtr endptr)
+RemoveXlogFile(const char *segname, XLogSegNo *endlogSegNo,
+			   XLogSegNo recycleSegNo)
 {
 	char		path[MAXPGPATH];
 #ifdef WIN32
 	char		newpath[MAXPGPATH];
 #endif
 	struct stat statbuf;
-	XLogSegNo	endlogSegNo;
-	XLogSegNo	recycleSegNo;
-
-	if (wal_recycle)
-	{
-		/*
-		 * Initialize info about where to try to recycle to.
-		 */
-		XLByteToSeg(endptr, endlogSegNo, wal_segment_size);
-		if (lastredoptr == InvalidXLogRecPtr)
-			recycleSegNo = endlogSegNo + 10;
-		else
-			recycleSegNo = XLOGfileslop(lastredoptr);
-	}
-	else
-		recycleSegNo = 0;		/* keep compiler quiet */
 
 	snprintf(path, MAXPGPATH, XLOGDIR "/%s", segname);
 
@@ -4247,9 +4249,9 @@ RemoveXlogFile(const char *segname, XLogRecPtr lastredoptr, XLogRecPtr endptr)
 	 * symbolic links pointing to a separate archive directory.
 	 */
 	if (wal_recycle &&
-		endlogSegNo <= recycleSegNo &&
+		*endlogSegNo <= recycleSegNo &&
 		lstat(path, &statbuf) == 0 && S_ISREG(statbuf.st_mode) &&
-		InstallXLogFileSegment(&endlogSegNo, path,
+		InstallXLogFileSegment(endlogSegNo, path,
 							   true, recycleSegNo, true))
 	{
 		ereport(DEBUG2,
@@ -4257,7 +4259,7 @@ RemoveXlogFile(const char *segname, XLogRecPtr lastredoptr, XLogRecPtr endptr)
 						segname)));
 		CheckpointStats.ckpt_segs_recycled++;
 		/* Needn't recheck that slot on future iterations */
-		endlogSegNo++;
+		(*endlogSegNo)++;
 	}
 	else
 	{
