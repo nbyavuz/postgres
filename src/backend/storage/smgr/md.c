@@ -482,7 +482,7 @@ mdextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 }
 
 static void
-zeroextend_complete(void *pgsw_private, void *write_private)
+zeroextend_complete(void *pgsw_private, PgAioInProgress *aio, void *write_private)
 {
 	BlockNumber *latest = (BlockNumber *) write_private;
 }

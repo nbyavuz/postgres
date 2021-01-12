@@ -151,7 +151,7 @@ extern char *pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb);
  * Helper to efficiently perform bulk writes.
  */
 typedef struct pg_streaming_write pg_streaming_write;
-typedef void (*pg_streaming_write_completed)(void *pgsw_private, void *write_private);
+typedef void (*pg_streaming_write_completed)(void *pgsw_private, PgAioInProgress *aio, void *write_private);
 
 extern pg_streaming_write *pg_streaming_write_alloc(uint32 iodepth, void *private,
 													pg_streaming_write_completed on_completion);

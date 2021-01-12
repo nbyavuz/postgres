@@ -157,7 +157,7 @@ pg_streaming_write_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress 
 	dlist_push_tail(&pgsw->available, &this_write->node);
 
 	/* call callback after all other handling so it can issue IO */
-	pgsw->on_completion(pgsw->private_data, private_data);
+	pgsw->on_completion(pgsw->private_data, io, private_data);
 
 	ereport(DEBUG3, errmsg("complete %zu", this_write - pgsw->all_items),
 			errhidestmt(true),

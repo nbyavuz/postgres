@@ -1832,7 +1832,7 @@ typedef struct BulkExtendBufferedState
 } BulkExtendBufferedState;
 
 static void
-bulk_extend_undirty_complete(void *pgsw_private, void *write_private)
+bulk_extend_undirty_complete(void *pgsw_private, PgAioInProgress *aio, void *write_private)
 {
 	BulkExtendBufferedState *be_state = (BulkExtendBufferedState * ) pgsw_private;
 	BulkExtendOneBuffer *ex_buf = (BulkExtendOneBuffer *) write_private;
@@ -2488,7 +2488,7 @@ UnpinBuffer(BufferDesc *buf, bool fixOwner)
 }
 
 static void
-buffer_sync_complete(void *pgsw_private, void *write_private)
+buffer_sync_complete(void *pgsw_private, PgAioInProgress *aio, void *write_private)
 {
 	WritebackContext *wb_context = (WritebackContext *) pgsw_private;
 	BufferDesc *bufHdr = (BufferDesc *) write_private;
