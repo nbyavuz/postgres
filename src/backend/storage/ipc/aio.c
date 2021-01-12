@@ -214,8 +214,8 @@ struct PgAioInProgress
 		struct
 		{
 			int fd;
-			uint64 nbytes;
-			uint32 offset;
+			uint32 nbytes;
+			uint64 offset;
 		} flush_range;
 
 		struct
