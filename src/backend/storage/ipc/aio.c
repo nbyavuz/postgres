@@ -471,17 +471,32 @@ static void pgaio_uring_iovec_transfer(PgAioContext *context);
 static int __sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
 								unsigned flags, sigset_t *sig);
 
-/* io completions */
+/* IO callbacks */
 static bool pgaio_nop_complete(PgAioInProgress *io);
+static void pgaio_nop_desc(PgAioInProgress *io, StringInfo s);
+
 static bool pgaio_fsync_complete(PgAioInProgress *io);
+static void pgaio_fsync_desc(PgAioInProgress *io, StringInfo s);
+
 static bool pgaio_fsync_wal_complete(PgAioInProgress *io);
+static void pgaio_fsync_wal_desc(PgAioInProgress *io, StringInfo s);
+
 static bool pgaio_flush_range_complete(PgAioInProgress *io);
+static void pgaio_flush_range_desc(PgAioInProgress *io, StringInfo s);
+
 static bool pgaio_read_buffer_complete(PgAioInProgress *io);
 static void pgaio_read_buffer_retry(PgAioInProgress *io);
+static void pgaio_read_buffer_desc(PgAioInProgress *io, StringInfo s);
+
 static bool pgaio_write_buffer_complete(PgAioInProgress *io);
 static void pgaio_write_buffer_retry(PgAioInProgress *io);
+static void pgaio_write_buffer_desc(PgAioInProgress *io, StringInfo s);
+
 static bool pgaio_write_wal_complete(PgAioInProgress *io);
+static void pgaio_write_wal_desc(PgAioInProgress *io, StringInfo s);
+
 static bool pgaio_write_generic_complete(PgAioInProgress *io);
+static void pgaio_write_generic_desc(PgAioInProgress *io, StringInfo s);
 
 
 /*
@@ -503,54 +518,77 @@ typedef bool (*PgAioCompletedCB)(PgAioInProgress *io);
  */
 typedef void (*PgAioRetryCB)(PgAioInProgress *io);
 
+/*
+ * IO desc callback.
+ */
+typedef void (*PgAioDescCB)(PgAioInProgress *io, StringInfo s);
+
 typedef struct PgAioActionCBs
 {
+	const char *name;
 	PgAioRetryCB retry;
 	PgAioCompletedCB complete;
+	PgAioDescCB desc;
 } PgAioActionCBs;
 
 static const PgAioActionCBs io_action_cbs[] =
 {
 	[PGAIO_NOP] =
 	{
-		.complete = pgaio_nop_complete
+		.name = "nop",
+		.complete = pgaio_nop_complete,
+		.desc = pgaio_nop_desc,
 	},
 
 	[PGAIO_FSYNC] =
 	{
-		.complete = pgaio_fsync_complete
+		.name = "fsync",
+		.complete = pgaio_fsync_complete,
+		.desc = pgaio_fsync_desc,
 	},
 
 	[PGAIO_FSYNC_WAL] =
 	{
-		.complete = pgaio_fsync_wal_complete
+		.name = "fsync_wal",
+		.complete = pgaio_fsync_wal_complete,
+		.desc = pgaio_fsync_wal_desc,
 	},
 
 	[PGAIO_FLUSH_RANGE] =
 	{
-		.complete = pgaio_flush_range_complete
+		.name = "flush_range",
+		.complete = pgaio_flush_range_complete,
+		.desc = pgaio_flush_range_desc,
 	},
 
 	[PGAIO_READ_BUFFER] =
 	{
+		.name = "read_buffer",
 		.retry = pgaio_read_buffer_retry,
-		.complete = pgaio_read_buffer_complete
+		.complete = pgaio_read_buffer_complete,
+		.desc = pgaio_read_buffer_desc,
 	},
 
 	[PGAIO_WRITE_BUFFER] =
 	{
+		.name = "write_buffer",
 		.retry = pgaio_write_buffer_retry,
-		.complete = pgaio_write_buffer_complete
+		.complete = pgaio_write_buffer_complete,
+		.desc = pgaio_write_buffer_desc,
 	},
 
 	[PGAIO_WRITE_WAL] =
 	{
-		.complete = pgaio_write_wal_complete
+		.name = "write_wal",
+		.complete = pgaio_write_wal_complete,
+		.desc = pgaio_write_wal_desc,
 	},
 
 	[PGAIO_WRITE_GENERIC] =
 	{
-		.complete = pgaio_write_generic_complete
+		.name = "write_generic",
+		.complete = pgaio_write_generic_complete,
+		.desc = pgaio_write_generic_desc,
 	},
 };
 
@@ -1108,6 +1146,32 @@ pgaio_uncombine(void)
 	}
 }
 
+static bool
+pgaio_io_call_shared_complete(PgAioInProgress *io)
+{
+#ifdef PGAIO_VERBOSE
+	if (message_level_is_interesting(DEBUG3))
+	{
+		MemoryContext oldcontext = MemoryContextSwitchTo(ErrorContext);
+		StringInfoData s;
+
+		initStringInfo(&s);
+
+		pgaio_io_print(io, &s);
+
+		ereport(DEBUG3,
+				errmsg("completing %s",
+					   s.data),
+				errhidestmt(true),
+				errhidecontext(true));
+		pfree(s.data);
+		MemoryContextSwitchTo(oldcontext);
+	}
+#endif
+
+	return io_action_cbs[io->type].complete(io);
+}
+
 static void  __attribute__((noinline))
 pgaio_complete_ios(bool in_error)
 {
@@ -1135,7 +1199,7 @@ pgaio_complete_ios(bool in_error)
 			 */
 			WRITE_ONCE_F(io->flags) |= PGAIOIP_SHARED_CALLBACK_CALLED;
 
-			finished = io_action_cbs[io->type].complete(io);
+			finished = pgaio_io_call_shared_complete(io);
 
 			dlist_delete_from(&my_aio->reaped, node);
 
@@ -2257,8 +2321,26 @@ pgaio_prepare_io(PgAioInProgress *io, PgAioAction action)
 static void  __attribute__((noinline))
 pgaio_finish_io(PgAioInProgress *io)
 {
-}
+#ifdef PGAIO_VERBOSE
+	if (message_level_is_interesting(DEBUG3))
+	{
+		MemoryContext oldcontext = MemoryContextSwitchTo(ErrorContext);
+		StringInfoData s;
 
+		initStringInfo(&s);
+
+		pgaio_io_print(io, &s);
+
+		ereport(DEBUG3,
+				errmsg("starting %s",
+					   s.data),
+				errhidestmt(true),
+				errhidecontext(true));
+		pfree(s.data);
+		MemoryContextSwitchTo(oldcontext);
+	}
+#endif
+}
 
 void
 pgaio_io_release(PgAioInProgress *io)
@@ -2418,31 +2500,8 @@ pgaio_print_queues(void)
 static const char *
 pgaio_io_action_string(PgAioAction a)
 {
-	switch(a)
-	{
-		case PGAIO_INVALID:
-			return "invalid";
-		case PGAIO_NOP:
-			return "nop";
-		case PGAIO_FLUSH_RANGE:
-			return "flush_range";
-		case PGAIO_FSYNC:
-			return "fsync";
-		case PGAIO_FSYNC_WAL:
-			return "fsync_wal";
-		case PGAIO_READ_BUFFER:
-			return "read_buffer";
-		case PGAIO_WRITE_BUFFER:
-			return "write_buffer";
-		case PGAIO_WRITE_WAL:
-			return "write_wal";
-		case PGAIO_WRITE_GENERIC:
-			return "write_generic";
-	}
-
-	pg_unreachable();
+	return io_action_cbs[a].name;
 }
-
 
 static void
 pgaio_io_flag_string(PgAioIPFlags flags, StringInfo s)
@@ -2475,69 +2534,7 @@ pgaio_io_flag_string(PgAioIPFlags flags, StringInfo s)
 static void
 pgaio_io_action_desc(PgAioInProgress *io, StringInfo s)
 {
-	switch (io->type)
-	{
-		case PGAIO_FSYNC:
-			appendStringInfo(s, "fd: %d, datasync: %d, barrier: %d",
-							 io->d.fsync.fd,
-							 io->d.fsync.datasync,
-							 io->d.fsync.barrier);
-			break;
-		case PGAIO_FSYNC_WAL:
-			appendStringInfo(s, "flush_no: %d, fd: %d, datasync: %d, barrier: %d",
-							 io->d.fsync_wal.flush_no,
-							 io->d.fsync_wal.fd,
-							 io->d.fsync_wal.datasync,
-							 io->d.fsync_wal.barrier);
-			break;
-		case PGAIO_FLUSH_RANGE:
-			appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %llu",
-							 io->d.flush_range.fd,
-							 (unsigned long long) io->d.flush_range.offset,
-							 (unsigned long long) io->d.flush_range.nbytes);
-			break;
-		case PGAIO_READ_BUFFER:
-			appendStringInfo(s, "fd: %d, mode: %d, offset: %u, nbytes: %u, already_done: %u, buf/data: %d/%p",
-							 io->d.read_buffer.fd,
-							 io->d.read_buffer.mode,
-							 io->d.read_buffer.offset,
-							 io->d.read_buffer.nbytes,
-							 io->d.read_buffer.already_done,
-							 io->d.read_buffer.buf,
-							 io->d.read_buffer.bufdata);
-			break;
-		case PGAIO_WRITE_BUFFER:
-			appendStringInfo(s, "fd: %d, offset: %u, nbytes: %u, already_done: %u, release_lock: %d, buf/data: %u/%p",
-							 io->d.write_buffer.fd,
-							 io->d.write_buffer.offset,
-							 io->d.write_buffer.nbytes,
-							 io->d.write_buffer.already_done,
-							 io->d.write_buffer.release_lock,
-							 io->d.write_buffer.buf,
-							 io->d.write_buffer.bufdata);
-			break;
-		case PGAIO_WRITE_WAL:
-			appendStringInfo(s, "write_no: %d, fd: %d, offset: %u, nbytes: %u, already_done: %u, bufdata: %p, no-reorder: %d",
-							 io->d.write_wal.write_no,
-							 io->d.write_wal.fd,
-							 io->d.write_wal.offset,
-							 io->d.write_wal.nbytes,
-							 io->d.write_wal.already_done,
-							 io->d.write_wal.bufdata,
-							 io->d.write_wal.no_reorder);
-			break;
-		case PGAIO_WRITE_GENERIC:
-			appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %u, already_done: %u, bufdata: %p, no-reorder: %d",
-							 io->d.write_generic.fd,
-							 (unsigned long long) io->d.write_generic.offset,
-							 io->d.write_generic.nbytes,
-							 io->d.write_generic.already_done,
-							 io->d.write_generic.bufdata,
-							 io->d.write_generic.no_reorder);
-			break;
-		default:
-			break;
-	}
+	io_action_cbs[io->type].desc(io, s);
 }
 
 static void
@@ -3372,12 +3369,6 @@ pgaio_io_start_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nb
 	io->d.flush_range.offset = offset;
 	io->d.flush_range.nbytes = nbytes;
 
-#ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "start_flush_range %zu: %d, %llu, %llu",
-		 io - aio_ctl->in_progress_io,
-		 fd, (unsigned long long) offset, (unsigned long long) nbytes);
-#endif
-
 	pgaio_finish_io(io);
 }
 
@@ -3396,20 +3387,6 @@ pgaio_io_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd,
 	io->d.read_buffer.bufdata = bufdata;
 	io->d.read_buffer.already_done = 0;
 	memcpy(&io->d.read_buffer.tag, tag, sizeof(io->d.read_buffer.tag));
-
-#ifdef PGAIO_VERBOSE
-	ereport(DEBUG3,
-			errmsg("start_read_buffer %zu: "
-				   "fd %d, off: %llu, bytes: %llu, buff: %d, data %p",
-				   io - aio_ctl->in_progress_io,
-				   fd,
-				   (unsigned long long) offset,
-				   (unsigned long long) nbytes,
-				   buffno,
-				   bufdata),
-		 errhidestmt(true),
-		 errhidecontext(true));
-#endif
 
 	pgaio_finish_io(io);
 }
@@ -3430,21 +3407,6 @@ pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd
 	io->d.write_buffer.release_lock = release_lock;
 	memcpy(&io->d.write_buffer.tag, tag, sizeof(io->d.write_buffer.tag));
 
-#ifdef PGAIO_VERBOSE
-	ereport(DEBUG3,
-			errmsg("start_write_buffer %zu: "
-				   "fd %d, off: %llu, nbytes: %llu, rel: %d, buff: %d, data %p",
-				   io - aio_ctl->in_progress_io,
-				   fd,
-				   (unsigned long long) offset,
-				   (unsigned long long) nbytes,
-				   release_lock,
-				   buffno,
-				   bufdata),
-			errhidestmt(true),
-			errhidecontext(true));
-#endif
-
 	pgaio_finish_io(io);
 }
 
@@ -3463,21 +3425,6 @@ pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbyt
 	io->d.write_wal.already_done = 0;
 	io->d.write_wal.write_no = write_no;
 
-#ifdef PGAIO_VERBOSE
-	ereport(DEBUG3,
-			errmsg("start_write_wal %zu:"
-				   "fd %d, off: %llu, bytes: %llu, write_no: %d, no_reorder: %d, data %p",
-				   io - aio_ctl->in_progress_io,
-				   fd,
-				   (unsigned long long) offset,
-				   (unsigned long long) nbytes,
-				   write_no,
-				   no_reorder,
-				   bufdata),
-			errhidestmt(true),
-			errhidecontext(true));
-#endif
-
 	pgaio_finish_io(io);
 }
 
@@ -3494,20 +3441,6 @@ pgaio_io_start_write_generic(PgAioInProgress *io, int fd, uint64 offset, uint32 
 	io->d.write_generic.nbytes = nbytes;
 	io->d.write_generic.bufdata = bufdata;
 	io->d.write_generic.already_done = 0;
-
-#ifdef PGAIO_VERBOSE
-	ereport(DEBUG3,
-			errmsg("start_write_generic %zu:"
-				   "fd %d, off: %llu, bytes: %llu, no_reorder: %d, data %p",
-				   io - aio_ctl->in_progress_io,
-				   fd,
-				   (unsigned long long) offset,
-				   (unsigned long long) nbytes,
-				   no_reorder,
-				   bufdata),
-			errhidestmt(true),
-			errhidecontext(true));
-#endif
 
 	pgaio_finish_io(io);
 }
@@ -3527,15 +3460,6 @@ pgaio_io_start_fsync(PgAioInProgress *io, int fd, bool barrier)
 	io->d.fsync.barrier = barrier;
 	io->d.fsync.datasync = false;
 
-#ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "start_fsync %zu:"
-		 "fd %d, is_barrier: %d, is_datasync: %d",
-		 io - aio_ctl->in_progress_io,
-		 fd,
-		 barrier,
-		 false);
-#endif
-
 	pgaio_finish_io(io);
 }
 
@@ -3546,15 +3470,6 @@ pgaio_io_start_fdatasync(PgAioInProgress *io, int fd, bool barrier)
 	io->d.fsync.fd = fd;
 	io->d.fsync.barrier = barrier;
 	io->d.fsync.datasync = true;
-
-#ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "start_fsync %zu:"
-		 "fd %d, is_barrier: %d, is_datasync: %d",
-		 io - aio_ctl->in_progress_io,
-		 fd,
-		 barrier,
-		 true);
-#endif
 
 	pgaio_finish_io(io);
 }
@@ -3567,16 +3482,6 @@ pgaio_io_start_fsync_wal(PgAioInProgress *io, int fd, bool barrier, bool datasyn
 	io->d.fsync_wal.barrier = barrier;
 	io->d.fsync_wal.datasync = datasync_only;
 	io->d.fsync_wal.flush_no = flush_no;
-
-#ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "start_fsync_wal %zu:"
-		 "fd %d, is_barrier: %d, is_datasync: %d, flush_no: %d",
-		 io - aio_ctl->in_progress_io,
-		 fd,
-		 barrier,
-		 datasync_only,
-		 flush_no);
-#endif
 
 	pgaio_finish_io(io);
 }
@@ -3591,26 +3496,32 @@ pgaio_nop_complete(PgAioInProgress *io)
 	return true;
 }
 
+static void
+pgaio_nop_desc(PgAioInProgress *io, StringInfo s)
+{
+}
+
 static bool
 pgaio_fsync_complete(PgAioInProgress *io)
 {
-#ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "completed fsync: %zu",
-		 io - aio_ctl->in_progress_io);
-#endif
 	if (io->result != 0)
 		elog(PANIC, "fsync needs better error handling");
 
 	return true;
 }
 
+static void
+pgaio_fsync_desc(PgAioInProgress *io, StringInfo s)
+{
+	appendStringInfo(s, "fd: %d, datasync: %d, barrier: %d",
+					 io->d.fsync.fd,
+					 io->d.fsync.datasync,
+					 io->d.fsync.barrier);
+}
+
 static bool
 pgaio_fsync_wal_complete(PgAioInProgress *io)
 {
-#ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "completed fsync_wal: %zu",
-		 io - aio_ctl->in_progress_io);
-#endif
 	if (io->result != 0)
 		elog(PANIC, "fsync_wal needs better error handling");
 
@@ -3618,16 +3529,29 @@ pgaio_fsync_wal_complete(PgAioInProgress *io)
 	return true;
 }
 
+static void
+pgaio_fsync_wal_desc(PgAioInProgress *io, StringInfo s)
+{
+	appendStringInfo(s, "flush_no: %d, fd: %d, datasync: %d, barrier: %d",
+					 io->d.fsync_wal.flush_no,
+					 io->d.fsync_wal.fd,
+					 io->d.fsync_wal.datasync,
+					 io->d.fsync_wal.barrier);
+}
+
 static bool
 pgaio_flush_range_complete(PgAioInProgress *io)
 {
-#ifdef PGAIO_VERBOSE
-	elog(DEBUG3, "completed flush_range: %zu, %s",
-		 io - aio_ctl->in_progress_io,
-		 io->result < 0 ? strerror(-io->result) : "ok");
-#endif
-
 	return true;
+}
+
+static void
+pgaio_flush_range_desc(PgAioInProgress *io, StringInfo s)
+{
+	appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %llu",
+					 io->d.flush_range.fd,
+					 (unsigned long long) io->d.flush_range.offset,
+					 (unsigned long long) io->d.flush_range.nbytes);
 }
 
 /* stringify relfilenode, for debugging use only */
@@ -3655,7 +3579,6 @@ static bool
 pgaio_read_buffer_complete(PgAioInProgress *io)
 {
 	Buffer		buffer = io->d.read_buffer.buf;
-
 	bool		call_completion;
 	bool		failed;
 	bool		done;
@@ -3664,17 +3587,6 @@ pgaio_read_buffer_complete(PgAioInProgress *io)
 #if 0
 	if (io->result > 4096)
 		io->result = 4096;
-#endif
-
-#ifdef PGAIO_VERBOSE
-	ereport(io->flags & PGAIOIP_RETRY ? DEBUG1 : DEBUG3,
-			errmsg("completed read_buffer: %zu, %d/%s, buf %d",
-				   io - aio_ctl->in_progress_io,
-				   io->result,
-				   io->result < 0 ? strerror(-io->result) : "ok",
-				   io->d.read_buffer.buf),
-			errhidestmt(true),
-			errhidecontext(true));
 #endif
 
 	if (io->result != (io->d.read_buffer.nbytes - io->d.read_buffer.already_done))
@@ -3752,6 +3664,19 @@ pgaio_read_buffer_complete(PgAioInProgress *io)
 }
 
 static void
+pgaio_read_buffer_desc(PgAioInProgress *io, StringInfo s)
+{
+	appendStringInfo(s, "fd: %d, mode: %d, offset: %u, nbytes: %u, already_done: %u, buf/data: %d/%p",
+					 io->d.read_buffer.fd,
+					 io->d.read_buffer.mode,
+					 io->d.read_buffer.offset,
+					 io->d.read_buffer.nbytes,
+					 io->d.read_buffer.already_done,
+					 io->d.read_buffer.buf,
+					 io->d.read_buffer.bufdata);
+}
+
+static void
 pgaio_write_buffer_retry(PgAioInProgress *io)
 {
 	io->d.write_buffer.fd = reopen_buffered(&io->d.write_buffer.tag);
@@ -3765,17 +3690,6 @@ pgaio_write_buffer_complete(PgAioInProgress *io)
 	bool		call_completion;
 	bool		failed;
 	bool		done;
-
-#ifdef PGAIO_VERBOSE
-	ereport(DEBUG3,
-			errmsg("completed write_buffer: %zu, %d/%s, buf %d",
-				   io - aio_ctl->in_progress_io,
-				   io->result,
-				   io->result < 0 ? strerror(-io->result) : "ok",
-				   io->d.write_buffer.buf),
-			errhidestmt(true),
-			errhidecontext(true));
-#endif
 
 	if (io->result != (io->d.write_buffer.nbytes - io->d.write_buffer.already_done))
 	{
@@ -3850,19 +3764,22 @@ pgaio_write_buffer_complete(PgAioInProgress *io)
 	return done;
 }
 
+static void
+pgaio_write_buffer_desc(PgAioInProgress *io, StringInfo s)
+{
+	appendStringInfo(s, "fd: %d, offset: %u, nbytes: %u, already_done: %u, release_lock: %d, buf/data: %u/%p",
+					 io->d.write_buffer.fd,
+					 io->d.write_buffer.offset,
+					 io->d.write_buffer.nbytes,
+					 io->d.write_buffer.already_done,
+					 io->d.write_buffer.release_lock,
+					 io->d.write_buffer.buf,
+					 io->d.write_buffer.bufdata);
+}
+
 static bool
 pgaio_write_wal_complete(PgAioInProgress *io)
 {
-#ifdef PGAIO_VERBOSE
-	ereport(DEBUG3,
-			errmsg("completed write_wal: %zu, %d/%s",
-				   io - aio_ctl->in_progress_io,
-				   io->result,
-				   io->result < 0 ? strerror(-io->result) : "ok"),
-			errhidestmt(true),
-			errhidecontext(true));
-#endif
-
 	if (io->result < 0)
 	{
 		if (io->result == -EAGAIN || io->result == -EINTR)
@@ -3889,20 +3806,22 @@ pgaio_write_wal_complete(PgAioInProgress *io)
 	return true;
 }
 
+static void
+pgaio_write_wal_desc(PgAioInProgress *io, StringInfo s)
+{
+	appendStringInfo(s, "write_no: %d, fd: %d, offset: %u, nbytes: %u, already_done: %u, bufdata: %p, no-reorder: %d",
+					 io->d.write_wal.write_no,
+					 io->d.write_wal.fd,
+					 io->d.write_wal.offset,
+					 io->d.write_wal.nbytes,
+					 io->d.write_wal.already_done,
+					 io->d.write_wal.bufdata,
+					 io->d.write_wal.no_reorder);
+}
 
 static bool
 pgaio_write_generic_complete(PgAioInProgress *io)
 {
-#ifdef PGAIO_VERBOSE
-	ereport(DEBUG3,
-			errmsg("completed write_generic: %zu, %d/%s",
-				   io - aio_ctl->in_progress_io,
-				   io->result,
-				   io->result < 0 ? strerror(-io->result) : "ok"),
-			errhidestmt(true),
-			errhidecontext(true));
-#endif
-
 	if (io->result < 0)
 	{
 		if (io->result == -EAGAIN || io->result == -EINTR)
@@ -3926,6 +3845,18 @@ pgaio_write_generic_complete(PgAioInProgress *io)
 	}
 
 	return true;
+}
+
+static void
+pgaio_write_generic_desc(PgAioInProgress *io, StringInfo s)
+{
+	appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %u, already_done: %u, bufdata: %p, no-reorder: %d",
+					 io->d.write_generic.fd,
+					 (unsigned long long) io->d.write_generic.offset,
+					 io->d.write_generic.nbytes,
+					 io->d.write_generic.already_done,
+					 io->d.write_generic.bufdata,
+					 io->d.write_generic.no_reorder);
 }
 
 
