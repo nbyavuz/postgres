@@ -580,9 +580,16 @@ static int my_aio_id;
 /* FIXME: move into PgAioPerBackend / subsume into ->reaped */
 static dlist_head local_recycle_requests;
 
-
 /* io_uring local state */
 struct io_uring local_ring;
+
+
+/*
+ * Ensure that flags is written once, rather than potentially multiple times
+ * (e.g. once and'ing it, and once or'ing it).
+ */
+#define WRITE_ONCE_F(flags) *(volatile PgAioIPFlags*) &(flags)
+
 
 static Size
 AioCtlShmemSize(void)
@@ -1126,7 +1133,7 @@ pgaio_complete_ios(bool in_error)
 			 * Set flag before calling callback, otherwise we could easily end
 			 * up looping forever.
 			 */
-			*(volatile PgAioIPFlags*) &io->flags |= PGAIOIP_SHARED_CALLBACK_CALLED;
+			WRITE_ONCE_F(io->flags) |= PGAIOIP_SHARED_CALLBACK_CALLED;
 
 			finished = io_action_cbs[io->type].complete(io);
 
@@ -1138,10 +1145,10 @@ pgaio_complete_ios(bool in_error)
 			}
 			else
 			{
-				Assert((*(volatile PgAioIPFlags*) &io->flags) & (PGAIOIP_SOFT_FAILURE | PGAIOIP_HARD_FAILURE));
+				Assert(io->flags & (PGAIOIP_SOFT_FAILURE | PGAIOIP_HARD_FAILURE));
 
 				LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
-				*(volatile PgAioIPFlags*) &io->flags =
+				WRITE_ONCE_F(io->flags) =
 					(io->flags & ~(PGAIOIP_REAPED | PGAIOIP_IN_PROGRESS)) |
 					PGAIOIP_DONE |
 					PGAIOIP_SHARED_FAILED;
@@ -1160,7 +1167,7 @@ pgaio_complete_ios(bool in_error)
 			dlist_delete_from(&my_aio->reaped, node);
 
 			LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
-			*(volatile PgAioIPFlags*) &io->flags =
+			WRITE_ONCE_F(io->flags) =
 				(io->flags & ~(PGAIOIP_REAPED | PGAIOIP_IN_PROGRESS)) |
 				PGAIOIP_DONE |
 				PGAIOIP_HARD_FAILURE |
@@ -1221,7 +1228,7 @@ pgaio_complete_ios(bool in_error)
 
 					pg_write_barrier();
 
-					*(volatile PgAioIPFlags*) &cur->flags =
+					WRITE_ONCE_F(cur->flags) =
 						(cur->flags & ~(PGAIOIP_REAPED | PGAIOIP_IN_PROGRESS)) |
 						PGAIOIP_DONE |
 						PGAIOIP_FOREIGN_DONE;
@@ -1230,7 +1237,7 @@ pgaio_complete_ios(bool in_error)
 				}
 				else
 				{
-					*(volatile PgAioIPFlags*) &cur->flags =
+					WRITE_ONCE_F(cur->flags) =
 						(cur->flags & ~(PGAIOIP_REAPED | PGAIOIP_IN_PROGRESS)) |
 						PGAIOIP_DONE;
 
@@ -1626,7 +1633,7 @@ pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 
 		pg_write_barrier();
 
-		*(volatile PgAioIPFlags*) &cur->flags =
+		WRITE_ONCE_F(cur->flags) =
 			(cur->flags & ~PGAIOIP_PENDING) | PGAIOIP_INFLIGHT;
 
 		dlist_delete_from(&my_aio->pending, &cur->io_node);
@@ -2030,7 +2037,7 @@ pgaio_io_get(void)
 	io->user_referenced = true;
 	io->system_referenced = false;
 
-	*(volatile PgAioIPFlags*) &io->flags = PGAIOIP_IDLE;
+	WRITE_ONCE_F(io->flags) = PGAIOIP_IDLE;
 
 	io->owner_id = my_aio_id;
 
@@ -2185,9 +2192,7 @@ pgaio_io_retry(PgAioInProgress *io)
 extern void
 pgaio_io_recycle(PgAioInProgress *io)
 {
-	uint32 init_flags = *(volatile PgAioIPFlags*) &io->flags;
-
-	Assert(init_flags & (PGAIOIP_IDLE | PGAIOIP_DONE));
+	Assert(io->flags & (PGAIOIP_IDLE | PGAIOIP_DONE));
 	Assert(io->user_referenced);
 	Assert(io->owner_id == my_aio_id);
 	Assert(!io->system_referenced);
@@ -2986,7 +2991,7 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_gene
 				errhidestmt(true),
 				errhidecontext(true));
 
-		flags = *(volatile PgAioIPFlags*) &io->flags;
+		flags = io->flags;
 
 		pg_read_barrier();
 
@@ -3093,7 +3098,7 @@ pgaio_uring_io_from_cqe(PgAioContext *context, struct io_uring_cqe *cqe)
 	Assert(io->flags & PGAIOIP_INFLIGHT);
 	Assert(io->system_referenced);
 
-	*(volatile PgAioIPFlags*) &io->flags = (io->flags & ~PGAIOIP_INFLIGHT) | PGAIOIP_REAPED;
+	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_INFLIGHT) | PGAIOIP_REAPED;
 	io->result = cqe->res;
 
 	dlist_push_tail(&my_aio->reaped, &io->io_node);
