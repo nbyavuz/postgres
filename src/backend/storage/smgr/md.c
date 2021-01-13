@@ -553,10 +553,10 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 		if (ret != 0)
 			elog(ERROR, "fallocate failed: %m");
 
-		for (BlockNumber i = segstartblock; i < segendblock; i++)
+		for (BlockNumber i = segstartblock; i < segendblock; i++, curblocknum++)
 		{
 			PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
-			AioBufferTag tag = {.rnode = reln->smgr_rnode, .forkNum = forknum, .blockNum = i};
+			AioBufferTag tag = {.rnode = reln->smgr_rnode, .forkNum = forknum, .blockNum = curblocknum};
 
 			pgaio_assoc_bounce_buffer(aio, bb);
 			FileStartWrite(aio, v->mdfd_vfd, zerobuf, BLCKSZ, i * BLCKSZ, &tag, InvalidBuffer, false);
@@ -593,7 +593,6 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 		Assert(_mdnblocks(reln, forknum, v) <= ((BlockNumber) RELSEG_SIZE));
 
 		remblocks -= segendblock - segstartblock;
-		curblocknum += segendblock - segstartblock;
 	}
 
 	pgaio_bounce_buffer_release(bb);
