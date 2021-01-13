@@ -3759,8 +3759,8 @@ pgaio_write_buffer_complete(PgAioInProgress *io)
 		done = true;
 	}
 
-	if (call_completion && BufferIsValid(buffer))
-		ReadBufferCompleteWrite(buffer, failed, io->d.write_buffer.release_lock);
+	if (call_completion)
+		ReadBufferCompleteWrite(buffer, &io->d.write_buffer.tag, io->d.write_buffer.release_lock, failed);
 
 	return done;
 }

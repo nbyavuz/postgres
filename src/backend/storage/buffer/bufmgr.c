@@ -1245,6 +1245,10 @@ ReadBufferCompleteRead(Buffer buffer, const AioBufferTag *tag, char *bufdata, in
 		else
 			bufHdr = GetBufferDescriptor(buffer - 1);
 
+		Assert(RelFileNodeEquals(tag->rnode.node, bufHdr->tag.rnode));
+		Assert(tag->forkNum == bufHdr->tag.forkNum);
+		Assert(tag->blockNum == bufHdr->tag.blockNum);
+
 		TerminateBufferIO(bufHdr, islocal,
 						  /* syncio = */ false, /* clear_dirty = */ false,
 						  failed ? BM_IO_ERROR : BM_VALID);
@@ -1252,15 +1256,24 @@ ReadBufferCompleteRead(Buffer buffer, const AioBufferTag *tag, char *bufdata, in
 }
 
 void
-ReadBufferCompleteWrite(Buffer buffer, bool failed, bool release_lock)
+ReadBufferCompleteWrite(Buffer buffer, const AioBufferTag *tag, bool release_lock, bool failed)
 {
 	BufferDesc *bufHdr;
-	bool		islocal = BufferIsLocal(buffer);
+	bool		islocal;
+
+	if (!BufferIsValid(buffer))
+		return;
+
+	islocal = BufferIsLocal(buffer);
 
 	if (islocal)
 		bufHdr = GetLocalBufferDescriptor(-buffer - 1);
 	else
 		bufHdr = GetBufferDescriptor(buffer - 1);
+
+	Assert(RelFileNodeEquals(tag->rnode.node, bufHdr->tag.rnode));
+	Assert(tag->forkNum == bufHdr->tag.forkNum);
+	Assert(tag->blockNum == bufHdr->tag.blockNum);
 
 	/* FIXME: implement track_io_timing */
 
