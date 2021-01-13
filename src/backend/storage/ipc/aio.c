@@ -1648,17 +1648,21 @@ pgaio_submit_pending(bool drain)
 	{
 		int max_submit;
 		int did_submit;
+		int inflight_limit;
+		int pending_count;
 
 		Assert(my_aio->pending_count > 0);
 		pgaio_apply_backend_limit();
 
-		Assert(my_aio->pending_count > 0);
-		if (my_aio->pending_count == 0)
+		pending_count = my_aio->pending_count;
+		Assert(pending_count > 0);
+		if (pending_count == 0)
 			break;
 
-		max_submit = Min(my_aio->pending_count, PGAIO_SUBMIT_BATCH_SIZE);
-		max_submit = Min(max_submit, io_max_concurrency - pg_atomic_read_u32(&my_aio->inflight_count));
-		Assert(max_submit > 0);
+		inflight_limit = io_max_concurrency - pg_atomic_read_u32(&my_aio->inflight_count);
+		max_submit = Min(pending_count, PGAIO_SUBMIT_BATCH_SIZE);
+		max_submit = Min(max_submit, inflight_limit);
+		Assert(max_submit > 0 && max_submit <= pending_count);
 
 		START_CRIT_SECTION();
 		did_submit = pgaio_uring_submit(max_submit, drain);
