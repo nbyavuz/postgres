@@ -139,13 +139,13 @@ struct PgAioInProgress
 	/* PgAioAction, indexes PgAioCompletionCallbacks */
 	PgAioAction type;
 
+	/* which AIO ring is this entry active for */
+	uint8 ring;
+
 	PgAioIPFlags flags;
 
 	bool user_referenced;
 	bool system_referenced;
-
-	/* which AIO ring is this entry active for */
-	uint8 ring;
 
 	/* index into allProcs, or PG_UINT32_MAX for process local IO */
 	uint32 owner_id;
@@ -1019,6 +1019,7 @@ pgaio_uncombine_one(PgAioInProgress *io)
 
 		Assert(!(cur->flags & PGAIOIP_SHARED_CALLBACK_CALLED));
 		Assert(cur->merge_with || cur != io);
+		Assert(cur->type == io->type);
 
 		switch (cur->type)
 		{
