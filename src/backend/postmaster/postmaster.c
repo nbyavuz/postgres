@@ -2722,6 +2722,9 @@ SIGHUP_handler(SIGNAL_ARGS)
 			signal_child(SysLoggerPID, SIGHUP);
 		if (PgStatPID != 0)
 			signal_child(PgStatPID, SIGHUP);
+		for (int i = 0; i < MAX_AIO_WORKERS; ++i)
+			if (aio_worker_pids[i] != 0)
+				signal_child(aio_worker_pids[i], SIGHUP);
 
 		/* Reload authentication config files too */
 		if (!load_hba())
@@ -3689,6 +3692,11 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 		allow_immediate_pgstat_restart();
 	}
 
+	/* Stop AIO workers. */
+	for (int i = 0; i < MAX_AIO_WORKERS; ++i)
+		if (aio_worker_pids[i] != 0)
+			signal_child(aio_worker_pids[i], SIGQUIT);
+
 	/* We do NOT restart the syslogger */
 
 	if (Shutdown != ImmediateShutdown)
@@ -4154,6 +4162,9 @@ TerminateChildren(int signal)
 		signal_child(PgArchPID, signal);
 	if (PgStatPID != 0)
 		signal_child(PgStatPID, signal);
+	for (int i = 0; i < MAX_AIO_WORKERS; ++i)
+		if (aio_worker_pids[i] != 0)
+			signal_child(aio_worker_pids[i], signal);
 }
 
 /*
