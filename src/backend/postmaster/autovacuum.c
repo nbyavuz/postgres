@@ -464,9 +464,7 @@ AutoVacLauncherMain(int argc, char *argv[])
 
 	pqsignal(SIGPIPE, SIG_IGN);
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
-	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 	pqsignal(SIGUSR2, avl_sigusr2_handler);
-	pqsignal(SIGURG, latch_sigurg_handler);
 	pqsignal(SIGFPE, FloatExceptionHandler);
 	pqsignal(SIGCHLD, SIG_DFL);
 
@@ -1545,7 +1543,6 @@ AutoVacWorkerMain(int argc, char *argv[])
 	pqsignal(SIGPIPE, SIG_IGN);
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 	pqsignal(SIGUSR2, SIG_IGN);
-	pqsignal(SIGURG, latch_sigurg_handler);
 	pqsignal(SIGFPE, FloatExceptionHandler);
 	pqsignal(SIGCHLD, SIG_DFL);
 

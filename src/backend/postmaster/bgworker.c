@@ -330,7 +330,6 @@ BackgroundWorkerStateChange(bool allow_new_workers)
 			pg_memory_barrier();
 			slot->pid = 0;
 			slot->in_use = false;
-			/* FIXME: shouldn't this use SetLatch() or something */
 			if (notify_pid != 0)
 				kill(notify_pid, SIGUSR1);
 
@@ -780,7 +779,6 @@ StartBackgroundWorker(void)
 		 */
 		pqsignal(SIGINT, StatementCancelHandler);
 		pqsignal(SIGUSR1, procsignal_sigusr1_handler);
-		pqsignal(SIGURG, latch_sigurg_handler);
 		pqsignal(SIGFPE, FloatExceptionHandler);
 
 		/* XXX Any other handlers needed here? */
@@ -789,7 +787,6 @@ StartBackgroundWorker(void)
 	{
 		pqsignal(SIGINT, SIG_IGN);
 		pqsignal(SIGUSR1, bgworker_sigusr1_handler);
-		pqsignal(SIGURG, latch_sigurg_handler);
 		pqsignal(SIGFPE, SIG_IGN);
 	}
 	pqsignal(SIGTERM, bgworker_die);
