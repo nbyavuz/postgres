@@ -263,7 +263,7 @@ heap_page_prune(Relation relation, Buffer buffer,
 		 p < (char *) PageGetItemId(page, maxoff);
 		 p += 64)
 	{
-		__builtin_prefetch((ItemId)p);
+		pg_prefetch_mem((ItemId)p);
 	}
 
 	for (offnum = FirstOffsetNumber;
@@ -276,8 +276,8 @@ heap_page_prune(Relation relation, Buffer buffer,
 		if (!ItemIdIsUsed(itemid) || ItemIdIsDead(itemid) || !ItemIdHasStorage(itemid))
 			continue;
 
-		__builtin_prefetch((HeapTupleHeader) PageGetItem(page, itemid));
-		__builtin_prefetch(PageGetItem(page, itemid) + sizeof(HeapTupleHeaderData) - 1);
+		pg_prefetch_mem((HeapTupleHeader) PageGetItem(page, itemid));
+		pg_prefetch_mem(PageGetItem(page, itemid) + sizeof(HeapTupleHeaderData) - 1);
 	}
 #endif
 
