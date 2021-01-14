@@ -7,8 +7,6 @@
  * - Consider not exposing PgAioInProgress* at all, instead expose a PgAioReference { uint32 io; uint64 generation; }
  *   which would make it a lot less problematic to immediate reuse IOs.
  * - Shrink size of PgAioInProgress
- * - refcount bounc buffers / redesign
- * - get rid of the current backpressure logic
  */
 #include "postgres.h"
 
