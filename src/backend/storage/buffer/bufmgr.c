@@ -718,13 +718,17 @@ ReadBufferInitRead(PgAioInProgress *aio,
 	 */
 	Assert(!(pg_atomic_read_u32(&bufHdr->state) & BM_VALID));	/* spinlock not needed */
 
-	/* FIXME: improve */
-	InProgressBuf = NULL;
-
 	pgaio_io_ref(aio, &bufHdr->io_in_progress);
 
 	smgrstartread(aio, smgr, forkNum, blockNum,
 				  bufBlock, buf, mode);
+
+	/*
+	 * Stop tracking this buffer via InProgressBuf - the AIO system now keeps
+	 * track.
+	 */
+	Assert(InProgressBuf != NULL);
+	InProgressBuf = NULL;
 }
 
 Buffer
@@ -2540,8 +2544,9 @@ BufferSyncWriteOne(pg_streaming_write *pgsw, BufferDesc *bufHdr)
 
 		/*
 		 * If there are pre-existing IOs in-flight, we can't block on the
-		 * content lock, it could lead to a deadlock. So first wait for
-		 * outstanding IO, and then block on acquiring the lock.
+		 * content lock, it could lead to a deadlock. If the lock cannot
+		 * immediately be acquired, first wait for all outstanding IO, and
+		 * then block on acquiring the lock.
 		 */
 		if (pg_streaming_write_inflight(pgsw) > 0 &&
 			LWLockConditionalAcquire(content_lock, LW_SHARED))
@@ -3522,6 +3527,8 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	uint32		buf_state;
 	PgAioBounceBuffer *bb;
 
+	Assert(LWLockHeldByMe(BufferDescriptorGetContentLock(buf)));
+
 	/*
 	 * Try to start an I/O operation.  If StartBufferIO returns false, then
 	 * someone else flushed the buffer before we could, so we need not do
@@ -3632,9 +3639,6 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 		buf_state += BUF_REFCOUNT_ONE;
 		UnlockBufHdr(buf, buf_state);
 
-		/* FIXME: improve */
-		InProgressBuf = NULL;
-
 		if (bb)
 		{
 			pgaio_assoc_bounce_buffer(aio, bb);
@@ -3651,6 +3655,14 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 					   BufferDescriptorGetBuffer(buf),
 					   /* skipFsync = */ false,
 					   /* release_lock = */ false);
+
+		/*
+		 * Stop tracking this buffer via InProgressBuf - the AIO system now keeps
+		 * track.
+		 */
+		Assert(InProgressBuf != NULL);
+		InProgressBuf = NULL;
+
 		pgaio_io_wait(aio);
 		pgaio_io_release(aio);
 	}
@@ -3711,9 +3723,6 @@ AsyncFlushBuffer(PgAioInProgress *aio, BufferDesc *buf, SMgrRelation reln)
 
 	bufToWrite = PageSetChecksumCopy((Page) bufBlock, buf->tag.blockNum, &bb);
 
-	/* FIXME: improve */
-	InProgressBuf = NULL;
-
 	pgBufferUsage.shared_blks_written++;
 
 	if (bb)
@@ -3754,6 +3763,14 @@ AsyncFlushBuffer(PgAioInProgress *aio, BufferDesc *buf, SMgrRelation reln)
 	 * layer, so we correctly handle errors happening during IO submission.
 	 */
 	LWLockReleaseOwnership(BufferDescriptorGetContentLock(buf));
+
+	/*
+	 * Stop tracking this buffer via InProgressBuf - the AIO system now keeps
+	 * track.
+	 */
+	Assert(InProgressBuf != NULL);
+	InProgressBuf = NULL;
+
 	RESUME_INTERRUPTS();
 
 	return true;
