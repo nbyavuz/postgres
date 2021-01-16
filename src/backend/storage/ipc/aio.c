@@ -2152,7 +2152,11 @@ pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local)
 		return;
 
 	if (am_owner && (flags & PGAIOIP_PENDING))
-		pgaio_submit_pending(false);
+	{
+		Assert(call_shared);
+		pgaio_submit_pending_internal(true, call_shared, call_local,
+									  /* will_wait = */ true);
+	}
 
 	Assert(!(flags & (PGAIOIP_UNUSED)));
 
@@ -2195,7 +2199,8 @@ pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local)
 			 * them. Don't want to do so when not needing to sleep, as
 			 * submitting IOs in smaller increments can be less efficient.
 			 */
-			pgaio_submit_pending_internal(call_shared, call_shared, call_local, true);
+			pgaio_submit_pending_internal(call_shared, call_shared, call_local,
+										  /* will_wait = */ false);
 		}
 		else if (aio_type != AIOTYPE_WORKER && (flags & PGAIOIP_INFLIGHT))
 		{
