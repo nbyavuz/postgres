@@ -4053,22 +4053,22 @@ pgaio_fill_one_iov(struct iovec *iov, const PgAioInProgress *io, bool first)
 	case PGAIO_WRITE_WAL:
 		Assert(first || io->d.write_wal.already_done == 0);
 		iov->iov_base = io->d.write_wal.bufdata + io->d.write_wal.already_done;
-		iov->iov_len = io->d.write_wal.nbytes;
+		iov->iov_len = io->d.write_wal.nbytes - io->d.write_wal.already_done;
 		break;
 	case PGAIO_READ_BUFFER:
 		Assert(first || io->d.read_buffer.already_done == 0);
 		iov->iov_base = io->d.read_buffer.bufdata + io->d.read_buffer.already_done;
-		iov->iov_len = io->d.read_buffer.nbytes;
+		iov->iov_len = io->d.read_buffer.nbytes - io->d.read_buffer.already_done;
 		break;
 	case PGAIO_WRITE_BUFFER:
 		Assert(first || io->d.write_buffer.already_done == 0);
 		iov->iov_base = io->d.write_buffer.bufdata + io->d.write_buffer.already_done;
-		iov->iov_len = io->d.write_buffer.nbytes;
+		iov->iov_len = io->d.write_buffer.nbytes - io->d.write_buffer.already_done;
 		break;
 	case PGAIO_WRITE_GENERIC:
 		Assert(first || io->d.write_generic.already_done == 0);
 		iov->iov_base = io->d.write_generic.bufdata + io->d.write_generic.already_done;
-		iov->iov_len = io->d.write_generic.nbytes;
+		iov->iov_len = io->d.write_generic.nbytes - io->d.write_generic.already_done;
 		break;
 	default:
 		elog(ERROR, "unexpected IO type while populating iovec");
