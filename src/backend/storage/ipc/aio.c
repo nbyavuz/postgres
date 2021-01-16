@@ -1454,6 +1454,10 @@ pgaio_io_call_local_callback(PgAioInProgress *io, bool in_error)
 	Assert(!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED));
 	Assert(io->user_referenced);
 
+	Assert(my_aio->local_completed_count > 0);
+	dlist_delete_from(&my_aio->local_completed, &io->io_node);
+	my_aio->local_completed_count--;
+
 	dlist_delete_from(&my_aio->issued, &io->owner_node);
 	my_aio->issued_count--;
 	dlist_push_tail(&my_aio->outstanding, &io->owner_node);
@@ -1483,15 +1487,13 @@ pgaio_call_local_callbacks(bool in_error)
 
 		if (local_callback_depth == 0)
 		{
+			dlist_mutable_iter iter;
+
 			local_callback_depth++;
 
-			while (!dlist_is_empty(&my_aio->local_completed))
+			dlist_foreach_modify(iter, &my_aio->local_completed)
 			{
-				dlist_node *node = dlist_pop_head_node(&my_aio->local_completed);
-				PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, node);
-
-				Assert(my_aio->local_completed_count > 0);
-				my_aio->local_completed_count--;
+				PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, iter.cur);
 
 				pgaio_io_call_local_callback(io, in_error);
 			}
@@ -2227,23 +2229,12 @@ wait_ref_out:
 	if (am_owner && call_local && !(flags & PGAIOIP_LOCAL_CALLBACK_CALLED))
 	{
 		if (flags & PGAIOIP_FOREIGN_DONE)
-		{
-			SpinLockAcquire(&my_aio->foreign_completed_lock);
-			dlist_delete_from(&my_aio->foreign_completed, &io->io_node);
-			io->flags &= ~PGAIOIP_FOREIGN_DONE;
-			my_aio->foreign_completed_count--;
-			SpinLockRelease(&my_aio->foreign_completed_lock);
-		}
-		else
-		{
-			Assert(my_aio->local_completed_count > 0);
-			dlist_delete_from(&my_aio->local_completed, &io->io_node);
-			my_aio->local_completed_count--;
-		}
+			pgaio_transfer_foreign_to_local();
+
+		Assert(!(io->flags & PGAIOIP_FOREIGN_DONE));
 
 		pgaio_io_call_local_callback(io, false);
 	}
-
 }
 
 bool
