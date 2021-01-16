@@ -2537,7 +2537,6 @@ pgaio_io_retry(PgAioInProgress *io)
 							io - aio_ctl->in_progress_io),
 				errhidestmt(true),
 				errhidecontext(true));
-		pgaio_io_print(io, NULL);
 		return;
 	}
 
