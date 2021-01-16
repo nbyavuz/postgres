@@ -288,7 +288,7 @@ heap_pgsr_release(uintptr_t pgsr_private, uintptr_t read_private)
 	HeapScanDesc scan = (HeapScanDesc) pgsr_private;
 	Buffer buf = (Buffer) read_private;
 
-	ereport(DEBUG2,
+	ereport(DEBUG5,
 			errmsg("pgsr %s: releasing buf %d",
 				   NameStr(scan->rs_base.rs_rd->rd_rel->relname),
 				   buf),
