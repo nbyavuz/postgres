@@ -2958,9 +2958,6 @@ XLogIOQueueAdd(XLogIOQueue *queue, PgAioInProgress *aio, XLogRecPtr upto)
 {
 	XLogIO *io;
 
-	elog(DEBUG3, "addinging aio %p at queue position %u/%u",
-		 aio, queue->next, queue->next & queue->mask);
-
 	Assert(LWLockHeldByMeInMode(WALWriteLock, LW_EXCLUSIVE));
 	Assert(LWLockHeldByMeInMode(WALIOQueueLock, LW_EXCLUSIVE));
 
