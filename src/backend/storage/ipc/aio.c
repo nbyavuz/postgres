@@ -3388,109 +3388,6 @@ pgaio_uring_io_from_cqe(PgAioContext *context, struct io_uring_cqe *cqe)
 	}
 }
 
-/*
- * FIXME: These need to be deduplicated.
- */
-static void
-prep_read_buffer_iov(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec *iovs)
-{
-	PgAioInProgress *cur;
-	uint32 offset = io->d.read_buffer.offset;
-	int	niov = 0;
-
-	cur = io;
-	while (cur)
-	{
-		offset += cur->d.read_buffer.already_done;
-		iovs[niov].iov_base = cur->d.read_buffer.bufdata + cur->d.read_buffer.already_done;
-		iovs[niov].iov_len = cur->d.read_buffer.nbytes - cur->d.read_buffer.already_done;
-
-		niov++;
-		cur = cur->merge_with;
-	}
-
-	io_uring_prep_readv(sqe,
-						io->d.read_buffer.fd,
-						iovs,
-						niov,
-						offset);
-}
-
-static void
-prep_write_buffer_iov(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec *iovs)
-{
-	PgAioInProgress *cur;
-	uint32 offset = io->d.write_buffer.offset;
-	int	niov = 0;
-
-	cur = io;
-	while (cur)
-	{
-		offset += cur->d.write_buffer.already_done;
-		iovs[niov].iov_base = cur->d.write_buffer.bufdata + cur->d.write_buffer.already_done;
-		iovs[niov].iov_len = cur->d.write_buffer.nbytes - cur->d.write_buffer.already_done;
-
-		niov++;
-		cur = cur->merge_with;
-	}
-
-	io_uring_prep_writev(sqe,
-						 io->d.write_buffer.fd,
-						 iovs,
-						 niov,
-						 offset);
-}
-
-static void
-prep_write_wal_iov(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec *iovs)
-{
-	PgAioInProgress *cur;
-	uint32 offset = io->d.write_wal.offset;
-	int	niov = 0;
-
-	cur = io;
-	while (cur)
-	{
-		offset += cur->d.write_wal.already_done;
-		iovs[niov].iov_base = cur->d.write_wal.bufdata + cur->d.write_wal.already_done;
-		iovs[niov].iov_len = cur->d.write_wal.nbytes - cur->d.write_wal.already_done;
-
-		niov++;
-		cur = cur->merge_with;
-	}
-
-	io_uring_prep_writev(sqe,
-						io->d.write_wal.fd,
-						iovs,
-						niov,
-						offset);
-}
-
-static void
-prep_write_generic_iov(PgAioInProgress *io, struct io_uring_sqe *sqe, struct iovec *iovs)
-{
-	PgAioInProgress *cur;
-	off_t offset = io->d.write_generic.offset;
-	int	niov = 0;
-
-	cur = io;
-	while (cur)
-	{
-		offset += cur->d.write_generic.already_done;
-		iovs[niov].iov_base = cur->d.write_generic.bufdata + cur->d.write_generic.already_done;
-		iovs[niov].iov_len = cur->d.write_generic.nbytes - cur->d.write_generic.already_done;
-
-		niov++;
-		cur = cur->merge_with;
-	}
-
-	io_uring_prep_writev(sqe,
-						io->d.write_generic.fd,
-						iovs,
-						niov,
-						offset);
-}
-
 static void
 pgaio_uring_iovec_transfer(PgAioContext *context)
 {
@@ -3539,6 +3436,7 @@ static void
 pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, struct io_uring_sqe *sqe)
 {
 	PgAioIovec *iovec;
+	int iovcnt = 0;
 
 	io->used_iovec = -1;
 
@@ -3562,13 +3460,26 @@ pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, struct io_uri
 
 		case PGAIO_READ_BUFFER:
 			iovec = pgaio_uring_iovec_get(context, io);
-			prep_read_buffer_iov(io, sqe, iovec->iovec);
-			//sqe->flags |= IOSQE_ASYNC;
+			iovcnt = pgaio_fill_iov(iovec->iovec, io);
+
+			io_uring_prep_readv(sqe,
+								io->d.read_buffer.fd,
+								iovec->iovec,
+								iovcnt,
+								io->d.read_buffer.offset
+								+ io->d.read_buffer.already_done);
 			break;
 
 		case PGAIO_WRITE_BUFFER:
 			iovec = pgaio_uring_iovec_get(context, io);
-			prep_write_buffer_iov(io, sqe, iovec->iovec);
+			iovcnt = pgaio_fill_iov(iovec->iovec, io);
+
+			io_uring_prep_writev(sqe,
+								 io->d.write_buffer.fd,
+								 iovec->iovec,
+								 iovcnt,
+								 io->d.write_buffer.offset
+								 + io->d.write_buffer.already_done);
 			break;
 
 		case PGAIO_FLUSH_RANGE:
@@ -3583,14 +3494,30 @@ pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, struct io_uri
 
 		case PGAIO_WRITE_WAL:
 			iovec = pgaio_uring_iovec_get(context, io);
-			prep_write_wal_iov(io, sqe, iovec->iovec);
+			iovcnt = pgaio_fill_iov(iovec->iovec, io);
+
+			io_uring_prep_writev(sqe,
+								 io->d.write_wal.fd,
+								 iovec->iovec,
+								 iovcnt,
+								 io->d.write_wal.offset
+								 + io->d.write_wal.already_done);
+
 			if (io->d.write_wal.no_reorder)
 				sqe->flags = IOSQE_IO_DRAIN;
 			break;
 
 		case PGAIO_WRITE_GENERIC:
 			iovec = pgaio_uring_iovec_get(context, io);
-			prep_write_generic_iov(io, sqe, iovec->iovec);
+			iovcnt = pgaio_fill_iov(iovec->iovec, io);
+
+			io_uring_prep_writev(sqe,
+								 io->d.write_generic.fd,
+								 iovec->iovec,
+								 iovcnt,
+								 io->d.write_generic.offset
+								 + io->d.write_generic.already_done);
+
 			if (io->d.write_generic.no_reorder)
 				sqe->flags = IOSQE_IO_DRAIN;
 			break;
@@ -4130,23 +4057,27 @@ pgaio_write_generic_desc(PgAioInProgress *io, StringInfo s)
  * Extract iov_base and iov_len from a single IO.
  */
 static void
-pgaio_fill_one_iov(struct iovec *iov, const PgAioInProgress *io)
+pgaio_fill_one_iov(struct iovec *iov, const PgAioInProgress *io, bool first)
 {
 	switch (io->type)
 	{
 	case PGAIO_WRITE_WAL:
+		Assert(first || io->d.write_wal.already_done == 0);
 		iov->iov_base = io->d.write_wal.bufdata + io->d.write_wal.already_done;
 		iov->iov_len = io->d.write_wal.nbytes;
 		break;
 	case PGAIO_READ_BUFFER:
+		Assert(first || io->d.read_buffer.already_done == 0);
 		iov->iov_base = io->d.read_buffer.bufdata + io->d.read_buffer.already_done;
 		iov->iov_len = io->d.read_buffer.nbytes;
 		break;
 	case PGAIO_WRITE_BUFFER:
+		Assert(first || io->d.write_buffer.already_done == 0);
 		iov->iov_base = io->d.write_buffer.bufdata + io->d.write_buffer.already_done;
 		iov->iov_len = io->d.write_buffer.nbytes;
 		break;
 	case PGAIO_WRITE_GENERIC:
+		Assert(first || io->d.write_generic.already_done == 0);
 		iov->iov_base = io->d.write_generic.bufdata + io->d.write_generic.already_done;
 		iov->iov_len = io->d.write_generic.nbytes;
 		break;
@@ -4167,8 +4098,8 @@ pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io)
 
 	/* Fill in the first one. */
 	iov = &iovs[0];
-	pgaio_fill_one_iov(iov, io);
-	
+	pgaio_fill_one_iov(iov, io, true);
+
 	/*
 	 * We have a chain of IOs that were linked together because they access
 	 * contiguous regions of a file.  As a micro-optimization we'll also
@@ -4178,7 +4109,7 @@ pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io)
 	{
 		struct iovec *next = iov + 1;
 
-		pgaio_fill_one_iov(next, io);
+		pgaio_fill_one_iov(next, io, false);
 		if ((char *) iov->iov_base + iov->iov_len == next->iov_base)
 			iov->iov_len += next->iov_len;
 		else
@@ -4195,7 +4126,7 @@ pgaio_worker_do(PgAioInProgress *io)
 	AioBufferTag *tag = NULL;
 	ssize_t result;
 	size_t already_done = 0;
-	off_t offset;
+	off_t offset = 0;
 	int fd = -1;
 	struct iovec iov[IOV_MAX];
 	int iovcnt = 0;
