@@ -1220,12 +1220,9 @@ pgaio_uncombine(void)
 	dlist_foreach_modify(iter, &my_aio->reaped)
 	{
 		PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, iter.cur);
-		uint32 extracted = 1;
 
 		if (io->flags & PGAIOIP_MERGE)
-			extracted += pgaio_uncombine_one(io);
-
-		pg_atomic_fetch_sub_u32(&aio_ctl->backend_state[io->owner_id].inflight_count, 1);
+			pgaio_uncombine_one(io);
 	}
 }
 
@@ -3047,6 +3044,7 @@ pgaio_uring_submit(int max_submit, bool drain)
 	struct io_uring_sqe *sqe[PGAIO_SUBMIT_BATCH_SIZE];
 	PgAioContext *context;
 	int nios = 0;
+	int our_nios = 0;
 
 	context = pgaio_acquire_context();
 
@@ -3083,6 +3081,14 @@ pgaio_uring_submit(int max_submit, bool drain)
 		pgaio_uring_sq_from_io(context, ios[nios], sqe[nios]);
 
 		nios++;
+		/*
+		 * Don't increase our inflight count for requests initiated by another
+		 * backend.
+		 */
+		if (io->owner_id == my_aio_id)
+			our_nios++;
+		else
+			pg_atomic_fetch_add_u32(&aio_ctl->backend_state[io->owner_id].inflight_count, 1);
 	}
 
 	Assert(nios > 0);
@@ -3090,7 +3096,8 @@ pgaio_uring_submit(int max_submit, bool drain)
 	{
 		int ret;
 
-		pg_atomic_add_fetch_u32(&my_aio->inflight_count, nios);
+		if (our_nios)
+			pg_atomic_add_fetch_u32(&my_aio->inflight_count, our_nios);
 		my_aio->submissions_total_count++;
 
 again:
@@ -3345,6 +3352,7 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_gene
 static void
 pgaio_uring_io_from_cqe(PgAioContext *context, struct io_uring_cqe *cqe)
 {
+	uint32 prev_inflight_count PG_USED_FOR_ASSERTS_ONLY;
 	PgAioInProgress *io;
 
 	io = io_uring_cqe_get_data(cqe);
@@ -3356,6 +3364,10 @@ pgaio_uring_io_from_cqe(PgAioContext *context, struct io_uring_cqe *cqe)
 	io->result = cqe->res;
 
 	dlist_push_tail(&my_aio->reaped, &io->io_node);
+
+	/* XXX: this doesn't need to be under the lock */
+	prev_inflight_count = pg_atomic_fetch_sub_u32(&aio_ctl->backend_state[io->owner_id].inflight_count, 1);
+	Assert(prev_inflight_count > 0);
 
 	if (io->used_iovec != -1)
 	{
