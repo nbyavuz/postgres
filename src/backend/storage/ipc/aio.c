@@ -1881,6 +1881,15 @@ pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, boo
 #endif /* COMBINE_ENABLED */
 
 	/*
+	 * FIXME: currently the pgaio_synchronous_submit() path is only compatible
+	 * with AIOTYPE_WORKER: There's e.g. a danger we'd wait for io_uring
+	 * events, which could stall (or trigger asserts), as
+	 * pgaio_io_wait_ref_int() right now has no way of detecting that case.
+	 */
+	if (aio_type != AIOTYPE_WORKER)
+		will_wait = false;
+
+	/*
 	 * Loop until all pending IOs are submitted. Throttle max in-flight before
 	 * calling into the IO implementation specific routine, so this code can
 	 * be shared.
