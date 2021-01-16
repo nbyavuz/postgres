@@ -479,7 +479,8 @@ static void pgaio_uncombine(void);
 static int pgaio_uncombine_one(PgAioInProgress *io);
 static void pgaio_call_local_callbacks(bool in_error);
 static int pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io);
-static int pgaio_synchronous_submit(bool drain);
+static int pgaio_synchronous_submit(void);
+static void pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local);
 
 /* aio worker related functions */
 static int pgaio_worker_submit(int max_submit, bool drain);
@@ -488,7 +489,7 @@ static void pgaio_worker_do(PgAioInProgress *io);
 #ifdef USE_LIBURING
 /* io_uring related functions */
 static int pgaio_uring_submit(int max_submit, bool drain);
-static int pgaio_uring_drain(PgAioContext *context);
+static int pgaio_uring_drain(PgAioContext *context, bool call_shared);
 static void pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 generation, uint32 wait_event_info);
 
 static void pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, struct io_uring_sqe *sqe);
@@ -1504,7 +1505,7 @@ pgaio_call_local_callbacks(bool in_error)
  * Receive completions in ring.
  */
 static int  __attribute__((noinline))
-pgaio_drain(PgAioContext *context, bool in_error, bool call_local)
+pgaio_drain(PgAioContext *context, bool call_shared, bool call_local)
 {
 	int ndrained = 0;
 
@@ -1517,16 +1518,19 @@ pgaio_drain(PgAioContext *context, bool in_error, bool call_local)
 	}
 #ifdef USE_LIBURING
 	else if (aio_type == AIOTYPE_LIBURING)
-		ndrained = pgaio_uring_drain(context);
+		ndrained = pgaio_uring_drain(context, call_shared);
 #endif
 
-	if (ndrained > 0)
-		pgaio_uncombine();
-
-	pgaio_complete_ios(false);
-	pgaio_transfer_foreign_to_local();
-	pgaio_call_local_callbacks(in_error);
-
+	if (call_shared)
+	{
+		pgaio_complete_ios(false);
+		pgaio_transfer_foreign_to_local();
+	}
+	if (call_local)
+	{
+		Assert(call_shared);
+		pgaio_call_local_callbacks(false);
+	}
 	return ndrained;
 }
 
@@ -1755,7 +1759,7 @@ pgaio_worker_need_synchronous(PgAioInProgress *io)
 }
 
 static int
-pgaio_synchronous_submit(bool drain)
+pgaio_synchronous_submit(void)
 {
 	int nsubmitted = 0;
 
@@ -1772,7 +1776,6 @@ pgaio_synchronous_submit(bool drain)
 
 		++nsubmitted;
 	}
-	pgaio_complete_ios(false);
 
 	return nsubmitted;
 }
@@ -1839,7 +1842,7 @@ pgaio_worker_submit(int max_submit, bool drain)
 }
 
 static void
-pgaio_submit_pending_internal(bool drain, bool will_wait)
+pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, bool will_wait)
 {
 	int total_submitted = 0;
 	uint32 orig_total;
@@ -1904,7 +1907,7 @@ pgaio_submit_pending_internal(bool drain, bool will_wait)
 
 		START_CRIT_SECTION();
 		if (my_aio->pending_count == 1 && will_wait)
-			did_submit = pgaio_synchronous_submit(drain);
+			did_submit = pgaio_synchronous_submit();
 		else if (aio_type == AIOTYPE_WORKER)
 			did_submit = pgaio_worker_submit(max_submit, drain);
 #ifdef USE_LIBURING
@@ -1930,14 +1933,21 @@ pgaio_submit_pending_internal(bool drain, bool will_wait)
 
 	RESUME_INTERRUPTS();
 
-	if (drain)
+	if (call_shared)
+	{
+		pgaio_complete_ios(false);
+		pgaio_transfer_foreign_to_local();
 		pgaio_call_local_callbacks(/* in_error = */ false);
+	}
 }
 
 void  __attribute__((noinline))
 pgaio_submit_pending(bool drain)
 {
-	pgaio_submit_pending_internal(drain, false);
+	pgaio_submit_pending_internal(drain,
+								  /* call_shared */ drain,
+								  /* call_local */ drain,
+								  /* will_wait */ false);
 }
 
 static void
@@ -2041,7 +2051,7 @@ pgaio_apply_backend_limit(void)
 							errhidecontext(true));
 
 					pgaio_io_ref(io, &ref);
-					pgaio_io_wait_ref(&ref, /* call_local = */ false);
+					pgaio_io_wait_ref_int(&ref, /* call_shared = */ false, /* call_local = */ false);
 					current_inflight = pg_atomic_read_u32(&my_aio->inflight_count);
 					break;
 				}
@@ -2055,6 +2065,14 @@ pgaio_apply_backend_limit(void)
 		{
 			dlist_iter iter;
 			PgAioIoRef ref;
+
+			/*
+			 * ->issued_abandoned_count is only maintained once shared
+			 * callbacks have been invoked. So do so, as otherwise we could
+			 * end up looping here endlessly, as those IOs already finished.
+			 */
+			pgaio_complete_ios(false);
+			pgaio_transfer_foreign_to_local();
 
 			io = NULL;
 
@@ -2086,7 +2104,7 @@ pgaio_apply_backend_limit(void)
 					errhidestmt(true),
 					errhidecontext(true));
 
-			pgaio_io_wait_ref(&ref, false);
+			pgaio_io_wait_ref_int(&ref,  /* call_shared = */ false, /* call_local = */ false);
 		}
 
 		current_inflight = pg_atomic_read_u32(&my_aio->inflight_count);
@@ -2096,11 +2114,27 @@ pgaio_apply_backend_limit(void)
 void
 pgaio_io_wait_ref(PgAioIoRef *ref, bool call_local)
 {
+	pgaio_io_wait_ref_int(ref, /* call_shared = */ true, call_local);
+}
+
+static void
+pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local)
+{
 	uint64 ref_generation;
 	PgAioInProgress *io;
 	uint32 done_flags = PGAIOIP_DONE;
 	PgAioIPFlags flags;
 	bool am_owner;
+
+	/*
+	 * If we just wait for the IO to finish, we can only wait for the
+	 * corresponding state.
+	 */
+	if (!call_shared)
+	{
+		Assert(!call_local);
+		done_flags |= PGAIOIP_REAPED;
+	}
 
 	Assert(ref->aio_index < max_aio_in_progress);
 
@@ -2140,7 +2174,7 @@ pgaio_io_wait_ref(PgAioIoRef *ref, bool call_local)
 
 		if (flags & PGAIOIP_INFLIGHT)
 		{
-			pgaio_drain(context, false, call_local);
+			pgaio_drain(context, call_shared, call_local);
 
 			flags = io->flags;
 			context = &aio_ctl->contexts[io->ring];
@@ -2153,17 +2187,15 @@ pgaio_io_wait_ref(PgAioIoRef *ref, bool call_local)
 				goto wait_ref_out;
 		}
 
-		if (my_aio->pending_count > 0 && call_local)
+		if (my_aio->pending_count > 0 && call_shared)
 		{
-			/* FIXME: we should call this in a larger number of cases */
-
 			/*
 			 * If we otherwise would have to sleep submit all pending
 			 * requests, to avoid others having to wait for us to submit
 			 * them. Don't want to do so when not needing to sleep, as
 			 * submitting IOs in smaller increments can be less efficient.
 			 */
-			pgaio_submit_pending_internal(false, true);
+			pgaio_submit_pending_internal(call_shared, call_shared, call_local, true);
 		}
 		else if (aio_type != AIOTYPE_WORKER && (flags & PGAIOIP_INFLIGHT))
 		{
@@ -2201,6 +2233,12 @@ wait_ref_out:
 	pg_read_barrier();
 	if (io->generation != ref_generation)
 		return;
+
+	if (!call_shared)
+	{
+		Assert(flags & (PGAIOIP_REAPED | PGAIOIP_SHARED_CALLBACK_CALLED | PGAIOIP_DONE));
+		return;
+	}
 
 	Assert(flags & PGAIOIP_DONE);
 
@@ -2270,7 +2308,7 @@ pgaio_io_check_ref(PgAioIoRef *ref)
 		return true;
 
 	if (flags & PGAIOIP_INFLIGHT)
-		pgaio_drain(context, false, false);
+		pgaio_drain(context, /* call_shared = */ true, /* call_local = */ false);
 
 	flags = io->flags;
 	pg_read_barrier();
@@ -2326,7 +2364,8 @@ pgaio_io_get(void)
 		 * Also, need to protect against too many ios handed out but not used.
 		 */
 		for (int i = 0; i < aio_ctl->num_contexts; i++)
-			pgaio_drain(&aio_ctl->contexts[i], false, true);
+			pgaio_drain(&aio_ctl->contexts[i],
+						/* call_shared = */ true, /* call_local = */ true);
 
 		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 	}
@@ -2931,7 +2970,9 @@ pgaio_bounce_buffer_get(void)
 				 pg_atomic_read_u32(&my_aio->inflight_count));
 
 			for (int i = 0; i < aio_ctl->num_contexts; i++)
-				pgaio_drain(&aio_ctl->contexts[i], false, true);
+				pgaio_drain(&aio_ctl->contexts[i],
+							/* call_shared = */ true,
+							/* call_local = */ true);
 		}
 		else
 			break;
@@ -3131,9 +3172,11 @@ again:
 		}
 	}
 
-	/* callbacks will be called later by pgaio_submit() */
+	/* callbacks will be called later, by pgaio_submit_pending_internal() */
 	if (drain)
-		pgaio_drain(context, false, false);
+		pgaio_drain(context,
+					/* call_shared = */ false,
+					/* call_local = */ false);
 
 	return nios;
 }
@@ -3205,7 +3248,7 @@ pgaio_uring_drain_locked(PgAioContext *context)
 }
 
 static int
-pgaio_uring_drain(PgAioContext *context)
+pgaio_uring_drain(PgAioContext *context, bool call_shared)
 {
 	uint32 processed = 0;
 
@@ -3217,16 +3260,17 @@ pgaio_uring_drain(PgAioContext *context)
 		{
 			processed = pgaio_uring_drain_locked(context);
 
-			/*
-			 * Call shared callbacks under lock - that avoids others to first
-			 * wait on the completion_lock for pgaio_uring_wait_one, then
-			 * again in pgaio_drain(), and then again on the condition
-			 * variable for the AIO.
-			 */
 			if (processed > 0)
 				pgaio_uncombine();
 
-			pgaio_complete_ios(false);
+			/*
+			 * If allowed, call shared callbacks under lock - that prevent
+			 * other backends to first have to wait on the completion_lock for
+			 * pgaio_uring_wait_one, then again below pgaio_drain(), and then
+			 * again on the condition variable for the AIO.
+			 */
+			if (call_shared)
+				pgaio_complete_ios(false);
 
 			LWLockRelease(&context->completion_lock);
 			break;
@@ -3324,9 +3368,9 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_gene
 
 		/*
 		 * Drain and call shared callbacks under lock while we already have it
-		 * - that avoids others to first wait on the completion_lock for
-		 * pgaio_uring_wait_one, then again in pgaio_drain(), and then again
-		 * on the condition variable for the AIO.
+		 * - that avoids others to first have to wait on the completion_lock
+		 * for pgaio_uring_wait_one, then again in pgaio_drain(), and then
+		 * again on the condition variable for the AIO.
 		 */
 		if (io_uring_cq_ready(&context->io_uring_ring))
 		{
