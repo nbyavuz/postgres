@@ -1204,6 +1204,23 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 void
 ReadBufferCompleteRead(Buffer buffer, const AioBufferTag *tag, char *bufdata, int mode, bool failed)
 {
+	BufferDesc *bufHdr = NULL;
+	bool		islocal;
+
+	if (BufferIsValid(buffer))
+	{
+		islocal = BufferIsLocal(buffer);
+
+		if (islocal)
+			bufHdr = GetLocalBufferDescriptor(-buffer - 1);
+		else
+			bufHdr = GetBufferDescriptor(buffer - 1);
+
+		Assert(RelFileNodeEquals(tag->rnode.node, bufHdr->tag.rnode));
+		Assert(tag->forkNum == bufHdr->tag.forkNum);
+		Assert(tag->blockNum == bufHdr->tag.blockNum);
+	}
+
 	/* FIXME: implement track_io_timing */
 
 	if (!failed)
@@ -1230,6 +1247,11 @@ ReadBufferCompleteRead(Buffer buffer, const AioBufferTag *tag, char *bufdata, in
 			}
 			else
 			{
+				if (BufferIsValid(buffer))
+					TerminateBufferIO(bufHdr, islocal,
+									  /* syncio = */ false, /* clear_dirty = */ false,
+									  BM_IO_ERROR);
+
 				ereport(ERROR,
 						(errcode(ERRCODE_DATA_CORRUPTED),
 						 errmsg("invalid page in block %u of relation %s",
@@ -1241,18 +1263,6 @@ ReadBufferCompleteRead(Buffer buffer, const AioBufferTag *tag, char *bufdata, in
 
 	if (BufferIsValid(buffer))
 	{
-		bool		islocal = BufferIsLocal(buffer);
-		BufferDesc *bufHdr;
-
-		if (islocal)
-			bufHdr = GetLocalBufferDescriptor(-buffer - 1);
-		else
-			bufHdr = GetBufferDescriptor(buffer - 1);
-
-		Assert(RelFileNodeEquals(tag->rnode.node, bufHdr->tag.rnode));
-		Assert(tag->forkNum == bufHdr->tag.forkNum);
-		Assert(tag->blockNum == bufHdr->tag.blockNum);
-
 		TerminateBufferIO(bufHdr, islocal,
 						  /* syncio = */ false, /* clear_dirty = */ false,
 						  failed ? BM_IO_ERROR : BM_VALID);
