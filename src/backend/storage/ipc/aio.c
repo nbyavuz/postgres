@@ -2547,7 +2547,7 @@ pgaio_io_retry(PgAioInProgress *io)
 	my_aio->pending_count++;
 	my_aio->retry_total_count++;
 
-	pgaio_submit_pending(true);
+	pgaio_submit_pending(false);
 }
 
 extern void
