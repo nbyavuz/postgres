@@ -2511,7 +2511,7 @@ pgaio_io_retry(PgAioInProgress *io)
 
 		dlist_delete(&io->io_node);
 
-		io->flags =
+		WRITE_ONCE_F(io->flags) =
 			(io->flags & ~(PGAIOIP_SHARED_FAILED |
 						   PGAIOIP_DONE |
 						   PGAIOIP_FOREIGN_DONE |
@@ -2602,7 +2602,7 @@ pgaio_prepare_io(PgAioInProgress *io, PgAioAction action)
 
 	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
 
-	io->flags = (io->flags & ~PGAIOIP_IDLE) | PGAIOIP_IN_PROGRESS | PGAIOIP_PENDING;
+	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_IDLE) | PGAIOIP_IN_PROGRESS | PGAIOIP_PENDING;
 
 	/* for this module */
 	io->system_referenced = true;
@@ -4342,7 +4342,7 @@ done:
 	 * just yet, because a regular backend might not be in the right context
 	 * for that.  (???)
 	 */
-	io->flags = (io->flags & ~PGAIOIP_INFLIGHT) | PGAIOIP_REAPED;
+	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_INFLIGHT) | PGAIOIP_REAPED;
 	dlist_push_tail(&my_aio->reaped, &io->io_node);
 
 	/* It might need to be unmerged into multiple IOs. */
