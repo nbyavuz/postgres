@@ -3748,72 +3748,55 @@ pgaio_flush_range_desc(PgAioInProgress *io, StringInfo s)
 					 (unsigned long long) io->d.flush_range.nbytes);
 }
 
-/* stringify relfilenode, for debugging use only */
-static char *
-relpath_debug(AioBufferTag *tag)
-{
-	char *path;
-	MemoryContext oldcontext = MemoryContextSwitchTo(ErrorContext);
-
-	path = relpath(tag->rnode,
-				   tag->forkNum);
-
-	MemoryContextSwitchTo(oldcontext);
-
-	return path;
-}
-
 static void
 pgaio_read_buffer_retry(PgAioInProgress *io)
 {
 	io->d.read_buffer.fd = reopen_buffered(&io->d.read_buffer.tag);
 }
 
-static bool
-pgaio_read_buffer_complete(PgAioInProgress *io)
+static void
+pgaio_read_impl(PgAioInProgress *io,
+				 uint32 nbytes, uint32 *already_done, uint64 offset,
+				 bool *failed, bool *done)
 {
-	Buffer		buffer = io->d.read_buffer.buf;
-	bool		call_completion;
-	bool		failed;
-	bool		done;
+	Assert((nbytes - *already_done) > 0);
 
-	/* great for torturing error handling */
 #if 0
 	if (io->result > 4096)
 		io->result = 4096;
 #endif
 
-	if (io->result != (io->d.read_buffer.nbytes - io->d.read_buffer.already_done))
+	if (io->result != (nbytes - *already_done))
 	{
-		failed = true;
+		*failed = true;
 
-		//pgaio_io_print(io, NULL);
-
-		if (io->result < 0)
+		if (io->result <= 0)
 		{
+			int elevel ;
+
 			if (io->result == -EAGAIN || io->result == -EINTR)
 			{
-				elog(PANIC, "need to implement retries for failed requests");
+				io->flags |= PGAIOIP_SOFT_FAILURE;
+				*done = false;
+				elevel = DEBUG1;
 			}
 			else
 			{
-				ereport(WARNING,
-						errcode_for_file_access(),
-						errmsg("could not read block %u in file \"%s\": %s",
-							   io->d.read_buffer.tag.blockNum,
-							   relpath_debug(&io->d.read_buffer.tag),
-							   strerror(-io->result)));
+				io->flags |= PGAIOIP_HARD_FAILURE;
+				*done = true;
+				elevel = WARNING;
 			}
 
-			call_completion = true;
-			done = true;
+			ereport(elevel,
+					errcode_for_file_access(),
+					errmsg("aio %zd: could not read at offset %llu: %s",
+						   io - aio_ctl->in_progress_io,
+						   (long long unsigned) (offset + *already_done),
+						   strerror(-io->result)));
 		}
 		else
 		{
-			io->flags |= PGAIOIP_SOFT_FAILURE;
-			call_completion = false;
-			done = false;
-			io->d.read_buffer.already_done += io->result;
+			uint32 old_already_done = *already_done;
 
 			/*
 			 * This is actually pretty common and harmless, happens when part
@@ -3827,28 +3810,41 @@ pgaio_read_buffer_complete(PgAioInProgress *io)
 			 * XXX: Should we handle repeated failures for the same blocks
 			 * differently?
 			 */
+
+			io->flags |= PGAIOIP_SOFT_FAILURE;
+			*already_done += io->result;
+			*done = false;
+
 			ereport(DEBUG1,
-					errcode(ERRCODE_DATA_CORRUPTED),
-					errmsg("aio %zd: could not read block %u in file \"%s\": read only %d of %d bytes (init: %d, cur: %d)",
-						   io - aio_ctl->in_progress_io,
-						   io->d.read_buffer.tag.blockNum,
-						   relpath_debug(&io->d.read_buffer.tag),
-						   io->result, BLCKSZ,
-						   io->owner_id, MyProc ? MyProc->pgprocno : INVALID_PGPROCNO));
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("aio %zd: partial read at offset %llu: read only %u of %u",
+							io - aio_ctl->in_progress_io,
+							(long long unsigned) (offset + old_already_done),
+							io->result,
+							nbytes - old_already_done)));
 		}
 	}
 	else
 	{
-		io->d.read_buffer.already_done += io->result;
+		*already_done += io->result;
+		*failed = false;
+		*done = true;
+	}
+}
+
+static bool
+pgaio_read_buffer_complete(PgAioInProgress *io)
+{
+	bool		failed;
+	bool		done;
+
+	pgaio_read_impl(io, io->d.read_buffer.nbytes, &io->d.read_buffer.already_done,
+					 io->d.read_buffer.offset, &failed, &done);
+	if (!failed)
 		Assert(io->d.read_buffer.already_done == BLCKSZ);
 
-		call_completion = true;
-		failed = false;
-		done = true;
-	}
-
-	if (call_completion)
-		ReadBufferCompleteRead(buffer,
+	if (done)
+		ReadBufferCompleteRead(io->d.read_buffer.buf,
 							   &io->d.read_buffer.tag,
 							   io->d.read_buffer.bufdata,
 							   io->d.read_buffer.mode,
@@ -3871,6 +3867,71 @@ pgaio_read_buffer_desc(PgAioInProgress *io, StringInfo s)
 }
 
 static void
+pgaio_write_impl(PgAioInProgress *io,
+				 uint32 nbytes, uint32 *already_done, uint64 offset,
+				 bool *failed, bool *done)
+{
+	Assert((nbytes - *already_done) > 0);
+
+#if 0
+	if (io->result > 4096)
+		io->result = 4096;
+#endif
+
+	if (io->result != (nbytes - *already_done))
+	{
+		*failed = true;
+
+		if (io->result <= 0)
+		{
+			int elevel ;
+
+			if (io->result == -EAGAIN || io->result == -EINTR)
+			{
+				io->flags |= PGAIOIP_SOFT_FAILURE;
+				*done = false;
+				elevel = DEBUG1;
+			}
+			else
+			{
+				io->flags |= PGAIOIP_HARD_FAILURE;
+				*done = true;
+				elevel = WARNING;
+			}
+
+			ereport(elevel,
+					errcode_for_file_access(),
+					errmsg("aio %zd: could not write at offset %llu: %s",
+						   io - aio_ctl->in_progress_io,
+						   (long long unsigned) (offset + *already_done),
+						   strerror(-io->result)));
+		}
+		else
+		{
+			uint32 old_already_done = *already_done;
+
+			io->flags |= PGAIOIP_SOFT_FAILURE;
+			*already_done += io->result;
+			*done = false;
+
+			ereport(DEBUG1,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("aio %zd: partial write at offset %llu: wrote only %u of %u",
+							io - aio_ctl->in_progress_io,
+							(long long unsigned) (offset + old_already_done),
+							io->result,
+							nbytes - old_already_done)));
+		}
+	}
+	else
+	{
+		*already_done += io->result;
+		*failed = false;
+		*done = true;
+	}
+}
+
+static void
 pgaio_write_buffer_retry(PgAioInProgress *io)
 {
 	io->d.write_buffer.fd = reopen_buffered(&io->d.write_buffer.tag);
@@ -3881,78 +3942,15 @@ pgaio_write_buffer_complete(PgAioInProgress *io)
 {
 	Buffer		buffer = io->d.write_buffer.buf;
 
-	bool		call_completion;
 	bool		failed;
 	bool		done;
 
-	if (io->result != (io->d.write_buffer.nbytes - io->d.write_buffer.already_done))
-	{
-		failed = true;
-
-		if (io->result < 0)
-		{
-			int elevel ;
-
-			failed = true;
-
-			if (io->result == -EAGAIN || io->result == -EINTR)
-			{
-				io->flags |= PGAIOIP_SOFT_FAILURE;
-
-				call_completion = false;
-				done = false;
-
-				elevel = DEBUG1;
-			}
-			else
-			{
-				io->flags |= PGAIOIP_HARD_FAILURE;
-				elevel = WARNING;
-
-				call_completion = true;
-				done = true;
-
-				pgaio_io_print(io, NULL);
-			}
-
-			ereport(elevel,
-					errcode_for_file_access(),
-					errmsg("aio %zd: could not write block %u in file \"%s\": %s",
-						   io - aio_ctl->in_progress_io,
-						   io->d.write_buffer.tag.blockNum,
-						   relpath_debug(&io->d.write_buffer.tag),
-						   strerror(-io->result)),
-					errhint("Check free disk space."));
-		}
-		else
-		{
-			io->flags |= PGAIOIP_SOFT_FAILURE;
-			io->d.write_buffer.already_done += io->result;
-
-			call_completion = false;
-			done = false;
-
-			ereport(WARNING,
-					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("aio %zd: could not write block %u in file \"%s\": wrote only %d of %d bytes (init: %d, cur: %d)",
-							io - aio_ctl->in_progress_io,
-							io->d.write_buffer.tag.blockNum,
-							relpath_debug(&io->d.write_buffer.tag),
-							io->result, (io->d.write_buffer.nbytes - io->d.write_buffer.already_done),
-							io->owner_id, MyProc ? MyProc->pgprocno : INVALID_PGPROCNO)));
-		}
-	}
-	else
-	{
-		io->d.write_buffer.already_done += io->result;
+	pgaio_write_impl(io, io->d.write_buffer.nbytes, &io->d.write_buffer.already_done,
+					 io->d.write_buffer.offset, &failed, &done);
+	if (!failed)
 		Assert(io->d.write_buffer.already_done == BLCKSZ);
 
-		call_completion = true;
-		failed = false;
-		done = true;
-	}
-
-	if (call_completion)
+	if (done)
 		ReadBufferCompleteWrite(buffer, &io->d.write_buffer.tag, io->d.write_buffer.release_lock, failed);
 
 	return done;
