@@ -34,7 +34,8 @@ typedef struct PgAioIoRef
 } PgAioIoRef;
 
 /* Enum for aio_type GUC. */
-enum AioType {
+enum AioType
+{
 	AIOTYPE_WORKER = 0,
 	AIOTYPE_LIBURING,
 };
@@ -103,7 +104,20 @@ extern bool pgaio_io_check_ref(PgAioIoRef *ref);
 extern bool pgaio_io_success(PgAioInProgress *io);
 extern bool pgaio_io_done(PgAioInProgress *io);
 extern void pgaio_io_recycle(PgAioInProgress *io);
+
+extern void pgaio_io_retry(PgAioInProgress *io);
+
+extern void pgaio_print_queues(void);
+struct StringInfoData;
+extern void pgaio_io_print(PgAioInProgress *io, struct StringInfoData *s);
+extern void pgaio_io_ref_print(PgAioIoRef *ref, struct StringInfoData *s);
+
+struct dlist_head;
+extern void pgaio_print_list(struct dlist_head *head, struct StringInfoData *s, size_t offset);
+extern void pgaio_submit_pending(bool drain);
+
 extern void pgaio_io_ref(PgAioInProgress *io, PgAioIoRef *ref);
+
 
 static inline bool
 pgaio_io_ref_valid(const PgAioIoRef *ref)
@@ -134,12 +148,16 @@ struct SMgrRelationData;
  */
 extern void pgaio_io_prep_read(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, uint32 nbytes);
 extern void pgaio_io_prep_write(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, uint32 nbytes);
+extern void pgaio_io_prep_fsync(PgAioInProgress *io, int fd, bool datasync);
+extern void pgaio_io_prep_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes);
+extern void pgaio_io_prep_nop(PgAioInProgress *io);
 
 
-extern void pgaio_io_start_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes);
-extern void pgaio_io_start_nop(PgAioInProgress *io);
-extern void pgaio_io_start_fsync(PgAioInProgress *io, int fd);
-extern void pgaio_io_start_fdatasync(PgAioInProgress *io, int fd);
+
+/* --------------------------------------------------------------------------------
+ * IO start routines
+ * --------------------------------------------------------------------------------
+ */
 
 extern void pgaio_io_start_read_smgr(PgAioInProgress *io,
 									 struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
@@ -164,15 +182,9 @@ extern void pgaio_io_start_write_generic(PgAioInProgress *io, int fd,
 extern void pgaio_io_start_fsync_wal(PgAioInProgress *io, int fd,
 									 bool datasync_only, uint32 sync_no);
 
-extern void pgaio_io_retry(PgAioInProgress *io);
-extern void pgaio_submit_pending(bool drain);
-
-extern void pgaio_print_queues(void);
-struct StringInfoData;
-extern void pgaio_io_print(PgAioInProgress *io, struct StringInfoData *s);
-extern void pgaio_io_ref_print(PgAioIoRef *ref, struct StringInfoData *s);
-struct dlist_head;
-extern void pgaio_print_list(struct dlist_head *head, struct StringInfoData *s, size_t offset);
+extern void pgaio_io_start_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes);
+extern void pgaio_io_start_nop(PgAioInProgress *io);
+extern void pgaio_io_start_fsync(PgAioInProgress *io, int fd, bool datasync);
 
 
 extern void pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb);
@@ -180,10 +192,18 @@ extern PgAioBounceBuffer *pgaio_bounce_buffer_get(void);
 extern void pgaio_bounce_buffer_release(PgAioBounceBuffer *bb);
 extern char *pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb);
 
+
+/* --------------------------------------------------------------------------------
+ * IO backend implementation related functions
+ * --------------------------------------------------------------------------------
+ */
+
 extern void AioWorkerMain(void);
 
-/*
+
+/* --------------------------------------------------------------------------------
  * Helpers. In aio_util.c.
+ * --------------------------------------------------------------------------------
  */
 
 /*

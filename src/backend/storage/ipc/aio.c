@@ -263,7 +263,7 @@ struct PgAioInProgress
 	union {
 		struct
 		{
-			Buffer buf;
+			Buffer buffid;
 			BackendId backend;
 			int mode;
 		} read_sb;
@@ -275,7 +275,7 @@ struct PgAioInProgress
 
 		struct
 		{
-			Buffer buf;
+			Buffer buffid;
 			BackendId backend;
 			bool release_lock;
 		} write_sb;
@@ -504,10 +504,8 @@ typedef struct PgAioCtl
 /* general pgaio helper functions */
 static void pgaio_complete_ios(bool in_error);
 static void pgaio_apply_backend_limit(void);
-static void pgaio_prepare_io(PgAioInProgress *io, PgAioOp op, PgAioSharedCallback scb);
 static void pgaio_io_prepare(PgAioInProgress *io, PgAioOp op);
-static void pgaio_finish_io(PgAioInProgress *io);
-static void pgaio_io_stage(PgAioInProgress *io);
+static void pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb);
 static void pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring);
 static void pgaio_bounce_buffer_release_internal(PgAioBounceBuffer *bb, bool holding_lock, bool release_resowner);
 static void pgaio_io_ref_internal(PgAioInProgress *io, PgAioIoRef *ref);
@@ -2576,6 +2574,9 @@ pgaio_io_recycle(PgAioInProgress *io)
 
 		io->flags &= ~PGAIOIP_DONE;
 		io->flags |= PGAIOIP_IDLE;
+
+		io->op = PGAIO_OP_INVALID;
+		io->scb = PGAIO_SCB_INVALID;
 	}
 
 	io->flags &= ~(PGAIOIP_MERGE |
@@ -2592,13 +2593,15 @@ pgaio_io_recycle(PgAioInProgress *io)
 static void  __attribute__((noinline))
 pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
 {
-	if (my_aio->pending_count + 1 >= PGAIO_SUBMIT_BATCH_SIZE)
-		pgaio_submit_pending(true);
-
 	/* true for now, but not necessarily in the future */
 	Assert(io->flags == PGAIOIP_IDLE);
 	Assert(io->user_referenced);
 	Assert(io->merge_with == NULL);
+	Assert(io->op == PGAIO_OP_INVALID);
+	Assert(io->scb == PGAIO_SCB_INVALID);
+
+	if (my_aio->pending_count + 1 >= PGAIO_SUBMIT_BATCH_SIZE)
+		pgaio_submit_pending(true);
 
 	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
 
@@ -2613,13 +2616,16 @@ pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
 
 
 static void  __attribute__((noinline))
-pgaio_io_stage(PgAioInProgress *io)
+pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb)
 {
 	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
 	Assert(io->flags == PGAIOIP_PREP);
 	Assert(io->user_referenced);
 	Assert(io->op != PGAIO_OP_INVALID);
-	Assert(io->scb != PGAIO_SCB_INVALID);
+	Assert(io->scb == PGAIO_SCB_INVALID);
+	Assert(io_action_cbs[scb].op == io->op);
+
+	io->scb = scb;
 
 	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_PREP) | PGAIOIP_IN_PROGRESS | PGAIOIP_PENDING;
 	dlist_push_tail(&my_aio->pending, &io->io_node);
@@ -2637,59 +2643,6 @@ pgaio_io_stage(PgAioInProgress *io)
 
 		ereport(DEBUG3,
 				errmsg("staged %s",
-					   s.data),
-				errhidestmt(true),
-				errhidecontext(true));
-		pfree(s.data);
-		MemoryContextSwitchTo(oldcontext);
-	}
-#endif
-}
-
-static void  __attribute__((noinline))
-pgaio_prepare_io(PgAioInProgress *io, PgAioOp op, PgAioSharedCallback scb)
-{
-	if (my_aio->pending_count + 1 >= PGAIO_SUBMIT_BATCH_SIZE)
-		pgaio_submit_pending(true);
-
-	/* true for now, but not necessarily in the future */
-	Assert(io->flags == PGAIOIP_IDLE);
-	Assert(io->user_referenced);
-	Assert(io->merge_with == NULL);
-
-	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
-
-	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_IDLE) | PGAIOIP_IN_PROGRESS | PGAIOIP_PENDING;
-
-	/* for this module */
-	io->system_referenced = true;
-	io->op = op;
-	io->scb = scb;
-	if (IsUnderPostmaster)
-		io->owner_id = MyProc->pgprocno;
-
-	// FIXME: should this be done in end_get_io?
-	dlist_push_tail(&my_aio->pending, &io->io_node);
-	my_aio->pending_count++;
-}
-
-static void  __attribute__((noinline))
-pgaio_finish_io(PgAioInProgress *io)
-{
-	Assert(io_action_cbs[io->scb].op == io->op);
-
-#ifdef PGAIO_VERBOSE
-	if (message_level_is_interesting(DEBUG3))
-	{
-		MemoryContext oldcontext = MemoryContextSwitchTo(ErrorContext);
-		StringInfoData s;
-
-		initStringInfo(&s);
-
-		pgaio_io_print(io, &s);
-
-		ereport(DEBUG3,
-				errmsg("starting %s",
 					   s.data),
 				errhidestmt(true),
 				errhidecontext(true));
@@ -3626,21 +3579,9 @@ __sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
 
 
 /* --------------------------------------------------------------------------------
- * Code dealing with specific IO types
+ * IO initialization routines for the basic IO types (see PgAioOp).
  * --------------------------------------------------------------------------------
  */
-
-void
-pgaio_io_start_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes)
-{
-	pgaio_prepare_io(io, PGAIO_OP_FLUSH_RANGE, PGAIO_SCB_FLUSH_RANGE);
-
-	io->op_data.flush_range.fd = fd;
-	io->op_data.flush_range.offset = offset;
-	io->op_data.flush_range.nbytes = nbytes;
-
-	pgaio_finish_io(io);
-}
 
 
 void
@@ -3670,6 +3611,40 @@ pgaio_io_prep_write(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, u
 }
 
 void
+pgaio_io_prep_fsync(PgAioInProgress *io, int fd, bool datasync)
+{
+	Assert(io->op == PGAIO_OP_FSYNC);
+	Assert(io->flags == PGAIOIP_PREP);
+
+	io->op_data.fsync.fd = fd;
+	io->op_data.fsync.datasync = datasync;
+}
+
+void
+pgaio_io_prep_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes)
+{
+	Assert(io->op == PGAIO_OP_FLUSH_RANGE);
+	Assert(io->flags == PGAIOIP_PREP);
+
+	io->op_data.flush_range.fd = fd;
+	io->op_data.flush_range.offset = offset;
+	io->op_data.flush_range.nbytes = nbytes;
+}
+
+void
+pgaio_io_prep_nop(PgAioInProgress *io)
+{
+	Assert(io->op == PGAIO_OP_WRITE);
+	Assert(io->flags == PGAIOIP_PREP);
+}
+
+
+/* --------------------------------------------------------------------------------
+ * IO start routines (see PgAioSharedCallback for a list)
+ * --------------------------------------------------------------------------------
+ */
+
+void
 pgaio_io_start_read_sb(PgAioInProgress *io, struct SMgrRelationData* smgr, ForkNumber forknum,
 					   BlockNumber blocknum, char *bufdata, int buffid, int mode)
 {
@@ -3679,13 +3654,11 @@ pgaio_io_start_read_sb(PgAioInProgress *io, struct SMgrRelationData* smgr, ForkN
 
 	smgrstartread(io, smgr, forknum, blocknum, bufdata);
 
-	io->scb_data.read_sb.buf = buffid;
+	io->scb_data.read_sb.buffid = buffid;
 	io->scb_data.read_sb.backend = smgr->smgr_rnode.backend;
 	io->scb_data.read_sb.mode = mode;
 
-	io->scb = PGAIO_SCB_READ_SB;
-
-	pgaio_io_stage(io);
+	pgaio_io_stage(io, PGAIO_SCB_READ_SB);
 }
 
 void
@@ -3702,9 +3675,7 @@ pgaio_io_start_read_smgr(PgAioInProgress *io, struct SMgrRelationData* smgr, For
 		.blockNum = blocknum
 		};
 
-	io->scb = PGAIO_SCB_READ_SMGR;
-
-	pgaio_io_stage(io);
+	pgaio_io_stage(io, PGAIO_SCB_READ_SMGR);
 }
 
 void
@@ -3716,13 +3687,11 @@ pgaio_io_start_write_sb(PgAioInProgress *io,
 
 	smgrstartwrite(io, smgr, forknum, blocknum, bufdata, skipFsync);
 
-	io->scb_data.write_sb.buf = buffid;
+	io->scb_data.write_sb.buffid = buffid;
 	io->scb_data.write_sb.backend = smgr->smgr_rnode.backend;
 	io->scb_data.write_sb.release_lock = release_lock;
 
-	io->scb = PGAIO_SCB_WRITE_SB;
-
-	pgaio_io_stage(io);
+	pgaio_io_stage(io, PGAIO_SCB_WRITE_SB);
 }
 
 void
@@ -3740,9 +3709,7 @@ pgaio_io_start_write_smgr(PgAioInProgress *io,
 		.blockNum = blocknum
 		};
 
-	io->scb = PGAIO_SCB_WRITE_SMGR;
-
-	pgaio_io_stage(io);
+	pgaio_io_stage(io, PGAIO_SCB_WRITE_SMGR);
 }
 
 void
@@ -3750,17 +3717,13 @@ pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbyt
 {
 	Assert(ShmemAddrIsValid(bufdata));
 
-	pgaio_prepare_io(io, PGAIO_OP_WRITE, PGAIO_SCB_WRITE_WAL);
+	pgaio_io_prepare(io, PGAIO_OP_WRITE);
 
-	io->op_data.write.fd = fd;
-	io->op_data.write.offset = offset;
-	io->op_data.write.nbytes = nbytes;
-	io->op_data.write.bufdata = bufdata;
-	io->op_data.write.already_done = 0;
+	pgaio_io_prep_write(io, fd, bufdata, offset, nbytes);
 
 	io->scb_data.write_wal.write_no = write_no;
 
-	pgaio_finish_io(io);
+	pgaio_io_stage(io, PGAIO_SCB_WRITE_WAL);
 }
 
 void
@@ -3768,58 +3731,60 @@ pgaio_io_start_write_generic(PgAioInProgress *io, int fd, uint64 offset, uint32 
 {
 	Assert(ShmemAddrIsValid(bufdata));
 
-	pgaio_prepare_io(io, PGAIO_OP_WRITE, PGAIO_SCB_WRITE_GENERIC);
+	pgaio_io_prepare(io, PGAIO_OP_WRITE);
 
-	io->op_data.write.fd = fd;
-	io->op_data.write.offset = offset;
-	io->op_data.write.nbytes = nbytes;
-	io->op_data.write.bufdata = bufdata;
-	io->op_data.write.already_done = 0;
+	pgaio_io_prep_write(io, fd, bufdata, offset, nbytes);
 
-	pgaio_finish_io(io);
+	pgaio_io_stage(io, PGAIO_SCB_WRITE_GENERIC);
 }
 
 void
 pgaio_io_start_nop(PgAioInProgress *io)
 {
-	pgaio_prepare_io(io, PGAIO_OP_NOP, PGAIO_SCB_NOP);
-	pgaio_finish_io(io);
+	pgaio_io_prepare(io, PGAIO_OP_NOP);
+
+	pgaio_io_prep_nop(io);
+
+	pgaio_io_stage(io, PGAIO_SCB_NOP);
 }
 
 void
-pgaio_io_start_fsync(PgAioInProgress *io, int fd)
+pgaio_io_start_fsync(PgAioInProgress *io, int fd, bool datasync)
 {
-	pgaio_prepare_io(io, PGAIO_OP_FSYNC, PGAIO_SCB_FSYNC);
+	pgaio_io_prepare(io, PGAIO_OP_FSYNC);
 
-	io->op_data.fsync.fd = fd;
-	io->op_data.fsync.datasync = false;
+	pgaio_io_prep_fsync(io, fd, datasync);
 
-	pgaio_finish_io(io);
-}
-
-void
-pgaio_io_start_fdatasync(PgAioInProgress *io, int fd)
-{
-	pgaio_prepare_io(io, PGAIO_OP_FSYNC, PGAIO_SCB_FSYNC);
-
-	io->op_data.fsync.fd = fd;
-	io->op_data.fsync.datasync = true;
-
-	pgaio_finish_io(io);
+	pgaio_io_stage(io, PGAIO_SCB_FSYNC);
 }
 
 void
 pgaio_io_start_fsync_wal(PgAioInProgress *io, int fd, bool datasync_only, uint32 flush_no)
 {
-	pgaio_prepare_io(io, PGAIO_OP_FSYNC, PGAIO_SCB_FSYNC_WAL);
+	pgaio_io_prepare(io, PGAIO_OP_FSYNC);
 
-	io->op_data.fsync.fd = fd;
-	io->op_data.fsync.datasync = false;
+	pgaio_io_prep_fsync(io, fd, datasync_only);
 
 	io->scb_data.fsync_wal.flush_no = flush_no;
 
-	pgaio_finish_io(io);
+	pgaio_io_stage(io, PGAIO_SCB_FSYNC_WAL);
 }
+
+void
+pgaio_io_start_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes)
+{
+	pgaio_io_prepare(io, PGAIO_OP_FLUSH_RANGE);
+
+	pgaio_io_prep_flush_range(io, fd, offset, nbytes);
+
+	pgaio_io_stage(io, PGAIO_SCB_FLUSH_RANGE);
+}
+
+
+/* --------------------------------------------------------------------------------
+ * shared IO implementation (see PgAioSharedCallback for a list)
+ * --------------------------------------------------------------------------------
+ */
 
 static bool
 pgaio_nop_complete(PgAioInProgress *io)
@@ -3977,7 +3942,7 @@ pgaio_read_sb_retry(PgAioInProgress *io)
 	BufferDesc *bufHdr = NULL;
 	bool		islocal;
 	BufferTag	tag;
-	Buffer		buffid = io->scb_data.read_sb.buf;
+	Buffer		buffid = io->scb_data.read_sb.buffid;
 	SMgrRelation reln;
 	uint32		off;
 
@@ -4008,7 +3973,7 @@ pgaio_read_sb_complete(PgAioInProgress *io)
 		Assert(io->op_data.read.already_done == BLCKSZ);
 
 	if (done)
-		ReadBufferCompleteRead(io->scb_data.read_sb.buf,
+		ReadBufferCompleteRead(io->scb_data.read_sb.buffid,
 							   io->op_data.read.bufdata,
 							   io->scb_data.read_sb.mode,
 							   failed);
@@ -4025,7 +3990,7 @@ pgaio_read_sb_desc(PgAioInProgress *io, StringInfo s)
 					 (long long unsigned) io->op_data.read.offset,
 					 io->op_data.read.nbytes,
 					 io->op_data.read.already_done,
-					 io->scb_data.read_sb.buf,
+					 io->scb_data.read_sb.buffid,
 					 io->op_data.read.bufdata);
 }
 
@@ -4144,7 +4109,7 @@ pgaio_write_sb_retry(PgAioInProgress *io)
 	BufferDesc *bufHdr = NULL;
 	bool		islocal;
 	BufferTag	tag;
-	Buffer		buffid = io->scb_data.read_sb.buf;
+	Buffer		buffid = io->scb_data.read_sb.buffid;
 	SMgrRelation reln;
 	uint32		off;
 
@@ -4165,7 +4130,7 @@ pgaio_write_sb_retry(PgAioInProgress *io)
 static bool
 pgaio_write_sb_complete(PgAioInProgress *io)
 {
-	Buffer		buffer = io->scb_data.write_sb.buf;
+	Buffer		buffer = io->scb_data.write_sb.buffid;
 
 	bool		failed;
 	bool		done;
@@ -4190,7 +4155,7 @@ pgaio_write_sb_desc(PgAioInProgress *io, StringInfo s)
 					 io->op_data.write.nbytes,
 					 io->op_data.write.already_done,
 					 io->scb_data.write_sb.release_lock,
-					 io->scb_data.write_sb.buf,
+					 io->scb_data.write_sb.buffid,
 					 io->op_data.write.bufdata);
 }
 
