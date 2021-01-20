@@ -123,41 +123,43 @@ typedef enum PgAioInProgressFlags
 	/*  */
 	PGAIOIP_IDLE = 1 << 1,
 
+	PGAIOIP_PREP = 1 << 2,
+
 	/*  */
-	PGAIOIP_IN_PROGRESS = 1 << 2,
+	PGAIOIP_IN_PROGRESS = 1 << 3,
 
 	/* somewhere */
-	PGAIOIP_PENDING = 1 << 3,
+	PGAIOIP_PENDING = 1 << 4,
 
 	/* request in kernel */
-	PGAIOIP_INFLIGHT = 1 << 4,
+	PGAIOIP_INFLIGHT = 1 << 5,
 
 	/* request reaped */
-	PGAIOIP_REAPED = 1 << 5,
+	PGAIOIP_REAPED = 1 << 6,
 
 	/* shared completion callback was called */
-	PGAIOIP_SHARED_CALLBACK_CALLED = 1 << 6,
+	PGAIOIP_SHARED_CALLBACK_CALLED = 1 << 7,
 
 	/* completed */
-	PGAIOIP_DONE = 1 << 7,
+	PGAIOIP_DONE = 1 << 8,
 
-	PGAIOIP_FOREIGN_DONE = 1 << 8,
+	PGAIOIP_FOREIGN_DONE = 1 << 9,
 
 	/* IO is merged with others */
-	PGAIOIP_MERGE = 1 << 9,
+	PGAIOIP_MERGE = 1 << 10,
 
-	PGAIOIP_RETRY = 1 << 10,
+	PGAIOIP_RETRY = 1 << 11,
 
 	/* request failed completely */
-	PGAIOIP_HARD_FAILURE = 1 << 11,
+	PGAIOIP_HARD_FAILURE = 1 << 12,
 
 	/* request failed partly, e.g. a short write */
-	PGAIOIP_SOFT_FAILURE = 1 << 12,
+	PGAIOIP_SOFT_FAILURE = 1 << 13,
 
-	PGAIOIP_SHARED_FAILED = 1 << 13,
+	PGAIOIP_SHARED_FAILED = 1 << 14,
 
 	/* local completion callback was called */
-	PGAIOIP_LOCAL_CALLBACK_CALLED = 1 << 14,
+	PGAIOIP_LOCAL_CALLBACK_CALLED = 1 << 15,
 
 } PgAioInProgressFlags;
 
@@ -1965,6 +1967,8 @@ pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 	while (cur)
 	{
 		Assert(cur->flags & PGAIOIP_PENDING);
+		Assert(!(cur->flags & PGAIOIP_PREP));
+		Assert(!(cur->flags & PGAIOIP_IDLE));
 
 		cur->ring = ring;
 
@@ -2546,7 +2550,7 @@ pgaio_io_retry(PgAioInProgress *io)
 	pgaio_submit_pending(false);
 }
 
-extern void
+void
 pgaio_io_recycle(PgAioInProgress *io)
 {
 	Assert(io->flags & (PGAIOIP_IDLE | PGAIOIP_DONE));
@@ -2603,6 +2607,8 @@ pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
 	io->op = op;
 	if (IsUnderPostmaster)
 		io->owner_id = MyProc->pgprocno;
+
+	WRITE_ONCE_F(io->flags) = PGAIOIP_PREP;
 }
 
 
@@ -2610,12 +2616,12 @@ static void  __attribute__((noinline))
 pgaio_io_stage(PgAioInProgress *io)
 {
 	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
-	Assert(io->flags == PGAIOIP_IDLE);
+	Assert(io->flags == PGAIOIP_PREP);
 	Assert(io->user_referenced);
 	Assert(io->op != PGAIO_OP_INVALID);
 	Assert(io->scb != PGAIO_SCB_INVALID);
 
-	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_IDLE) | PGAIOIP_IN_PROGRESS | PGAIOIP_PENDING;
+	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_PREP) | PGAIOIP_IN_PROGRESS | PGAIOIP_PENDING;
 	dlist_push_tail(&my_aio->pending, &io->io_node);
 	my_aio->pending_count++;
 
@@ -2704,6 +2710,7 @@ pgaio_io_release(PgAioInProgress *io)
 	io->user_referenced = false;
 
 	if (io->flags & (PGAIOIP_IDLE |
+					 PGAIOIP_PREP |
 					 PGAIOIP_PENDING |
 					 PGAIOIP_LOCAL_CALLBACK_CALLED))
 	{
@@ -2754,8 +2761,9 @@ pgaio_io_release(PgAioInProgress *io)
 	{
 		Assert(!(io->flags & PGAIOIP_INFLIGHT));
 		Assert(!(io->flags & PGAIOIP_MERGE));
-		Assert(io->flags & PGAIOIP_DONE ||
-			   io->flags & PGAIOIP_IDLE);
+		Assert(io->flags & (PGAIOIP_IDLE |
+							PGAIOIP_PREP |
+							PGAIOIP_DONE));
 
 		if (io->flags & PGAIOIP_DONE)
 		{
@@ -2866,6 +2874,7 @@ pgaio_io_flag_string(PgAioIPFlags flags, StringInfo s)
 
 	STRINGIFY_FLAG(PGAIOIP_UNUSED);
 	STRINGIFY_FLAG(PGAIOIP_IDLE);
+	STRINGIFY_FLAG(PGAIOIP_PREP);
 	STRINGIFY_FLAG(PGAIOIP_IN_PROGRESS);
 	STRINGIFY_FLAG(PGAIOIP_PENDING);
 	STRINGIFY_FLAG(PGAIOIP_INFLIGHT);
@@ -3637,7 +3646,8 @@ pgaio_io_start_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nb
 void
 pgaio_io_prep_read(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, uint32 nbytes)
 {
-	pgaio_io_prepare(io, PGAIO_OP_READ);
+	Assert(io->op == PGAIO_OP_READ);
+	Assert(io->flags == PGAIOIP_PREP);
 
 	io->op_data.read.fd = fd;
 	io->op_data.read.offset = offset;
@@ -3649,7 +3659,8 @@ pgaio_io_prep_read(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, ui
 void
 pgaio_io_prep_write(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, uint32 nbytes)
 {
-	pgaio_io_prepare(io, PGAIO_OP_WRITE);
+	Assert(io->op == PGAIO_OP_WRITE);
+	Assert(io->flags == PGAIOIP_PREP);
 
 	io->op_data.write.fd = fd;
 	io->op_data.write.offset = offset;
@@ -3663,6 +3674,8 @@ pgaio_io_start_read_sb(PgAioInProgress *io, struct SMgrRelationData* smgr, ForkN
 					   BlockNumber blocknum, char *bufdata, int buffid, int mode)
 {
 	Assert(BufferIsValid(buffid));
+
+	pgaio_io_prepare(io, PGAIO_OP_READ);
 
 	smgrstartread(io, smgr, forknum, blocknum, bufdata);
 
@@ -3679,6 +3692,8 @@ void
 pgaio_io_start_read_smgr(PgAioInProgress *io, struct SMgrRelationData* smgr, ForkNumber forknum,
 						 BlockNumber blocknum, char *bufdata)
 {
+	pgaio_io_prepare(io, PGAIO_OP_READ);
+
 	smgrstartread(io, smgr, forknum, blocknum, bufdata);
 
 	io->scb_data.read_smgr.tag = (AioBufferTag){
@@ -3697,6 +3712,8 @@ pgaio_io_start_write_sb(PgAioInProgress *io,
 						struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
 						char *bufdata, int buffid, bool skipFsync, bool release_lock)
 {
+	pgaio_io_prepare(io, PGAIO_OP_WRITE);
+
 	smgrstartwrite(io, smgr, forknum, blocknum, bufdata, skipFsync);
 
 	io->scb_data.write_sb.buf = buffid;
@@ -3713,6 +3730,8 @@ pgaio_io_start_write_smgr(PgAioInProgress *io,
 						struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
 						char *bufdata, bool skipFsync)
 {
+	pgaio_io_prepare(io, PGAIO_OP_WRITE);
+
 	smgrstartwrite(io, smgr, forknum, blocknum, bufdata, skipFsync);
 
 	io->scb_data.write_smgr.tag = (AioBufferTag){
