@@ -3380,7 +3380,7 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 
 				aio = pgaio_io_get();
 				pgaio_io_start_write_wal(aio, openLogFile, startoffset,
-										 nbytes, from, /* barrier = */ false,
+										 nbytes, from,
 										 XLogCtl->writes->next & XLogCtl->writes->mask);
 
 				LogwrtResult.WriteInit = write_upto;
@@ -3438,9 +3438,6 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 					sync_method != SYNC_METHOD_OPEN_DSYNC &&
 					enableFsync)
 				{
-					bool use_barrier;
-
-#if 1
 					ereport(LOG,
 							errmsg("waiting for end-of-segment writes"),
 							errhidestmt(true),
@@ -3451,10 +3448,6 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 									   LogwrtResult.WriteInit,
 									   false);
 					Assert(LogwrtResult.WriteDone == LogwrtResult.WriteInit);
-					use_barrier = false;
-#else
-					use_barrier = true;
-#endif
 
 					{
 						PgAioInProgress *aio;
@@ -3466,7 +3459,6 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 #endif
 						aio = pgaio_io_get();
 						pgaio_io_start_fsync_wal(aio, openLogFile,
-												 /* barrier = */ use_barrier,
 												 fdatasync,
 												 XLogCtl->flushes->next & XLogCtl->flushes->mask);
 
@@ -3617,7 +3609,6 @@ XLogWriteIssueFlushes(XLogWritePos *write_pos)
 
 			aio = pgaio_io_get();
 			pgaio_io_start_fsync_wal(aio, openLogFile,
-									 /* barrier = */ false,
 									 use_fdatasync,
 									 XLogCtl->flushes->next & XLogCtl->flushes->mask);
 
@@ -4680,7 +4671,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 			{
 				PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
 
-				pgaio_io_start_write_generic(aio, fd, nbytes, XLOG_BLCKSZ, XLogCtl->zerobuf, false);
+				pgaio_io_start_write_generic(aio, fd, nbytes, XLOG_BLCKSZ, XLogCtl->zerobuf);
 				pg_streaming_write_write(pgsw, aio, NULL);
 			}
 		}
@@ -4727,7 +4718,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 			pg_streaming_write_wait_all(pgsw);
 
 			aio = pg_streaming_write_get_io(pgsw);
-			pgaio_io_start_fsync(aio, fd, /* barrier = */ false);
+			pgaio_io_start_fsync(aio, fd);
 			pg_streaming_write_write(pgsw, aio, NULL);
 		}
 		pg_streaming_write_wait_all(pgsw);
