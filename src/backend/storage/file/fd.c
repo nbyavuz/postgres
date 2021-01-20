@@ -2081,7 +2081,7 @@ retry:
 }
 
 bool
-FileStartRead(struct PgAioInProgress *io, File file, char *buffer, int amount, off_t offset, const AioBufferTag *tag, int bufid, int mode)
+FileStartRead(struct PgAioInProgress *io, File file, char *buffer, int amount, off_t offset)
 {
 	int			returnCode;
 	Vfd		   *vfdP;
@@ -2099,7 +2099,7 @@ FileStartRead(struct PgAioInProgress *io, File file, char *buffer, int amount, o
 
 	vfdP = &VfdCache[file];
 
-	pgaio_io_start_read_buffer(io, tag, vfdP->fd, offset, amount, buffer, bufid, mode);
+	pgaio_io_prep_read(io, vfdP->fd, buffer, offset, amount);
 
 	return true;
 }
@@ -2203,7 +2203,7 @@ retry:
 }
 
 bool
-FileStartWrite(struct PgAioInProgress *io, File file, char *buffer, int amount, off_t offset, const AioBufferTag *tag, int bufid, bool release_lock)
+FileStartWrite(struct PgAioInProgress *io, File file, char *buffer, int amount, off_t offset)
 {
 	int			returnCode;
 	Vfd		   *vfdP;
@@ -2221,7 +2221,7 @@ FileStartWrite(struct PgAioInProgress *io, File file, char *buffer, int amount, 
 
 	vfdP = &VfdCache[file];
 
-	pgaio_io_start_write_buffer(io, tag, vfdP->fd, offset, amount, buffer, bufid, release_lock);
+	pgaio_io_prep_write(io, vfdP->fd, buffer, offset, amount);
 
 	return true;
 }

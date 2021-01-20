@@ -132,8 +132,8 @@ prewarm_smgr_next(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_
 
 	pgaio_assoc_bounce_buffer(aio, bb);
 
-	smgrstartread(aio, p->rel->rd_smgr, p->forkNumber, blockno,
-				  pgaio_bounce_buffer_buffer(bb), InvalidBuffer, 0);
+	pgaio_io_start_read_smgr(aio, p->rel->rd_smgr, p->forkNumber, blockno,
+							 pgaio_bounce_buffer_buffer(bb));
 
 	*read_private = (uintptr_t) bb;
 

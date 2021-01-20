@@ -98,9 +98,11 @@ pg_attribute_packed()
 	/* intentionally the zero value, to help catch zeroed memory etc */
 	PGAIO_SCB_INVALID = 0,
 
-	PGAIO_SCB_READ_BUFFER,
+	PGAIO_SCB_READ_SB,
+	PGAIO_SCB_READ_SMGR,
 
-	PGAIO_SCB_WRITE_BUFFER,
+	PGAIO_SCB_WRITE_SB,
+	PGAIO_SCB_WRITE_SMGR,
 	PGAIO_SCB_WRITE_WAL,
 	PGAIO_SCB_WRITE_GENERIC,
 
@@ -260,16 +262,26 @@ struct PgAioInProgress
 		struct
 		{
 			Buffer buf;
-			AioBufferTag tag;
+			BackendId backend;
 			int mode;
-		} read_buffer;
+		} read_sb;
+
+		struct
+		{
+			AioBufferTag tag;
+		} read_smgr;
 
 		struct
 		{
 			Buffer buf;
+			BackendId backend;
 			bool release_lock;
+		} write_sb;
+
+		struct
+		{
 			AioBufferTag tag;
-		} write_buffer;
+		} write_smgr;
 
 		struct
 		{
@@ -491,8 +503,10 @@ typedef struct PgAioCtl
 static void pgaio_complete_ios(bool in_error);
 static void pgaio_apply_backend_limit(void);
 static void pgaio_prepare_io(PgAioInProgress *io, PgAioOp op, PgAioSharedCallback scb);
-static void pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring);
+static void pgaio_io_prepare(PgAioInProgress *io, PgAioOp op);
 static void pgaio_finish_io(PgAioInProgress *io);
+static void pgaio_io_stage(PgAioInProgress *io);
+static void pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring);
 static void pgaio_bounce_buffer_release_internal(PgAioBounceBuffer *bb, bool holding_lock, bool release_resowner);
 static void pgaio_io_ref_internal(PgAioInProgress *io, PgAioIoRef *ref);
 static void pgaio_transfer_foreign_to_local(void);
@@ -535,13 +549,21 @@ static void pgaio_fsync_wal_desc(PgAioInProgress *io, StringInfo s);
 static bool pgaio_flush_range_complete(PgAioInProgress *io);
 static void pgaio_flush_range_desc(PgAioInProgress *io, StringInfo s);
 
-static bool pgaio_read_buffer_complete(PgAioInProgress *io);
-static void pgaio_read_buffer_retry(PgAioInProgress *io);
-static void pgaio_read_buffer_desc(PgAioInProgress *io, StringInfo s);
+static bool pgaio_read_sb_complete(PgAioInProgress *io);
+static void pgaio_read_sb_retry(PgAioInProgress *io);
+static void pgaio_read_sb_desc(PgAioInProgress *io, StringInfo s);
 
-static bool pgaio_write_buffer_complete(PgAioInProgress *io);
-static void pgaio_write_buffer_retry(PgAioInProgress *io);
-static void pgaio_write_buffer_desc(PgAioInProgress *io, StringInfo s);
+static bool pgaio_read_smgr_complete(PgAioInProgress *io);
+static void pgaio_read_smgr_retry(PgAioInProgress *io);
+static void pgaio_read_smgr_desc(PgAioInProgress *io, StringInfo s);
+
+static bool pgaio_write_sb_complete(PgAioInProgress *io);
+static void pgaio_write_sb_retry(PgAioInProgress *io);
+static void pgaio_write_sb_desc(PgAioInProgress *io, StringInfo s);
+
+static bool pgaio_write_smgr_complete(PgAioInProgress *io);
+static void pgaio_write_smgr_retry(PgAioInProgress *io);
+static void pgaio_write_smgr_desc(PgAioInProgress *io, StringInfo s);
 
 static bool pgaio_write_wal_complete(PgAioInProgress *io);
 static void pgaio_write_wal_retry(PgAioInProgress *io);
@@ -587,22 +609,40 @@ typedef struct PgAioActionCBs
 static const PgAioActionCBs io_action_cbs[] =
 {
 
-	[PGAIO_SCB_READ_BUFFER] =
+	[PGAIO_SCB_READ_SB] =
 	{
 		.op = PGAIO_OP_READ,
-		.name = "read_buffer",
-		.retry = pgaio_read_buffer_retry,
-		.complete = pgaio_read_buffer_complete,
-		.desc = pgaio_read_buffer_desc,
+		.name = "read_sb",
+		.retry = pgaio_read_sb_retry,
+		.complete = pgaio_read_sb_complete,
+		.desc = pgaio_read_sb_desc,
 	},
 
-	[PGAIO_SCB_WRITE_BUFFER] =
+	[PGAIO_SCB_READ_SMGR] =
+	{
+		.op = PGAIO_OP_READ,
+		.name = "read_smgr",
+		.retry = pgaio_read_smgr_retry,
+		.complete = pgaio_read_smgr_complete,
+		.desc = pgaio_read_smgr_desc,
+	},
+
+	[PGAIO_SCB_WRITE_SB] =
 	{
 		.op = PGAIO_OP_WRITE,
-		.name = "write_buffer",
-		.retry = pgaio_write_buffer_retry,
-		.complete = pgaio_write_buffer_complete,
-		.desc = pgaio_write_buffer_desc,
+		.name = "write_sb",
+		.retry = pgaio_write_sb_retry,
+		.complete = pgaio_write_sb_complete,
+		.desc = pgaio_write_sb_desc,
+	},
+
+	[PGAIO_SCB_WRITE_SMGR] =
+	{
+		.op = PGAIO_OP_WRITE,
+		.name = "write_smgr",
+		.retry = pgaio_write_smgr_retry,
+		.complete = pgaio_write_smgr_complete,
+		.desc = pgaio_write_smgr_desc,
 	},
 
 	[PGAIO_SCB_WRITE_WAL] =
@@ -2448,15 +2488,6 @@ pgaio_io_on_completion_local(PgAioInProgress *io, PgAioOnCompletionLocalContext 
 	io->on_completion_local = ocb;
 }
 
-static int
-reopen_buffered(const AioBufferTag *tag)
-{
-	uint32 off;
-	SMgrRelation reln = smgropen(tag->rnode.node, tag->rnode.backend);
-
-	return smgrfd(reln, tag->forkNum, tag->blockNum, &off);
-}
-
 void
 pgaio_io_retry(PgAioInProgress *io)
 {
@@ -2552,6 +2583,61 @@ pgaio_io_recycle(PgAioInProgress *io)
 	Assert(io->flags == PGAIOIP_IDLE);
 	io->result = 0;
 	io->on_completion_local = NULL;
+}
+
+static void  __attribute__((noinline))
+pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
+{
+	if (my_aio->pending_count + 1 >= PGAIO_SUBMIT_BATCH_SIZE)
+		pgaio_submit_pending(true);
+
+	/* true for now, but not necessarily in the future */
+	Assert(io->flags == PGAIOIP_IDLE);
+	Assert(io->user_referenced);
+	Assert(io->merge_with == NULL);
+
+	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
+
+	/* for this module */
+	io->system_referenced = true;
+	io->op = op;
+	if (IsUnderPostmaster)
+		io->owner_id = MyProc->pgprocno;
+}
+
+
+static void  __attribute__((noinline))
+pgaio_io_stage(PgAioInProgress *io)
+{
+	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
+	Assert(io->flags == PGAIOIP_IDLE);
+	Assert(io->user_referenced);
+	Assert(io->op != PGAIO_OP_INVALID);
+	Assert(io->scb != PGAIO_SCB_INVALID);
+
+	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_IDLE) | PGAIOIP_IN_PROGRESS | PGAIOIP_PENDING;
+	dlist_push_tail(&my_aio->pending, &io->io_node);
+	my_aio->pending_count++;
+
+#ifdef PGAIO_VERBOSE
+	if (message_level_is_interesting(DEBUG3))
+	{
+		MemoryContext oldcontext = MemoryContextSwitchTo(ErrorContext);
+		StringInfoData s;
+
+		initStringInfo(&s);
+
+		pgaio_io_print(io, &s);
+
+		ereport(DEBUG3,
+				errmsg("staged %s",
+					   s.data),
+				errhidestmt(true),
+				errhidecontext(true));
+		pfree(s.data);
+		MemoryContextSwitchTo(oldcontext);
+	}
+#endif
 }
 
 static void  __attribute__((noinline))
@@ -3547,44 +3633,97 @@ pgaio_io_start_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nb
 	pgaio_finish_io(io);
 }
 
-void
-pgaio_io_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes, char *bufdata, int buffno, int mode)
-{
-	Assert(ShmemAddrIsValid(bufdata));
 
-	pgaio_prepare_io(io, PGAIO_OP_READ, PGAIO_SCB_READ_BUFFER);
+void
+pgaio_io_prep_read(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, uint32 nbytes)
+{
+	pgaio_io_prepare(io, PGAIO_OP_READ);
 
 	io->op_data.read.fd = fd;
 	io->op_data.read.offset = offset;
 	io->op_data.read.nbytes = nbytes;
 	io->op_data.read.bufdata = bufdata;
 	io->op_data.read.already_done = 0;
-
-	io->scb_data.read_buffer.buf = buffno;
-	io->scb_data.read_buffer.mode = mode;
-	memcpy(&io->scb_data.read_buffer.tag, tag, sizeof(io->scb_data.read_buffer.tag));
-
-	pgaio_finish_io(io);
 }
 
 void
-pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes, char *bufdata, int buffno, bool release_lock)
+pgaio_io_prep_write(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, uint32 nbytes)
 {
-	Assert(ShmemAddrIsValid(bufdata));
-
-	pgaio_prepare_io(io, PGAIO_OP_WRITE, PGAIO_SCB_WRITE_BUFFER);
+	pgaio_io_prepare(io, PGAIO_OP_WRITE);
 
 	io->op_data.write.fd = fd;
 	io->op_data.write.offset = offset;
 	io->op_data.write.nbytes = nbytes;
 	io->op_data.write.bufdata = bufdata;
 	io->op_data.write.already_done = 0;
+}
 
-	io->scb_data.write_buffer.buf = buffno;
-	io->scb_data.write_buffer.release_lock = release_lock;
-	memcpy(&io->scb_data.write_buffer.tag, tag, sizeof(io->scb_data.write_buffer.tag));
+void
+pgaio_io_start_read_sb(PgAioInProgress *io, struct SMgrRelationData* smgr, ForkNumber forknum,
+					   BlockNumber blocknum, char *bufdata, int buffid, int mode)
+{
+	Assert(BufferIsValid(buffid));
 
-	pgaio_finish_io(io);
+	smgrstartread(io, smgr, forknum, blocknum, bufdata);
+
+	io->scb_data.read_sb.buf = buffid;
+	io->scb_data.read_sb.backend = smgr->smgr_rnode.backend;
+	io->scb_data.read_sb.mode = mode;
+
+	io->scb = PGAIO_SCB_READ_SB;
+
+	pgaio_io_stage(io);
+}
+
+void
+pgaio_io_start_read_smgr(PgAioInProgress *io, struct SMgrRelationData* smgr, ForkNumber forknum,
+						 BlockNumber blocknum, char *bufdata)
+{
+	smgrstartread(io, smgr, forknum, blocknum, bufdata);
+
+	io->scb_data.read_smgr.tag = (AioBufferTag){
+		.rnode = smgr->smgr_rnode,
+		.forkNum = forknum,
+		.blockNum = blocknum
+		};
+
+	io->scb = PGAIO_SCB_READ_SMGR;
+
+	pgaio_io_stage(io);
+}
+
+void
+pgaio_io_start_write_sb(PgAioInProgress *io,
+						struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
+						char *bufdata, int buffid, bool skipFsync, bool release_lock)
+{
+	smgrstartwrite(io, smgr, forknum, blocknum, bufdata, skipFsync);
+
+	io->scb_data.write_sb.buf = buffid;
+	io->scb_data.write_sb.backend = smgr->smgr_rnode.backend;
+	io->scb_data.write_sb.release_lock = release_lock;
+
+	io->scb = PGAIO_SCB_WRITE_SB;
+
+	pgaio_io_stage(io);
+}
+
+void
+pgaio_io_start_write_smgr(PgAioInProgress *io,
+						struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
+						char *bufdata, bool skipFsync)
+{
+	smgrstartwrite(io, smgr, forknum, blocknum, bufdata, skipFsync);
+
+	io->scb_data.write_smgr.tag = (AioBufferTag){
+		.rnode = smgr->smgr_rnode,
+		.forkNum = forknum,
+		.blockNum = blocknum
+		};
+
+	io->scb = PGAIO_SCB_WRITE_SMGR;
+
+	pgaio_io_stage(io);
 }
 
 void
@@ -3736,12 +3875,6 @@ pgaio_flush_range_desc(PgAioInProgress *io, StringInfo s)
 }
 
 static void
-pgaio_read_buffer_retry(PgAioInProgress *io)
-{
-	io->op_data.read.fd = reopen_buffered(&io->scb_data.read_buffer.tag);
-}
-
-static void
 pgaio_read_impl(PgAioInProgress *io,
 				 uint32 nbytes, uint32 *already_done, uint64 offset,
 				 bool *failed, bool *done)
@@ -3819,8 +3952,33 @@ pgaio_read_impl(PgAioInProgress *io,
 	}
 }
 
+static void
+pgaio_read_sb_retry(PgAioInProgress *io)
+{
+	BufferDesc *bufHdr = NULL;
+	bool		islocal;
+	BufferTag	tag;
+	Buffer		buffid = io->scb_data.read_sb.buf;
+	SMgrRelation reln;
+	uint32		off;
+
+	islocal = BufferIsLocal(buffid);
+
+	if (islocal)
+		bufHdr = GetLocalBufferDescriptor(-buffid - 1);
+	else
+		bufHdr = GetBufferDescriptor(buffid - 1);
+
+	tag = bufHdr->tag;
+
+	reln = smgropen(tag.rnode, io->scb_data.read_sb.backend);
+	io->op_data.read.fd = smgrfd(reln, tag.forkNum, tag.blockNum, &off);
+
+	Assert(off == io->op_data.read.offset);
+}
+
 static bool
-pgaio_read_buffer_complete(PgAioInProgress *io)
+pgaio_read_sb_complete(PgAioInProgress *io)
 {
 	bool		failed;
 	bool		done;
@@ -3831,25 +3989,68 @@ pgaio_read_buffer_complete(PgAioInProgress *io)
 		Assert(io->op_data.read.already_done == BLCKSZ);
 
 	if (done)
-		ReadBufferCompleteRead(io->scb_data.read_buffer.buf,
-							   &io->scb_data.read_buffer.tag,
+		ReadBufferCompleteRead(io->scb_data.read_sb.buf,
 							   io->op_data.read.bufdata,
-							   io->scb_data.read_buffer.mode,
+							   io->scb_data.read_sb.mode,
 							   failed);
 
 	return done;
 }
 
 static void
-pgaio_read_buffer_desc(PgAioInProgress *io, StringInfo s)
+pgaio_read_sb_desc(PgAioInProgress *io, StringInfo s)
 {
 	appendStringInfo(s, "fd: %d, mode: %d, offset: %llu, nbytes: %u, already_done: %u, buf/data: %d/%p",
 					 io->op_data.read.fd,
-					 io->scb_data.read_buffer.mode,
+					 io->scb_data.read_sb.mode,
 					 (long long unsigned) io->op_data.read.offset,
 					 io->op_data.read.nbytes,
 					 io->op_data.read.already_done,
-					 io->scb_data.read_buffer.buf,
+					 io->scb_data.read_sb.buf,
+					 io->op_data.read.bufdata);
+}
+
+static void
+pgaio_read_smgr_retry(PgAioInProgress *io)
+{
+	uint32 off;
+	AioBufferTag *tag = &io->scb_data.read_smgr.tag;
+	SMgrRelation reln = smgropen(tag->rnode.node,
+								 tag->rnode.backend);
+
+	io->op_data.read.fd = smgrfd(reln, tag->forkNum, tag->blockNum, &off);
+	Assert(off == io->op_data.read.offset);
+}
+
+static bool
+pgaio_read_smgr_complete(PgAioInProgress *io)
+{
+	bool		failed;
+	bool		done;
+
+	pgaio_read_impl(io, io->op_data.read.nbytes, &io->op_data.read.already_done,
+					 io->op_data.read.offset, &failed, &done);
+	if (!failed)
+		Assert(io->op_data.read.already_done == BLCKSZ);
+
+	if (done)
+		ReadBufferCompleteRawRead(&io->scb_data.read_smgr.tag,
+								  io->op_data.read.bufdata,
+								  failed);
+
+	return done;
+}
+
+static void
+pgaio_read_smgr_desc(PgAioInProgress *io, StringInfo s)
+{
+	/* FIXME: proper path, critical section safe */
+	appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %u, already_done: %u, rel: %u, buf: %p",
+					 io->op_data.read.fd,
+					 (long long unsigned) io->op_data.read.offset,
+					 io->op_data.read.nbytes,
+					 io->op_data.read.already_done,
+					 io->scb_data.read_smgr.tag.rnode.node.relNode,
 					 io->op_data.read.bufdata);
 }
 
@@ -3919,15 +4120,33 @@ pgaio_write_impl(PgAioInProgress *io,
 }
 
 static void
-pgaio_write_buffer_retry(PgAioInProgress *io)
+pgaio_write_sb_retry(PgAioInProgress *io)
 {
-	io->op_data.write.fd = reopen_buffered(&io->scb_data.write_buffer.tag);
+	BufferDesc *bufHdr = NULL;
+	bool		islocal;
+	BufferTag	tag;
+	Buffer		buffid = io->scb_data.read_sb.buf;
+	SMgrRelation reln;
+	uint32		off;
+
+	islocal = BufferIsLocal(buffid);
+
+	if (islocal)
+		bufHdr = GetLocalBufferDescriptor(-buffid - 1);
+	else
+		bufHdr = GetBufferDescriptor(buffid - 1);
+
+	tag = bufHdr->tag;
+	reln = smgropen(tag.rnode, io->scb_data.read_sb.backend);
+	io->op_data.write.fd = smgrfd(reln, tag.forkNum, tag.blockNum, &off);
+
+	Assert(off == io->op_data.write.offset);
 }
 
 static bool
-pgaio_write_buffer_complete(PgAioInProgress *io)
+pgaio_write_sb_complete(PgAioInProgress *io)
 {
-	Buffer		buffer = io->scb_data.write_buffer.buf;
+	Buffer		buffer = io->scb_data.write_sb.buf;
 
 	bool		failed;
 	bool		done;
@@ -3938,23 +4157,62 @@ pgaio_write_buffer_complete(PgAioInProgress *io)
 		Assert(io->op_data.write.already_done == BLCKSZ);
 
 	if (done)
-		ReadBufferCompleteWrite(buffer, &io->scb_data.write_buffer.tag, io->scb_data.write_buffer.release_lock, failed);
+		ReadBufferCompleteWrite(buffer, io->scb_data.write_sb.release_lock, failed);
 
 	return done;
 }
 
 static void
-pgaio_write_buffer_desc(PgAioInProgress *io, StringInfo s)
+pgaio_write_sb_desc(PgAioInProgress *io, StringInfo s)
 {
 	appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %u, already_done: %u, release_lock: %d, buf/data: %u/%p",
 					 io->op_data.write.fd,
 					 (unsigned long long) io->op_data.write.offset,
 					 io->op_data.write.nbytes,
 					 io->op_data.write.already_done,
-					 io->scb_data.write_buffer.release_lock,
-					 io->scb_data.write_buffer.buf,
+					 io->scb_data.write_sb.release_lock,
+					 io->scb_data.write_sb.buf,
 					 io->op_data.write.bufdata);
 }
+
+
+static void
+pgaio_write_smgr_retry(PgAioInProgress *io)
+{
+	uint32 off;
+	AioBufferTag *tag = &io->scb_data.write_smgr.tag;
+	SMgrRelation reln = smgropen(tag->rnode.node,
+								 tag->rnode.backend);
+
+	io->op_data.read.fd = smgrfd(reln, tag->forkNum, tag->blockNum, &off);
+	Assert(off == io->op_data.read.offset);
+}
+
+static bool
+pgaio_write_smgr_complete(PgAioInProgress *io)
+{
+	bool		failed;
+	bool		done;
+
+	pgaio_write_impl(io, io->op_data.write.nbytes, &io->op_data.write.already_done,
+					 io->op_data.write.offset, &failed, &done);
+	if (!failed)
+		Assert(io->op_data.write.already_done == BLCKSZ);
+
+	return done;
+}
+
+static void
+pgaio_write_smgr_desc(PgAioInProgress *io, StringInfo s)
+{
+	appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %u, already_done: %u, data: %p",
+					 io->op_data.write.fd,
+					 (unsigned long long) io->op_data.write.offset,
+					 io->op_data.write.nbytes,
+					 io->op_data.write.already_done,
+					 io->op_data.write.bufdata);
+}
+
 
 static void
 pgaio_write_wal_retry(PgAioInProgress *io)

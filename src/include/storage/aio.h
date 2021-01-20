@@ -124,17 +124,36 @@ typedef struct AioBufferTag
 	ForkNumber	forkNum;
 	BlockNumber blockNum;		/* blknum relative to begin of reln */
 } AioBufferTag;
-struct buftag;
+
+struct SMgrRelationData;
+
+
+/*
+ * Low level IO preparation routines. These are called as part of
+ * pgaio_io_start_*.
+ */
+extern void pgaio_io_prep_read(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, uint32 nbytes);
+extern void pgaio_io_prep_write(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, uint32 nbytes);
+
 
 extern void pgaio_io_start_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes);
 extern void pgaio_io_start_nop(PgAioInProgress *io);
 extern void pgaio_io_start_fsync(PgAioInProgress *io, int fd);
 extern void pgaio_io_start_fdatasync(PgAioInProgress *io, int fd);
 
-extern void pgaio_io_start_read_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes,
-									   char *bufdata, int buffno, int mode);
-extern void pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd, uint32 offset, uint32 nbytes,
-										char *bufdata, int buffno, bool release_lock);
+extern void pgaio_io_start_read_smgr(PgAioInProgress *io,
+									 struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
+									 char *bufdata);
+extern void pgaio_io_start_read_sb(PgAioInProgress *io,
+								   struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
+								   char *bufdata, int buffid, int mode);
+extern void pgaio_io_start_write_sb(PgAioInProgress *io,
+									struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
+									char *bufdata, int buffid, bool skipFsync, bool release_lock);
+extern void pgaio_io_start_write_smgr(PgAioInProgress *io,
+									  struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
+									  char *bufdata, bool skipFsync);
+
 extern void pgaio_io_start_write_wal(PgAioInProgress *io, int fd,
 									 uint32 offset, uint32 nbytes,
 									 char *bufdata,

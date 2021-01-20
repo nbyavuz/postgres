@@ -307,8 +307,9 @@ extern void WritebackContextInit(WritebackContext *context, int *max_pending);
 extern void IssuePendingWritebacks(WritebackContext *context);
 extern void ScheduleBufferTagForWriteback(WritebackContext *context, BufferTag *tag);
 
-extern void ReadBufferCompleteRead(Buffer buffer, const AioBufferTag *tag, char *bufdata, int mode, bool failed);
-extern void ReadBufferCompleteWrite(Buffer buffer, const AioBufferTag *tag, bool release_lock, bool failed);
+extern void ReadBufferCompleteRead(Buffer buffer, char *bufdata, int mode, bool failed);
+extern void ReadBufferCompleteRawRead(const AioBufferTag *tag, char *bufdata, bool failed);
+extern void ReadBufferCompleteWrite(Buffer buffer, bool release_lock, bool failed);
 
 
 /* freelist.c */

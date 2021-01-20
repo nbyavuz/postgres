@@ -58,12 +58,11 @@ typedef struct f_smgr
 							  BlockNumber blocknum, char *buffer);
 	void		(*smgr_startread) (struct PgAioInProgress *io ,
 								   SMgrRelation reln, ForkNumber forknum,
-								   BlockNumber blocknum, char *buffer,
-								   int bufno, int mode);
+								   BlockNumber blocknum, char *buffer);
 	void		(*smgr_startwrite) (struct PgAioInProgress *io,
 									SMgrRelation reln, ForkNumber forknum,
 									BlockNumber blocknum, char *buffer,
-									int bufno, bool skipFsync, bool release_lock);
+									bool skipFsync);
 	void		(*smgr_write) (SMgrRelation reln, ForkNumber forknum,
 							   BlockNumber blocknum, char *buffer, bool skipFsync);
 	void		(*smgr_writeback) (SMgrRelation reln, ForkNumber forknum,
@@ -529,9 +528,9 @@ smgrread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 void
 smgrstartread(struct PgAioInProgress *io, SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-			  char *buffer, int bufno, int mode)
+			  char *buffer)
 {
-	return smgrsw[reln->smgr_which].smgr_startread(io, reln, forknum, blocknum, buffer, bufno, mode);
+	return smgrsw[reln->smgr_which].smgr_startread(io, reln, forknum, blocknum, buffer);
 }
 
 /*
@@ -561,10 +560,10 @@ void
 smgrstartwrite(struct PgAioInProgress *io,
 			   SMgrRelation reln, ForkNumber forknum,
 			   BlockNumber blocknum, char *buffer,
-			   int bufno, bool skipFsync, bool release_lock)
+			   bool skipFsync)
 {
 	smgrsw[reln->smgr_which].smgr_startwrite(io, reln, forknum, blocknum,
-											 buffer, bufno, skipFsync, release_lock);
+											 buffer, skipFsync);
 }
 
 

@@ -36,10 +36,10 @@ extern void mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				   char *buffer);
 extern void mdstartread(struct PgAioInProgress *,
 						SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-						char *buffer, int bufno, int mode);
+						char *buffer);
 extern void mdstartwrite(struct PgAioInProgress *,
 						 SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-						 char *buffer, int bufno, bool skipFsync, bool release_lock);
+						 char *buffer, bool skipFsync);
 extern void mdwrite(SMgrRelation reln, ForkNumber forknum,
 					BlockNumber blocknum, char *buffer, bool skipFsync);
 extern void mdwriteback(SMgrRelation reln, ForkNumber forknum,

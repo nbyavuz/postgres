@@ -720,8 +720,8 @@ ReadBufferInitRead(PgAioInProgress *aio,
 
 	pgaio_io_ref(aio, &bufHdr->io_in_progress);
 
-	smgrstartread(aio, smgr, forkNum, blockNum,
-				  bufBlock, buf, mode);
+	pgaio_io_start_read_sb(aio, smgr, forkNum, blockNum,
+						   bufBlock, buf, mode);
 
 	/*
 	 * Stop tracking this buffer via InProgressBuf - the AIO system now keeps
@@ -1202,37 +1202,38 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 }
 
 void
-ReadBufferCompleteRead(Buffer buffer, const AioBufferTag *tag, char *bufdata, int mode, bool failed)
+ReadBufferCompleteRead(Buffer buffer, char *bufdata, int mode, bool failed)
 {
 	BufferDesc *bufHdr = NULL;
 	bool		islocal;
 
-	if (BufferIsValid(buffer))
-	{
-		islocal = BufferIsLocal(buffer);
+	Assert(BufferIsValid(buffer));
 
-		if (islocal)
-			bufHdr = GetLocalBufferDescriptor(-buffer - 1);
-		else
-			bufHdr = GetBufferDescriptor(buffer - 1);
+	islocal = BufferIsLocal(buffer);
 
-		Assert(RelFileNodeEquals(tag->rnode.node, bufHdr->tag.rnode));
-		Assert(tag->forkNum == bufHdr->tag.forkNum);
-		Assert(tag->blockNum == bufHdr->tag.blockNum);
-	}
+	if (islocal)
+		bufHdr = GetLocalBufferDescriptor(-buffer - 1);
+	else
+		bufHdr = GetBufferDescriptor(buffer - 1);
+
+	/*
+	 * Right now that's always the case, but conceivably it could be a bounce
+	 * buffer or such.
+	 */
+	Assert((char *) BufHdrGetBlock(bufHdr) == bufdata);
 
 	/* FIXME: implement track_io_timing */
 
 	if (!failed)
 	{
 		Block		bufBlock = (Block) bufdata;
-		BlockNumber blockNum = tag->blockNum;
+		BlockNumber blockNum = bufHdr->tag.blockNum;
 
 		/* check for garbage data */
 		if (!PageIsVerified((Page) bufdata, blockNum))
 		{
-			RelFileNode rnode = tag->rnode.node;
-			BlockNumber forkNum = tag->forkNum;
+			RelFileNode rnode = bufHdr->tag.rnode;
+			BlockNumber forkNum = bufHdr->tag.forkNum;
 
 			failed = true;
 
@@ -1247,10 +1248,9 @@ ReadBufferCompleteRead(Buffer buffer, const AioBufferTag *tag, char *bufdata, in
 			}
 			else
 			{
-				if (BufferIsValid(buffer))
-					TerminateBufferIO(bufHdr, islocal,
-									  /* syncio = */ false, /* clear_dirty = */ false,
-									  BM_IO_ERROR);
+				TerminateBufferIO(bufHdr, islocal,
+								  /* syncio = */ false, /* clear_dirty = */ false,
+								  BM_IO_ERROR);
 
 				ereport(ERROR,
 						(errcode(ERRCODE_DATA_CORRUPTED),
@@ -1261,22 +1261,55 @@ ReadBufferCompleteRead(Buffer buffer, const AioBufferTag *tag, char *bufdata, in
 		}
 	}
 
-	if (BufferIsValid(buffer))
+	TerminateBufferIO(bufHdr, islocal,
+					  /* syncio = */ false, /* clear_dirty = */ false,
+					  failed ? BM_IO_ERROR : BM_VALID);
+}
+
+void
+ReadBufferCompleteRawRead(const AioBufferTag *tag, char *bufdata, bool failed)
+{
+	if (!failed)
 	{
-		TerminateBufferIO(bufHdr, islocal,
-						  /* syncio = */ false, /* clear_dirty = */ false,
-						  failed ? BM_IO_ERROR : BM_VALID);
+		Block		bufBlock = (Block) bufdata;
+		BlockNumber blockNum = tag->blockNum;
+
+		/* check for garbage data */
+		if (!PageIsVerified((Page) bufdata, blockNum))
+		{
+			RelFileNode rnode = tag->rnode.node;
+			BlockNumber forkNum = tag->forkNum;
+
+			failed = true;
+
+			if (zero_damaged_pages)
+			{
+				ereport(WARNING,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("invalid page in block %u of relation %s; zeroing out page",
+								blockNum,
+								relpathperm(rnode, forkNum))));
+				MemSet((char *) bufBlock, 0, BLCKSZ);
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("invalid page in block %u of relation %s",
+								blockNum,
+								relpathperm(rnode, forkNum))));
+			}
+		}
 	}
 }
 
 void
-ReadBufferCompleteWrite(Buffer buffer, const AioBufferTag *tag, bool release_lock, bool failed)
+ReadBufferCompleteWrite(Buffer buffer, bool release_lock, bool failed)
 {
 	BufferDesc *bufHdr;
 	bool		islocal;
 
-	if (!BufferIsValid(buffer))
-		return;
+	Assert(BufferIsValid(buffer));
 
 	islocal = BufferIsLocal(buffer);
 
@@ -1284,10 +1317,6 @@ ReadBufferCompleteWrite(Buffer buffer, const AioBufferTag *tag, bool release_loc
 		bufHdr = GetLocalBufferDescriptor(-buffer - 1);
 	else
 		bufHdr = GetBufferDescriptor(buffer - 1);
-
-	Assert(RelFileNodeEquals(tag->rnode.node, bufHdr->tag.rnode));
-	Assert(tag->forkNum == bufHdr->tag.forkNum);
-	Assert(tag->blockNum == bufHdr->tag.blockNum);
 
 	/* FIXME: implement track_io_timing */
 
@@ -3657,14 +3686,14 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 
 		pgaio_io_ref(aio, &buf->io_in_progress);
 
-		smgrstartwrite(aio,
-					   reln,
-					   buf->tag.forkNum,
-					   buf->tag.blockNum,
-					   bufToWrite,
-					   BufferDescriptorGetBuffer(buf),
-					   /* skipFsync = */ false,
-					   /* release_lock = */ false);
+		pgaio_io_start_write_sb(aio,
+								reln,
+								buf->tag.forkNum,
+								buf->tag.blockNum,
+								bufToWrite,
+								BufferDescriptorGetBuffer(buf),
+								/* skipFsync = */ false,
+								/* release_lock = */ false);
 
 		/*
 		 * Stop tracking this buffer via InProgressBuf - the AIO system now keeps
@@ -3761,12 +3790,14 @@ AsyncFlushBuffer(PgAioInProgress *aio, BufferDesc *buf, SMgrRelation reln)
 	 * subsystem successfully started tracking the IO.
 	 */
 
-	smgrstartwrite(aio, reln,
-				   buf->tag.forkNum, buf->tag.blockNum,
-				   bufToWrite,
-				   BufferDescriptorGetBuffer(buf),
-				   /* skipFsync = */ false,
-				   /* release_lock = */ true);
+	pgaio_io_start_write_sb(aio,
+							reln,
+							buf->tag.forkNum,
+							buf->tag.blockNum,
+							bufToWrite,
+							BufferDescriptorGetBuffer(buf),
+							/* skipFsync = */ false,
+							/* release_lock = */ true);
 
 	/*
 	 * XXX: The lock ownership release should probably be moved into the AIO

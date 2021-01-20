@@ -581,10 +581,10 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 		for (BlockNumber i = segstartblock; i < segendblock; i++, curblocknum++)
 		{
 			PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
-			AioBufferTag tag = {.rnode = reln->smgr_rnode, .forkNum = forknum, .blockNum = curblocknum};
 
 			pgaio_assoc_bounce_buffer(aio, bb);
-			FileStartWrite(aio, v->mdfd_vfd, zerobuf, BLCKSZ, i * BLCKSZ, &tag, InvalidBuffer, false);
+
+			pgaio_io_start_write_smgr(aio, reln, forknum, i, zerobuf, skipFsync);
 
 			pg_streaming_write_write(pgsw, aio, (void*) &i);
 
@@ -863,11 +863,10 @@ mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 void
 mdstartread(PgAioInProgress *io, SMgrRelation reln,
 			ForkNumber forknum, BlockNumber blocknum,
-			char *buffer, int bufno, int mode)
+			char *buffer)
 {
 	off_t		seekpos;
 	MdfdVec    *v;
-	AioBufferTag tag = {.rnode = reln->smgr_rnode, .forkNum = forknum, .blockNum = blocknum};
 
 	AssertPointerAlignment(buffer, 4096);
 
@@ -878,7 +877,7 @@ mdstartread(PgAioInProgress *io, SMgrRelation reln,
 
 	Assert(seekpos < (off_t) BLCKSZ * RELSEG_SIZE);
 
-	if (!FileStartRead(io, v->mdfd_vfd, buffer, BLCKSZ, seekpos, &tag, bufno, mode))
+	if (!FileStartRead(io, v->mdfd_vfd, buffer, BLCKSZ, seekpos))
 	{
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -961,11 +960,10 @@ mdwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 void
 mdstartwrite(PgAioInProgress *io, SMgrRelation reln,
 			 ForkNumber forknum, BlockNumber blocknum,
-			 char *buffer, int bufno, bool skipFsync, bool release_lock)
+			 char *buffer, bool skipFsync)
 {
 	off_t		seekpos;
 	MdfdVec    *v;
-	AioBufferTag tag = {.rnode = reln->smgr_rnode, .forkNum = forknum, .blockNum = blocknum};
 
 	/* This assert is too expensive to have on normally ... */
 #ifdef CHECK_WRITE_VS_EXTEND
@@ -992,7 +990,7 @@ mdstartwrite(PgAioInProgress *io, SMgrRelation reln,
 	if (!skipFsync && !SmgrIsTemp(reln))
 		register_dirty_segment(reln, forknum, v);
 
-	if (!FileStartWrite(io, v->mdfd_vfd, buffer, BLCKSZ, seekpos, &tag, bufno, release_lock))
+	if (!FileStartWrite(io, v->mdfd_vfd, buffer, BLCKSZ, seekpos))
 	{
 		ereport(ERROR,
 				(errcode_for_file_access(),
