@@ -245,7 +245,6 @@ struct PgAioInProgress
 		struct
 		{
 			int fd;
-			bool barrier;
 			bool datasync;
 		} fsync;
 
@@ -274,14 +273,12 @@ struct PgAioInProgress
 
 		struct
 		{
-			bool no_reorder;
 			uint32 write_no;
 		} write_wal;
 
 		struct
 		{
 			char *bufdata;
-			bool no_reorder;
 		} write_generic;
 
 		struct
@@ -3494,8 +3491,6 @@ pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, struct io_uri
 			io_uring_prep_fsync(sqe,
 								io->op_data.fsync.fd,
 								io->op_data.fsync.datasync ? IORING_FSYNC_DATASYNC : 0);
-			if (io->op_data.fsync.barrier)
-				sqe->flags |= IOSQE_IO_DRAIN;
 			break;
 
 		case PGAIO_OP_FLUSH_RANGE:
@@ -3593,7 +3588,7 @@ pgaio_io_start_write_buffer(PgAioInProgress *io, const AioBufferTag *tag, int fd
 }
 
 void
-pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, bool no_reorder, uint32 write_no)
+pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, uint32 write_no)
 {
 	Assert(ShmemAddrIsValid(bufdata));
 
@@ -3611,7 +3606,7 @@ pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbyt
 }
 
 void
-pgaio_io_start_write_generic(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes, char *bufdata, bool no_reorder)
+pgaio_io_start_write_generic(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes, char *bufdata)
 {
 	Assert(ShmemAddrIsValid(bufdata));
 
@@ -3634,36 +3629,33 @@ pgaio_io_start_nop(PgAioInProgress *io)
 }
 
 void
-pgaio_io_start_fsync(PgAioInProgress *io, int fd, bool barrier)
+pgaio_io_start_fsync(PgAioInProgress *io, int fd)
 {
 	pgaio_prepare_io(io, PGAIO_OP_FSYNC, PGAIO_SCB_FSYNC);
 
 	io->op_data.fsync.fd = fd;
-	io->op_data.fsync.barrier = barrier;
 	io->op_data.fsync.datasync = false;
 
 	pgaio_finish_io(io);
 }
 
 void
-pgaio_io_start_fdatasync(PgAioInProgress *io, int fd, bool barrier)
+pgaio_io_start_fdatasync(PgAioInProgress *io, int fd)
 {
 	pgaio_prepare_io(io, PGAIO_OP_FSYNC, PGAIO_SCB_FSYNC);
 
 	io->op_data.fsync.fd = fd;
-	io->op_data.fsync.barrier = barrier;
 	io->op_data.fsync.datasync = true;
 
 	pgaio_finish_io(io);
 }
 
 void
-pgaio_io_start_fsync_wal(PgAioInProgress *io, int fd, bool barrier, bool datasync_only, uint32 flush_no)
+pgaio_io_start_fsync_wal(PgAioInProgress *io, int fd, bool datasync_only, uint32 flush_no)
 {
 	pgaio_prepare_io(io, PGAIO_OP_FSYNC, PGAIO_SCB_FSYNC_WAL);
 
 	io->op_data.fsync.fd = fd;
-	io->op_data.fsync.barrier = barrier;
 	io->op_data.fsync.datasync = false;
 
 	io->scb_data.fsync_wal.flush_no = flush_no;
@@ -3698,10 +3690,9 @@ pgaio_fsync_complete(PgAioInProgress *io)
 static void
 pgaio_fsync_desc(PgAioInProgress *io, StringInfo s)
 {
-	appendStringInfo(s, "fd: %d, datasync: %d, barrier: %d",
+	appendStringInfo(s, "fd: %d, datasync: %d",
 					 io->op_data.fsync.fd,
-					 io->op_data.fsync.datasync,
-					 io->op_data.fsync.barrier);
+					 io->op_data.fsync.datasync);
 }
 
 static void
@@ -3723,11 +3714,10 @@ pgaio_fsync_wal_complete(PgAioInProgress *io)
 static void
 pgaio_fsync_wal_desc(PgAioInProgress *io, StringInfo s)
 {
-	appendStringInfo(s, "flush_no: %d, fd: %d, datasync: %d, barrier: %d",
+	appendStringInfo(s, "flush_no: %d, fd: %d, datasync: %d",
 					 io->scb_data.fsync_wal.flush_no,
 					 io->op_data.fsync.fd,
-					 io->op_data.fsync.datasync,
-					 io->op_data.fsync.barrier);
+					 io->op_data.fsync.datasync);
 }
 
 static bool
@@ -4009,14 +3999,13 @@ pgaio_write_wal_complete(PgAioInProgress *io)
 static void
 pgaio_write_wal_desc(PgAioInProgress *io, StringInfo s)
 {
-	appendStringInfo(s, "write_no: %d, fd: %d, offset: %llu, nbytes: %u, already_done: %u, bufdata: %p, no-reorder: %d",
+	appendStringInfo(s, "write_no: %d, fd: %d, offset: %llu, nbytes: %u, already_done: %u, bufdata: %p",
 					 io->scb_data.write_wal.write_no,
 					 io->op_data.write.fd,
 					 (unsigned long long) io->op_data.write.offset,
 					 io->op_data.write.nbytes,
 					 io->op_data.write.already_done,
-					 io->op_data.write.bufdata,
-					 io->scb_data.write_wal.no_reorder);
+					 io->op_data.write.bufdata);
 }
 
 static bool
@@ -4050,13 +4039,12 @@ pgaio_write_generic_complete(PgAioInProgress *io)
 static void
 pgaio_write_generic_desc(PgAioInProgress *io, StringInfo s)
 {
-	appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %u, already_done: %u, bufdata: %p, no-reorder: %d",
+	appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %u, already_done: %u, bufdata: %p",
 					 io->op_data.write.fd,
 					 (unsigned long long) io->op_data.write.offset,
 					 io->op_data.write.nbytes,
 					 io->op_data.write.already_done,
-					 io->op_data.write.bufdata,
-					 io->scb_data.write_generic.no_reorder);
+					 io->op_data.write.bufdata);
 }
 
 /*
