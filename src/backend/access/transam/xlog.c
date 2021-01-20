@@ -4718,7 +4718,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 			pg_streaming_write_wait_all(pgsw);
 
 			aio = pg_streaming_write_get_io(pgsw);
-			pgaio_io_start_fsync(aio, fd);
+			pgaio_io_start_fsync(aio, fd, false);
 			pg_streaming_write_write(pgsw, aio, NULL);
 		}
 		pg_streaming_write_wait_all(pgsw);
