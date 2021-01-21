@@ -4058,47 +4058,52 @@ pgaio_write_impl(PgAioInProgress *io,
 				 uint32 nbytes, uint32 *already_done, uint64 offset,
 				 bool *failed, bool *done)
 {
-	Assert((nbytes - *already_done) > 0);
+	Assert(((int)nbytes - (int)*already_done) > 0);
 
 #if 0
 	if (io->result > 4096)
 		io->result = 4096;
 #endif
 
-	if (io->result != (nbytes - *already_done))
+	if (io->result <= 0)
 	{
-		*failed = true;
+		int elevel ;
 
-		if (io->result <= 0)
+		/* didn't set error, assume problem is no disk space */
+		if (io->result == 0)
+			io->result = -ENOSPC;
+
+		if (io->result == -EAGAIN || io->result == -EINTR)
 		{
-			int elevel ;
-
-			if (io->result == -EAGAIN || io->result == -EINTR)
-			{
-				io->flags |= PGAIOIP_SOFT_FAILURE;
-				*done = false;
-				elevel = DEBUG1;
-			}
-			else
-			{
-				io->flags |= PGAIOIP_HARD_FAILURE;
-				*done = true;
-				elevel = WARNING;
-			}
-
-			ereport(elevel,
-					errcode_for_file_access(),
-					errmsg("aio %zd: could not write at offset %llu: %s",
-						   io - aio_ctl->in_progress_io,
-						   (long long unsigned) (offset + *already_done),
-						   strerror(-io->result)));
+			io->flags |= PGAIOIP_SOFT_FAILURE;
+			*done = false;
+			elevel = DEBUG1;
 		}
 		else
 		{
-			uint32 old_already_done = *already_done;
+			io->flags |= PGAIOIP_HARD_FAILURE;
+			*done = true;
+			elevel = WARNING;
+		}
+
+		ereport(elevel,
+				errcode_for_file_access(),
+				errmsg("aio %zd: could not write at offset %llu: %s",
+					   io - aio_ctl->in_progress_io,
+					   (long long unsigned) (offset + *already_done),
+					   strerror(-io->result)));
+	}
+	else
+	{
+		uint32 old_already_done = *already_done;
+
+		*already_done += io->result;
+
+		if (io->result != (nbytes - old_already_done))
+		{
+			*failed = true;
 
 			io->flags |= PGAIOIP_SOFT_FAILURE;
-			*already_done += io->result;
 			*done = false;
 
 			ereport(DEBUG1,
@@ -4109,12 +4114,11 @@ pgaio_write_impl(PgAioInProgress *io,
 							io->result,
 							nbytes - old_already_done)));
 		}
-	}
-	else
-	{
-		*already_done += io->result;
-		*failed = false;
-		*done = true;
+		else
+		{
+			*failed = false;
+			*done = true;
+		}
 	}
 }
 
@@ -4146,7 +4150,6 @@ static bool
 pgaio_write_sb_complete(PgAioInProgress *io)
 {
 	Buffer		buffer = io->scb_data.write_sb.buffid;
-
 	bool		failed;
 	bool		done;
 
@@ -4222,35 +4225,42 @@ pgaio_write_wal_retry(PgAioInProgress *io)
 static bool
 pgaio_write_wal_complete(PgAioInProgress *io)
 {
+	bool		failed;
+	bool		done;
+
 #if 0
 	if (io->result > 4096)
 		io->result = 4096;
 #endif
 
-	if (io->result < 0)
+	pgaio_write_impl(io, io->op_data.write.nbytes, &io->op_data.write.already_done,
+					 io->op_data.write.offset, &failed, &done);
+
+	if (done)
 	{
-		if (io->result == -EAGAIN || io->result == -EINTR)
+
+		if (failed)
 		{
-			elog(WARNING, "need to implement retries");
+			if (io->result <= 0)
+			{
+				ereport(PANIC,
+						(errcode_for_file_access(),
+						 errmsg("could not write to log file: %s",
+								strerror(-io->result))));
+			}
+			else
+			{
+				ereport(PANIC,
+						(errcode_for_file_access(),
+						 errmsg("could not write to log file: wrote only %d of %d bytes",
+								io->result, (io->op_data.write.nbytes - io->op_data.write.already_done))));
+			}
 		}
 
-		ereport(PANIC,
-				(errcode_for_file_access(),
-				 errmsg("could not write to log file: %s",
-						strerror(-io->result))));
-	}
-	else if (io->result != (io->op_data.write.nbytes - io->op_data.write.already_done))
-	{
-		/* FIXME: implement retries for short writes */
-		ereport(PANIC,
-				(errcode_for_file_access(),
-				 errmsg("could not write to log file: wrote only %d of %d bytes",
-						io->result, (io->op_data.write.nbytes - io->op_data.write.already_done))));
+		XLogWriteComplete(io, io->scb_data.write_wal.write_no);
 	}
 
-	XLogWriteComplete(io, io->scb_data.write_wal.write_no);
-
-	return true;
+	return done;
 }
 
 static void
