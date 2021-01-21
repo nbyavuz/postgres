@@ -3604,6 +3604,7 @@ pgaio_io_prep_read(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, ui
 {
 	Assert(io->op == PGAIO_OP_READ);
 	Assert(io->flags == PGAIOIP_PREP);
+	Assert(ShmemAddrIsValid(bufdata));
 
 	io->op_data.read.fd = fd;
 	io->op_data.read.offset = offset;
@@ -3617,6 +3618,7 @@ pgaio_io_prep_write(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, u
 {
 	Assert(io->op == PGAIO_OP_WRITE);
 	Assert(io->flags == PGAIOIP_PREP);
+	Assert(ShmemAddrIsValid(bufdata));
 
 	io->op_data.write.fd = fd;
 	io->op_data.write.offset = offset;
@@ -3730,8 +3732,6 @@ pgaio_io_start_write_smgr(PgAioInProgress *io,
 void
 pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbytes, char *bufdata, uint32 write_no)
 {
-	Assert(ShmemAddrIsValid(bufdata));
-
 	pgaio_io_prepare(io, PGAIO_OP_WRITE);
 
 	pgaio_io_prep_write(io, fd, bufdata, offset, nbytes);
@@ -3744,8 +3744,6 @@ pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbyt
 void
 pgaio_io_start_write_generic(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes, char *bufdata)
 {
-	Assert(ShmemAddrIsValid(bufdata));
-
 	pgaio_io_prepare(io, PGAIO_OP_WRITE);
 
 	pgaio_io_prep_write(io, fd, bufdata, offset, nbytes);
