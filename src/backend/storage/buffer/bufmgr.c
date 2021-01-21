@@ -1955,7 +1955,7 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 		dlist_push_tail(&be_state->allocated_buffers, &be_state->ios[i].node);
 	}
 
-	be_state->pgsw = pg_streaming_write_alloc(128, be_state, bulk_extend_undirty_complete);
+	be_state->pgsw = pg_streaming_write_alloc(128, be_state);
 
 	while (be_state->acquired_buffers_count < extendby)
 	{
@@ -2017,7 +2017,8 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 					buffer_usable = true;
 					buffer_io = true;
 
-					pg_streaming_write_write(be_state->pgsw, aio, cur_ex_buf);
+					pg_streaming_write_write(be_state->pgsw, aio,
+											 bulk_extend_undirty_complete, cur_ex_buf);
 				}
 				else
 				{
@@ -2599,7 +2600,7 @@ BufferSyncWriteOne(pg_streaming_write *pgsw, BufferDesc *bufHdr)
 
 		if (AsyncFlushBuffer(aio, bufHdr, NULL))
 		{
-			pg_streaming_write_write(pgsw, aio, bufHdr);
+			pg_streaming_write_write(pgsw, aio, buffer_sync_complete, bufHdr);
 			BgWriterStats.m_buf_written_checkpoints++;
 			did_write = true;
 		}
@@ -2711,7 +2712,7 @@ BufferSync(int flags)
 
 	WritebackContextInit(&wb_context, &checkpoint_flush_after);
 
-	pgsw = pg_streaming_write_alloc(128, &wb_context, buffer_sync_complete);
+	pgsw = pg_streaming_write_alloc(128, &wb_context);
 
 	TRACE_POSTGRESQL_BUFFER_SYNC_START(NBuffers, num_to_scan);
 
@@ -3129,7 +3130,7 @@ BgBufferSync(WritebackContext *wb_context)
 		upcoming_alloc_est = min_scan_buffers + reusable_buffers_est;
 	}
 
-	pgsw = pg_streaming_write_alloc(128, wb_context, buffer_sync_complete);
+	pgsw = pg_streaming_write_alloc(128, wb_context);
 
 	/*
 	 * Now write out dirty reusable buffers, working forward from the
@@ -3294,7 +3295,7 @@ BgBufferSyncWriteOne(int buf_id, bool skip_recently_used,
 
 	if (AsyncFlushBuffer(aio, bufHdr, NULL))
 	{
-		pg_streaming_write_write(pgsw, aio, bufHdr);
+		pg_streaming_write_write(pgsw, aio, buffer_sync_complete, bufHdr);
 		result |= BUF_WRITTEN;
 	}
 	else

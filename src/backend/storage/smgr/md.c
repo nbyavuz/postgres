@@ -521,7 +521,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 
 	Assert(nblocks > 0);
 
-	pgsw = pg_streaming_write_alloc(Min(256, nblocks), &latest, zeroextend_complete);
+	pgsw = pg_streaming_write_alloc(Min(256, nblocks), &latest);
 
 	bb = pgaio_bounce_buffer_get();
 	zerobuf = pgaio_bounce_buffer_buffer(bb);
@@ -586,7 +586,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 
 			pgaio_io_start_write_smgr(aio, reln, forknum, i, zerobuf, skipFsync);
 
-			pg_streaming_write_write(pgsw, aio, (void*) &i);
+			pg_streaming_write_write(pgsw, aio, zeroextend_complete, (void*) &i);
 
 			/* FIXME: ensure errors are handled equivalently */
 #if 0

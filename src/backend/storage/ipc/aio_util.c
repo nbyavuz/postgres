@@ -15,7 +15,8 @@ typedef struct PgStreamingWriteItem
 
 	struct pg_streaming_write *pgsw;
 
-	PgAioOnCompletionLocalContext on_completion;
+	pg_streaming_write_completed on_completion_user;
+	PgAioOnCompletionLocalContext on_completion_aio;
 } PgStreamingWriteItem;
 
 /* typedef is in header */
@@ -26,8 +27,6 @@ struct pg_streaming_write
 	uint32 inflight_count;
 
 	void *private_data;
-
-	pg_streaming_write_completed on_completion;
 
 	/* submitted writes */
 	dlist_head issued;
@@ -41,7 +40,7 @@ struct pg_streaming_write
 static void pg_streaming_write_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *io);
 
 pg_streaming_write*
-pg_streaming_write_alloc(uint32 iodepth, void *private_data, pg_streaming_write_completed on_completion)
+pg_streaming_write_alloc(uint32 iodepth, void *private_data)
 {
 	pg_streaming_write *pgsw;
 
@@ -52,7 +51,6 @@ pg_streaming_write_alloc(uint32 iodepth, void *private_data, pg_streaming_write_
 
 	pgsw->iodepth = iodepth;
 	pgsw->private_data = private_data;
-	pgsw->on_completion = on_completion;
 
 	dlist_init(&pgsw->available);
 	dlist_init(&pgsw->issued);
@@ -61,7 +59,7 @@ pg_streaming_write_alloc(uint32 iodepth, void *private_data, pg_streaming_write_
 	{
 		PgStreamingWriteItem *this_write = &pgsw->all_items[i];
 
-		this_write->on_completion.callback = pg_streaming_write_complete;
+		this_write->on_completion_aio.callback = pg_streaming_write_complete;
 		this_write->pgsw = pgsw;
 		dlist_push_tail(&pgsw->available, &this_write->node);
 	}
@@ -105,7 +103,8 @@ pg_streaming_write_inflight(pg_streaming_write *pgsw)
 }
 
 void
-pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io, void *private_data)
+pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io,
+						 pg_streaming_write_completed on_completion, void *private_data)
 {
 	PgStreamingWriteItem *this_write;
 
@@ -118,8 +117,9 @@ pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io, void *pr
 
 	dlist_delete_from(&pgsw->available, &this_write->node);
 
-	pgaio_io_on_completion_local(this_write->aio, &this_write->on_completion);
+	pgaio_io_on_completion_local(this_write->aio, &this_write->on_completion_aio);
 
+	this_write->on_completion_user = on_completion;
 	this_write->private_data = private_data;
 	this_write->in_progress = true;
 
@@ -138,7 +138,8 @@ pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io, void *pr
 static void
 pg_streaming_write_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *io)
 {
-	PgStreamingWriteItem *this_write = pgaio_ocb_container(PgStreamingWriteItem, on_completion, ocb);
+	PgStreamingWriteItem *this_write =
+		pgaio_ocb_container(PgStreamingWriteItem, on_completion_aio, ocb);
 	pg_streaming_write *pgsw = this_write->pgsw;
 	void *private_data;
 
@@ -157,7 +158,8 @@ pg_streaming_write_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress 
 	dlist_push_tail(&pgsw->available, &this_write->node);
 
 	/* call callback after all other handling so it can issue IO */
-	pgsw->on_completion(pgsw->private_data, io, private_data);
+	if (this_write->on_completion_user)
+		this_write->on_completion_user(pgsw->private_data, io, private_data);
 
 	ereport(DEBUG3, errmsg("complete %zu", this_write - pgsw->all_items),
 			errhidestmt(true),
