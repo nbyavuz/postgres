@@ -23,6 +23,7 @@
 
 #include "access/xlogdefs.h"
 
+
 typedef struct PgAioInProgress PgAioInProgress;
 typedef struct PgAioBounceBuffer PgAioBounceBuffer;
 
@@ -34,11 +35,11 @@ typedef struct PgAioIoRef
 } PgAioIoRef;
 
 /* Enum for aio_type GUC. */
-enum AioType
+typedef enum AioType 
 {
 	AIOTYPE_WORKER = 0,
 	AIOTYPE_LIBURING,
-};
+} AioType;
 
 /* We'll default to bgworker. */
 #define DEFAULT_AIO_TYPE AIOTYPE_WORKER
@@ -59,8 +60,6 @@ extern void pgaio_postmaster_child_init(void);
 
 extern void pgaio_at_abort(void);
 extern void pgaio_at_commit(void);
-
-extern bool IsAioWorker(void);
 
 /*
  * XXX: Add flags to the initiation functions that govern:
@@ -142,10 +141,12 @@ typedef struct AioBufferTag
 struct SMgrRelationData;
 
 
-/*
+/* --------------------------------------------------------------------------------
  * Low level IO preparation routines. These are called as part of
  * pgaio_io_start_*.
+ * --------------------------------------------------------------------------------
  */
+
 extern void pgaio_io_prep_read(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, uint32 nbytes);
 extern void pgaio_io_prep_write(PgAioInProgress *io, int fd, char *bufdata, uint64 offset, uint32 nbytes);
 extern void pgaio_io_prep_fsync(PgAioInProgress *io, int fd, bool datasync);
@@ -187,6 +188,12 @@ extern void pgaio_io_start_nop(PgAioInProgress *io);
 extern void pgaio_io_start_fsync(PgAioInProgress *io, int fd, bool datasync);
 
 
+/* --------------------------------------------------------------------------------
+ * Bounce buffers for doing BLCKSZ sized asynchronous IO to/from outside of
+ * shared bufers.
+ * --------------------------------------------------------------------------------
+ */
+
 extern void pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb);
 extern PgAioBounceBuffer *pgaio_bounce_buffer_get(void);
 extern void pgaio_bounce_buffer_release(PgAioBounceBuffer *bb);
@@ -199,6 +206,7 @@ extern char *pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb);
  */
 
 extern void AioWorkerMain(void);
+extern bool IsAioWorker(void);
 
 
 /* --------------------------------------------------------------------------------
