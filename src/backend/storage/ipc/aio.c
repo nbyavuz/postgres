@@ -2689,7 +2689,7 @@ pgaio_io_release(PgAioInProgress *io)
 		my_aio->outstanding_count--;
 
 #ifdef PGAIO_VERBOSE
-		ereport(DEBUG3, errmsg("releasing plain user reference to %zu",
+		ereport(DEBUG4, errmsg("releasing plain user reference to %zu",
 							   io - aio_ctl->in_progress_io),
 				errhidecontext(1),
 				errhidestmt(1));
