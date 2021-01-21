@@ -4595,7 +4595,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 	 * just be part of the AIO infrastructure somehow.
 	 */
 	CurrentMemoryContext->allowInCritSection = true;
-	pgsw = pg_streaming_write_alloc(128, NULL, XLogFileInitComplete);
+	pgsw = pg_streaming_write_alloc(128, NULL);
 	CurrentMemoryContext->allowInCritSection = true;
 
 	snprintf(tmppath, MAXPGPATH, XLOGDIR "/xlogtemp.%d", (int) getpid());
@@ -4672,7 +4672,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 				PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
 
 				pgaio_io_start_write_generic(aio, fd, nbytes, XLOG_BLCKSZ, XLogCtl->zerobuf);
-				pg_streaming_write_write(pgsw, aio, NULL);
+				pg_streaming_write_write(pgsw, aio, XLogFileInitComplete, NULL);
 			}
 		}
 #endif
@@ -4719,7 +4719,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 
 			aio = pg_streaming_write_get_io(pgsw);
 			pgaio_io_start_fsync(aio, fd, false);
-			pg_streaming_write_write(pgsw, aio, NULL);
+			pg_streaming_write_write(pgsw, aio, XLogFileInitComplete, NULL);
 		}
 		pg_streaming_write_wait_all(pgsw);
 		pg_streaming_write_free(pgsw);
