@@ -4278,26 +4278,27 @@ pgaio_write_wal_desc(PgAioInProgress *io, StringInfo s)
 static bool
 pgaio_write_generic_complete(PgAioInProgress *io)
 {
+	bool		failed;
+	bool		done;
+
+	pgaio_write_impl(io, io->op_data.write.nbytes, &io->op_data.write.already_done,
+					 io->op_data.write.offset, &failed, &done);
+
+	/* FIXME: retries for partial writes */
+
 	if (io->result < 0)
 	{
-		if (io->result == -EAGAIN || io->result == -EINTR)
-		{
-			elog(WARNING, "need to implement retries");
-		}
-
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not write to log file: %s",
 						strerror(-io->result))));
 	}
-	else if (io->result != (io->op_data.write.nbytes - io->op_data.write.already_done))
+	else if (io->op_data.write.nbytes != io->op_data.write.already_done)
 	{
-		/* FIXME: implement retries for short writes */
-		/* FIXME: not WAL */
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not write to log file: wrote only %d of %d bytes",
-						io->result, (io->op_data.write.nbytes - io->op_data.write.already_done))));
+						io->op_data.write.already_done, io->op_data.write.nbytes)));
 	}
 
 	return true;
