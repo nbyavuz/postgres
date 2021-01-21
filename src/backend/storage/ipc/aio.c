@@ -2167,6 +2167,8 @@ pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local)
 
 	Assert(!(flags & (PGAIOIP_UNUSED)));
 
+wait_ref_again:
+
 	while (true)
 	{
 		PgAioContext *context;
@@ -2246,6 +2248,15 @@ wait_ref_out:
 	if (io->generation != ref_generation)
 		return;
 
+	/*
+	 * If somebody else is retrying the IO, just wait from scratch.
+	 */
+	if (!(flags & done_flags))
+	{
+		Assert(flags & PGAIOIP_RETRY);
+		goto wait_ref_again;
+	}
+
 	if (!call_shared)
 	{
 		Assert(flags & (PGAIOIP_REAPED | PGAIOIP_SHARED_CALLBACK_CALLED | PGAIOIP_DONE));
@@ -2261,7 +2272,7 @@ wait_ref_out:
 		if (flags & PGAIOIP_SOFT_FAILURE)
 		{
 			pgaio_io_retry(io);
-			pgaio_io_wait_ref(ref, call_local);
+			pgaio_io_wait_ref_int(ref, call_shared, call_local);
 		}
 		else
 		{
@@ -2289,7 +2300,6 @@ pgaio_io_check_ref(PgAioIoRef *ref)
 {
 	uint64 ref_generation;
 	PgAioInProgress *io;
-	uint32 done_flags = PGAIOIP_DONE;
 	PgAioIPFlags flags;
 	PgAioContext *context;
 
@@ -2310,7 +2320,10 @@ pgaio_io_check_ref(PgAioIoRef *ref)
 	if (flags & PGAIOIP_PENDING)
 		return false;
 
-	if (flags & done_flags)
+	if (flags & PGAIOIP_SOFT_FAILURE)
+		return false;
+
+	if (flags & PGAIOIP_DONE)
 		return true;
 
 	context = &aio_ctl->contexts[io->ring];
@@ -2328,10 +2341,12 @@ pgaio_io_check_ref(PgAioIoRef *ref)
 	if (io->generation != ref_generation)
 		return true;
 
-	Assert(!(flags & PGAIOIP_PENDING));
+	if (flags & (PGAIOIP_SOFT_FAILURE | PGAIOIP_RETRY))
+		return false;
 
-	if (flags & done_flags)
+	if (flags & PGAIOIP_DONE)
 		return true;
+
 	return false;
 }
 
