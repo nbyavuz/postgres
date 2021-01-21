@@ -3688,7 +3688,7 @@ pgaio_io_start_read_smgr(PgAioInProgress *io, struct SMgrRelationData* smgr, For
 		.rnode = smgr->smgr_rnode,
 		.forkNum = forknum,
 		.blockNum = blocknum
-		};
+	};
 
 	pgaio_io_stage(io, PGAIO_SCB_READ_SMGR);
 }
@@ -3711,8 +3711,8 @@ pgaio_io_start_write_sb(PgAioInProgress *io,
 
 void
 pgaio_io_start_write_smgr(PgAioInProgress *io,
-						struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
-						char *bufdata, bool skipFsync)
+						  struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
+						  char *bufdata, bool skipFsync)
 {
 	pgaio_io_prepare(io, PGAIO_OP_WRITE);
 
@@ -3722,7 +3722,7 @@ pgaio_io_start_write_smgr(PgAioInProgress *io,
 		.rnode = smgr->smgr_rnode,
 		.forkNum = forknum,
 		.blockNum = blocknum
-		};
+	};
 
 	pgaio_io_stage(io, PGAIO_SCB_WRITE_SMGR);
 }
@@ -3875,8 +3875,8 @@ pgaio_flush_range_desc(PgAioInProgress *io, StringInfo s)
 
 static void
 pgaio_read_impl(PgAioInProgress *io,
-				 uint32 nbytes, uint32 *already_done, uint64 offset,
-				 bool *failed, bool *done)
+				uint32 nbytes, uint32 *already_done, uint64 offset,
+				bool *failed, bool *done)
 {
 	Assert((nbytes - *already_done) > 0);
 
@@ -3983,7 +3983,7 @@ pgaio_read_sb_complete(PgAioInProgress *io)
 	bool		done;
 
 	pgaio_read_impl(io, io->op_data.read.nbytes, &io->op_data.read.already_done,
-					 io->op_data.read.offset, &failed, &done);
+					io->op_data.read.offset, &failed, &done);
 	if (!failed)
 		Assert(io->op_data.read.already_done == BLCKSZ);
 
@@ -4028,7 +4028,7 @@ pgaio_read_smgr_complete(PgAioInProgress *io)
 	bool		done;
 
 	pgaio_read_impl(io, io->op_data.read.nbytes, &io->op_data.read.already_done,
-					 io->op_data.read.offset, &failed, &done);
+					io->op_data.read.offset, &failed, &done);
 	if (!failed)
 		Assert(io->op_data.read.already_done == BLCKSZ);
 
@@ -4323,18 +4323,18 @@ pgaio_fill_one_iov(struct iovec *iov, const PgAioInProgress *io, bool first)
 {
 	switch (io->op)
 	{
-	case PGAIO_OP_WRITE:
-		Assert(first || io->op_data.write.already_done == 0);
-		iov->iov_base = io->op_data.write.bufdata + io->op_data.write.already_done;
-		iov->iov_len = io->op_data.write.nbytes - io->op_data.write.already_done;
-		break;
-	case PGAIO_OP_READ:
-		Assert(first || io->op_data.read.already_done == 0);
-		iov->iov_base = io->op_data.read.bufdata + io->op_data.read.already_done;
-		iov->iov_len = io->op_data.read.nbytes - io->op_data.read.already_done;
-		break;
-	default:
-		elog(ERROR, "unexpected IO type while populating iovec");
+		case PGAIO_OP_WRITE:
+			Assert(first || io->op_data.write.already_done == 0);
+			iov->iov_base = io->op_data.write.bufdata + io->op_data.write.already_done;
+			iov->iov_len = io->op_data.write.nbytes - io->op_data.write.already_done;
+			break;
+		case PGAIO_OP_READ:
+			Assert(first || io->op_data.read.already_done == 0);
+			iov->iov_base = io->op_data.read.bufdata + io->op_data.read.already_done;
+			iov->iov_len = io->op_data.read.nbytes - io->op_data.read.already_done;
+			break;
+		default:
+			elog(ERROR, "unexpected IO type while populating iovec");
 	}
 }
 
@@ -4385,7 +4385,7 @@ pgaio_worker_do(PgAioInProgress *io)
 	 * When running in a worker process, we can't use the file descriptor;
 	 * instead we have to open the file, with appropriate caching.
 	 */
-	 fd_usable = !AmAioWorkerProcess();
+	fd_usable = !AmAioWorkerProcess();
 
 	/*
 	 * Handle easy cases, and extract tag.  Also compute the total size of
@@ -4393,45 +4393,45 @@ pgaio_worker_do(PgAioInProgress *io)
 	 * consecutive blocks to be merged for worker mode, so it's enough to sum
 	 * up the size of merged requests.
 	 */
-	 if (!fd_usable)
-	 {
-		 Assert(io_action_cbs[io->scb].retry != NULL);
-		 io_action_cbs[io->scb].retry(io);
-	 }
+	if (!fd_usable)
+	{
+		Assert(io_action_cbs[io->scb].retry != NULL);
+		io_action_cbs[io->scb].retry(io);
+	}
 
 	/* Perform IO. */
 	switch (io->op)
 	{
-	case PGAIO_OP_FLUSH_RANGE:
-		/* XXX not implemented */
-		result = 0;
-		break;
-	case PGAIO_OP_FSYNC:
-		pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
-		if (io->op_data.fsync.datasync)
-			result = fdatasync(io->op_data.fsync.fd);
-		else
-			result = fsync(io->op_data.fsync.fd);
-		pgstat_report_wait_end();
-		break;
-	case PGAIO_OP_READ:
-		iovcnt = pgaio_fill_iov(iov, io);
-		pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_READ);
-		result = pg_preadv(io->op_data.read.fd, iov, iovcnt,
-						   io->op_data.read.offset + io->op_data.read.already_done);
-		pgstat_report_wait_end();
-		break;
-	case PGAIO_OP_WRITE:
-		iovcnt = pgaio_fill_iov(iov, io);
-		pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_WRITE);
-		result = pg_pwritev(io->op_data.write.fd, iov, iovcnt,
-							io->op_data.write.offset + io->op_data.write.already_done);
-		pgstat_report_wait_end();
-		break;
-	default:
-		result = -1;
-		errno = EOPNOTSUPP;
-		break;
+		case PGAIO_OP_FLUSH_RANGE:
+			/* XXX not implemented */
+			result = 0;
+			break;
+		case PGAIO_OP_FSYNC:
+			pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
+			if (io->op_data.fsync.datasync)
+				result = fdatasync(io->op_data.fsync.fd);
+			else
+				result = fsync(io->op_data.fsync.fd);
+			pgstat_report_wait_end();
+			break;
+		case PGAIO_OP_READ:
+			iovcnt = pgaio_fill_iov(iov, io);
+			pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_READ);
+			result = pg_preadv(io->op_data.read.fd, iov, iovcnt,
+							   io->op_data.read.offset + io->op_data.read.already_done);
+			pgstat_report_wait_end();
+			break;
+		case PGAIO_OP_WRITE:
+			iovcnt = pgaio_fill_iov(iov, io);
+			pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_WRITE);
+			result = pg_pwritev(io->op_data.write.fd, iov, iovcnt,
+								io->op_data.write.offset + io->op_data.write.already_done);
+			pgstat_report_wait_end();
+			break;
+		default:
+			result = -1;
+			errno = EOPNOTSUPP;
+			break;
 	}
 
 	/* Encode result and error into io->result. */

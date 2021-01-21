@@ -35,7 +35,7 @@ typedef struct PgAioIoRef
 } PgAioIoRef;
 
 /* Enum for aio_type GUC. */
-typedef enum AioType 
+typedef enum AioType
 {
 	AIOTYPE_WORKER = 0,
 	AIOTYPE_LIBURING,
