@@ -1473,23 +1473,13 @@ SlruScanDirectory(SlruCtl ctl, SlruScanCallback callback, void *data)
 }
 
 static void
-SlruSyncFileTagComplete(void *pgsw_private, PgAioInProgress *aio, void *write_private)
+SlruSyncFileTagComplete(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private)
 {
 	InflightSyncEntry *entry = (InflightSyncEntry *) write_private;
 
 	CloseTransientFile((int) entry->handler_data);
 
-	if (pgaio_io_success(aio))
-		SyncRequestCompleted(entry, true, 0);
-	else
-	{
-		int			err;
-
-		err = pgaio_io_error(aio);
-		Assert(err < 0);
-
-		SyncRequestCompleted(entry, false, -err);
-	}
+	SyncRequestCompleted(entry, result >= 0, result >= 0 ? 0 : -result);
 }
 
 /*

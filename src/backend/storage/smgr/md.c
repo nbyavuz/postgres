@@ -1590,7 +1590,7 @@ _mdnblocks(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 }
 
 static void
-mdsyncfiletag_complete(void *pgsw_private, PgAioInProgress *aio, void *write_private)
+mdsyncfiletag_complete(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private)
 {
 	InflightSyncEntry *entry = (InflightSyncEntry *) write_private;
 	File file = (int)entry->handler_data;
@@ -1598,17 +1598,7 @@ mdsyncfiletag_complete(void *pgsw_private, PgAioInProgress *aio, void *write_pri
 	if (file != -1)
 		FileClose(file);
 
-	if (pgaio_io_success(aio))
-		SyncRequestCompleted(entry, true, 0);
-	else
-	{
-		int			err;
-
-		err = pgaio_io_error(aio);
-		Assert(err < 0);
-
-		SyncRequestCompleted(entry, false, -err);
-	}
+	SyncRequestCompleted(entry, result >= 0, result >= 0 ? 0 : -result);
 }
 
 /*
