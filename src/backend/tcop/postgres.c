@@ -3962,6 +3962,8 @@ PostgresMain(int argc, char *argv[],
 
 		/* AIO is needed during InitPostgres() */
 		pgaio_postmaster_init();
+
+		set_max_safe_fds();
 	}
 
 	/* Early initialization */
