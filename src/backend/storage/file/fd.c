@@ -3385,12 +3385,12 @@ looks_like_temp_rel_name(const char *name)
 }
 
 static void
-sync_completed(void *pgsw_private, PgAioInProgress *aio, void *write_private)
+sync_completed(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private)
 {
 	sync_walkdir_state *sync_state = (sync_walkdir_state *) pgsw_private;
 	sync_entry *entry = (sync_entry *) write_private;
 
-	fsync_fname_close(entry->fd, !pgaio_io_success(aio), entry->fname, entry->isdir, sync_state->elevel);
+	fsync_fname_close(entry->fd, result < 0, entry->fname, entry->isdir, sync_state->elevel);
 	pfree(entry);
 }
 
@@ -3566,7 +3566,7 @@ walkdir(const char *path,
 #ifdef PG_FLUSH_DATA_WORKS
 
 static void
-pre_sync_completed(void *pgsw_private, PgAioInProgress *aio, void *write_private)
+pre_sync_completed(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private)
 {
 	sync_walkdir_state *sync_state = (sync_walkdir_state *) pgsw_private;
 	sync_entry *entry = (sync_entry *) write_private;
