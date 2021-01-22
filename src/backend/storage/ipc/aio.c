@@ -2456,9 +2456,10 @@ pgaio_io_success(PgAioInProgress *io)
 }
 
 int
-pgaio_io_error(PgAioInProgress *io)
+pgaio_io_result(PgAioInProgress *io)
 {
-	Assert(!pgaio_io_success(io));
+	Assert(io->user_referenced);
+	Assert(io->flags & PGAIOIP_DONE);
 
 	/*
 	 * FIXME: This will currently not return correct information for partial
