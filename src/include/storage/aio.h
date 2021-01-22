@@ -219,7 +219,7 @@ extern bool IsAioWorker(void);
  * Helper to efficiently perform bulk writes.
  */
 typedef struct pg_streaming_write pg_streaming_write;
-typedef void (*pg_streaming_write_completed)(void *pgsw_private, PgAioInProgress *aio, void *write_private);
+typedef void (*pg_streaming_write_completed)(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private);
 
 extern pg_streaming_write *pg_streaming_write_alloc(uint32 iodepth, void *private);
 extern PgAioInProgress *pg_streaming_write_get_io(pg_streaming_write *pgsw);

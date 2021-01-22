@@ -102,11 +102,6 @@ pg_streaming_write_inflight(pg_streaming_write *pgsw)
 	return pgsw->inflight_count;
 }
 
-/*
- * The on_completion callback will be called once IO completed. Note that
- * right now the callback is not allowed to issue further IO involving this
- * pgsw instance.
- */
 void
 pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io,
 						 pg_streaming_write_completed on_completion, void *private_data)
@@ -147,6 +142,7 @@ pg_streaming_write_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress 
 		pgaio_ocb_container(PgStreamingWriteItem, on_completion_aio, ocb);
 	pg_streaming_write *pgsw = this_write->pgsw;
 	void *private_data;
+	int result;
 
 	Assert(this_write->in_progress);
 	Assert(pgaio_io_done(io));
@@ -159,11 +155,13 @@ pg_streaming_write_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress 
 	this_write->private_data = NULL;
 	this_write->in_progress = false;
 
-	if (this_write->on_completion_user)
-		this_write->on_completion_user(pgsw->private_data, io, private_data);
-
+	result = pgaio_io_result(io);
 	pgaio_io_recycle(this_write->aio);
 	dlist_push_tail(&pgsw->available, &this_write->node);
+
+	/* call callback after all other handling so it can issue IO */
+	if (this_write->on_completion_user)
+		this_write->on_completion_user(pgsw, pgsw->private_data, result, private_data);
 
 	ereport(DEBUG3, errmsg("complete %zu", this_write - pgsw->all_items),
 			errhidestmt(true),
