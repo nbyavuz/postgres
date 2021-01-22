@@ -4067,6 +4067,8 @@ pgaio_write_impl(PgAioInProgress *io,
 	{
 		int elevel ;
 
+		*failed = true;
+
 		/* didn't set error, assume problem is no disk space */
 		if (io->result == 0)
 			io->result = -ENOSPC;
