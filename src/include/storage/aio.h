@@ -101,6 +101,7 @@ extern void pgaio_io_wait_ref(PgAioIoRef *ref, bool call_local);
 extern bool pgaio_io_check_ref(PgAioIoRef *ref);
 
 extern bool pgaio_io_success(PgAioInProgress *io);
+extern int pgaio_io_error(PgAioInProgress *io);
 extern bool pgaio_io_done(PgAioInProgress *io);
 extern void pgaio_io_recycle(PgAioInProgress *io);
 

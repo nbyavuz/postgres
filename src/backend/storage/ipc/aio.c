@@ -2447,6 +2447,18 @@ pgaio_io_success(PgAioInProgress *io)
 	return true;
 }
 
+int
+pgaio_io_error(PgAioInProgress *io)
+{
+	Assert(!pgaio_io_success(io));
+
+	/*
+	 * FIXME: This will currently not return correct information for partial
+	 * writes that were retried.
+	 */
+	return io->result;
+}
+
 bool
 pgaio_io_done(PgAioInProgress *io)
 {
