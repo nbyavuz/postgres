@@ -2268,6 +2268,25 @@ FileSync(File file, uint32 wait_event_info)
 	return returnCode;
 }
 
+bool
+FileStartSync(struct PgAioInProgress *io, File file)
+{
+	int			returnCode;
+
+	Assert(FileIsValid(file));
+
+	DO_DB(elog(LOG, "FileStartSync: %d (%s)",
+			   file, VfdCache[file].fileName));
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return false;
+
+	pgaio_io_start_fsync(io, VfdCache[file].fd, false);
+
+	return true;
+}
+
 off_t
 FileSize(File file)
 {
