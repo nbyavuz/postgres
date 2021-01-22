@@ -536,6 +536,8 @@ static int __sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complet
 #endif
 
 /* IO callbacks */
+static void pgaio_invalid_desc(PgAioInProgress *io, StringInfo s);
+
 static bool pgaio_nop_complete(PgAioInProgress *io);
 static void pgaio_nop_desc(PgAioInProgress *io, StringInfo s);
 
@@ -608,6 +610,12 @@ typedef struct PgAioActionCBs
 
 static const PgAioActionCBs io_action_cbs[] =
 {
+	[PGAIO_SCB_INVALID] =
+	{
+		.op = PGAIO_OP_INVALID,
+		.name = "invalid",
+		.desc = pgaio_invalid_desc,
+	},
 
 	[PGAIO_SCB_READ_SB] =
 	{
@@ -3811,6 +3819,11 @@ pgaio_io_start_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nb
  * --------------------------------------------------------------------------------
  */
 
+static void
+pgaio_invalid_desc(PgAioInProgress *io, StringInfo s)
+{
+}
+
 static bool
 pgaio_nop_complete(PgAioInProgress *io)
 {
@@ -4625,12 +4638,28 @@ pg_stat_get_aios(PG_FUNCTION_ARGS)
 
 	for (int i = 0; i < max_aio_in_progress; i++)
 	{
-		PgAioInProgress *io = &aio_ctl->in_progress_io[i];
+		PgAioInProgress *raw_io = &aio_ctl->in_progress_io[i];
+		PgAioInProgress io_copy;
 		Datum		values[PG_STAT_GET_AIOS_COLS];
 		bool		nulls[PG_STAT_GET_AIOS_COLS];
-		int			owner_pid;
-		uint32      owner_id;
-		PgAioInProgressFlags flags = io->flags;
+		uint64 ref_generation;
+		PgAioInProgressFlags flags;
+
+		flags = raw_io->flags;
+		if (flags & PGAIOIP_UNUSED)
+			continue;
+
+		ref_generation = raw_io->generation;
+
+		pg_read_barrier();
+		io_copy = *raw_io;
+		pg_read_barrier();
+
+		flags = raw_io->flags;
+		pg_read_barrier();
+
+		if (raw_io->generation != ref_generation)
+			continue;
 
 		if (flags & PGAIOIP_UNUSED)
 			continue;
@@ -4638,30 +4667,24 @@ pg_stat_get_aios(PG_FUNCTION_ARGS)
 		memset(nulls, 0, sizeof(nulls));
 
 		values[ 0] = Int32GetDatum(i);
-		values[ 1] = PointerGetDatum(cstring_to_text(pgaio_io_shared_callback_string(io->scb)));
+		values[ 1] = PointerGetDatum(cstring_to_text(pgaio_io_shared_callback_string(io_copy.scb)));
 
 		pgaio_io_flag_string(flags, &tmps);
 		values[ 2] = PointerGetDatum(cstring_to_text(tmps.data));
 		resetStringInfo(&tmps);
 
-		values[ 3] = Int32GetDatum(io->ring);
+		values[ 3] = Int32GetDatum(io_copy.ring);
 
-		owner_id = io->owner_id; // XXX: READ_ONCE needed?
-		if (owner_id != INVALID_PGPROCNO)
-		{
-			owner_pid = ProcGlobal->allProcs[owner_id].pid;
-			values[ 4] = Int32GetDatum(owner_pid);
-		}
+		if (io_copy.owner_id != INVALID_PGPROCNO)
+			values[ 4] = Int32GetDatum(ProcGlobal->allProcs[io_copy.owner_id].pid);
 		else
-		{
 			nulls[ 4] = true;
-		}
 
-		values[ 5] = Int64GetDatum(io->generation);
+		values[ 5] = Int64GetDatum(io_copy.generation);
 
-		values[ 6] = Int32GetDatum(io->result);
+		values[ 6] = Int32GetDatum(io_copy.result);
 
-		pgaio_io_shared_desc(io, &tmps);
+		pgaio_io_shared_desc(&io_copy, &tmps);
 		values[ 7] = PointerGetDatum(cstring_to_text(tmps.data));
 		resetStringInfo(&tmps);
 
