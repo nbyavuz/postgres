@@ -4527,7 +4527,7 @@ XLogNeedsFlush(XLogRecPtr record)
 }
 
 static void
-XLogFileInitComplete(void *pgsw_private, PgAioInProgress *aio, void *write_private)
+XLogFileInitComplete(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private)
 {
 }
 
