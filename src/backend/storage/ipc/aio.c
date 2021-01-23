@@ -3079,16 +3079,16 @@ pgaio_io_shared_desc(PgAioInProgress *io, StringInfo s)
 static void
 pgaio_io_print_one(PgAioInProgress *io, StringInfo s)
 {
-	appendStringInfo(s, "aio %zu/"UINT64_FORMAT": op: %s, scb: %s, ring: %d, owner: %d, flags: ",
+	appendStringInfo(s, "aio %zu/%llu: op: %s, scb: %s, result: %d, ring: %d, owner: %d, flags: ",
 					 io - aio_ctl->in_progress_io,
-					 io->generation,
+					 (long long unsigned) io->generation,
 					 pgaio_io_operation_string(io->op),
 					 pgaio_io_shared_callback_string(io->scb),
+					 io->result,
 					 io->ring,
 					 io->owner_id);
 	pgaio_io_flag_string(io->flags, s);
-	appendStringInfo(s, ", result: %d, user/system_referenced: %d/%d (",
-					 io->result,
+	appendStringInfo(s, ", user/system_referenced: %d/%d (",
 					 io->user_referenced,
 					 io->system_referenced);
 	pgaio_io_shared_desc(io, s);
@@ -3558,9 +3558,11 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_gene
 				&aio_ctl->contexts[io->ring] != context)
 			{
 				ereport(PANIC,
-						errmsg("generation changed while locked, after wait: %llu, real: %llu",
+						errmsg("generation/context changed while locked: ref_gen: %llu, real_gen: %llu, orig ring: %d, cur ring: %d",
 							   (long long unsigned) ref_generation,
-							   (long long unsigned) io->generation),
+							   (long long unsigned) io->generation,
+							   (int)(context - aio_ctl->contexts),
+							   io->ring),
 						errhidestmt(true),
 						errhidecontext(true));
 			}
@@ -3583,9 +3585,11 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_gene
 				&aio_ctl->contexts[io->ring] != context)
 			{
 				ereport(PANIC,
-						errmsg("generation changed while locked, after wait: %llu, real: %llu",
+						errmsg("generation/context changed while locked, after wait: ref_gen: %llu, real_gen: %llu, orig ring: %d, cur ring: %d",
 							   (long long unsigned) ref_generation,
-							   (long long unsigned) io->generation),
+							   (long long unsigned) io->generation,
+							   (int)(context - aio_ctl->contexts),
+							   io->ring),
 						errhidestmt(true),
 						errhidecontext(true));
 			}
@@ -4156,14 +4160,13 @@ pgaio_read_sb_complete(PgAioInProgress *io)
 static void
 pgaio_read_sb_desc(PgAioInProgress *io, StringInfo s)
 {
-	appendStringInfo(s, "fd: %d, mode: %d, offset: %llu, nbytes: %u, already_done: %u, buf/data: %d/%p",
+	appendStringInfo(s, "fd: %d, mode: %d, offset: %llu, nbytes: %u, already_done: %u, buffid: %u",
 					 io->op_data.read.fd,
 					 io->scb_data.read_sb.mode,
 					 (long long unsigned) io->op_data.read.offset,
 					 io->op_data.read.nbytes,
 					 io->op_data.read.already_done,
-					 io->scb_data.read_sb.buffid,
-					 io->op_data.read.bufdata);
+					 io->scb_data.read_sb.buffid);
 }
 
 static void
@@ -4243,14 +4246,13 @@ pgaio_write_sb_complete(PgAioInProgress *io)
 static void
 pgaio_write_sb_desc(PgAioInProgress *io, StringInfo s)
 {
-	appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %u, already_done: %u, release_lock: %d, buf/data: %u/%p",
+	appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %u, already_done: %u, release_lock: %d, buffid: %u",
 					 io->op_data.write.fd,
 					 (unsigned long long) io->op_data.write.offset,
 					 io->op_data.write.nbytes,
 					 io->op_data.write.already_done,
 					 io->scb_data.write_sb.release_lock,
-					 io->scb_data.write_sb.buffid,
-					 io->op_data.write.bufdata);
+					 io->scb_data.write_sb.buffid);
 }
 
 
