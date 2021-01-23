@@ -3652,8 +3652,6 @@ datadir_fsync_fname(const char *fname, bool isdir, int elevel, uintptr_t state)
 	int fd;
 	sync_entry *entry;
 
-	aio = pg_streaming_write_get_io(sync_state->pgsw);
-
 	/*
 	 * We want to silently ignoring errors about unreadable files.  Pass that
 	 * desire on to fsync_fname_open().
@@ -3671,6 +3669,7 @@ datadir_fsync_fname(const char *fname, bool isdir, int elevel, uintptr_t state)
 	entry->isdir = isdir;
 	strlcpy(entry->fname, fname, MAXPGPATH);
 
+	aio = pg_streaming_write_get_io(sync_state->pgsw);
 	pgaio_io_start_fsync(aio, fd, false);
 	pg_streaming_write_write(sync_state->pgsw, aio, sync_completed, entry);
 }
