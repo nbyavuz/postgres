@@ -1644,7 +1644,10 @@ mdsyncfiletag(pg_streaming_write *pgsw, InflightSyncEntry *entry)
 	if (FileStartSync(aio, file))
 		pg_streaming_write_write(pgsw, aio, mdsyncfiletag_complete, entry);
 	else
+	{
+		pg_streaming_write_release_io(pgsw, aio);
 		SyncRequestCompleted(entry, false, errno);
+	}
 }
 
 /*
