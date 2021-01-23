@@ -504,7 +504,6 @@ mdextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 static void
 zeroextend_complete(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private)
 {
-	BlockNumber *latest = (BlockNumber *) write_private;
 }
 
 BlockNumber
