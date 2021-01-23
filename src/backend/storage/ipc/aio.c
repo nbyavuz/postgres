@@ -506,12 +506,13 @@ static void pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring);
 static void pgaio_bounce_buffer_release_internal(PgAioBounceBuffer *bb, bool holding_lock, bool release_resowner);
 static void pgaio_io_ref_internal(PgAioInProgress *io, PgAioIoRef *ref);
 static void pgaio_transfer_foreign_to_local(void);
-static void pgaio_uncombine(void);
-static int pgaio_uncombine_one(PgAioInProgress *io);
 static void pgaio_call_local_callbacks(bool in_error);
 static int pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io);
 static int pgaio_synchronous_submit(void);
 static void pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local);
+
+/* printing functions */
+static const char *pgaio_io_shared_callback_string(PgAioSharedCallback a);
 
 /* aio worker related functions */
 static int pgaio_worker_submit(int max_submit, bool drain);
@@ -1185,107 +1186,203 @@ pgaio_at_commit(void)
 	}
 }
 
-static int
-pgaio_uncombine_one(PgAioInProgress *io)
+/* helper pgaio_process_io_completion combining the read/write cases */
+static void
+pgaio_process_io_rw_completion(PgAioInProgress *myio,
+							   bool first,
+							   uint32 nbytes,
+							   uint64 offset,
+							   uint32 *already_done,
+							   int result,
+							   int *running_result_p,
+							   int *new_result,
+							   PgAioIPFlags *new_flags)
 {
-	int orig_result = io->result;
-	int running_result = orig_result;
+	int running_result = *running_result_p;
+	int remaining_bytes;
+
+	Assert(first || *already_done == 0);
+	Assert(*already_done < nbytes);
+
+	remaining_bytes = nbytes - *already_done;
+
+	if (result <= 0)
+	{
+		/* merge request failed, report failure on all */
+		*new_result = result;
+
+		if (result == -EAGAIN || result == -EINTR)
+			*new_flags |= PGAIOIP_SOFT_FAILURE;
+		else
+			*new_flags |= PGAIOIP_HARD_FAILURE;
+
+		ereport(DEBUG1,
+				errcode_for_file_access(),
+				errmsg("aio %zd: failed to %s of %u-%u bytes at offset %llu+%u: %s",
+					   myio - aio_ctl->in_progress_io,
+					   pgaio_io_shared_callback_string(myio->scb),
+					   nbytes, *already_done,
+					   (long long unsigned) offset, *already_done,
+					   strerror(-*new_result)));
+	}
+	else if (running_result == 0)
+	{
+		Assert(!first);
+		*new_result = -EAGAIN;
+		*new_flags |= PGAIOIP_SOFT_FAILURE;
+	}
+	else if (running_result >= remaining_bytes)
+	{
+		/* request completely satisfied */
+		*already_done += remaining_bytes;
+		running_result -= remaining_bytes;
+		*new_result = *already_done;
+	}
+	else
+	{
+		/*
+		 * This is actually pretty common and harmless, happens e.g. when one
+		 * parts of the read are in the kernel page cache, but others
+		 * aren't. So don't issue WARNING/ERROR, but just retry.
+		 *
+		 * While it can happen with single BLCKSZ reads (since they're bigger
+		 * than typical page sizes), it's made much more likely by us
+		 * combining reads.
+		 *
+		 * For writes it can happen e.g. in case of memory pressure.
+		 */
+
+		ereport(DEBUG3,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("aio %zd: partial %s of %u-%u bytes at offset %llu+%u: read only %u of %u",
+						myio - aio_ctl->in_progress_io,
+						pgaio_io_shared_callback_string(myio->scb),
+						nbytes, *already_done,
+						(long long unsigned) offset, *already_done,
+						running_result,
+						nbytes - *already_done)));
+
+		Assert(running_result < remaining_bytes);
+		*already_done += running_result;
+		*new_result = *already_done;
+		running_result = 0;
+
+		*new_flags |= PGAIOIP_SOFT_FAILURE;
+	}
+
+	*running_result_p = running_result;
+}
+
+static void
+pgaio_process_io_completion(PgAioInProgress *io, int result)
+{
+	int running_result;
 	PgAioInProgress *cur = io;
-	PgAioInProgress *last = NULL;
-	int extracted = 0;
+	bool first = true;
+
+	Assert(io->flags & PGAIOIP_INFLIGHT);
+	Assert(io->system_referenced);
+	Assert(io->result == 0 || !(io->flags & PGAIOIP_MERGE));
+
+	/* very useful for testing the retry logic */
+#if 0
+	if (io->op == PGAIO_OP_READ && result > 4096)
+		result = 4096;
+#endif
+#if 0
+	if (result > 4096 && (
+			io->scb == PGAIO_SCB_WRITE_SMGR
+			|| io->scb == PGAIO_SCB_WRITE_SB
+			|| io->scb == PGAIO_SCB_WRITE_WAL
+			))
+		result = 4096;
+#endif
+
+	/* treat 0 length write as ENOSPC */
+	if (result == 0 && io->op == PGAIO_OP_WRITE)
+		running_result = result = -ENOSPC;
+	else
+		running_result = result;
 
 	while (cur)
 	{
-		PgAioInProgress *next = cur->merge_with;
+		PgAioInProgress *next;
+		PgAioIPFlags new_flags;
 
-		Assert(!(cur->flags & PGAIOIP_SHARED_CALLBACK_CALLED));
-		Assert(cur->merge_with || cur != io);
+		new_flags = cur->flags;
+
+		Assert(new_flags & PGAIOIP_INFLIGHT);
+		Assert(cur->system_referenced);
 		Assert(cur->op == io->op);
 		Assert(cur->scb == io->scb);
+
+		if (cur->merge_with != NULL)
+		{
+			Assert(new_flags & PGAIOIP_MERGE);
+			new_flags &= ~PGAIOIP_MERGE;
+			next = cur->merge_with;
+		}
+		else
+		{
+			Assert(!(cur->flags & PGAIOIP_MERGE));
+			next = NULL;
+		}
 
 		switch (cur->op)
 		{
 			case PGAIO_OP_READ:
-				Assert(cur->op_data.read.already_done == 0);
-
-				if (orig_result < 0)
-				{
-					cur->result = io->result;
-				}
-				else if (running_result >= cur->op_data.read.nbytes)
-				{
-					cur->result = cur->op_data.read.nbytes;
-					running_result -= cur->result;
-				}
-				else if (running_result < cur->op_data.read.nbytes)
-				{
-					cur->result = running_result;
-					running_result = 0;
-				}
-
+				pgaio_process_io_rw_completion(cur,
+											   first,
+											   cur->op_data.read.nbytes,
+											   cur->op_data.read.offset,
+											   &cur->op_data.read.already_done,
+											   result,
+											   &running_result,
+											   &cur->result,
+											   &new_flags);
 				break;
 
 			case PGAIO_OP_WRITE:
-				Assert(cur->op_data.write.already_done == 0);
-
-				if (orig_result < 0)
-				{
-					cur->result = io->result;
-				}
-				else if (running_result >= cur->op_data.write.nbytes)
-				{
-					cur->result = cur->op_data.write.nbytes;
-					running_result -= cur->result;
-				}
-				else if (running_result < cur->op_data.write.nbytes)
-				{
-					cur->result = running_result;
-					running_result = 0;
-				}
+				pgaio_process_io_rw_completion(cur,
+											   first,
+											   cur->op_data.write.nbytes,
+											   cur->op_data.write.offset,
+											   &cur->op_data.write.already_done,
+											   result,
+											   &running_result,
+											   &cur->result,
+											   &new_flags);
 				break;
 
-			default:
-				elog(PANIC, "merge for %d not supported yet", cur->op);
+			case PGAIO_OP_FSYNC:
+			case PGAIO_OP_FLUSH_RANGE:
+			case PGAIO_OP_NOP:
+				/* XXX: should we treat EINTR/EAGAIN as retryable? */
+				cur->result = result;
+				if (result < 0)
+					new_flags |= PGAIOIP_HARD_FAILURE;
+				break;
+
+			case PGAIO_OP_INVALID:
+				pg_unreachable();
+				elog(ERROR, "invalid");
+				break;
 		}
 
+		next = cur->merge_with;
 		cur->merge_with = NULL;
 
-		if (last)
-		{
-			cur->flags =
-				(cur->flags & ~(PGAIOIP_INFLIGHT |
-								PGAIOIP_MERGE)) |
-				PGAIOIP_REAPED;
+		new_flags &= ~PGAIOIP_INFLIGHT;
+		new_flags |= PGAIOIP_REAPED;
 
-			Assert(dlist_is_member(&my_aio->reaped, &last->io_node));
-			dlist_insert_after(&last->io_node, &cur->io_node);
-			extracted++;
-		}
-		else
-		{
-			cur->flags &= ~PGAIOIP_MERGE;
-		}
+		WRITE_ONCE_F(cur->flags) = new_flags;
 
-		last = cur;
+		dlist_push_tail(&my_aio->reaped, &cur->io_node);
+
 		cur = next;
+		first = false;
 	}
 
-	return extracted;
-}
-
-static void
-pgaio_uncombine(void)
-{
-	dlist_mutable_iter iter;
-
-	/* "unmerge" merged IOs, so they can be treated uniformly */
-	dlist_foreach_modify(iter, &my_aio->reaped)
-	{
-		PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, iter.cur);
-
-		if (io->flags & PGAIOIP_MERGE)
-			pgaio_uncombine_one(io);
-	}
 }
 
 static bool
@@ -3384,9 +3481,6 @@ pgaio_uring_drain(PgAioContext *context, bool call_shared)
 		{
 			processed = pgaio_uring_drain_locked(context);
 
-			if (processed > 0)
-				pgaio_uncombine();
-
 			/*
 			 * If allowed, call shared callbacks under lock - that prevent
 			 * other backends to first have to wait on the completion_lock for
@@ -3499,7 +3593,6 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_gene
 		if (io_uring_cq_ready(&context->io_uring_ring))
 		{
 			pgaio_uring_drain_locked(context);
-			pgaio_uncombine();
 			pgaio_complete_ios(false);
 		}
 
@@ -3525,38 +3618,21 @@ pgaio_uring_io_from_cqe(PgAioContext *context, struct io_uring_cqe *cqe)
 
 	io = io_uring_cqe_get_data(cqe);
 	Assert(io != NULL);
-	Assert(io->flags & PGAIOIP_INFLIGHT);
-	Assert(io->system_referenced);
-
-	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_INFLIGHT) | PGAIOIP_REAPED;
-	io->result = cqe->res;
-
-	dlist_push_tail(&my_aio->reaped, &io->io_node);
-
-	/* XXX: this doesn't need to be under the lock */
-	prev_inflight_count = pg_atomic_fetch_sub_u32(&aio_ctl->backend_state[io->owner_id].inflight_count, 1);
-	Assert(prev_inflight_count > 0);
 
 	if (io->used_iovec != -1)
 	{
 		PgAioIovec *iovec = &context->iovecs[io->used_iovec];
 
+		io->used_iovec = -1;
 		slist_push_head(&context->reaped_iovecs, &iovec->node);
 		context->reaped_iovecs_count++;
 	}
 
-	/*
-	 * FIXME: needs to be removed at some point, this is effectively a
-	 * critical section.
-	 */
-	if (cqe->res < 0)
-	{
-		elog(WARNING, "cqe: u: %p s: %d/%s f: %u",
-			 io_uring_cqe_get_data(cqe),
-			 cqe->res,
-			 cqe->res < 0 ? strerror(-cqe->res) : "",
-			 cqe->flags);
-	}
+	/* XXX: this doesn't need to be under the lock */
+	prev_inflight_count = pg_atomic_fetch_sub_u32(&aio_ctl->backend_state[io->owner_id].inflight_count, 1);
+	Assert(prev_inflight_count > 0);
+
+	pgaio_process_io_completion(io, cqe->res);
 }
 
 static void
@@ -4015,84 +4091,6 @@ pgaio_flush_range_smgr_retry(PgAioInProgress *io)
 }
 
 static void
-pgaio_read_impl(PgAioInProgress *io,
-				uint32 nbytes, uint32 *already_done, uint64 offset,
-				bool *failed, bool *done)
-{
-	Assert((nbytes - *already_done) > 0);
-
-#if 0
-	if (io->result > 4096)
-		io->result = 4096;
-#endif
-
-	if (io->result != (nbytes - *already_done))
-	{
-		*failed = true;
-
-		if (io->result <= 0)
-		{
-			int elevel ;
-
-			if (io->result == -EAGAIN || io->result == -EINTR)
-			{
-				io->flags |= PGAIOIP_SOFT_FAILURE;
-				*done = false;
-				elevel = DEBUG1;
-			}
-			else
-			{
-				io->flags |= PGAIOIP_HARD_FAILURE;
-				*done = true;
-				elevel = WARNING;
-			}
-
-			ereport(elevel,
-					errcode_for_file_access(),
-					errmsg("aio %zd: could not read at offset %llu: %s",
-						   io - aio_ctl->in_progress_io,
-						   (long long unsigned) (offset + *already_done),
-						   strerror(-io->result)));
-		}
-		else
-		{
-			uint32 old_already_done = *already_done;
-
-			/*
-			 * This is actually pretty common and harmless, happens when part
-			 * of the block is in the kernel page cache, but the other
-			 * isn't. So don't issue WARNING/ERROR, but just retry.
-			 *
-			 * While it can happen with single BLCKSZ reads (since they're
-			 * bigger than typical page sizes), it's made much more likely by
-			 * us combining reads.
-			 *
-			 * XXX: Should we handle repeated failures for the same blocks
-			 * differently?
-			 */
-
-			io->flags |= PGAIOIP_SOFT_FAILURE;
-			*already_done += io->result;
-			*done = false;
-
-			ereport(DEBUG1,
-					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("aio %zd: partial read at offset %llu: read only %u of %u",
-							io - aio_ctl->in_progress_io,
-							(long long unsigned) (offset + old_already_done),
-							io->result,
-							nbytes - old_already_done)));
-		}
-	}
-	else
-	{
-		*already_done += io->result;
-		*failed = false;
-		*done = true;
-	}
-}
-
-static void
 pgaio_read_sb_retry(PgAioInProgress *io)
 {
 	BufferDesc *bufHdr = NULL;
@@ -4120,21 +4118,14 @@ pgaio_read_sb_retry(PgAioInProgress *io)
 static bool
 pgaio_read_sb_complete(PgAioInProgress *io)
 {
-	bool		failed;
-	bool		done;
+	if (io->flags & PGAIOIP_SOFT_FAILURE)
+		return false;
 
-	pgaio_read_impl(io, io->op_data.read.nbytes, &io->op_data.read.already_done,
-					io->op_data.read.offset, &failed, &done);
-	if (!failed)
-		Assert(io->op_data.read.already_done == BLCKSZ);
-
-	if (done)
-		ReadBufferCompleteRead(io->scb_data.read_sb.buffid,
-							   io->op_data.read.bufdata,
-							   io->scb_data.read_sb.mode,
-							   failed);
-
-	return done;
+	ReadBufferCompleteRead(io->scb_data.read_sb.buffid,
+						   io->op_data.read.bufdata,
+						   io->scb_data.read_sb.mode,
+						   io->flags & PGAIOIP_HARD_FAILURE);
+	return true;
 }
 
 static void
@@ -4165,20 +4156,14 @@ pgaio_read_smgr_retry(PgAioInProgress *io)
 static bool
 pgaio_read_smgr_complete(PgAioInProgress *io)
 {
-	bool		failed;
-	bool		done;
+	if (io->flags & PGAIOIP_SOFT_FAILURE)
+		return false;
 
-	pgaio_read_impl(io, io->op_data.read.nbytes, &io->op_data.read.already_done,
-					io->op_data.read.offset, &failed, &done);
-	if (!failed)
-		Assert(io->op_data.read.already_done == BLCKSZ);
+	ReadBufferCompleteRawRead(&io->scb_data.read_smgr.tag,
+							  io->op_data.read.bufdata,
+							  io->flags & PGAIOIP_HARD_FAILURE);
 
-	if (done)
-		ReadBufferCompleteRawRead(&io->scb_data.read_smgr.tag,
-								  io->op_data.read.bufdata,
-								  failed);
-
-	return done;
+	return true;
 }
 
 static void
@@ -4192,77 +4177,6 @@ pgaio_read_smgr_desc(PgAioInProgress *io, StringInfo s)
 					 io->op_data.read.already_done,
 					 io->scb_data.read_smgr.tag.rnode.node.relNode,
 					 io->op_data.read.bufdata);
-}
-
-static void
-pgaio_write_impl(PgAioInProgress *io,
-				 uint32 nbytes, uint32 *already_done, uint64 offset,
-				 bool *failed, bool *done)
-{
-	Assert(((int)nbytes - (int)*already_done) > 0);
-
-#if 0
-	if (io->result > 4096)
-		io->result = 4096;
-#endif
-
-	if (io->result <= 0)
-	{
-		int elevel ;
-
-		*failed = true;
-
-		/* didn't set error, assume problem is no disk space */
-		if (io->result == 0)
-			io->result = -ENOSPC;
-
-		if (io->result == -EAGAIN || io->result == -EINTR)
-		{
-			io->flags |= PGAIOIP_SOFT_FAILURE;
-			*done = false;
-			elevel = DEBUG1;
-		}
-		else
-		{
-			io->flags |= PGAIOIP_HARD_FAILURE;
-			*done = true;
-			elevel = WARNING;
-		}
-
-		ereport(elevel,
-				errcode_for_file_access(),
-				errmsg("aio %zd: could not write at offset %llu: %s",
-					   io - aio_ctl->in_progress_io,
-					   (long long unsigned) (offset + *already_done),
-					   strerror(-io->result)));
-	}
-	else
-	{
-		uint32 old_already_done = *already_done;
-
-		*already_done += io->result;
-
-		if (io->result != (nbytes - old_already_done))
-		{
-			*failed = true;
-
-			io->flags |= PGAIOIP_SOFT_FAILURE;
-			*done = false;
-
-			ereport(DEBUG1,
-					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("aio %zd: partial write at offset %llu: wrote only %u of %u",
-							io - aio_ctl->in_progress_io,
-							(long long unsigned) (offset + old_already_done),
-							io->result,
-							nbytes - old_already_done)));
-		}
-		else
-		{
-			*failed = false;
-			*done = true;
-		}
-	}
 }
 
 static void
@@ -4292,19 +4206,13 @@ pgaio_write_sb_retry(PgAioInProgress *io)
 static bool
 pgaio_write_sb_complete(PgAioInProgress *io)
 {
-	Buffer		buffer = io->scb_data.write_sb.buffid;
-	bool		failed;
-	bool		done;
+	if (io->flags & PGAIOIP_SOFT_FAILURE)
+		return false;
 
-	pgaio_write_impl(io, io->op_data.write.nbytes, &io->op_data.write.already_done,
-					 io->op_data.write.offset, &failed, &done);
-	if (!failed)
-		Assert(io->op_data.write.already_done == BLCKSZ);
-
-	if (done)
-		ReadBufferCompleteWrite(buffer, io->scb_data.write_sb.release_lock, failed);
-
-	return done;
+	ReadBufferCompleteWrite(io->scb_data.write_sb.buffid,
+							io->scb_data.write_sb.release_lock,
+							io->flags & PGAIOIP_HARD_FAILURE);
+	return true;
 }
 
 static void
@@ -4336,15 +4244,13 @@ pgaio_write_smgr_retry(PgAioInProgress *io)
 static bool
 pgaio_write_smgr_complete(PgAioInProgress *io)
 {
-	bool		failed;
-	bool		done;
+	if (io->flags & PGAIOIP_SOFT_FAILURE)
+		return false;
 
-	pgaio_write_impl(io, io->op_data.write.nbytes, &io->op_data.write.already_done,
-					 io->op_data.write.offset, &failed, &done);
-	if (!failed)
+	if (!(io->flags & PGAIOIP_HARD_FAILURE))
 		Assert(io->op_data.write.already_done == BLCKSZ);
 
-	return done;
+	return true;
 }
 
 static void
@@ -4368,42 +4274,31 @@ pgaio_write_wal_retry(PgAioInProgress *io)
 static bool
 pgaio_write_wal_complete(PgAioInProgress *io)
 {
-	bool		failed;
-	bool		done;
+	if (io->flags & PGAIOIP_SOFT_FAILURE)
+		return false;
 
-#if 0
-	if (io->result > 4096)
-		io->result = 4096;
-#endif
-
-	pgaio_write_impl(io, io->op_data.write.nbytes, &io->op_data.write.already_done,
-					 io->op_data.write.offset, &failed, &done);
-
-	if (done)
+	if (io->flags & PGAIOIP_HARD_FAILURE)
 	{
-
-		if (failed)
+		if (io->result <= 0)
 		{
-			if (io->result <= 0)
-			{
-				ereport(PANIC,
-						(errcode_for_file_access(),
-						 errmsg("could not write to log file: %s",
-								strerror(-io->result))));
-			}
-			else
-			{
-				ereport(PANIC,
-						(errcode_for_file_access(),
-						 errmsg("could not write to log file: wrote only %d of %d bytes",
-								io->result, (io->op_data.write.nbytes - io->op_data.write.already_done))));
-			}
+			ereport(PANIC,
+					(errcode_for_file_access(),
+					 errmsg("could not write to log file: %s",
+							strerror(-io->result))));
 		}
-
-		XLogWriteComplete(io, io->scb_data.write_wal.write_no);
+		else
+		{
+			ereport(PANIC,
+					(errcode_for_file_access(),
+					 errmsg("could not write to log file: wrote only %d of %d bytes",
+							io->result, (io->op_data.write.nbytes - io->op_data.write.already_done))));
+		}
 	}
 
-	return done;
+
+	XLogWriteComplete(io, io->scb_data.write_wal.write_no);
+
+	return true;
 }
 
 static void
@@ -4421,26 +4316,20 @@ pgaio_write_wal_desc(PgAioInProgress *io, StringInfo s)
 static bool
 pgaio_write_generic_complete(PgAioInProgress *io)
 {
-	bool		failed;
-	bool		done;
-
-	pgaio_write_impl(io, io->op_data.write.nbytes, &io->op_data.write.already_done,
-					 io->op_data.write.offset, &failed, &done);
-
 	/* FIXME: retries for partial writes */
-
+	/* FIXME: this should just be in local completion callback */
 	if (io->result < 0)
 	{
 		ereport(PANIC,
 				(errcode_for_file_access(),
-				 errmsg("could not write to log file: %s",
+				 errmsg("could not write to generic file: %s",
 						strerror(-io->result))));
 	}
 	else if (io->op_data.write.nbytes != io->op_data.write.already_done)
 	{
 		ereport(PANIC,
 				(errcode_for_file_access(),
-				 errmsg("could not write to log file: wrote only %d of %d bytes",
+				 errmsg("could not write to generic file: wrote only %d of %d bytes",
 						io->op_data.write.already_done, io->op_data.write.nbytes)));
 	}
 
@@ -4582,21 +4471,7 @@ pgaio_worker_do(PgAioInProgress *io)
 			break;
 	}
 
-	/* Encode result and error into io->result. */
-	io->result = result < 0 ? -errno : result;
-
-	/*
-	 * We'll reap the IO immediately.  This might be running in a regular
-	 * worker or a background worker, so we can't actually complete reaped IOs
-	 * just yet, because a regular backend might not be in the right context
-	 * for that.  (???)
-	 */
-	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_INFLIGHT) | PGAIOIP_REAPED;
-	dlist_push_tail(&my_aio->reaped, &io->io_node);
-
-	/* It might need to be unmerged into multiple IOs. */
-	if (io->flags & PGAIOIP_MERGE)
-		pgaio_uncombine_one(io);
+	pgaio_process_io_completion(io, result < 0 ? -errno : result);
 }
 
 bool
