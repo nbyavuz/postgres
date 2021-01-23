@@ -103,8 +103,11 @@ extern bool pgaio_io_check_ref(PgAioIoRef *ref);
 extern bool pgaio_io_success(PgAioInProgress *io);
 extern int pgaio_io_result(PgAioInProgress *io);
 extern bool pgaio_io_done(PgAioInProgress *io);
-extern void pgaio_io_recycle(PgAioInProgress *io);
+extern bool pgaio_io_pending(PgAioInProgress *io);
+extern uint32 pgaio_io_id(PgAioInProgress *io);
+extern uint64 pgaio_io_generation(PgAioInProgress *io);
 
+extern void pgaio_io_recycle(PgAioInProgress *io);
 extern void pgaio_io_retry(PgAioInProgress *io);
 
 extern void pgaio_print_queues(void);

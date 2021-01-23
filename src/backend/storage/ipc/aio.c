@@ -2513,6 +2513,27 @@ pgaio_io_done(PgAioInProgress *io)
 	return false;
 }
 
+bool
+pgaio_io_pending(PgAioInProgress *io)
+{
+	Assert(io->user_referenced);
+	Assert(!(io->flags & PGAIOIP_UNUSED));
+
+	return io->flags & PGAIOIP_PENDING;
+}
+
+uint32
+pgaio_io_id(PgAioInProgress *io)
+{
+	return io - aio_ctl->in_progress_io;
+}
+
+uint64
+pgaio_io_generation(PgAioInProgress *io)
+{
+	return io->generation;
+}
+
 static void
 pgaio_io_ref_internal(PgAioInProgress *io, PgAioIoRef *ref)
 {
