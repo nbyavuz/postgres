@@ -184,6 +184,9 @@ extern void pgaio_io_start_write_wal(PgAioInProgress *io, int fd,
 extern void pgaio_io_start_write_generic(PgAioInProgress *io, int fd,
 										 uint64 offset, uint32 nbytes,
 										 char *bufdata);
+
+extern void pgaio_io_start_fsync_raw(PgAioInProgress *io, int fd,
+									 bool datasync);
 extern void pgaio_io_start_fsync_wal(PgAioInProgress *io, int fd,
 									 bool datasync_only, uint32 sync_no);
 
@@ -193,7 +196,6 @@ extern BlockNumber pgaio_io_start_flush_range_smgr(PgAioInProgress *io,
 												   BlockNumber blocknum, BlockNumber nblocks);
 
 extern void pgaio_io_start_nop(PgAioInProgress *io);
-extern void pgaio_io_start_fsync(PgAioInProgress *io, int fd, bool datasync);
 
 
 /* --------------------------------------------------------------------------------

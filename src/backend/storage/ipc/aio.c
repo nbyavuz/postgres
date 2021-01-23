@@ -106,7 +106,7 @@ pg_attribute_packed()
 	PGAIO_SCB_WRITE_WAL,
 	PGAIO_SCB_WRITE_GENERIC,
 
-	PGAIO_SCB_FSYNC,
+	PGAIO_SCB_FSYNC_RAW,
 	PGAIO_SCB_FSYNC_WAL,
 
 	PGAIO_SCB_FLUSH_RANGE_RAW,
@@ -537,8 +537,8 @@ static void pgaio_invalid_desc(PgAioInProgress *io, StringInfo s);
 static bool pgaio_nop_complete(PgAioInProgress *io);
 static void pgaio_nop_desc(PgAioInProgress *io, StringInfo s);
 
-static bool pgaio_fsync_complete(PgAioInProgress *io);
-static void pgaio_fsync_desc(PgAioInProgress *io, StringInfo s);
+static bool pgaio_fsync_raw_complete(PgAioInProgress *io);
+static void pgaio_fsync_raw_desc(PgAioInProgress *io, StringInfo s);
 
 static bool pgaio_fsync_wal_complete(PgAioInProgress *io);
 static void pgaio_fsync_wal_retry(PgAioInProgress *io);
@@ -667,12 +667,12 @@ static const PgAioActionCBs io_action_cbs[] =
 		.desc = pgaio_write_generic_desc,
 	},
 
-	[PGAIO_SCB_FSYNC] =
+	[PGAIO_SCB_FSYNC_RAW] =
 	{
 		.op = PGAIO_OP_FSYNC,
 		.name = "raw",
-		.complete = pgaio_fsync_complete,
-		.desc = pgaio_fsync_desc,
+		.complete = pgaio_fsync_raw_complete,
+		.desc = pgaio_fsync_raw_desc,
 	},
 
 	[PGAIO_SCB_FSYNC_WAL] =
@@ -3932,23 +3932,13 @@ pgaio_io_start_write_generic(PgAioInProgress *io, int fd, uint64 offset, uint32 
 }
 
 void
-pgaio_io_start_nop(PgAioInProgress *io)
-{
-	pgaio_io_prepare(io, PGAIO_OP_NOP);
-
-	pgaio_io_prep_nop(io);
-
-	pgaio_io_stage(io, PGAIO_SCB_NOP);
-}
-
-void
-pgaio_io_start_fsync(PgAioInProgress *io, int fd, bool datasync)
+pgaio_io_start_fsync_raw(PgAioInProgress *io, int fd, bool datasync)
 {
 	pgaio_io_prepare(io, PGAIO_OP_FSYNC);
 
 	pgaio_io_prep_fsync(io, fd, datasync);
 
-	pgaio_io_stage(io, PGAIO_SCB_FSYNC);
+	pgaio_io_stage(io, PGAIO_SCB_FSYNC_RAW);
 }
 
 void
@@ -4008,6 +3998,16 @@ pgaio_io_start_flush_range_smgr(PgAioInProgress *io, struct SMgrRelationData* sm
 	return ret;
 }
 
+void
+pgaio_io_start_nop(PgAioInProgress *io)
+{
+	pgaio_io_prepare(io, PGAIO_OP_NOP);
+
+	pgaio_io_prep_nop(io);
+
+	pgaio_io_stage(io, PGAIO_SCB_NOP);
+}
+
 
 /* --------------------------------------------------------------------------------
  * shared IO implementation (see PgAioSharedCallback for a list)
@@ -4035,7 +4035,7 @@ pgaio_nop_desc(PgAioInProgress *io, StringInfo s)
 }
 
 static bool
-pgaio_fsync_complete(PgAioInProgress *io)
+pgaio_fsync_raw_complete(PgAioInProgress *io)
 {
 	if (io->result != 0)
 		elog(PANIC, "fsync needs better error handling");
@@ -4044,7 +4044,7 @@ pgaio_fsync_complete(PgAioInProgress *io)
 }
 
 static void
-pgaio_fsync_desc(PgAioInProgress *io, StringInfo s)
+pgaio_fsync_raw_desc(PgAioInProgress *io, StringInfo s)
 {
 	appendStringInfo(s, "fd: %d, datasync: %d",
 					 io->op_data.fsync.fd,

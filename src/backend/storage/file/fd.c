@@ -2302,7 +2302,7 @@ FileStartSync(struct PgAioInProgress *io, File file)
 	if (returnCode < 0)
 		return false;
 
-	pgaio_io_start_fsync(io, VfdCache[file].fd, false);
+	pgaio_io_start_fsync_raw(io, VfdCache[file].fd, false);
 
 	return true;
 }
