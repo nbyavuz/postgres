@@ -529,8 +529,6 @@ static void pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, s
 static void pgaio_uring_io_from_cqe(PgAioContext *context, struct io_uring_cqe *cqe);
 static void pgaio_uring_iovec_transfer(PgAioContext *context);
 
-static int __sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
-								unsigned flags, sigset_t *sig);
 #endif
 
 /* IO callbacks */
@@ -3548,6 +3546,7 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_gene
 			(flags & PGAIOIP_INFLIGHT))
 		{
 			int ret;
+			struct io_uring_cqe *cqes;
 
 			/*
 			 * XXX: Temporary, non-assert, sanity checks, some of these are
@@ -3568,9 +3567,7 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_gene
 			}
 
 			pgstat_report_wait_start(wait_event_info);
-			ret = __sys_io_uring_enter(context->io_uring_ring.ring_fd,
-									   0, 1,
-									   IORING_ENTER_GETEVENTS, NULL);
+			ret = io_uring_wait_cqes(&context->io_uring_ring, &cqes, 1, NULL, NULL);
 			pgstat_report_wait_end();
 
 			if (ret < 0 && errno == EINTR)
@@ -3767,19 +3764,6 @@ pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, struct io_uri
 	}
 
 	io_uring_sqe_set_data(sqe, io);
-}
-
-static int
-__sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
-			 unsigned flags, sigset_t *sig)
-{
-
-# ifndef __NR_io_uring_enter
-#  define __NR_io_uring_enter		426
-# endif
-
-	return syscall(__NR_io_uring_enter, fd, to_submit, min_complete,
-			flags, sig, _NSIG / 8);
 }
 
 #endif
