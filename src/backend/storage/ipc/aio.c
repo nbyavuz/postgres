@@ -293,18 +293,13 @@ struct PgAioInProgress
 
 		struct
 		{
-			char *bufdata;
-		} write_generic;
-
-		struct
-		{
 			uint32 flush_no;
 		} fsync_wal;
 
 		struct
 		{
 			AioBufferTag tag;
-		} flush_range;
+		} flush_range_smgr;
 	} scb_data;
 };
 
@@ -551,6 +546,7 @@ static void pgaio_fsync_wal_desc(PgAioInProgress *io, StringInfo s);
 
 static bool pgaio_flush_range_complete(PgAioInProgress *io);
 static void pgaio_flush_range_desc(PgAioInProgress *io, StringInfo s);
+static void pgaio_flush_range_smgr_retry(PgAioInProgress *io);
 
 static bool pgaio_read_sb_complete(PgAioInProgress *io);
 static void pgaio_read_sb_retry(PgAioInProgress *io);
@@ -700,6 +696,7 @@ static const PgAioActionCBs io_action_cbs[] =
 	{
 		.op = PGAIO_OP_FLUSH_RANGE,
 		.name = "flush_range_smgr",
+		.retry = pgaio_flush_range_smgr_retry,
 		.complete = pgaio_flush_range_complete,
 		.desc = pgaio_flush_range_desc,
 	},
@@ -3898,7 +3895,14 @@ pgaio_io_start_flush_range_smgr(PgAioInProgress *io, struct SMgrRelationData* sm
 	ret = smgrstartwriteback(io, smgr, forknum, blocknum, nblocks);
 
 	if (ret != InvalidBlockNumber)
+	{
+		io->scb_data.flush_range_smgr.tag = (AioBufferTag){
+			.rnode = smgr->smgr_rnode,
+			.forkNum = forknum,
+			.blockNum = blocknum
+		};
 		pgaio_io_stage(io, PGAIO_SCB_FLUSH_RANGE_SMGR);
+	}
 	else
 	{
 		Assert(io->op == PGAIO_OP_FLUSH_RANGE);
@@ -3996,6 +4000,18 @@ pgaio_flush_range_desc(PgAioInProgress *io, StringInfo s)
 					 io->op_data.flush_range.fd,
 					 (unsigned long long) io->op_data.flush_range.offset,
 					 (unsigned long long) io->op_data.flush_range.nbytes);
+}
+
+static void
+pgaio_flush_range_smgr_retry(PgAioInProgress *io)
+{
+	uint32 off;
+	AioBufferTag *tag = &io->scb_data.flush_range_smgr.tag;
+	SMgrRelation reln = smgropen(tag->rnode.node,
+								 tag->rnode.backend);
+
+	io->op_data.flush_range.fd = smgrfd(reln, tag->forkNum, tag->blockNum, &off);
+	Assert(off == io->op_data.flush_range.offset);
 }
 
 static void
