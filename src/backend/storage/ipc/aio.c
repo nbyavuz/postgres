@@ -70,11 +70,7 @@
  * minimal space. We could alternatively just use a uint8, but then we'd need
  * casts in more places...
  */
-typedef enum
-#ifdef pg_attribute_packed
-pg_attribute_packed()
-#endif
-	PgAioOp
+typedef enum pg_attribute_packed_desired() PgAioOp
 {
 	/* intentionally the zero value, to help catch zeroed memory etc */
 	PGAIO_OP_INVALID = 0,
@@ -89,11 +85,7 @@ pg_attribute_packed()
 	PGAIO_OP_NOP,
 } PgAioOp;
 
-typedef enum
-#ifdef pg_attribute_packed
-pg_attribute_packed()
-#endif
-	PgAioSharedCallback
+typedef enum pg_attribute_packed_desired() PgAioSharedCallback
 {
 	/* intentionally the zero value, to help catch zeroed memory etc */
 	PGAIO_SCB_INVALID = 0,
