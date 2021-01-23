@@ -490,15 +490,6 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 	 * We compile all alternatives that are supported on the current platform,
 	 * to find portability problems more easily.
 	 */
-#if USE_LIBURING
-	{
-		PgAioInProgress *aio = pgaio_io_get();
-
-		pgaio_io_start_flush_range_raw(aio, fd, offset, nbytes);
-		pgaio_io_release(aio);
-		return;
-	}
-#endif
 #if defined(HAVE_SYNC_FILE_RANGE)
 	{
 		int			rc;
