@@ -513,6 +513,7 @@ static void pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_l
 
 /* printing functions */
 static const char *pgaio_io_shared_callback_string(PgAioSharedCallback a);
+static const char *pgaio_io_operation_string(PgAioOp op);
 
 /* aio worker related functions */
 static int pgaio_worker_submit(int max_submit, bool drain);
@@ -618,7 +619,7 @@ static const PgAioActionCBs io_action_cbs[] =
 	[PGAIO_SCB_READ_SB] =
 	{
 		.op = PGAIO_OP_READ,
-		.name = "read_sb",
+		.name = "sb",
 		.retry = pgaio_read_sb_retry,
 		.complete = pgaio_read_sb_complete,
 		.desc = pgaio_read_sb_desc,
@@ -627,7 +628,7 @@ static const PgAioActionCBs io_action_cbs[] =
 	[PGAIO_SCB_READ_SMGR] =
 	{
 		.op = PGAIO_OP_READ,
-		.name = "read_smgr",
+		.name = "smgr",
 		.retry = pgaio_read_smgr_retry,
 		.complete = pgaio_read_smgr_complete,
 		.desc = pgaio_read_smgr_desc,
@@ -636,7 +637,7 @@ static const PgAioActionCBs io_action_cbs[] =
 	[PGAIO_SCB_WRITE_SB] =
 	{
 		.op = PGAIO_OP_WRITE,
-		.name = "write_sb",
+		.name = "sb",
 		.retry = pgaio_write_sb_retry,
 		.complete = pgaio_write_sb_complete,
 		.desc = pgaio_write_sb_desc,
@@ -645,7 +646,7 @@ static const PgAioActionCBs io_action_cbs[] =
 	[PGAIO_SCB_WRITE_SMGR] =
 	{
 		.op = PGAIO_OP_WRITE,
-		.name = "write_smgr",
+		.name = "smgr",
 		.retry = pgaio_write_smgr_retry,
 		.complete = pgaio_write_smgr_complete,
 		.desc = pgaio_write_smgr_desc,
@@ -654,7 +655,7 @@ static const PgAioActionCBs io_action_cbs[] =
 	[PGAIO_SCB_WRITE_WAL] =
 	{
 		.op = PGAIO_OP_WRITE,
-		.name = "write_wal",
+		.name = "wal",
 		.retry = pgaio_write_wal_retry,
 		.complete = pgaio_write_wal_complete,
 		.desc = pgaio_write_wal_desc,
@@ -663,7 +664,7 @@ static const PgAioActionCBs io_action_cbs[] =
 	[PGAIO_SCB_WRITE_GENERIC] =
 	{
 		.op = PGAIO_OP_WRITE,
-		.name = "write_generic",
+		.name = "generic",
 		.complete = pgaio_write_generic_complete,
 		.desc = pgaio_write_generic_desc,
 	},
@@ -671,7 +672,7 @@ static const PgAioActionCBs io_action_cbs[] =
 	[PGAIO_SCB_FSYNC] =
 	{
 		.op = PGAIO_OP_FSYNC,
-		.name = "fsync",
+		.name = "raw",
 		.complete = pgaio_fsync_complete,
 		.desc = pgaio_fsync_desc,
 	},
@@ -679,7 +680,7 @@ static const PgAioActionCBs io_action_cbs[] =
 	[PGAIO_SCB_FSYNC_WAL] =
 	{
 		.op = PGAIO_OP_FSYNC,
-		.name = "fsync_wal",
+		.name = "wal",
 		.retry = pgaio_fsync_wal_retry,
 		.complete = pgaio_fsync_wal_complete,
 		.desc = pgaio_fsync_wal_desc,
@@ -688,7 +689,7 @@ static const PgAioActionCBs io_action_cbs[] =
 	[PGAIO_SCB_FLUSH_RANGE_RAW] =
 	{
 		.op = PGAIO_OP_FLUSH_RANGE,
-		.name = "flush_range_raw",
+		.name = "raw",
 		.complete = pgaio_flush_range_complete,
 		.desc = pgaio_flush_range_desc,
 	},
@@ -696,7 +697,7 @@ static const PgAioActionCBs io_action_cbs[] =
 	[PGAIO_SCB_FLUSH_RANGE_SMGR] =
 	{
 		.op = PGAIO_OP_FLUSH_RANGE,
-		.name = "flush_range_smgr",
+		.name = "smgr",
 		.retry = pgaio_flush_range_smgr_retry,
 		.complete = pgaio_flush_range_complete,
 		.desc = pgaio_flush_range_desc,
@@ -1218,8 +1219,9 @@ pgaio_process_io_rw_completion(PgAioInProgress *myio,
 
 		ereport(DEBUG1,
 				errcode_for_file_access(),
-				errmsg("aio %zd: failed to %s of %u-%u bytes at offset %llu+%u: %s",
+				errmsg("aio %zd: failed to %s:%s of %u-%u bytes at offset %llu+%u: %s",
 					   myio - aio_ctl->in_progress_io,
+					   pgaio_io_operation_string(myio->op),
 					   pgaio_io_shared_callback_string(myio->scb),
 					   nbytes, *already_done,
 					   (long long unsigned) offset, *already_done,
@@ -1254,8 +1256,9 @@ pgaio_process_io_rw_completion(PgAioInProgress *myio,
 
 		ereport(DEBUG3,
 				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("aio %zd: partial %s of %u-%u bytes at offset %llu+%u: read only %u of %u",
+				 errmsg("aio %zd: partial %s:%s of %u-%u bytes at offset %llu+%u: read only %u of %u",
 						myio - aio_ctl->in_progress_io,
+						pgaio_io_operation_string(myio->op),
 						pgaio_io_shared_callback_string(myio->scb),
 						nbytes, *already_done,
 						(long long unsigned) offset, *already_done,
@@ -3012,6 +3015,27 @@ pgaio_print_queues(void)
 }
 
 static const char *
+pgaio_io_operation_string(PgAioOp op)
+{
+	switch (op)
+	{
+		case PGAIO_OP_INVALID:
+			return "invalid";
+		case PGAIO_OP_READ:
+			return "read";
+		case PGAIO_OP_WRITE:
+			return "write";
+		case PGAIO_OP_FSYNC:
+			return "fsync";
+		case PGAIO_OP_FLUSH_RANGE:
+			return "flush_range";
+		case PGAIO_OP_NOP:
+			return "nop";
+	}
+	return "";
+}
+
+static const char *
 pgaio_io_shared_callback_string(PgAioSharedCallback a)
 {
 	return io_action_cbs[a].name;
@@ -3055,9 +3079,10 @@ pgaio_io_shared_desc(PgAioInProgress *io, StringInfo s)
 static void
 pgaio_io_print_one(PgAioInProgress *io, StringInfo s)
 {
-	appendStringInfo(s, "aio %zu/"UINT64_FORMAT": action: %s, ring: %d, init: %d, flags: ",
+	appendStringInfo(s, "aio %zu/"UINT64_FORMAT": op: %s, scb: %s, ring: %d, owner: %d, flags: ",
 					 io - aio_ctl->in_progress_io,
 					 io->generation,
+					 pgaio_io_operation_string(io->op),
 					 pgaio_io_shared_callback_string(io->scb),
 					 io->ring,
 					 io->owner_id);
@@ -4599,7 +4624,7 @@ pg_stat_get_aio_backends(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_aios(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_AIOS_COLS	8
+#define PG_STAT_GET_AIOS_COLS	9
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	TupleDesc	tupdesc;
@@ -4665,25 +4690,25 @@ pg_stat_get_aios(PG_FUNCTION_ARGS)
 		memset(nulls, 0, sizeof(nulls));
 
 		values[ 0] = Int32GetDatum(i);
-		values[ 1] = PointerGetDatum(cstring_to_text(pgaio_io_shared_callback_string(io_copy.scb)));
+		values[ 1] = Int64GetDatum(io_copy.generation);
+		values[ 2] = PointerGetDatum(cstring_to_text(pgaio_io_operation_string(io_copy.op)));
+		values[ 3] = PointerGetDatum(cstring_to_text(pgaio_io_shared_callback_string(io_copy.scb)));
 
 		pgaio_io_flag_string(flags, &tmps);
-		values[ 2] = PointerGetDatum(cstring_to_text(tmps.data));
+		values[ 4] = PointerGetDatum(cstring_to_text(tmps.data));
 		resetStringInfo(&tmps);
 
-		values[ 3] = Int32GetDatum(io_copy.ring);
+		values[ 5] = Int32GetDatum(io_copy.ring);
 
 		if (io_copy.owner_id != INVALID_PGPROCNO)
-			values[ 4] = Int32GetDatum(ProcGlobal->allProcs[io_copy.owner_id].pid);
+			values[ 6] = Int32GetDatum(ProcGlobal->allProcs[io_copy.owner_id].pid);
 		else
-			nulls[ 4] = true;
+			nulls[ 6] = true;
 
-		values[ 5] = Int64GetDatum(io_copy.generation);
-
-		values[ 6] = Int32GetDatum(io_copy.result);
+		values[ 7] = Int32GetDatum(io_copy.result);
 
 		pgaio_io_shared_desc(&io_copy, &tmps);
-		values[ 7] = PointerGetDatum(cstring_to_text(tmps.data));
+		values[ 8] = PointerGetDatum(cstring_to_text(tmps.data));
 		resetStringInfo(&tmps);
 
 		tuplestore_putvalues(tupstore, tupdesc, values, nulls);

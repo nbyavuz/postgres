@@ -11323,7 +11323,7 @@
 { oid => '812', descr => 'AIO stats',
   proname => 'pg_stat_get_aios', procost => '1000', prorows => '20', proretset => 't',
   provolatile => 'v', prorettype => 'record', proargtypes => '',
-  proallargtypes => '{int4,text,text,int4,int4,int8,int8,text}', proargmodes => '{o,o,o,o,o,o,o,o}',
-  proargnames => '{id,operation,flags,ring,owner_pid,generation,result,action_desc}', prosrc => 'pg_stat_get_aios' },
+  proallargtypes => '{int4,int8,text,text,text,int4,int4,int8,text}', proargmodes => '{o,o,o,o,o,o,o,o,o}',
+  proargnames => '{id,gen,op,scb,flags,ring,owner_pid,result,desc}', prosrc => 'pg_stat_get_aios' },
 
 ]
