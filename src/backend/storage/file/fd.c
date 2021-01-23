@@ -3661,7 +3661,7 @@ datadir_fsync_fname(const char *fname, bool isdir, int elevel, uintptr_t state)
 	strlcpy(entry->fname, fname, MAXPGPATH);
 
 	aio = pg_streaming_write_get_io(sync_state->pgsw);
-	pgaio_io_start_fsync(aio, fd, false);
+	pgaio_io_start_fsync_raw(aio, fd, false);
 	pg_streaming_write_write(sync_state->pgsw, aio, sync_completed, entry);
 }
 
