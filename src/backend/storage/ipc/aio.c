@@ -4530,8 +4530,13 @@ pgaio_worker_do(PgAioInProgress *io)
 	switch (io->op)
 	{
 		case PGAIO_OP_FLUSH_RANGE:
-			/* XXX not implemented */
+			pgstat_report_wait_start(WAIT_EVENT_DATA_FILE_FLUSH);
+			pg_flush_data(io->op_data.flush_range.fd,
+						  io->op_data.flush_range.offset,
+						  io->op_data.flush_range.nbytes);
+			/* never errors */
 			result = 0;
+			pgstat_report_wait_end();
 			break;
 		case PGAIO_OP_FSYNC:
 			pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
