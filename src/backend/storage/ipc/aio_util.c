@@ -10,6 +10,7 @@ typedef struct PgStreamingWriteItem
 	dlist_node node;
 
 	PgAioInProgress *aio;
+	bool in_purgatory;
 	bool in_progress;
 	void *private_data;
 
@@ -34,6 +35,13 @@ struct pg_streaming_write
 	/* available writes (unused or completed) */
 	dlist_head available;
 
+	/*
+	 * IOs returned by pg_streaming_write_get_io, before
+	 * pg_streaming_write_release_io or pg_streaming_write_write has been
+	 * called.
+	 */
+	dlist_head purgatory;
+
 	PgStreamingWriteItem all_items[FLEXIBLE_ARRAY_MEMBER];
 };
 
@@ -54,6 +62,7 @@ pg_streaming_write_alloc(uint32 iodepth, void *private_data)
 
 	dlist_init(&pgsw->available);
 	dlist_init(&pgsw->issued);
+	dlist_init(&pgsw->purgatory);
 
 	for (int i = 0; i < pgsw->iodepth; i++)
 	{
@@ -81,7 +90,10 @@ pg_streaming_write_get_io(pg_streaming_write *pgsw)
 		Assert(this_write->in_progress);
 
 		pgaio_io_wait(this_write->aio);
-		Assert(!this_write->in_progress);
+		/*
+		 * NB: cannot assert that the IO is done now, since the callback may
+		 * trigger new IO.
+		 */
 	}
 
 	this_write = dlist_head_element(PgStreamingWriteItem, node, &pgsw->available);
@@ -90,8 +102,25 @@ pg_streaming_write_get_io(pg_streaming_write *pgsw)
 
 	if (!this_write->aio)
 	{
-		this_write->aio = pgaio_io_get();
+		PgAioInProgress *newaio = pgaio_io_get();
+
+		Assert(this_write->aio == NULL);
+		this_write->aio = newaio;
 	}
+
+	Assert(!this_write->in_progress);
+	Assert(!this_write->in_purgatory);
+	this_write->in_purgatory = true;
+	dlist_delete_from(&pgsw->available, &this_write->node);
+	dlist_push_head(&pgsw->purgatory, &this_write->node);
+
+	ereport(DEBUG3, errmsg("pgsw get_io AIO %u/%llu, pgsw %zu, pgsw has now %d inflight",
+						   pgaio_io_id(this_write->aio),
+						   (long long unsigned) pgaio_io_generation(this_write->aio),
+						   this_write - pgsw->all_items,
+						   pgsw->inflight_count),
+			errhidestmt(true),
+			errhidecontext(true));
 
 	return this_write->aio;
 }
@@ -102,20 +131,65 @@ pg_streaming_write_inflight(pg_streaming_write *pgsw)
 	return pgsw->inflight_count;
 }
 
+static PgStreamingWriteItem *
+pg_streaming_write_find_purgatory(pg_streaming_write *pgsw, PgAioInProgress *io)
+{
+	dlist_iter iter;
+	PgStreamingWriteItem *this_write = NULL;
+
+	dlist_foreach(iter, &pgsw->purgatory)
+	{
+		PgStreamingWriteItem *cur = dlist_container(PgStreamingWriteItem, node, iter.cur);
+
+		Assert(cur->in_purgatory);
+
+		if (cur->aio == io)
+		{
+			this_write = cur;
+			break;
+		}
+	}
+
+	Assert(this_write);
+
+	return this_write;
+}
+
+void
+pg_streaming_write_release_io(pg_streaming_write *pgsw, PgAioInProgress *io)
+{
+	PgStreamingWriteItem *this_write;
+
+	this_write = pg_streaming_write_find_purgatory(pgsw, io);
+	dlist_delete_from(&pgsw->purgatory, &this_write->node);
+
+	this_write->in_purgatory = false;
+	dlist_push_tail(&pgsw->available, &this_write->node);
+
+
+	ereport(DEBUG3, errmsg("pgsw release AIO %u/%llu, pgsw %zu",
+						   pgaio_io_id(io),
+						   (long long unsigned) pgaio_io_generation(io),
+						   this_write - pgsw->all_items),
+			errhidestmt(true),
+			errhidecontext(true));
+}
+
 void
 pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io,
 						 pg_streaming_write_completed on_completion, void *private_data)
 {
 	PgStreamingWriteItem *this_write;
 
-	Assert(!dlist_is_empty(&pgsw->available));
+	Assert(pgaio_io_pending(io));
+	Assert(!dlist_is_empty(&pgsw->purgatory));
 
-	this_write = dlist_container(PgStreamingWriteItem, node, dlist_pop_head_node(&pgsw->available));
-
+	this_write = pg_streaming_write_find_purgatory(pgsw, io);
 	Assert(!this_write->in_progress);
 	Assert(this_write->aio && this_write->aio == io);
 
-	dlist_delete_from(&pgsw->available, &this_write->node);
+	this_write->in_purgatory = false;
+	dlist_delete_from(&pgsw->purgatory, &this_write->node);
 
 	pgaio_io_on_completion_local(this_write->aio, &this_write->on_completion_aio);
 
@@ -130,7 +204,11 @@ pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io,
 	 * XXX: It'd make sense to trigger io submission more often.
 	 */
 
-	ereport(DEBUG3, errmsg("submit %zu, %d deep", this_write - pgsw->all_items, pgsw->inflight_count),
+	ereport(DEBUG3, errmsg("pgsw write AIO %u/%llu, pgsw %zu, pgsw has now %d inflight",
+						   pgaio_io_id(io),
+						   (long long unsigned) pgaio_io_generation(io),
+						   this_write - pgsw->all_items,
+						   pgsw->inflight_count),
 			errhidestmt(true),
 			errhidecontext(true));
 }
@@ -145,11 +223,22 @@ pg_streaming_write_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress 
 	int result;
 
 	Assert(this_write->in_progress);
+	Assert(!this_write->in_purgatory);
 	Assert(pgaio_io_done(io));
 	Assert(pgaio_io_success(io));
 
 	dlist_delete_from(&pgsw->issued, &this_write->node);
+	Assert(pgsw->inflight_count > 0);
 	pgsw->inflight_count--;
+
+	ereport(DEBUG3,
+			errmsg("pgsw completion AIO %u/%llu, pgsw %zu, pgsw has now %d inflight",
+				   pgaio_io_id(io),
+				   (long long unsigned) pgaio_io_generation(io),
+				   this_write - pgsw->all_items,
+				   pgsw->inflight_count),
+			errhidestmt(true),
+			errhidecontext(true));
 
 	private_data = this_write->private_data;
 	this_write->private_data = NULL;
@@ -162,24 +251,24 @@ pg_streaming_write_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress 
 	/* call callback after all other handling so it can issue IO */
 	if (this_write->on_completion_user)
 		this_write->on_completion_user(pgsw, pgsw->private_data, result, private_data);
-
-	ereport(DEBUG3, errmsg("complete %zu", this_write - pgsw->all_items),
-			errhidestmt(true),
-			errhidecontext(true));
 }
 
 void
 pg_streaming_write_wait_all(pg_streaming_write *pgsw)
 {
+	ereport(DEBUG3, errmsg("pgsw wait all, %d inflight",
+						   pgsw->inflight_count),
+			errhidestmt(true),
+			errhidecontext(true));
+
 	while (!dlist_is_empty(&pgsw->issued))
 	{
 		PgStreamingWriteItem *this_write =
 			dlist_head_element(PgStreamingWriteItem, node, &pgsw->issued);
 
-		if (!this_write->in_progress)
-			continue;
+		Assert(this_write->in_progress);
+		Assert(!this_write->in_purgatory);
 		pgaio_io_wait(this_write->aio);
-		Assert(!this_write->in_progress);
 	}
 
 	Assert(pgsw->inflight_count == 0);
@@ -193,6 +282,7 @@ pg_streaming_write_free(pg_streaming_write *pgsw)
 		PgStreamingWriteItem *this_write = &pgsw->all_items[off];
 
 		Assert(!this_write->in_progress);
+		Assert(!this_write->in_purgatory);
 		if (this_write->aio)
 			pgaio_io_release(this_write->aio);
 		this_write->aio = NULL;

@@ -2051,6 +2051,8 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 				}
 				else
 				{
+					pg_streaming_write_release_io(be_state->pgsw, aio);
+
 					buffer_io = false;
 
 					if (!bulk_extend_buffer_inval(cur_buf_hdr))
@@ -2636,6 +2638,7 @@ BufferSyncWriteOne(pg_streaming_write *pgsw, BufferDesc *bufHdr)
 		else
 		{
 			LWLockRelease(content_lock);
+			pg_streaming_write_release_io(pgsw, aio);
 			UnpinBuffer(bufHdr, true);
 		}
 	}
@@ -3331,6 +3334,8 @@ BgBufferSyncWriteOne(int buf_id, bool skip_recently_used,
 	{
 		LWLockRelease(content_lock);
 		UnpinBuffer(bufHdr, true);
+
+		pg_streaming_write_release_io(pgsw, aio);
 	}
 
 	return result | BUF_WRITTEN;
