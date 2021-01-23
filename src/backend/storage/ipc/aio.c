@@ -1011,11 +1011,20 @@ pgaio_postmaster_before_child_exit(int code, Datum arg)
 	elog(DEBUG2, "aio before shmem exit: start");
 
 	/*
+	 * When exitinging in a normal backend there will be no pending IOs due to
+	 * pgaio_at_commit()/pgaio_at_abort(). But for aux processes that won't be
+	 * the case, so do so explicitly.
+	 */
+	pgaio_submit_pending(false);
+
+	/*
 	 * Need to wait for in-progress IOs initiated by this backend to
 	 * finish. Some operating systems, like linux w/ io_uring, cancel IOs that
 	 * are still in progress when exiting. Other's don't provide access to the
 	 * results of such IOs.
 	 */
+
+	/* move all requests onto issued_abandoned */
 	while (!dlist_is_empty(&my_aio->issued))
 	{
 		PgAioInProgress *io = dlist_head_element(PgAioInProgress, owner_node, &my_aio->issued);
@@ -1308,6 +1317,12 @@ pgaio_complete_ios(bool in_error)
 
 	Assert(!LWLockHeldByMe(SharedAIOCtlLock));
 
+	/*
+	 * Don't want to recurse into proc_exit() or such while calling callbacks
+	 * - we need to process the shared (but not local) callbacks.
+	 */
+	HOLD_INTERRUPTS();
+
 	/* call all callbacks, without holding lock */
 	while (!dlist_is_empty(&my_aio->reaped))
 	{
@@ -1369,6 +1384,8 @@ pgaio_complete_ios(bool in_error)
 			LWLockRelease(SharedAIOCtlLock);
 		}
 	}
+
+	RESUME_INTERRUPTS();
 
 	/* if any IOs weren't fully done, re-submit them */
 	if (pending_count_before != my_aio->pending_count)
@@ -1503,9 +1520,11 @@ pgaio_io_call_local_callback(PgAioInProgress *io, bool in_error)
 
 	Assert(my_aio->local_completed_count > 0);
 	dlist_delete_from(&my_aio->local_completed, &io->io_node);
+	Assert(my_aio->local_completed_count > 0);
 	my_aio->local_completed_count--;
 
 	dlist_delete_from(&my_aio->issued, &io->owner_node);
+	Assert(my_aio->issued_count > 0);
 	my_aio->issued_count--;
 	dlist_push_tail(&my_aio->outstanding, &io->owner_node);
 	my_aio->outstanding_count++;
@@ -1516,8 +1535,10 @@ pgaio_io_call_local_callback(PgAioInProgress *io, bool in_error)
 		return;
 
 	if (!in_error)
+	{
+		check_stack_depth();
 		io->on_completion_local->callback(io->on_completion_local, io);
-
+	}
 }
 
 /*
@@ -1534,13 +1555,12 @@ pgaio_call_local_callbacks(bool in_error)
 
 		if (local_callback_depth == 0)
 		{
-			dlist_mutable_iter iter;
-
 			local_callback_depth++;
 
-			dlist_foreach_modify(iter, &my_aio->local_completed)
+			while (!dlist_is_empty(&my_aio->local_completed))
 			{
-				PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, iter.cur);
+				dlist_node *node = dlist_pop_head_node(&my_aio->local_completed);
+				PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, node);
 
 				pgaio_io_call_local_callback(io, in_error);
 			}
@@ -2173,6 +2193,8 @@ pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local)
 									  /* will_wait = */ true);
 	}
 
+	Assert(!am_owner || !(flags & PGAIOIP_IDLE));
+
 	Assert(!(flags & (PGAIOIP_UNUSED)));
 
 wait_ref_again:
@@ -2637,15 +2659,24 @@ pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
 	Assert(io->scb == PGAIO_SCB_INVALID);
 
 	if (my_aio->pending_count + 1 >= PGAIO_SUBMIT_BATCH_SIZE)
+	{
+#ifdef PGAIO_VERBOSE
+		ereport(DEBUG3,
+				errmsg("submitting during prep for %zu due to %u inflight",
+					   io - aio_ctl->in_progress_io,
+					   my_aio->pending_count),
+				errhidecontext(1),
+				errhidestmt(1));
+#endif
 		pgaio_submit_pending(true);
+	}
 
 	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
 
 	/* for this module */
 	io->system_referenced = true;
 	io->op = op;
-	if (IsUnderPostmaster)
-		io->owner_id = MyProc->pgprocno;
+	Assert(io->owner_id == my_aio_id);
 
 	WRITE_ONCE_F(io->flags) = PGAIOIP_PREP;
 }
@@ -2673,6 +2704,12 @@ pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb)
 		MemoryContext oldcontext = MemoryContextSwitchTo(ErrorContext);
 		StringInfoData s;
 
+		/*
+		 * This code isn't ever allowed to error out, but the debugging
+		 * output is super useful...
+		 */
+		START_CRIT_SECTION();
+
 		initStringInfo(&s);
 
 		pgaio_io_print(io, &s);
@@ -2684,6 +2721,8 @@ pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb)
 				errhidecontext(true));
 		pfree(s.data);
 		MemoryContextSwitchTo(oldcontext);
+
+		END_CRIT_SECTION();
 	}
 #endif
 }
@@ -2692,7 +2731,7 @@ void
 pgaio_io_release(PgAioInProgress *io)
 {
 	Assert(io->user_referenced);
-	Assert(!IsUnderPostmaster || io->owner_id == MyProc->pgprocno);
+	Assert(io->owner_id == my_aio_id);
 
 	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 
