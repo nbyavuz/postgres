@@ -518,6 +518,7 @@ PrefetchSharedBuffer(Relation reln,
 {
 	PrefetchBufferResult result = {InvalidBuffer, false};
 	bool already_valid;
+	PgAioInProgress *aio = NULL;
 
 	/*
 	 * Report the buffer it was in at that time.  The caller may be able
@@ -526,15 +527,24 @@ PrefetchSharedBuffer(Relation reln,
 	 */
 
 	result.recent_buffer = ReadBufferAsync(reln, forkNum, blockNum, RBM_NORMAL,
-										   NULL, &already_valid, NULL);
+										   NULL, &already_valid, &aio);
 	result.initiated_io = !already_valid;
 
 	if (already_valid)
+	{
+		Assert(aio == NULL);
 		ReleaseBuffer(result.recent_buffer);
-#if 0
+	}
 	else
+	{
+		Assert(aio != NULL);
+		ReleaseBuffer(result.recent_buffer);
+		pgaio_io_release(aio);
+#if 0
 		pgaio_submit_pending(true);
 #endif
+	}
+
 	return result;
 }
 
@@ -698,6 +708,46 @@ ReadBufferWithoutRelcache(RelFileNode rnode, ForkNumber forkNum,
 							 mode, strategy, &hit);
 }
 
+/*
+ * State adjustments for a buffer that is asynchronously read.
+ *
+ * NB: This code may not error out.
+ */
+void
+ReadBufferPrepRead(PgAioInProgress *aio, Buffer buffer)
+{
+	BufferDesc *bufHdr;
+	uint32		buf_state;
+
+	Assert(!BufferIsLocal(buffer));
+	Assert(BufferIsPinned(buffer));
+
+	bufHdr = GetBufferDescriptor(buffer - 1);
+
+	/*
+	 * Increase refcount by one, representing the AIO subsystem. This ensures
+	 * that the buffer cannot be replaced while under IO if the issuing
+	 * process errors out (and thus releases pin) before completion.
+	 *
+	 * This pin is released by TerminateSharedBufferIO().
+	 */
+	buf_state = LockBufHdr(bufHdr);
+	Assert(buf_state & BM_IO_IN_PROGRESS);
+	Assert(BUF_STATE_GET_REFCOUNT(buf_state) >= 1);
+	buf_state += BUF_REFCOUNT_ONE;
+	UnlockBufHdr(bufHdr, buf_state);
+
+	/*
+	 * Stop tracking this buffer via InProgressBuf - the AIO system now keeps
+	 * track.
+	 */
+	Assert(InProgressBuf != NULL);
+	InProgressBuf = NULL;
+
+	/* allow backends to wait for this IO */
+	pgaio_io_ref(aio, &bufHdr->io_in_progress);
+}
+
 static void
 ReadBufferInitRead(PgAioInProgress *aio,
 				   SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
@@ -705,7 +755,6 @@ ReadBufferInitRead(PgAioInProgress *aio,
 {
 	Block		bufBlock;
 
-	//bufBlock = isLocalBuf ? LocalBufHdrGetBlock(bufHdr) : BufHdrGetBlock(bufHdr);
 	if (BufferIsLocal(buf))
 		bufBlock = LocalBufHdrGetBlock(bufHdr);
 	else
@@ -718,17 +767,8 @@ ReadBufferInitRead(PgAioInProgress *aio,
 	 */
 	Assert(!(pg_atomic_read_u32(&bufHdr->state) & BM_VALID));	/* spinlock not needed */
 
-	pgaio_io_ref(aio, &bufHdr->io_in_progress);
-
 	pgaio_io_start_read_sb(aio, smgr, forkNum, blockNum,
 						   bufBlock, buf, mode);
-
-	/*
-	 * Stop tracking this buffer via InProgressBuf - the AIO system now keeps
-	 * track.
-	 */
-	Assert(InProgressBuf != NULL);
-	InProgressBuf = NULL;
 }
 
 Buffer
@@ -739,8 +779,9 @@ ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 	Buffer buf;
 	BufferDesc *bufHdr;
 	bool hit;
-	bool release_io;
 	PgAioInProgress *aio;
+
+	Assert(aiop != NULL);
 
 	if (mode != RBM_NORMAL || blockNum == P_NEW)
 		elog(ERROR, "unsupported");
@@ -776,56 +817,12 @@ ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 
 	*already_valid = false;
 
-	if (aiop == NULL)
-	{
-		release_io = true;
-		aio = pgaio_io_get();
-	}
-	else if(*aiop == NULL)
-	{
-		release_io = false;
+	if(*aiop == NULL)
 		*aiop = aio = pgaio_io_get();
-	}
 	else
-	{
-		release_io = false;
 		aio = *aiop;
-	}
-
-	/*
-	 * FIXME: Not accurate anymore.
-	 * Decrement local pin, but keep shared pin. The latter will be released
-	 * upon completion of the IO. Otherwise the buffer could be recycled while
-	 * the IO is ongoing.
-	 *
-	 * FIXME: Make this optional? It's only useful for fire-and-forget style
-	 * IO.
-	 */
-	if (!release_io)
-	{
-		uint32		buf_state;
-
-		buf_state = LockBufHdr(bufHdr);
-		buf_state += BUF_REFCOUNT_ONE;
-		UnlockBufHdr(bufHdr, buf_state);
-	}
-	else
-	{
-		PrivateRefCountEntry *ref;
-
-		ref = GetPrivateRefCountEntry(buf, false);
-		Assert(ref != NULL);
-		Assert(ref->refcount > 0);
-
-		ResourceOwnerForgetBuffer(CurrentResourceOwner, buf);
-		ref->refcount--;
-		ForgetPrivateRefCountEntry(ref);
-	}
 
 	ReadBufferInitRead(aio, reln->rd_smgr, forkNum, blockNum, buf, bufHdr, mode);
-
-	if (release_io)
-		pgaio_io_release(aio);
 
 	return buf;
 }
@@ -1175,11 +1172,6 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	else
 	{
 		PgAioInProgress* aio = pgaio_io_get();
-		uint32		buf_state;
-
-		buf_state = LockBufHdr(bufHdr);
-		buf_state += BUF_REFCOUNT_ONE;
-		UnlockBufHdr(bufHdr, buf_state);
 
 		ReadBufferInitRead(aio, smgr, forkNum, blockNum, buf, bufHdr, mode);
 		pgaio_io_wait(aio);
@@ -1301,6 +1293,43 @@ ReadBufferCompleteRawRead(const AioBufferTag *tag, char *bufdata, bool failed)
 			}
 		}
 	}
+}
+
+/*
+ * See ReadBufferPrepRead().
+ */
+void
+ReadBufferPrepWrite(PgAioInProgress *aio, Buffer buffer, bool release_lock)
+{
+	BufferDesc *bufHdr;
+	uint32		buf_state;
+
+	Assert(!BufferIsLocal(buffer));
+	Assert(BufferIsPinned(buffer));
+
+	bufHdr = GetBufferDescriptor(buffer - 1);
+
+	Assert(LWLockHeldByMe(BufferDescriptorGetContentLock(bufHdr)));
+
+	/* ownership while in AIO subsystem */
+	buf_state = LockBufHdr(bufHdr);
+	Assert(buf_state & BM_IO_IN_PROGRESS);
+	Assert(BUF_STATE_GET_REFCOUNT(buf_state) >= 1);
+	buf_state += BUF_REFCOUNT_ONE;
+	UnlockBufHdr(bufHdr, buf_state);
+
+	/*
+	 * Stop tracking this buffer via InProgressBuf - the AIO system now keeps
+	 * track.
+	 */
+	Assert(InProgressBuf != NULL);
+	InProgressBuf = NULL;
+
+	/* allow backends to wait for this IO */
+	pgaio_io_ref(aio, &bufHdr->io_in_progress);
+
+	if (release_lock)
+		LWLockReleaseOwnership(BufferDescriptorGetContentLock(bufHdr));
 }
 
 void
@@ -3673,19 +3702,12 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	else
 	{
 		PgAioInProgress *aio = pgaio_io_get();
-		uint32		buf_state;
-
-		buf_state = LockBufHdr(buf);
-		buf_state += BUF_REFCOUNT_ONE;
-		UnlockBufHdr(buf, buf_state);
 
 		if (bb)
 		{
 			pgaio_assoc_bounce_buffer(aio, bb);
 			pgaio_bounce_buffer_release(bb);
 		}
-
-		pgaio_io_ref(aio, &buf->io_in_progress);
 
 		pgaio_io_start_write_sb(aio,
 								reln,
@@ -3695,13 +3717,6 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 								BufferDescriptorGetBuffer(buf),
 								/* skipFsync = */ false,
 								/* release_lock = */ false);
-
-		/*
-		 * Stop tracking this buffer via InProgressBuf - the AIO system now keeps
-		 * track.
-		 */
-		Assert(InProgressBuf != NULL);
-		InProgressBuf = NULL;
 
 		pgaio_io_wait(aio);
 		pgaio_io_release(aio);
@@ -3751,9 +3766,6 @@ AsyncFlushBuffer(PgAioInProgress *aio, BufferDesc *buf, SMgrRelation reln)
 	/* To check if block content changes while flushing. - vadim 01/17/97 */
 	buf_state &= ~BM_JUST_DIRTIED;
 
-	/* ownership while in AIO subsystem */
-	buf_state += BUF_REFCOUNT_ONE;
-
 	UnlockBufHdr(buf, buf_state);
 
 	if (buf_state & BM_PERMANENT)
@@ -3770,8 +3782,6 @@ AsyncFlushBuffer(PgAioInProgress *aio, BufferDesc *buf, SMgrRelation reln)
 		pgaio_assoc_bounce_buffer(aio, bb);
 		pgaio_bounce_buffer_release(bb);
 	}
-
-	pgaio_io_ref(aio, &buf->io_in_progress);
 
 	/*
 	 * Ask the completion routine to release the lock for us. That's important
@@ -3799,19 +3809,6 @@ AsyncFlushBuffer(PgAioInProgress *aio, BufferDesc *buf, SMgrRelation reln)
 							BufferDescriptorGetBuffer(buf),
 							/* skipFsync = */ false,
 							/* release_lock = */ true);
-
-	/*
-	 * XXX: The lock ownership release should probably be moved into the AIO
-	 * layer, so we correctly handle errors happening during IO submission.
-	 */
-	LWLockReleaseOwnership(BufferDescriptorGetContentLock(buf));
-
-	/*
-	 * Stop tracking this buffer via InProgressBuf - the AIO system now keeps
-	 * track.
-	 */
-	Assert(InProgressBuf != NULL);
-	InProgressBuf = NULL;
 
 	RESUME_INTERRUPTS();
 
@@ -5215,6 +5212,7 @@ TerminateSharedBufferIO(BufferDesc *buf, bool syncio, bool clear_dirty, uint32 s
 
 	if (!syncio)
 	{
+		/* release ownership by the AIO subsystem */
 		buf_state -= BUF_REFCOUNT_ONE;
 		pgaio_io_ref_clear(&buf->io_in_progress);
 	}

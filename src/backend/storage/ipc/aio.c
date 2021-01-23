@@ -2494,7 +2494,7 @@ pgaio_io_done(PgAioInProgress *io)
 static void
 pgaio_io_ref_internal(PgAioInProgress *io, PgAioIoRef *ref)
 {
-	Assert(io->flags & (PGAIOIP_IDLE | PGAIOIP_IN_PROGRESS | PGAIOIP_DONE));
+	Assert(io->flags & (PGAIOIP_IDLE | PGAIOIP_PREP | PGAIOIP_IN_PROGRESS | PGAIOIP_DONE));
 
 	ref->aio_index = io - aio_ctl->in_progress_io;
 	ref->generation_upper = (uint32) (io->generation >> 32);
@@ -3696,6 +3696,8 @@ pgaio_io_start_read_sb(PgAioInProgress *io, struct SMgrRelationData* smgr, ForkN
 	io->scb_data.read_sb.backend = smgr->smgr_rnode.backend;
 	io->scb_data.read_sb.mode = mode;
 
+	ReadBufferPrepRead(io, buffid);
+
 	pgaio_io_stage(io, PGAIO_SCB_READ_SB);
 }
 
@@ -3728,6 +3730,8 @@ pgaio_io_start_write_sb(PgAioInProgress *io,
 	io->scb_data.write_sb.buffid = buffid;
 	io->scb_data.write_sb.backend = smgr->smgr_rnode.backend;
 	io->scb_data.write_sb.release_lock = release_lock;
+
+	ReadBufferPrepWrite(io, buffid, release_lock);
 
 	pgaio_io_stage(io, PGAIO_SCB_WRITE_SB);
 }
