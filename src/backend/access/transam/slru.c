@@ -1502,6 +1502,6 @@ SlruSyncFileTag(SlruCtl ctl, struct pg_streaming_write *pgsw, InflightSyncEntry 
 
 	entry->handler_data = fd;
 	aio = pg_streaming_write_get_io(pgsw);
-	pgaio_io_start_fsync(aio, fd, false);
+	pgaio_io_start_fsync_raw(aio, fd, false);
 	pg_streaming_write_write(pgsw, aio, SlruSyncFileTagComplete, entry);
 }
