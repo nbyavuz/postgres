@@ -2952,7 +2952,7 @@ BufferSync(int flags)
  * bgwriter_lru_maxpages to 0.)
  */
 bool
-BgBufferSync(WritebackContext *wb_context)
+BgBufferSync(struct pg_streaming_write *pgsw, WritebackContext *wb_context)
 {
 	/* info obtained from freelist.c */
 	int			strategy_buf_id;
@@ -2994,8 +2994,6 @@ BgBufferSync(WritebackContext *wb_context)
 	/* Variables for final smoothed_density update */
 	long		new_strategy_delta;
 	uint32		new_recent_alloc;
-
-	pg_streaming_write *pgsw;
 
 	/*
 	 * Find out where the freelist clock sweep currently is, and how many
@@ -3162,8 +3160,6 @@ BgBufferSync(WritebackContext *wb_context)
 		upcoming_alloc_est = min_scan_buffers + reusable_buffers_est;
 	}
 
-	pgsw = pg_streaming_write_alloc(128, wb_context);
-
 	/*
 	 * Now write out dirty reusable buffers, working forward from the
 	 * next_to_clean point, until we have lapped the strategy scan, or cleaned
@@ -3203,9 +3199,6 @@ BgBufferSync(WritebackContext *wb_context)
 		else if (sync_state & BUF_REUSABLE)
 			reusable_buffers++;
 	}
-
-	pg_streaming_write_wait_all(pgsw);
-	pg_streaming_write_free(pgsw);
 
 	BgWriterStats.m_buf_written_clean += num_written;
 
