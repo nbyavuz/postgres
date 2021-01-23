@@ -14,14 +14,11 @@
 #ifndef AIO_H
 #define AIO_H
 
-#include "access/xlogdefs.h"
 #include "common/relpath.h"
+#include "lib/ilist.h"
 #include "storage/block.h"
 #include "storage/buf.h"
 #include "storage/relfilenode.h"
-#include "lib/ilist.h"
-
-#include "access/xlogdefs.h"
 
 
 typedef struct PgAioInProgress PgAioInProgress;
@@ -82,18 +79,19 @@ extern void pgaio_at_commit(void);
 extern PgAioInProgress *pgaio_io_get(void);
 extern void pgaio_io_release(PgAioInProgress *io);
 
-extern dlist_node* pgaio_io_node(PgAioInProgress *io);
-
-typedef struct PgAioOnCompletionLocalContext PgAioOnCompletionLocalContext;;
+typedef struct PgAioOnCompletionLocalContext PgAioOnCompletionLocalContext;
 typedef void (*PgAioOnCompletionLocalCB)(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *io);
+
 struct PgAioOnCompletionLocalContext
 {
 	PgAioOnCompletionLocalCB callback;
 };
-#define pgaio_ocb_container(type, membername, ptr)								\
-	(AssertVariableIsOfTypeMacro(ptr, PgAioOnCompletionLocalContext *),			\
+
+#define pgaio_ocb_container(type, membername, ptr)												\
+	(AssertVariableIsOfTypeMacro(ptr, PgAioOnCompletionLocalContext *),							\
 	 AssertVariableIsOfTypeMacro(((type *) NULL)->membername, PgAioOnCompletionLocalContext),	\
 	 ((type *) ((char *) (ptr) - offsetof(type, membername))))
+
 extern void pgaio_io_on_completion_local(PgAioInProgress *io, PgAioOnCompletionLocalContext *ocb);
 
 extern void pgaio_io_wait(PgAioInProgress *io);
@@ -170,13 +168,13 @@ extern void pgaio_io_start_read_smgr(PgAioInProgress *io,
 extern void pgaio_io_start_read_sb(PgAioInProgress *io,
 								   struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
 								   char *bufdata, int buffid, int mode);
+
 extern void pgaio_io_start_write_sb(PgAioInProgress *io,
 									struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
 									char *bufdata, int buffid, bool skipFsync, bool release_lock);
 extern void pgaio_io_start_write_smgr(PgAioInProgress *io,
 									  struct SMgrRelationData* smgr, ForkNumber forknum, BlockNumber blocknum,
 									  char *bufdata, bool skipFsync);
-
 extern void pgaio_io_start_write_wal(PgAioInProgress *io, int fd,
 									 uint32 offset, uint32 nbytes,
 									 char *bufdata,
