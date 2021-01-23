@@ -1540,7 +1540,7 @@ BufferAlloc(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 				LWLockRelease(BufferDescriptorGetContentLock(buf));
 
 				ScheduleBufferTagForWriteback(&BackendWritebackContext,
-											  &buf->tag);
+											  NULL, &buf->tag);
 
 				TRACE_POSTGRESQL_BUFFER_WRITE_DIRTY_DONE(forkNum, blockNum,
 														 smgr->smgr_rnode.node.spcNode,
@@ -1940,7 +1940,7 @@ bulk_extend_undirty_complete(pg_streaming_write *pgsw, void *pgsw_private, int r
 		UnpinBuffer(ex_buf->buf_hdr, true);
 	}
 
-	ScheduleBufferTagForWriteback(&BackendWritebackContext, &tag);
+	ScheduleBufferTagForWriteback(&BackendWritebackContext, be_state->pgsw, &tag);
 }
 
 /*
@@ -2588,7 +2588,7 @@ buffer_sync_complete(pg_streaming_write *pgsw, void *pgsw_private, int result, v
 	UnpinBuffer(bufHdr, true);
 
 	if (wb_context)
-		ScheduleBufferTagForWriteback(wb_context, &tag);
+		ScheduleBufferTagForWriteback(wb_context, pgsw, &tag);
 }
 
 static bool
@@ -2922,10 +2922,12 @@ BufferSync(int flags)
 	}
 
 	pg_streaming_write_wait_all(pgsw);
-	pg_streaming_write_free(pgsw);
 
 	/* issue all pending flushes */
-	IssuePendingWritebacks(&wb_context);
+	IssuePendingWritebacks(&wb_context, pgsw);
+
+	pg_streaming_write_wait_all(pgsw);
+	pg_streaming_write_free(pgsw);
 
 	pfree(per_ts_stat);
 	per_ts_stat = NULL;
@@ -3233,6 +3235,8 @@ BgBufferSync(struct pg_streaming_write *pgsw, WritebackContext *wb_context)
 			 scans_per_alloc, smoothed_density);
 #endif
 	}
+
+	IssuePendingWritebacks(wb_context, pgsw);
 
 	/* Return true if OK to hibernate */
 	return (bufs_to_lap == 0 && recent_alloc == 0);
@@ -5526,7 +5530,7 @@ WritebackContextInit(WritebackContext *context, int *max_pending)
  * Add buffer to list of pending writeback requests.
  */
 void
-ScheduleBufferTagForWriteback(WritebackContext *context, BufferTag *tag)
+ScheduleBufferTagForWriteback(WritebackContext *context, pg_streaming_write *pgsw, BufferTag *tag)
 {
 	PendingWriteback *pending;
 
@@ -5552,7 +5556,7 @@ ScheduleBufferTagForWriteback(WritebackContext *context, BufferTag *tag)
 	 * is now disabled.
 	 */
 	if (context->nr_pending >= *context->max_pending)
-		IssuePendingWritebacks(context);
+		IssuePendingWritebacks(context, pgsw);
 }
 
 /*
@@ -5563,7 +5567,7 @@ ScheduleBufferTagForWriteback(WritebackContext *context, BufferTag *tag)
  * error out - it's just a hint.
  */
 void
-IssuePendingWritebacks(WritebackContext *context)
+IssuePendingWritebacks(WritebackContext *context, pg_streaming_write *pgsw)
 {
 	int			i;
 
@@ -5623,7 +5627,38 @@ IssuePendingWritebacks(WritebackContext *context)
 
 		/* and finally tell the kernel to write the data to storage */
 		reln = smgropen(tag.rnode, InvalidBackendId);
-		smgrwriteback(reln, tag.forkNum, tag.blockNum, nblocks);
+
+		if (io_data_direct)
+		{
+			/* could have been changed */
+		}
+		else if (!pgsw)
+		{
+			smgrwriteback(reln, tag.forkNum, tag.blockNum, nblocks);
+		}
+		else
+		{
+			BlockNumber startblock = tag.blockNum;
+
+			while (nblocks > 0)
+			{
+				PgAioInProgress *aio;
+				BlockNumber initblocks;
+
+				aio = pg_streaming_write_get_io(pgsw);
+				initblocks = pgaio_io_start_flush_range_smgr(aio, reln, tag.forkNum, startblock, nblocks);
+
+				if (initblocks == InvalidBlockNumber)
+				{
+					pg_streaming_write_release_io(pgsw, aio);
+					break;
+				}
+
+				pg_streaming_write_write(pgsw, aio, NULL, NULL);
+				startblock += initblocks;
+				nblocks -= initblocks;
+			}
+		}
 	}
 
 	context->nr_pending = 0;

@@ -494,7 +494,7 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 	{
 		PgAioInProgress *aio = pgaio_io_get();
 
-		pgaio_io_start_flush_range(aio, fd, offset, nbytes);
+		pgaio_io_start_flush_range_raw(aio, fd, offset, nbytes);
 		pgaio_io_release(aio);
 		return;
 	}
@@ -2043,6 +2043,35 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 	pgstat_report_wait_start(wait_event_info);
 	pg_flush_data(VfdCache[file].fd, offset, nbytes);
 	pgstat_report_wait_end();
+}
+
+bool
+FileStartWriteback(struct PgAioInProgress *io, File file, off_t offset, off_t nbytes)
+{
+	int			returnCode;
+
+	Assert(FileIsValid(file));
+
+	DO_DB(elog(LOG, "FileWriteback: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
+			   file, VfdCache[file].fileName,
+			   (int64) offset, (int64) nbytes));
+
+	if (nbytes <= 0)
+		return false;
+
+#ifdef O_DIRECT
+	/* no point */
+	if (VfdCache[file].fileFlags & O_DIRECT)
+		return false;
+#endif
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return false;
+
+	pgaio_io_prep_flush_range(io, VfdCache[file].fd, offset, nbytes);
+
+	return true;
 }
 
 int
@@ -3609,7 +3638,7 @@ pre_sync_fname(const char *fname, bool isdir, int elevel, uintptr_t state)
 	strlcpy(entry->fname, fname, MAXPGPATH);
 
 	aio = pg_streaming_write_get_io(sync_state->pgsw);
-	pgaio_io_start_flush_range(aio, fd, 0, 0);
+	pgaio_io_start_flush_range_raw(aio, fd, 0, 0);
 	pg_streaming_write_write(sync_state->pgsw, aio, pre_sync_completed, entry);
 }
 

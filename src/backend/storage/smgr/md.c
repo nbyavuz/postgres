@@ -750,8 +750,8 @@ void
 mdwriteback(SMgrRelation reln, ForkNumber forknum,
 			BlockNumber blocknum, BlockNumber nblocks)
 {
-	if (io_data_direct)
-		return;
+	Assert(!io_data_direct);
+
 	/*
 	 * Issue flush requests in as few requests as possible; have to split at
 	 * segment boundaries though, since those are actually separate files.
@@ -792,6 +792,59 @@ mdwriteback(SMgrRelation reln, ForkNumber forknum,
 		nblocks -= nflush;
 		blocknum += nflush;
 	}
+}
+
+/*
+ * mdstartwriteback() -- Tell the kernel to write pages back to storage.
+ *
+ * This accepts a range of blocks because flushing several pages at once is
+ * considerably more efficient than doing so individually.
+ *
+ * Returns the number of blocks writeback was initated for. Note that this may
+ * be less than what was requested (e.g. when the request would have crossed a
+ * segment boundary).  If no IO needed to be issued, InvalidBlockNumber is
+ * returned.
+ */
+BlockNumber
+mdstartwriteback(struct PgAioInProgress *aio,
+				 SMgrRelation reln, ForkNumber forknum,
+				 BlockNumber blocknum, BlockNumber nblocks)
+{
+	BlockNumber nflush = nblocks;
+	off_t		seekpos;
+	MdfdVec    *v;
+	int			segnum_start,
+				segnum_end;
+
+	Assert(!io_data_direct);
+
+	v = _mdfd_getseg(reln, forknum, blocknum, true /* not used */ ,
+					 EXTENSION_RETURN_NULL);
+
+	/*
+	 * We might be flushing buffers of already removed relations, that's
+	 * ok, just ignore that case.
+	 */
+	if (!v)
+		return InvalidBlockNumber;
+
+	/* compute offset inside the current segment */
+	segnum_start = blocknum / RELSEG_SIZE;
+
+	/* compute number of desired writes within the current segment */
+	segnum_end = (blocknum + nblocks - 1) / RELSEG_SIZE;
+	if (segnum_start != segnum_end)
+		nflush = RELSEG_SIZE - (blocknum % ((BlockNumber) RELSEG_SIZE));
+
+	Assert(nflush >= 1);
+	Assert(nflush <= nblocks);
+
+	seekpos = (off_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
+
+	if (FileStartWriteback(aio, v->mdfd_vfd, seekpos, (off_t) BLCKSZ * nflush))
+		return nflush;
+	else
+		return InvalidBlockNumber;
 }
 
 /*

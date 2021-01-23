@@ -109,7 +109,8 @@ pg_attribute_packed()
 	PGAIO_SCB_FSYNC,
 	PGAIO_SCB_FSYNC_WAL,
 
-	PGAIO_SCB_FLUSH_RANGE,
+	PGAIO_SCB_FLUSH_RANGE_RAW,
+	PGAIO_SCB_FLUSH_RANGE_SMGR,
 
 	PGAIO_SCB_NOP,
 } PgAioSharedCallback;
@@ -687,10 +688,18 @@ static const PgAioActionCBs io_action_cbs[] =
 		.desc = pgaio_fsync_wal_desc,
 	},
 
-	[PGAIO_SCB_FLUSH_RANGE] =
+	[PGAIO_SCB_FLUSH_RANGE_RAW] =
 	{
 		.op = PGAIO_OP_FLUSH_RANGE,
-		.name = "flush_range",
+		.name = "flush_range_raw",
+		.complete = pgaio_flush_range_complete,
+		.desc = pgaio_flush_range_desc,
+	},
+
+	[PGAIO_SCB_FLUSH_RANGE_SMGR] =
+	{
+		.op = PGAIO_OP_FLUSH_RANGE,
+		.name = "flush_range_smgr",
 		.complete = pgaio_flush_range_complete,
 		.desc = pgaio_flush_range_desc,
 	},
@@ -3869,13 +3878,41 @@ pgaio_io_start_fsync_wal(PgAioInProgress *io, int fd, bool datasync_only, uint32
 }
 
 void
-pgaio_io_start_flush_range(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes)
+pgaio_io_start_flush_range_raw(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes)
 {
 	pgaio_io_prepare(io, PGAIO_OP_FLUSH_RANGE);
 
 	pgaio_io_prep_flush_range(io, fd, offset, nbytes);
 
-	pgaio_io_stage(io, PGAIO_SCB_FLUSH_RANGE);
+	pgaio_io_stage(io, PGAIO_SCB_FLUSH_RANGE_RAW);
+}
+
+BlockNumber
+pgaio_io_start_flush_range_smgr(PgAioInProgress *io, struct SMgrRelationData* smgr, ForkNumber forknum,
+								BlockNumber blocknum, BlockNumber nblocks)
+{
+	BlockNumber ret;
+
+	pgaio_io_prepare(io, PGAIO_OP_FLUSH_RANGE);
+
+	ret = smgrstartwriteback(io, smgr, forknum, blocknum, nblocks);
+
+	if (ret != InvalidBlockNumber)
+		pgaio_io_stage(io, PGAIO_SCB_FLUSH_RANGE_SMGR);
+	else
+	{
+		Assert(io->op == PGAIO_OP_FLUSH_RANGE);
+		Assert(io->owner_id == my_aio_id);
+		Assert(io->flags == PGAIOIP_PREP);
+		Assert(io->system_referenced);
+
+		io->op = PGAIO_OP_INVALID;
+		io->system_referenced = false;
+
+		WRITE_ONCE_F(io->flags) = PGAIOIP_IDLE;
+	}
+
+	return ret;
 }
 
 
