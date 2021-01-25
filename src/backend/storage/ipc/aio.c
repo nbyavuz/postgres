@@ -208,7 +208,11 @@ struct PgAioInProgress
 	/* index into context->iovec, or -1 */
 	int32 used_iovec;
 
-	PgAioBounceBuffer *bb;
+	/*
+	 * PGAIO_BB_INVALID, or index into aio_ctl->bounce_buffers
+	 */
+#define PGAIO_BB_INVALID PG_UINT32_MAX
+	uint32 bb_idx;
 
 	/*
 	 * PGAIO_MERGE_INVALID if not merged, index into aio_ctl->in_progress_io
@@ -869,6 +873,7 @@ AioShmemInit(void)
 			io->flags = PGAIOIP_UNUSED;
 			io->system_referenced = true;
 			io->generation = 1;
+			io->bb_idx = PGAIO_BB_INVALID;
 			io->merge_with_idx = PGAIO_MERGE_INVALID;
 		}
 
@@ -1576,12 +1581,12 @@ pgaio_complete_ios(bool in_error)
 
 				cur->flags = PGAIOIP_UNUSED;
 
-				if (cur->bb)
+				if (cur->bb_idx != PGAIO_BB_INVALID)
 				{
-					pgaio_bounce_buffer_release_internal(cur->bb,
+					pgaio_bounce_buffer_release_internal(&aio_ctl->bounce_buffers[cur->bb_idx],
 														 /* holding_lock = */ true,
 														 /* release_resowner = */ false);
-					cur->bb = NULL;
+					cur->bb_idx = PGAIO_BB_INVALID;
 				}
 
 				cur->op = PGAIO_OP_INVALID;
@@ -2737,10 +2742,12 @@ pgaio_io_recycle(PgAioInProgress *io)
 	Assert(!io->system_referenced);
 	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
 
-	if (io->bb)
+	if (io->bb_idx != PGAIO_BB_INVALID)
 	{
-		pgaio_bounce_buffer_release_internal(io->bb, false, false);
-		io->bb = NULL;
+		pgaio_bounce_buffer_release_internal(&aio_ctl->bounce_buffers[io->bb_idx],
+											 /* holding_lock = */ false,
+											 /* release_resowner = */ false);
+		io->bb_idx = PGAIO_BB_INVALID;
 	}
 
 	if (io->flags & PGAIOIP_DONE)
@@ -2945,13 +2952,12 @@ pgaio_io_release(PgAioInProgress *io)
 
 		Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
 
-		/* could do this earlier or conditionally */
-		if (io->bb)
+		if (io->bb_idx != PGAIO_BB_INVALID)
 		{
-			pgaio_bounce_buffer_release_internal(io->bb,
+			pgaio_bounce_buffer_release_internal(&aio_ctl->bounce_buffers[io->bb_idx],
 												 /* holding_lock = */ true,
 												 /* release_resowner = */ false);
-			io->bb = NULL;
+			io->bb_idx = PGAIO_BB_INVALID;
 		}
 
 		dlist_push_head(&aio_ctl->unused_ios, &io->owner_node);
@@ -3265,12 +3271,12 @@ void
 pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb)
 {
 	Assert(bb != NULL);
-	Assert(io->bb == NULL);
+	Assert(io->bb_idx == PGAIO_BB_INVALID);
 	Assert(io->flags == PGAIOIP_IDLE);
 	Assert(io->user_referenced);
 	Assert(pg_atomic_read_u32(&bb->refcount) > 0);
 
-	io->bb = bb;
+	io->bb_idx = bb - aio_ctl->bounce_buffers;
 	pg_atomic_fetch_add_u32(&bb->refcount, 1);
 }
 
