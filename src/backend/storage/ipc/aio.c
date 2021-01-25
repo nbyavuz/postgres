@@ -139,21 +139,18 @@ typedef enum PgAioInProgressFlags
 
 	PGAIOIP_FOREIGN_DONE = 1 << 9,
 
-	/* IO is merged with others */
-	PGAIOIP_MERGE = 1 << 10,
-
-	PGAIOIP_RETRY = 1 << 11,
+	PGAIOIP_RETRY = 1 << 10,
 
 	/* request failed completely */
-	PGAIOIP_HARD_FAILURE = 1 << 12,
+	PGAIOIP_HARD_FAILURE = 1 << 11,
 
 	/* request failed partly, e.g. a short write */
-	PGAIOIP_SOFT_FAILURE = 1 << 13,
+	PGAIOIP_SOFT_FAILURE = 1 << 12,
 
-	PGAIOIP_SHARED_FAILED = 1 << 14,
+	PGAIOIP_SHARED_FAILED = 1 << 13,
 
 	/* local completion callback was called */
-	PGAIOIP_LOCAL_CALLBACK_CALLED = 1 << 15,
+	PGAIOIP_LOCAL_CALLBACK_CALLED = 1 << 14,
 
 } PgAioInProgressFlags;
 
@@ -213,7 +210,12 @@ struct PgAioInProgress
 
 	PgAioBounceBuffer *bb;
 
-	PgAioInProgress *merge_with;
+	/*
+	 * PGAIO_MERGE_INVALID if not merged, index into aio_ctl->in_progress_io
+	 * otherwise.
+	 */
+#define PGAIO_MERGE_INVALID PG_UINT32_MAX
+	uint32 merge_with_idx;
 
 	uint64 generation;
 
@@ -867,6 +869,7 @@ AioShmemInit(void)
 			io->flags = PGAIOIP_UNUSED;
 			io->system_referenced = true;
 			io->generation = 1;
+			io->merge_with_idx = PGAIO_MERGE_INVALID;
 		}
 
 		aio_ctl->backend_state_count = TotalProcs;
@@ -1204,7 +1207,7 @@ pgaio_process_io_rw_completion(PgAioInProgress *myio,
 
 	if (result <= 0)
 	{
-		/* merge request failed, report failure on all */
+		/* merged request failed, report failure on all */
 		*new_result = result;
 
 		if (result == -EAGAIN || result == -EINTR)
@@ -1280,7 +1283,7 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 
 	Assert(io->flags & PGAIOIP_INFLIGHT);
 	Assert(io->system_referenced);
-	Assert(io->result == 0 || !(io->flags & PGAIOIP_MERGE));
+	Assert(io->result == 0 || io->merge_with_idx == PGAIO_MERGE_INVALID);
 
 	/* very useful for testing the retry logic */
 	/*
@@ -1318,17 +1321,13 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 		Assert(cur->op == io->op);
 		Assert(cur->scb == io->scb);
 
-		if (cur->merge_with != NULL)
+		if (cur->merge_with_idx != PGAIO_MERGE_INVALID)
 		{
-			Assert(new_flags & PGAIOIP_MERGE);
-			new_flags &= ~PGAIOIP_MERGE;
-			next = cur->merge_with;
+			next = &aio_ctl->in_progress_io[cur->merge_with_idx];
+			cur->merge_with_idx = PGAIO_MERGE_INVALID;
 		}
 		else
-		{
-			Assert(!(cur->flags & PGAIOIP_MERGE));
 			next = NULL;
-		}
 
 		switch (cur->op)
 		{
@@ -1370,9 +1369,6 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 				elog(ERROR, "invalid");
 				break;
 		}
-
-		next = cur->merge_with;
-		cur->merge_with = NULL;
 
 		new_flags &= ~PGAIOIP_INFLIGHT;
 		new_flags |= PGAIOIP_REAPED;
@@ -1522,10 +1518,9 @@ pgaio_complete_ios(bool in_error)
 			Assert(cur->flags & PGAIOIP_REAPED);
 			Assert(!(cur->flags & PGAIOIP_DONE));
 			Assert(!(cur->flags & PGAIOIP_INFLIGHT));
-			Assert(!(cur->flags & PGAIOIP_MERGE));
 			Assert(!(cur->flags & (PGAIOIP_SHARED_FAILED)));
 			Assert(!(cur->flags & (PGAIOIP_SOFT_FAILURE)));
-			Assert(cur->merge_with == NULL);
+			Assert(cur->merge_with_idx == PGAIO_MERGE_INVALID);
 
 			if (cur->user_referenced)
 			{
@@ -1817,8 +1812,7 @@ pgaio_io_merge(PgAioInProgress *into, PgAioInProgress *tomerge)
 			errhidestmt(true),
 			errhidecontext(true));
 
-	into->merge_with = tomerge;
-	into->flags |= PGAIOIP_MERGE;
+	into->merge_with_idx = tomerge - aio_ctl->in_progress_io;
 }
 
 static void
@@ -1835,15 +1829,12 @@ pgaio_combine_pending(void)
 		PgAioInProgress *cur = dlist_container(PgAioInProgress, io_node, iter.cur);
 
 		/* can happen when failing partway through io submission */
-		if (cur->merge_with)
+		if (cur->merge_with_idx != PGAIO_MERGE_INVALID)
 		{
 			elog(DEBUG1, "already merged request (%zu), giving up on merging",
 				 cur - aio_ctl->in_progress_io);
 			return;
 		}
-
-		Assert(cur->merge_with == NULL);
-		Assert(!(cur->flags & PGAIOIP_MERGE));
 
 		if (last == NULL)
 		{
@@ -1960,10 +1951,12 @@ pgaio_worker_submit(int max_submit, bool drain)
 	{
 		PgAioInProgress *cur = ios[i];
 
-		while (cur)
+		while (true)
 		{
 			ConditionVariableBroadcast(&cur->cv);
-			cur = cur->merge_with;
+			if (cur->merge_with_idx == PGAIO_MERGE_INVALID)
+				break;
+			cur = &aio_ctl->in_progress_io[cur->merge_with_idx];
 		}
 	}
 
@@ -2095,7 +2088,7 @@ pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 
 	cur = io;
 
-	while (cur)
+	while (true)
 	{
 		Assert(cur->flags & PGAIOIP_PENDING);
 		Assert(!(cur->flags & PGAIOIP_PREP));
@@ -2148,7 +2141,9 @@ pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 				errhidecontext(1),
 				errhidestmt(1));
 
-		cur = cur->merge_with;
+		if (cur->merge_with_idx == PGAIO_MERGE_INVALID)
+			break;
+		cur = &aio_ctl->in_progress_io[cur->merge_with_idx];
 	}
 }
 
@@ -2552,6 +2547,7 @@ pgaio_io_get(void)
 	Assert(io->flags == PGAIOIP_UNUSED);
 	Assert(io->system_referenced);
 	Assert(io->on_completion_local == NULL);
+	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
 
 	io->user_referenced = true;
 	io->system_referenced = false;
@@ -2739,7 +2735,7 @@ pgaio_io_recycle(PgAioInProgress *io)
 	Assert(io->user_referenced);
 	Assert(io->owner_id == my_aio_id);
 	Assert(!io->system_referenced);
-	Assert(io->merge_with == NULL);
+	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
 
 	if (io->bb)
 	{
@@ -2763,8 +2759,7 @@ pgaio_io_recycle(PgAioInProgress *io)
 		io->scb = PGAIO_SCB_INVALID;
 	}
 
-	io->flags &= ~(PGAIOIP_MERGE |
-				   PGAIOIP_SHARED_CALLBACK_CALLED |
+	io->flags &= ~(PGAIOIP_SHARED_CALLBACK_CALLED |
 				   PGAIOIP_LOCAL_CALLBACK_CALLED |
 				   PGAIOIP_RETRY |
 				   PGAIOIP_HARD_FAILURE |
@@ -2780,7 +2775,7 @@ pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
 	/* true for now, but not necessarily in the future */
 	Assert(io->flags == PGAIOIP_IDLE);
 	Assert(io->user_referenced);
-	Assert(io->merge_with == NULL);
+	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
 	Assert(io->op == PGAIO_OP_INVALID);
 	Assert(io->scb == PGAIO_SCB_INVALID);
 
@@ -2914,7 +2909,6 @@ pgaio_io_release(PgAioInProgress *io)
 	if (!io->system_referenced)
 	{
 		Assert(!(io->flags & PGAIOIP_INFLIGHT));
-		Assert(!(io->flags & PGAIOIP_MERGE));
 		Assert(io->flags & (PGAIOIP_IDLE |
 							PGAIOIP_PREP |
 							PGAIOIP_DONE));
@@ -2949,7 +2943,7 @@ pgaio_io_release(PgAioInProgress *io)
 		io->system_referenced = true;
 		io->on_completion_local = NULL;
 
-		Assert(io->merge_with == NULL);
+		Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
 
 		/* could do this earlier or conditionally */
 		if (io->bb)
@@ -3060,7 +3054,6 @@ pgaio_io_flag_string(PgAioIPFlags flags, StringInfo s)
 	STRINGIFY_FLAG(PGAIOIP_DONE);
 	STRINGIFY_FLAG(PGAIOIP_FOREIGN_DONE);
 
-	STRINGIFY_FLAG(PGAIOIP_MERGE);
 	STRINGIFY_FLAG(PGAIOIP_RETRY);
 	STRINGIFY_FLAG(PGAIOIP_HARD_FAILURE);
 	STRINGIFY_FLAG(PGAIOIP_SOFT_FAILURE);
@@ -3119,20 +3112,24 @@ pgaio_io_print(PgAioInProgress *io, StringInfo s)
 
 	pgaio_io_print_one(io, s);
 
+	if (io->merge_with_idx != PGAIO_MERGE_INVALID)
 	{
 		PgAioInProgress *cur = io;
 		int nummerge = 0;
 
-		if (cur->merge_with)
-			appendStringInfoString(s, "\n  merge with:");
+		appendStringInfoString(s, "\n  merge with:");
 
-		while (cur->merge_with)
+		while (cur->merge_with_idx != PGAIO_MERGE_INVALID)
 		{
+			PgAioInProgress *next;
+
 			nummerge++;
 			appendStringInfo(s, "\n    %d: ", nummerge);
-			pgaio_io_print_one(cur->merge_with, s);
 
-			cur = cur->merge_with;
+			next = &aio_ctl->in_progress_io[cur->merge_with_idx];
+			pgaio_io_print_one(next, s);
+
+			cur = next;
 		}
 	}
 
@@ -3410,10 +3407,12 @@ again:
 	{
 		PgAioInProgress *cur = ios[i];
 
-		while (cur)
+		while (true)
 		{
 			ConditionVariableBroadcast(&cur->cv);
-			cur = cur->merge_with;
+			if (cur->merge_with_idx == PGAIO_MERGE_INVALID)
+				break;
+			cur = &aio_ctl->in_progress_io[cur->merge_with_idx];
 		}
 	}
 
@@ -4401,9 +4400,11 @@ pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io)
 	 * contiguous regions of a file.  As a micro-optimization we'll also
 	 * consolidate iovecs that access contiguous memory.
 	 */
-	for (io = io->merge_with; io; io = io->merge_with)
+	while (io->merge_with_idx != PGAIO_MERGE_INVALID)
 	{
 		struct iovec *next = iov + 1;
+
+		io = &aio_ctl->in_progress_io[io->merge_with_idx];
 
 		pgaio_fill_one_iov(next, io, false);
 		if ((char *) iov->iov_base + iov->iov_len == next->iov_base)
