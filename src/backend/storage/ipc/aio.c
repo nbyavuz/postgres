@@ -1,11 +1,12 @@
 /*
- * Big picture changes:
+ * Big picture changes needed:
  * - backend local recycleable IOs
+ * - retries for AIOs that cannot be retried shared (e.g. XLogFileInit())
+ * - docs / comments / cleanup
+ * - split aio.c in multiple files (aio.c, aio_uring.c, aio_worker.c, aio_cb.c)
+ *   - introduce aio_internal.h for that purpose
+ * - move more of the shared callback logic into bufmgr.c etc
  * - merging of IOs when submitting individual IOs, not when submitting all pending IOs
- * - reorganization of shared callback system, so there's an underlying
- *   "write" operation that's used both by WAL, generic, ...  writes.
- * - Consider not exposing PgAioInProgress* at all, instead expose a PgAioReference { uint32 io; uint64 generation; }
- *   which would make it a lot less problematic to immediate reuse IOs.
  * - Shrink size of PgAioInProgress
  */
 #include "postgres.h"
@@ -160,8 +161,10 @@ typedef uint16 PgAioIPFlags;
 
 struct PgAioInProgress
 {
-	/* PgAioAction, indexes PgAioCompletionCallbacks */
+	/* basic IO types supported by aio.c */
 	PgAioOp op;
+
+	/* shared callback for this IO, see io_action_cbs */
 	PgAioSharedCallback scb;
 
 	/* which AIO ring is this entry active for */
@@ -215,6 +218,8 @@ struct PgAioInProgress
 	uint64 generation;
 
 	/*
+	 * Data necessary for basic IO types (PgAioOp).
+	 *
 	 * NB: Note that fds in here may *not* be relied upon for re-issuing
 	 * requests (e.g. for partial reads/writes) - the fd might be from another
 	 * process, or closed since. That's not a problem for IOs waiting to be
@@ -1278,6 +1283,10 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 	Assert(io->result == 0 || !(io->flags & PGAIOIP_MERGE));
 
 	/* very useful for testing the retry logic */
+	/*
+	 * XXX: a probabilistic mode would be useful, especially if it also
+	 * injected occasional EINTR/EAGAINs.
+	 */
 #if 0
 	if (io->op == PGAIO_OP_READ && result > 4096)
 		result = 4096;
