@@ -4432,10 +4432,9 @@ pgaio_worker_do(PgAioInProgress *io)
 	fd_usable = !AmAioWorkerProcess();
 
 	/*
-	 * Handle easy cases, and extract tag.  Also compute the total size of
-	 * merged requests.  For now, pgaio_can_be_combined() only allows
-	 * consecutive blocks to be merged for worker mode, so it's enough to sum
-	 * up the size of merged requests.
+	 * If this is not the process originating the request (can happen via
+	 * pgaio_synchronous_submit()), we need to open the files locally to rely
+	 * on the fd.
 	 */
 	if (!fd_usable)
 	{
