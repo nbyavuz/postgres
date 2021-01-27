@@ -492,6 +492,8 @@ typedef struct PgAioCtl
 	 * on aio_submission_queue.
 	 */
 	ConditionVariable submission_queue_not_empty;
+	squeue32 *aio_submission_queue;
+
 
 	int backend_state_count;
 	PgAioPerBackend *backend_state;
@@ -752,9 +754,6 @@ int MyAioWorkerId;
 struct io_uring local_ring;
 #endif
 
-/* Submission queue, used if aio_type is bgworker. */
-squeue32 *aio_submission_queue;
-
 /* Options for aio_type. */
 const struct config_enum_entry aio_type_options[] = {
 	{"worker", AIOTYPE_WORKER, false},
@@ -931,12 +930,12 @@ AioShmemInit(void)
 
 		if (aio_type == AIOTYPE_WORKER)
 		{
-			aio_submission_queue =
+			aio_ctl->aio_submission_queue =
 				ShmemInitStruct("aio submission queue",
 								AioSubmissionQueueShmemSize(),
 								&found);
 			Assert(!found);
-			squeue32_init(aio_submission_queue, aio_worker_queue_size);
+			squeue32_init(aio_ctl->aio_submission_queue, aio_worker_queue_size);
 			ConditionVariableInit(&aio_ctl->submission_queue_not_empty);
 		}
 #ifdef USE_LIBURING
@@ -1937,7 +1936,7 @@ pgaio_worker_submit(int max_submit, bool drain)
 			 * queue is full then handle it synchronously rather than waiting.
 			 * XXX Is this fair enough?
 			 */
-			if (squeue32_enqueue(aio_submission_queue, io_index))
+			if (squeue32_enqueue(aio_ctl->aio_submission_queue, io_index))
 				ConditionVariableSignal(&aio_ctl->submission_queue_not_empty);
 			else
 				pgaio_worker_do(io);
@@ -4521,7 +4520,7 @@ AioWorkerMain(void)
 	{
 		uint32 io_index;
 
-		if (squeue32_dequeue(aio_submission_queue, &io_index))
+		if (squeue32_dequeue(aio_ctl->aio_submission_queue, &io_index))
 		{
 			/* Do IO and completions.  This'll signal anyone waiting. */
 			/*
