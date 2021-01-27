@@ -534,7 +534,7 @@ void
 smgrstartread(struct PgAioInProgress *io, SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			  char *buffer)
 {
-	return smgrsw[reln->smgr_which].smgr_startread(io, reln, forknum, blocknum, buffer);
+	smgrsw[reln->smgr_which].smgr_startread(io, reln, forknum, blocknum, buffer);
 }
 
 /*
