@@ -4427,7 +4427,7 @@ pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io)
 static void
 pgaio_worker_do(PgAioInProgress *io)
 {
-	ssize_t result;
+	ssize_t result = 0;
 	struct iovec iov[IOV_MAX];
 	int iovcnt = 0;
 	bool fd_usable;
