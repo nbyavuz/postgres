@@ -1910,7 +1910,6 @@ pgaio_synchronous_submit(void)
 static int
 pgaio_worker_submit(int max_submit, bool drain)
 {
-	PgAioInProgress *ios[PGAIO_SUBMIT_BATCH_SIZE];
 	int nios = 0;
 
 	while (!dlist_is_empty(&my_aio->pending) && nios < max_submit)
@@ -1944,27 +1943,7 @@ pgaio_worker_submit(int max_submit, bool drain)
 		}
 		pgaio_complete_ios(false);
 
-		ios[nios] = io;
 		++nios;
-	}
-
-	/* XXXX copied from uring submit */
-	/*
-	 * Others might have been waiting for this IO. Because it wasn't
-	 * marked as in-flight until now, they might be waiting for the
-	 * CV. Wake'em up.
-	 */
-	for (int i = 0; i < nios; i++)
-	{
-		PgAioInProgress *cur = ios[i];
-
-		while (true)
-		{
-			ConditionVariableBroadcast(&cur->cv);
-			if (cur->merge_with_idx == PGAIO_MERGE_INVALID)
-				break;
-			cur = &aio_ctl->in_progress_io[cur->merge_with_idx];
-		}
 	}
 
 	return nios;
