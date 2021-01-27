@@ -457,6 +457,9 @@ typedef struct PgAioContext
 	/* locked by completion lock */
 	slist_head reaped_iovecs;
 	uint32 reaped_iovecs_count;
+#else
+	/* msvc doesn't like empty structs */
+	int pro_forma_member;
 #endif
 
 	/* XXX: probably worth padding to a cacheline boundary here */
