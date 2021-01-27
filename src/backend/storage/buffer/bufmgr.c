@@ -2193,7 +2193,7 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 		new_buf_block = BufHdrGetBlock(new_buf_hdr);
 
 		/* new buffers are zero-filled */
-		memset((char *) __builtin_assume_aligned(new_buf_block, 4096), 0, BLCKSZ);
+		memset((char *) new_buf_block, 0, BLCKSZ);
 
 		buf_state = LockBufHdr(new_buf_hdr);
 		buf_state &= ~(BM_IO_IN_PROGRESS | BM_IO_ERROR);
