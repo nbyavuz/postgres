@@ -3401,7 +3401,7 @@ pg_get_multixact_members(PG_FUNCTION_ARGS)
 void
 multixactoffsetssyncfiletag(struct pg_streaming_write *pgsw, InflightSyncEntry *entry)
 {
-	return SlruSyncFileTag(MultiXactOffsetCtl, pgsw, entry);
+	SlruSyncFileTag(MultiXactOffsetCtl, pgsw, entry);
 }
 
 /*
@@ -3410,5 +3410,5 @@ multixactoffsetssyncfiletag(struct pg_streaming_write *pgsw, InflightSyncEntry *
 void
 multixactmemberssyncfiletag(struct pg_streaming_write *pgsw, InflightSyncEntry *entry)
 {
-	return SlruSyncFileTag(MultiXactMemberCtl, pgsw, entry);
+	SlruSyncFileTag(MultiXactMemberCtl, pgsw, entry);
 }
