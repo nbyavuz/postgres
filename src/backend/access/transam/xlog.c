@@ -4278,7 +4278,7 @@ XLogFlush(XLogRecPtr record)
 	WriteRqst.FlushInit = 0;
 	WriteRqst.FlushDone = record;
 
-	pgaio_submit_pending(true);
+	pgaio_submit_pending(false);
 
 	// FIXME: reimplement commit delay
 	XLogWrite(WriteRqst, false);
