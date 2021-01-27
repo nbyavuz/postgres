@@ -1027,7 +1027,8 @@ pgaio_postmaster_before_child_exit(int code, Datum arg)
 	 * pgaio_at_commit()/pgaio_at_abort(). But for aux processes that won't be
 	 * the case, so do so explicitly.
 	 */
-	pgaio_submit_pending(false);
+	pgaio_at_abort();
+
 
 	/*
 	 * Need to wait for in-progress IOs initiated by this backend to
