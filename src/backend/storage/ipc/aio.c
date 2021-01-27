@@ -4468,9 +4468,9 @@ pgaio_worker_do(PgAioInProgress *io)
 		case PGAIO_OP_FSYNC:
 			pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
 			if (io->op_data.fsync.datasync)
-				result = fdatasync(io->op_data.fsync.fd);
+				result = pg_fdatasync(io->op_data.fsync.fd);
 			else
-				result = fsync(io->op_data.fsync.fd);
+				result = pg_fsync(io->op_data.fsync.fd);
 			pgstat_report_wait_end();
 			break;
 		case PGAIO_OP_FLUSH_RANGE:
