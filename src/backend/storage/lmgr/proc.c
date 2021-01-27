@@ -465,8 +465,6 @@ InitProcess(void)
 	 */
 	InitLWLockAccess();
 	InitDeadLockChecking();
-
-	pgaio_postmaster_child_init();
 }
 
 /*
@@ -604,8 +602,6 @@ InitAuxiliaryProcess(void)
 	/* Check that group locking fields are in a proper initial state. */
 	Assert(MyProc->lockGroupLeader == NULL);
 	Assert(dlist_is_empty(&MyProc->lockGroupMembers));
-
-	pgaio_postmaster_child_init();
 
 	/*
 	 * We might be reusing a semaphore that belonged to a failed process. So

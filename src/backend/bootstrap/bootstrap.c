@@ -411,6 +411,8 @@ AuxiliaryProcessMain(int argc, char *argv[])
 		/* finish setting up bufmgr.c */
 		InitBufferPoolBackend();
 
+		pgaio_postmaster_child_init();
+
 		/*
 		 * Auxiliary processes don't run transactions, but they may need a
 		 * resource owner anyway to manage buffer pins acquired outside
@@ -448,6 +450,7 @@ AuxiliaryProcessMain(int argc, char *argv[])
 			SetProcessingMode(BootstrapProcessing);
 			bootstrap_signals();
 			InitProcess();
+			pgaio_postmaster_child_init();
 			BootStrapXLOG();
 			BootstrapModeMain();
 			proc_exit(1);		/* should never return */
