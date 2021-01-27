@@ -1415,7 +1415,7 @@ pgaio_io_call_shared_complete(PgAioInProgress *io)
 	return io_action_cbs[io->scb].complete(io);
 }
 
-static void  __attribute__((noinline))
+static void pg_noinline
 pgaio_complete_ios(bool in_error)
 {
 	int pending_count_before = my_aio->pending_count;
@@ -1677,7 +1677,7 @@ pgaio_call_local_callbacks(bool in_error)
 /*
  * Receive completions in ring.
  */
-static int  __attribute__((noinline))
+static int pg_noinline
 pgaio_drain(PgAioContext *context, bool call_shared, bool call_local)
 {
 	int ndrained = 0;
@@ -2076,7 +2076,7 @@ pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, boo
 	}
 }
 
-void  __attribute__((noinline))
+void pg_noinline
 pgaio_submit_pending(bool drain)
 {
 	pgaio_submit_pending_internal(drain,
@@ -2775,7 +2775,7 @@ pgaio_io_recycle(PgAioInProgress *io)
 	io->on_completion_local = NULL;
 }
 
-static void  __attribute__((noinline))
+static void pg_noinline
 pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
 {
 	/* true for now, but not necessarily in the future */
@@ -2809,7 +2809,7 @@ pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
 }
 
 
-static void  __attribute__((noinline))
+static void pg_noinline
 pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb)
 {
 	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
