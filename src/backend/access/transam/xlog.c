@@ -3361,15 +3361,15 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 				XLogRecPtr ins = XLogBytePosToRecPtr(XLogCtl->Insert.CurrBytePos);
 
 				ereport(DEBUG1,
-						errmsg("performing %s write of %d bytes: from %X/%X to %X/%X, min %X/%X opt %X/%X (compl %X/%X: %ld, ins %X/%X: %ld)",
+						errmsg("performing %s write of %d bytes: from %X/%X to %X/%X, min %X/%X opt %X/%X (compl %X/%X: %u, ins %X/%X: %u)",
 							   ispartialpage ? "partial" : "non-partial",
 							   nbytes,
 							   (uint32) (startwrite >> 32), (uint32)startwrite,
 							   (uint32) (write_upto >> 32), (uint32)write_upto,
 							   (uint32) (write_pos->write_init_min >> 32), (uint32) write_pos->write_init_min,
 							   (uint32) (write_pos->write_init_opt >> 32), (uint32) write_pos->write_init_opt,
-							   (uint32) (compl >> 32), (uint32) compl, compl - write_upto,
-							   (uint32) (ins >> 32), (uint32) ins, ins - write_upto),
+							   (uint32) (compl >> 32), (uint32) compl, (uint32) (compl - write_upto),
+							   (uint32) (ins >> 32), (uint32) ins, (uint32) (ins - write_upto)),
 						errhidestmt(true),
 						errhidecontext(true));
 
