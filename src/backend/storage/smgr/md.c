@@ -548,11 +548,8 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 
 	while (remblocks > 0)
 	{
-		int fd;
-		int ret;
 		int segstartblock = curblocknum % ((BlockNumber) RELSEG_SIZE);
 		int segendblock = (curblocknum % ((BlockNumber) RELSEG_SIZE)) + remblocks;
-		off_t		seekpos;
 
 		if (segendblock > RELSEG_SIZE)
 			segendblock = RELSEG_SIZE;
@@ -562,18 +559,21 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 		Assert(segstartblock < RELSEG_SIZE);
 		Assert(segendblock <= RELSEG_SIZE);
 
-		seekpos = (off_t) BLCKSZ * segstartblock;
-
-		fd = FileGetRawDesc(v->mdfd_vfd);
 #ifdef HAVE_POSIX_FALLOCATE
-		ret = posix_fallocate(fd,
-							  seekpos,
-							  (off_t) BLCKSZ * (segendblock - segstartblock));
-
-		if (ret != 0 && ret != EINVAL && ret != EOPNOTSUPP)
 		{
-			errno = ret;
-			elog(ERROR, "fallocate failed: %m");
+			int			fd = FileGetRawDesc(v->mdfd_vfd);
+			off_t		seekpos = (off_t) BLCKSZ * segstartblock;
+			int			ret;
+
+			ret = posix_fallocate(fd,
+								  seekpos,
+								  (off_t) BLCKSZ * (segendblock - segstartblock));
+
+			if (ret != 0 && ret != EINVAL && ret != EOPNOTSUPP)
+			{
+				errno = ret;
+				elog(ERROR, "fallocate failed: %m");
+			}
 		}
 #endif
 
