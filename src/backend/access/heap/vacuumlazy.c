@@ -929,6 +929,8 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 	/* see note above about forcing scanning of last page */
 	if (nblocks > 0 && should_attempt_truncation(params, vacrelstats))
 		vss.nblocks_for_skip = nblocks - 1;
+	else
+		vss.nblocks_for_skip = nblocks;
 
 	{
 		int iodepth = Max(Min(128, NBuffers / 128), 1);
