@@ -358,7 +358,7 @@ static void unlink_if_exists_fname(const char *fname, bool isdir, int elevel, ui
 
 static int	fsync_parent_path(const char *fname, int elevel);
 
-static int fsync_fname_open(const char *fname, bool isdir, bool ignore_perm, int elevel);
+static bool fsync_fname_open(const char *fname, bool isdir, bool ignore_perm, int elevel, int *ret);
 static int fsync_fname_close(int fd, bool failed, const char *fname, bool isdir, int elevel);
 
 /*
@@ -3651,8 +3651,7 @@ datadir_fsync_fname(const char *fname, bool isdir, int elevel, uintptr_t state)
 	 * it's probably fine because SyncDataDirectory() is only used in the
 	 * startup process, but ...
 	 */
-	fd = fsync_fname_open(fname, isdir, true, elevel);
-	if (fd < 0)
+	if (!fsync_fname_open(fname, isdir, true, elevel, &fd))
 		return;
 
 	entry = palloc(sizeof(sync_entry));
@@ -3687,11 +3686,16 @@ unlink_if_exists_fname(const char *fname, bool isdir, int elevel, uintptr_t stat
 /*
  * Helper for opening a file as part of fsync_fname_ext() and
  * datadir_fsync_fname(). Split out because the latter uses AIO.
+ *
+ * In case of failure to open the file false is returned; *ret is set to 0 if
+ * the failure does not signal a problem, -1 otherwise.
+ *
+ * If the file was opened successfully, true is returned and *ret is set to
+ * the fd.
  */
-static int
-fsync_fname_open(const char *fname, bool isdir, bool ignore_perm, int elevel)
+static bool
+fsync_fname_open(const char *fname, bool isdir, bool ignore_perm, int elevel, int *ret)
 {
-	int			fd;
 	int			flags;
 
 	/*
@@ -3706,26 +3710,32 @@ fsync_fname_open(const char *fname, bool isdir, bool ignore_perm, int elevel)
 	else
 		flags |= O_RDONLY;
 
-	fd = OpenTransientFile(fname, flags);
+	*ret = OpenTransientFile(fname, flags);
 
 	/*
 	 * Some OSs don't allow us to open directories at all (Windows returns
 	 * EACCES), just ignore the error in that case.  If desired also silently
 	 * ignoring errors about unreadable files. Log others.
 	 */
-	if (fd < 0 && isdir && (errno == EISDIR || errno == EACCES))
-		return 0;
-	else if (fd < 0 && ignore_perm && errno == EACCES)
-		return 0;
-	else if (fd < 0)
+	if (*ret >= 0)
+		return true;
+	else if (isdir && (errno == EISDIR || errno == EACCES))
+	{
+		*ret = 0;
+		return false;
+	}
+	else if (ignore_perm && errno == EACCES)
+	{
+		*ret = 0;
+		return false;
+	}
+	else
 	{
 		ereport(elevel,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m", fname)));
-		return -1;
+		return false;
 	}
-
-	return fd;
 }
 
 /*
@@ -3779,10 +3789,10 @@ fsync_fname_ext(const char *fname, bool isdir, bool ignore_perm, int elevel)
 	int			fd;
 	int			returncode;
 
-	fd = fsync_fname_open(fname, isdir, ignore_perm, elevel);
-
-	if (fd < 0)
+	if (!fsync_fname_open(fname, isdir, ignore_perm, elevel, &fd))
 		return fd;
+
+	Assert(fd >= 0);
 
 	returncode = pg_fsync(fd);
 
