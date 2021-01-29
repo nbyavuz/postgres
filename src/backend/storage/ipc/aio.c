@@ -4502,13 +4502,17 @@ AioWorkerMain(void)
 {
 	/* TODO review all signals */
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
-	pqsignal(SIGINT, StatementCancelHandler);
-	pqsignal(SIGTERM, die);
-	pqsignal(SIGQUIT, SignalHandlerForCrashExit);
+	pqsignal(SIGINT, die); /* to allow manually triggering worker restart */
+	/*
+	 * Ignore SIGTERM, will get explicit shutdown via SIGUSR2 later in the
+	 * shutdown sequence, similar to checkpointer.
+	 */
+	pqsignal(SIGTERM, SIG_IGN);
+	/* SIGQUIT handler was already set up by InitPostmasterChild */
 	pqsignal(SIGALRM, SIG_IGN);
 	pqsignal(SIGPIPE, SIG_IGN);
 	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
-	pqsignal(SIGUSR2, SIG_IGN);
+	pqsignal(SIGUSR2, die);
 	PG_SETMASK(&UnBlockSig);
 
 	for (;;)

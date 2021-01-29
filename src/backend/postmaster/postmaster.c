@@ -328,8 +328,9 @@ typedef enum
 	PM_WAIT_BACKENDS,			/* waiting for live backends to exit */
 	PM_SHUTDOWN,				/* waiting for checkpointer to do shutdown
 								 * ckpt */
-	PM_SHUTDOWN_2,				/* waiting for archiver, walsenders and
-								 * aio workers to finish */
+	PM_SHUTDOWN_2,				/* waiting for archiver and walsenders to
+								 * exit */
+	PM_SHUTDOWN_AIO,			/* waiting for aio workers to exit */
 	PM_WAIT_DEAD_END,			/* waiting for dead_end children to exit */
 	PM_NO_CHILDREN				/* all important children have exited */
 } PMState;
@@ -437,6 +438,7 @@ static bool assign_backendlist_entry(RegisteredBgWorker *rw);
 static void maybe_start_bgworkers(void);
 static bool maybe_reap_aio_worker(int pid);
 static void maybe_adjust_aio_workers(void);
+static void signal_aio_workers(int signal);
 static bool CreateOptsFile(int argc, char *argv[], char *fullprogname);
 static pid_t StartChildProcess(AuxProcType type, int id);
 static void StartAutovacuumWorker(void);
@@ -1407,6 +1409,8 @@ PostmasterMain(int argc, char *argv[])
 	 */
 	AddToDataDirLockFile(LOCK_FILE_LINE_PM_STATUS, PM_STATUS_STARTING);
 
+	pmState = PM_STARTUP;
+
 	/* Make sure we can perform I/O while starting up. */
 	maybe_adjust_aio_workers();
 
@@ -1416,7 +1420,6 @@ PostmasterMain(int argc, char *argv[])
 	StartupPID = StartupDataBase();
 	Assert(StartupPID != 0);
 	StartupStatus = STARTUP_RUNNING;
-	pmState = PM_STARTUP;
 
 	/* Some workers may be scheduled to start now */
 	maybe_start_bgworkers();
@@ -2722,9 +2725,7 @@ SIGHUP_handler(SIGNAL_ARGS)
 			signal_child(SysLoggerPID, SIGHUP);
 		if (PgStatPID != 0)
 			signal_child(PgStatPID, SIGHUP);
-		for (int i = 0; i < MAX_AIO_WORKERS; ++i)
-			if (aio_worker_pids[i] != 0)
-				signal_child(aio_worker_pids[i], SIGHUP);
+		signal_aio_workers(SIGHUP);
 
 		/* Reload authentication config files too */
 		if (!load_hba())
@@ -3243,7 +3244,16 @@ reaper(SIGNAL_ARGS)
 		/* Was it an AIO worker? */
 		if (maybe_reap_aio_worker(pid))
 		{
+			if (!EXIT_STATUS_0(exitstatus) && !EXIT_STATUS_1(exitstatus))
+				HandleChildCrash(pid, exitstatus,_("aio worker"));
+
 			maybe_adjust_aio_workers();
+
+			if (aio_worker_count == 0 &&
+				pmState >= PM_SHUTDOWN_AIO)
+			{
+				pmState = PM_WAIT_DEAD_END;
+			}
 			continue;
 		}
 
@@ -3661,6 +3671,9 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 		signal_child(AutoVacPID, (SendStop ? SIGSTOP : SIGQUIT));
 	}
 
+	/* Take care of aio workers too */
+	signal_aio_workers(SIGQUIT);
+
 	/*
 	 * Force a power-cycle of the pgarch process too.  (This isn't absolutely
 	 * necessary, but it seems like a good idea for robustness, and it
@@ -3691,11 +3704,6 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 		signal_child(PgStatPID, SIGQUIT);
 		allow_immediate_pgstat_restart();
 	}
-
-	/* Stop AIO workers. */
-	for (int i = 0; i < MAX_AIO_WORKERS; ++i)
-		if (aio_worker_pids[i] != 0)
-			signal_child(aio_worker_pids[i], SIGQUIT);
 
 	/* We do NOT restart the syslogger */
 
@@ -3919,12 +3927,16 @@ PostmasterStateMachine(void)
 					FatalError = true;
 					pmState = PM_WAIT_DEAD_END;
 
-					/* Kill the walsenders, archiver and stats collector too */
+					/*
+					 * Kill walsenders, archiver, stats collector and aio
+					 * workers too.
+					 */
 					SignalChildren(SIGQUIT);
 					if (PgArchPID != 0)
 						signal_child(PgArchPID, SIGQUIT);
 					if (PgStatPID != 0)
 						signal_child(PgStatPID, SIGQUIT);
+					signal_aio_workers(SIGQUIT);
 				}
 			}
 		}
@@ -3934,33 +3946,47 @@ PostmasterStateMachine(void)
 	{
 		/*
 		 * PM_SHUTDOWN_2 state ends when there's no other children than
-		 * dead_end children left. There shouldn't be any regular backends
-		 * left by now anyway; what we're really waiting for is walsenders,
-		 * aio workers and archiver.
+		 * dead_end children and aio workers left. There shouldn't be any
+		 * regular backends left by now anyway; what we're really waiting for
+		 * is walsenders and archiver.
 		 */
 		if (PgArchPID == 0 && CountChildren(BACKEND_TYPE_ALL) == 0)
 		{
-			pmState = PM_WAIT_DEAD_END;
+			pmState = PM_SHUTDOWN_AIO;
+			signal_aio_workers(SIGUSR2);
 		}
+	}
+
+	if (pmState == PM_SHUTDOWN_AIO)
+	{
+		/*
+		 * PM_SHUTDOWN_AIO state ends when there's only dead_end children
+		 * left.
+		 */
+		if (aio_worker_count == 0)
+			pmState = PM_WAIT_DEAD_END;
 	}
 
 	if (pmState == PM_WAIT_DEAD_END)
 	{
 		/*
 		 * PM_WAIT_DEAD_END state ends when the BackendList is entirely empty
-		 * (ie, no dead_end children remain), and the archiver and stats
-		 * collector are gone too.
+		 * (ie, no dead_end children remain), and archiver, stats collector
+		 * and aio workers are all gone too.
 		 *
-		 * The reason we wait for those two is to protect them against a new
-		 * postmaster starting conflicting subprocesses; this isn't an
-		 * ironclad protection, but it at least helps in the
-		 * shutdown-and-immediately-restart scenario.  Note that they have
-		 * already been sent appropriate shutdown signals, either during a
-		 * normal state transition leading up to PM_WAIT_DEAD_END, or during
-		 * FatalError processing.
+		 * We need to wait for those because we might have transitioned
+		 * directly to PM_WAIT_DEAD_END due to immediate shutdown or fatal
+		 * error.  Note that they have already been sent appropriate shutdown
+		 * signals, either during a normal state transition leading up to
+		 * PM_WAIT_DEAD_END, or during FatalError processing.
+		 *
+		 * The reason we wait for archiver and stats collector is to protect
+		 * them against a new postmaster starting conflicting subprocesses;
+		 * this isn't an ironclad protection, but it at least helps in the
+		 * shutdown-and-immediately-restart scenario.
 		 */
 		if (dlist_is_empty(&BackendList) &&
-			PgArchPID == 0 && PgStatPID == 0)
+			aio_worker_count == 0 && PgArchPID == 0 && PgStatPID == 0)
 		{
 			/* These other guys should be dead already */
 			Assert(StartupPID == 0);
@@ -4042,10 +4068,14 @@ PostmasterStateMachine(void)
 
 		reset_shared();
 
+		pmState = PM_STARTUP;
+
+		/* Make sure we can perform I/O while starting up. */
+		maybe_adjust_aio_workers();
+
 		StartupPID = StartupDataBase();
 		Assert(StartupPID != 0);
 		StartupStatus = STARTUP_RUNNING;
-		pmState = PM_STARTUP;
 		/* crash recovery started, reset SIGKILL flag */
 		AbortStartTime = 0;
 	}
@@ -4162,9 +4192,7 @@ TerminateChildren(int signal)
 		signal_child(PgArchPID, signal);
 	if (PgStatPID != 0)
 		signal_child(PgStatPID, signal);
-	for (int i = 0; i < MAX_AIO_WORKERS; ++i)
-		if (aio_worker_pids[i] != 0)
-			signal_child(aio_worker_pids[i], signal);
+	signal_aio_workers(signal);
 }
 
 /*
@@ -5913,6 +5941,7 @@ bgworker_should_start_now(BgWorkerStartTime start_time)
 	{
 		case PM_NO_CHILDREN:
 		case PM_WAIT_DEAD_END:
+		case PM_SHUTDOWN_AIO:
 		case PM_SHUTDOWN_2:
 		case PM_SHUTDOWN:
 		case PM_WAIT_BACKENDS:
@@ -6146,13 +6175,27 @@ static void
 maybe_adjust_aio_workers(void)
 {
 	if (aio_type != AIOTYPE_WORKER)
+	{
+		Assert(aio_worker_count == 0);
 		return;
+	}
 
 	/*
 	 * If we're in final shutting down state, then we're just waiting for all
 	 * processes to exit.
 	 */
-	if (pmState == PM_SHUTDOWN_2)
+	if (pmState >= PM_SHUTDOWN_AIO)
+		return;
+	/* Don't start new workers during an immediate shutdown either. */
+	if (Shutdown >= ImmediateShutdown)
+	{
+		return;
+
+	/*
+	 * Don't start new workers if we're in the shutdown phase of a crash
+	 * restart. But we *do* need to start if we're already starting up again.
+	 */
+	if (FatalError && pmState >= PM_STOP_BACKENDS)
 		return;
 
 	/* Not enough running? */
@@ -6169,6 +6212,8 @@ maybe_adjust_aio_workers(void)
 		}
 		if (id == MAX_AIO_WORKERS)
 			elog(ERROR, "could not find a free AIO worker ID");
+
+		Assert(pmState < PM_STOP_BACKENDS);
 
 		/* Try to launch one. */
 		pid = StartAioWorker(id);
@@ -6189,11 +6234,19 @@ maybe_adjust_aio_workers(void)
 		{
 			if (aio_worker_pids[id] != 0)
 			{
-				kill(aio_worker_pids[id], SIGQUIT);
+				kill(aio_worker_pids[id], SIGUSR2);
 				break;
 			}
 		}
 	}
+}
+
+static void
+signal_aio_workers(int signal)
+{
+	for (int i = 0; i < MAX_AIO_WORKERS; ++i)
+		if (aio_worker_pids[i] != 0)
+			signal_child(aio_worker_pids[i], signal);
 }
 
 void
