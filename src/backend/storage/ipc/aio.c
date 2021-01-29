@@ -2067,6 +2067,15 @@ pgaio_submit_pending(bool drain)
 								  /* will_wait */ false);
 }
 
+void
+pgaio_closing_possibly_referenced(void)
+{
+	if (!my_aio)
+		return;
+
+	pgaio_submit_pending(false);
+}
+
 static void
 pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 {

@@ -117,6 +117,8 @@ struct dlist_head;
 extern void pgaio_print_list(struct dlist_head *head, struct StringInfoData *s, size_t offset);
 extern void pgaio_submit_pending(bool drain);
 
+extern void pgaio_closing_possibly_referenced(void);
+
 extern void pgaio_io_ref(PgAioInProgress *io, PgAioIoRef *ref);
 
 

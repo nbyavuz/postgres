@@ -1210,7 +1210,7 @@ LruDelete(File file)
 
 	vfdP = &VfdCache[file];
 
-	pgaio_submit_pending(false);
+	pgaio_closing_possibly_referenced();
 
 	/*
 	 * Close the file.  We aren't expecting this to fail; if it does, better
@@ -1891,7 +1891,7 @@ FileClose(File file)
 
 	if (!FileIsNotOpen(file))
 	{
-		pgaio_submit_pending(false);
+		pgaio_closing_possibly_referenced();
 
 		/* close the file */
 		if (close(vfdP->fd) != 0)
@@ -2666,7 +2666,7 @@ FreeDesc(AllocateDesc *desc)
 			result = closedir(desc->desc.dir);
 			break;
 		case AllocateDescRawFD:
-			pgaio_submit_pending(false);
+			pgaio_closing_possibly_referenced();
 			result = close(desc->desc.fd);
 			break;
 		default:
@@ -2735,7 +2735,7 @@ CloseTransientFile(int fd)
 	/* Only get here if someone passes us a file not in allocatedDescs */
 	elog(WARNING, "fd passed to CloseTransientFile was not obtained from OpenTransientFile");
 
-	pgaio_submit_pending(false);
+	pgaio_closing_possibly_referenced();
 
 	return close(fd);
 }
