@@ -625,7 +625,7 @@ SetLatch(Latch *latch)
 			sendSelfPipeByte();
 #else
 		if (waiting)
-			raise(SIGURG);
+			kill(MyProcPid, SIGURG);
 #endif
 	}
 	else
