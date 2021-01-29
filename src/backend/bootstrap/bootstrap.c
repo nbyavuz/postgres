@@ -408,10 +408,10 @@ AuxiliaryProcessMain(int argc, char *argv[])
 			ProcSignalInit(MaxBackends + MAX_AIO_WORKERS + MyAuxProcType + 1);
 		}
 
+		pgaio_postmaster_child_init();
+
 		/* finish setting up bufmgr.c */
 		InitBufferPoolBackend();
-
-		pgaio_postmaster_child_init();
 
 		/*
 		 * Auxiliary processes don't run transactions, but they may need a

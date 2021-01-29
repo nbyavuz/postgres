@@ -624,12 +624,14 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 		RegisterTimeout(IDLE_SESSION_TIMEOUT, IdleSessionTimeoutHandler);
 	}
 
+	/* in bootstrap this is already set up */
+	if (!bootstrap)
+		pgaio_postmaster_child_init();
+
 	/*
 	 * bufmgr needs another initialization call too
 	 */
 	InitBufferPoolBackend();
-
-	pgaio_postmaster_child_init();
 
 	/*
 	 * Initialize local process's access to XLOG.

@@ -1100,11 +1100,15 @@ pgaio_postmaster_child_exit(int code, Datum arg)
 
 	Assert(my_aio->foreign_completed_count == 0);
 	Assert(dlist_is_empty(&my_aio->foreign_completed));
+
+	my_aio = NULL;
 }
 
 void
 pgaio_postmaster_child_init(void)
 {
+	Assert(!my_aio);
+
 #ifdef USE_LIBURING
 	if (aio_type == AIOTYPE_LIBURING)
 	{
@@ -2061,6 +2065,8 @@ pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, boo
 void pg_noinline
 pgaio_submit_pending(bool drain)
 {
+	Assert(my_aio);
+
 	pgaio_submit_pending_internal(drain,
 								  /* call_shared */ drain,
 								  /* call_local */ drain,
