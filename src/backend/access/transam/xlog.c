@@ -2663,6 +2663,58 @@ XLogCheckpointNeeded(XLogSegNo new_segno)
 	return false;
 }
 
+
+static LWLockWaitCheckRes
+XLogWriteLockCheck(LWLock *lock, LWLockMode mode, uint64_t cb_data)
+{
+	XLogRecPtr cur_write_init = XLogCtl->LogwrtResult.WriteInit;
+
+	Assert(lock == WALWriteLock && mode == LW_EXCLUSIVE);
+	Assert(cb_data == MyProc->lwWaitData);
+
+	if (cb_data <= cur_write_init)
+	{
+		if (0)
+			elog(DEBUG1, "writelockcheck %X/%X to %X/%X: %d",
+				 (uint32)(cur_write_init >> 32), (uint32) cur_write_init,
+				 (uint32)(cb_data >> 32), (uint32)cb_data,
+				 (int32)(cb_data - cur_write_init));
+
+		return LW_WAIT_DONE;
+	}
+	else
+	{
+		return LW_WAIT_NEEDS_LOCK;
+	}
+}
+
+static LWLockWaitCheckRes
+XLogWriteWakeCheck(LWLock *lock, LWLockMode mode, struct PGPROC *wakee, uint64_t cb_data)
+{
+	XLogRecPtr cur_write_init = XLogCtl->LogwrtResult.WriteInit;
+
+	if (wakee->lwWaitData <= cur_write_init)
+	{
+		if (0)
+			elog(DEBUG1, "wake: nolock: %X/%X to %X/%X: %d",
+				 (uint32)(wakee->lwWaitData >> 32), (uint32)wakee->lwWaitData,
+				 (uint32)(cur_write_init >> 32), (uint32) cur_write_init,
+				 (int32)(cur_write_init - wakee->lwWaitData));
+
+		return LW_WAIT_DONE;
+	}
+	else
+	{
+		if (0)
+			elog(DEBUG1, "wake: lock: %X/%X to %X/%X: %d",
+				 (uint32)(wakee->lwWaitData >> 32), (uint32) wakee->lwWaitData,
+				 (uint32)(cur_write_init >> 32), (uint32) cur_write_init,
+				 (int32)(cur_write_init - wakee->lwWaitData));
+
+		return LW_WAIT_NEEDS_LOCK;
+	}
+}
+
 static void
 XLogIOQueueCheck(XLogIOQueue *queue)
 {
@@ -2882,8 +2934,9 @@ XLogIOQueueWaitFor(XLogIOQueue *queue, XLogRecPtr lsn, bool release_write_lock)
 			if (pgaio_io_check_ref(&aio_refs[i]))
 				continue;
 
-			//elog(DEBUG1, "WALWriteLock wait");
-			LWLockRelease(WALWriteLock);
+			//elog(DEBUG1, "WALWriteLock rel due to wait");
+			Assert(LogwrtResult.WriteInit == XLogCtl->LogwrtResult.WriteInit);
+			LWLockReleaseEx(WALWriteLock, XLogWriteWakeCheck, LogwrtResult.WriteInit);
 			released_lock = true;
 		}
 		pgaio_io_wait_ref(&aio_refs[i], false);
@@ -2933,8 +2986,9 @@ XLogIOQueueEnsureOne(XLogIOQueue *queue)
 		if (io->in_progress)
 		{
 			LWLockRelease(WALIOQueueLock);
-			//elog(DEBUG1, "WALWriteLock ensure");
-			LWLockRelease(WALWriteLock);
+			//elog(DEBUG1, "WALWriteLock rel XLogIOQueueEnsureOne");
+			Assert(LogwrtResult.WriteInit == XLogCtl->LogwrtResult.WriteInit);
+			LWLockReleaseEx(WALWriteLock, XLogWriteWakeCheck, LogwrtResult.WriteInit);
 
 			pgaio_submit_pending(true);
 
@@ -3657,6 +3711,7 @@ XLogWrite(XLogwrtRqst WriteRqstTmp, bool flexible)
 	XLogWritePos write_pos = {0};
 	bool		statted = false;
 	bool		did_wait_for_insert = false;
+	bool		tried_lock = false;
 
 	/* normalize request */
 	write_pos.write_init_min = WriteRqstTmp.WriteInit;
@@ -3792,8 +3847,12 @@ xlogwrite_again:
 		}
 	}
 
-	if (!LWLockAcquireOrWait(WALWriteLock, LW_EXCLUSIVE))
+	if (!performed_io && tried_lock)
+		elog(DEBUG1, "about to again wait for lock");
+
+	if (!LWLockAcquireEx(WALWriteLock, LW_EXCLUSIVE, XLogWriteLockCheck, write_pos.write_init_min))
 	{
+		tried_lock = true;
 		holding_lock = false;
 		pgWalUsage.wal_lock_wait++;
 		goto xlogwrite_again;
@@ -3816,7 +3875,8 @@ xlogwrite_again:
 	{
 		Assert(holding_lock);
 		//elog(DEBUG1, "WALWriteLock already fulfilled");
-		LWLockRelease(WALWriteLock);
+		Assert(LogwrtResult.WriteInit == XLogCtl->LogwrtResult.WriteInit);
+		LWLockReleaseEx(WALWriteLock, XLogWriteWakeCheck, LogwrtResult.WriteInit);
 		holding_lock = false;
 
 		if (AmWalWriterProcess())
@@ -4040,7 +4100,8 @@ xlogwrite_again:
 	}
 
 	Assert(holding_lock);
-	LWLockRelease(WALWriteLock);
+	Assert(LogwrtResult.WriteInit == XLogCtl->LogwrtResult.WriteInit);
+	LWLockReleaseEx(WALWriteLock, XLogWriteWakeCheck, LogwrtResult.WriteInit);
 
 	END_CRIT_SECTION();
 	return performed_io;
