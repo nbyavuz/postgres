@@ -529,7 +529,7 @@ static void pgaio_worker_do(PgAioInProgress *io);
 #ifdef USE_LIBURING
 /* io_uring related functions */
 static int pgaio_uring_submit(int max_submit, bool drain);
-static int pgaio_uring_drain(PgAioContext *context, bool call_shared);
+static int pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared);
 static void pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 generation, uint32 wait_event_info);
 
 static void pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, struct io_uring_sqe *sqe);
@@ -1685,7 +1685,7 @@ pgaio_call_local_callbacks(bool in_error)
  * Receive completions in ring.
  */
 static int pg_noinline
-pgaio_drain(PgAioContext *context, bool call_shared, bool call_local)
+pgaio_drain(PgAioContext *context, bool block, bool call_shared, bool call_local)
 {
 	int ndrained = 0;
 
@@ -1698,7 +1698,7 @@ pgaio_drain(PgAioContext *context, bool call_shared, bool call_local)
 	}
 #ifdef USE_LIBURING
 	else if (aio_type == AIOTYPE_LIBURING)
-		ndrained = pgaio_uring_drain(context, call_shared);
+		ndrained = pgaio_uring_drain(context, block, call_shared);
 #endif
 
 	if (call_shared)
@@ -2315,7 +2315,9 @@ wait_ref_again:
 
 		if (flags & PGAIOIP_INFLIGHT)
 		{
-			pgaio_drain(&aio_ctl->contexts[io->ring], call_shared, call_local);
+			pgaio_drain(&aio_ctl->contexts[io->ring],
+						/* block = */ false,
+						call_shared, call_local);
 
 			flags = io->flags;
 			pg_read_barrier();
@@ -2462,7 +2464,10 @@ pgaio_io_check_ref(PgAioIoRef *ref)
 		return true;
 
 	if (flags & PGAIOIP_INFLIGHT)
-		pgaio_drain(context, /* call_shared = */ true, /* call_local = */ false);
+		pgaio_drain(context,
+					/* block = */ false,
+					/* call_shared = */ true,
+					/* call_local = */ false);
 
 	flags = io->flags;
 	pg_read_barrier();
@@ -2521,7 +2526,9 @@ pgaio_io_get(void)
 		 */
 		for (int i = 0; i < aio_ctl->num_contexts; i++)
 			pgaio_drain(&aio_ctl->contexts[i],
-						/* call_shared = */ true, /* call_local = */ true);
+						/* block = */ true,
+						/* call_shared = */ true,
+						/* call_local = */ true);
 
 		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 	}
@@ -3213,6 +3220,7 @@ pgaio_bounce_buffer_get(void)
 
 			for (int i = 0; i < aio_ctl->num_contexts; i++)
 				pgaio_drain(&aio_ctl->contexts[i],
+							/* block = */ true,
 							/* call_shared = */ true,
 							/* call_local = */ true);
 		}
@@ -3429,6 +3437,7 @@ again:
 	/* callbacks will be called later, by pgaio_submit_pending_internal() */
 	if (drain)
 		pgaio_drain(context,
+					/* block = */ false,
 					/* call_shared = */ false,
 					/* call_local = */ false);
 
@@ -3502,7 +3511,7 @@ pgaio_uring_drain_locked(PgAioContext *context)
 }
 
 static int
-pgaio_uring_drain(PgAioContext *context, bool call_shared)
+pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared)
 {
 	uint32 processed = 0;
 
@@ -3510,22 +3519,30 @@ pgaio_uring_drain(PgAioContext *context, bool call_shared)
 
 	while (io_uring_cq_ready(&context->io_uring_ring))
 	{
-		if (LWLockAcquireOrWait(&context->completion_lock, LW_EXCLUSIVE))
+		if (block)
 		{
-			processed = pgaio_uring_drain_locked(context);
-
-			/*
-			 * If allowed, call shared callbacks under lock - that prevent
-			 * other backends to first have to wait on the completion_lock for
-			 * pgaio_uring_wait_one, then again below pgaio_drain(), and then
-			 * again on the condition variable for the AIO.
-			 */
-			if (call_shared)
-				pgaio_complete_ios(false);
-
-			LWLockRelease(&context->completion_lock);
-			break;
+			if (!LWLockAcquireOrWait(&context->completion_lock, LW_EXCLUSIVE))
+				continue;
 		}
+		else
+		{
+			if (!LWLockConditionalAcquire(&context->completion_lock, LW_EXCLUSIVE))
+				break;
+		}
+
+		processed = pgaio_uring_drain_locked(context);
+
+		/*
+		 * If allowed, call shared callbacks under lock - that prevent
+		 * other backends to first have to wait on the completion_lock for
+		 * pgaio_uring_wait_one, then again below pgaio_drain(), and then
+		 * again on the condition variable for the AIO.
+		 */
+		if (call_shared)
+			pgaio_complete_ios(false);
+
+		LWLockRelease(&context->completion_lock);
+		break;
 	}
 
 	return processed;
