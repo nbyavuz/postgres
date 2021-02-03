@@ -60,14 +60,26 @@ task:
   name: Linux
   container:
     dockerfile: ci/LinuxDockerfile
+    # kvm avoids the use of a broken kernel version - there's probably a better approach
+    kvm: true
   env:
     CCACHE_SIZE: "500M"
     CCACHE_DIR: "/tmp/ccache_dir"
   ccache_cache:
     folder: "/tmp/ccache_dir"
+  early_info_script:
+    - id
+    - uname -a
+    - cat /proc/cmdline || true
+    - ulimit -a -H
+    - ulimit -a -S
   create_user_script:
     - useradd -m postgres
     - chown -R postgres:postgres .
+    # kvm kernel / image uses a low default ulimit
+    - echo '* - memlock 134217728' > /etc/security/limits.d/postgres.conf
+    - su postgres -c 'ulimit -l -H'
+    - su postgres -c 'ulimit -l -S'
   build_script:
     - su postgres -c './configure --enable-cassert --enable-debug --enable-tap-tests --with-liburing --with-tcl --with-python --with-perl --with-ldap --with-openssl --with-icu --with-llvm CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"'
     - su postgres -c 'make -s -j4'
