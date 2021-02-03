@@ -323,6 +323,14 @@ typedef struct PgAioIovec
 	struct iovec iovec[PGAIO_MAX_COMBINE];
 } PgAioIovec;
 
+#ifdef USE_LIBURING
+typedef struct PgAioUringWaitRef
+{
+	PgAioInProgress *aio;
+	struct PgAioContext *context;
+	uint64 ref_generation;
+} PgAioUringWaitRef;
+#endif
 
 /*
  * XXX: Really want a proclist like structure that works with integer
@@ -432,6 +440,9 @@ typedef struct PgAioPerBackend
 	uint64 foreign_completed_total_count;
 	uint64 retry_total_count;
 
+#ifdef USE_LIBURING
+	PgAioUringWaitRef wr;
+#endif
 } PgAioPerBackend;
 
 typedef struct PgAioContext
@@ -1142,6 +1153,10 @@ pgaio_postmaster_child_init(void)
 	my_aio->submissions_total_count = 0;
 	my_aio->foreign_completed_total_count = 0;
 	my_aio->retry_total_count = 0;
+
+	my_aio->wr.context = NULL;
+	my_aio->wr.aio = NULL;
+	my_aio->wr.ref_generation = PG_UINT32_MAX;
 }
 
 void
@@ -3510,6 +3525,63 @@ pgaio_uring_drain_locked(PgAioContext *context)
 	return processed;
 }
 
+static LWLockWaitCheckRes
+pgaio_uring_completion_check_wait(LWLock *lock, LWLockMode mode, uint64_t cb_data)
+{
+	PgAioUringWaitRef *wr = (PgAioUringWaitRef*) cb_data;
+
+	if (wr->aio == NULL)
+	{
+		return LW_WAIT_DONE;
+	}
+	else
+	{
+		PgAioUringWaitRef *wr = (PgAioUringWaitRef*) cb_data;
+		PgAioIPFlags flags;
+
+		flags = wr->aio->flags;
+
+		pg_read_barrier();
+
+		if (wr->ref_generation == wr->aio->generation &&
+			(flags & PGAIOIP_INFLIGHT))
+		{
+			return LW_WAIT_NEEDS_LOCK;
+		}
+		else
+		{
+			return LW_WAIT_DONE;
+		}
+	}
+}
+
+static LWLockWaitCheckRes
+pgaio_uring_completion_check_wake(LWLock *lock, LWLockMode mode, struct PGPROC *wakee, uint64_t cb_data)
+{
+	PgAioUringWaitRef *wr = (PgAioUringWaitRef*) wakee->lwWaitData;
+
+	if (wr->aio == NULL)
+		return LW_WAIT_NEEDS_LOCK;
+	else
+	{
+		PgAioIPFlags flags;
+
+		flags = wr->aio->flags;
+
+		pg_read_barrier();
+
+		if (wr->ref_generation == wr->aio->generation &&
+			(flags & PGAIOIP_INFLIGHT))
+		{
+			return LW_WAIT_NEEDS_LOCK;
+		}
+		else
+		{
+			return LW_WAIT_DONE;
+		}
+	}
+}
+
 static int
 pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared)
 {
@@ -3521,8 +3593,18 @@ pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared)
 	{
 		if (block)
 		{
-			if (!LWLockAcquireOrWait(&context->completion_lock, LW_EXCLUSIVE))
+			Assert(my_aio->wr.context == NULL);
+			Assert(my_aio->wr.aio == NULL);
+			Assert(my_aio->wr.ref_generation == UINT32_MAX);
+
+			my_aio->wr.context = context;
+
+			if (!LWLockAcquireEx(&context->completion_lock, LW_EXCLUSIVE,
+								pgaio_uring_completion_check_wait, (uint64) &my_aio->wr))
+			{
+				my_aio->wr.context = NULL;
 				continue;
+			}
 		}
 		else
 		{
@@ -3541,7 +3623,9 @@ pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared)
 		if (call_shared)
 			pgaio_complete_ios(false);
 
-		LWLockRelease(&context->completion_lock);
+		LWLockReleaseEx(&context->completion_lock,
+						pgaio_uring_completion_check_wake, 0);
+		my_aio->wr.context = NULL;
 		break;
 	}
 
@@ -3554,9 +3638,18 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_gene
 	PgAioIPFlags flags;
 	int loops = 0;
 
+	Assert(my_aio->wr.context == NULL);
+	Assert(my_aio->wr.aio == NULL);
+	Assert(my_aio->wr.ref_generation == UINT32_MAX);
+
+	my_aio->wr.context = context;
+	my_aio->wr.aio = io;
+	my_aio->wr.ref_generation = ref_generation;
+
 uring_wait_one_again:
 
-	if (LWLockAcquireOrWait(&context->completion_lock, LW_EXCLUSIVE))
+	if (LWLockAcquireEx(&context->completion_lock, LW_EXCLUSIVE,
+						pgaio_uring_completion_check_wait, (uint64) &my_aio->wr))
 	{
 		ereport(DEBUG3,
 				errmsg("[%d] got the lock, before waiting for %zu/%llu, %d ready",
@@ -3652,7 +3745,8 @@ uring_wait_one_again:
 			pgaio_complete_ios(false);
 		}
 
-		LWLockRelease(&context->completion_lock);
+		LWLockReleaseEx(&context->completion_lock,
+						pgaio_uring_completion_check_wake, 0);
 	}
 	else
 	{
@@ -3685,6 +3779,10 @@ uring_wait_one_again:
 				errhidecontext(true));
 		goto uring_wait_one_again;
 	}
+
+	my_aio->wr.context = NULL;
+	my_aio->wr.aio = NULL;
+	my_aio->wr.ref_generation = PG_UINT32_MAX;
 }
 
 static void
