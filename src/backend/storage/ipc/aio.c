@@ -3535,6 +3535,9 @@ static void
 pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info)
 {
 	PgAioIPFlags flags;
+	int loops = 0;
+
+uring_wait_one_again:
 
 	if (LWLockAcquireOrWait(&context->completion_lock, LW_EXCLUSIVE))
 	{
@@ -3643,6 +3646,27 @@ pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_gene
 					   io_uring_cq_ready(&context->io_uring_ring)),
 				errhidestmt(true),
 				errhidecontext(true));
+	}
+
+	/*
+	 * If the IO is still INFLIGHT (e.g. we just got completions for other
+	 * IOs, or didn't get the lock), try again. We could return to
+	 * pgaio_io_wait_ref_int(), but it's a bit more efficient to loop here.
+	 */
+	flags = io->flags;
+	pg_read_barrier();
+	if (io->generation == ref_generation &&
+		(flags & PGAIOIP_INFLIGHT))
+	{
+		loops++;
+		ereport(DEBUG3,
+				errmsg("[%d] will need to wait on %zu/%lu again, %d loops",
+					   (int)(context - aio_ctl->contexts),
+					   io - aio_ctl->in_progress_io, io->generation,
+					   loops),
+				errhidestmt(true),
+				errhidecontext(true));
+		goto uring_wait_one_again;
 	}
 }
 
