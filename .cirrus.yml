@@ -90,6 +90,7 @@ task:
     - echo aio_type=io_uring > /tmp/extra.conf
     - echo io_data_direct=on >> /tmp/extra.conf
     - echo io_wal_direct=on >> /tmp/extra.conf
+    - echo restart_after_crash=false >> /tmp/extra.conf
     - su postgres -c 'TEMP_CONFIG=/tmp/extra.conf make -s check'
   on_failure:
     debug_script:
