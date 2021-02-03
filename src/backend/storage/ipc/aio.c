@@ -1245,7 +1245,7 @@ pgaio_process_io_rw_completion(PgAioInProgress *myio,
 
 		ereport(DEBUG1,
 				errcode_for_file_access(),
-				errmsg("aio %zd: failed to %s:%s of %u-%u bytes at offset %llu+%u: %s",
+				errmsg("aio %zd: failed to %s: %s of %u-%u bytes at offset %llu+%u: %s",
 					   myio - aio_ctl->in_progress_io,
 					   pgaio_io_operation_string(myio->op),
 					   pgaio_io_shared_callback_string(myio->scb),
