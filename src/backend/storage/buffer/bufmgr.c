@@ -485,6 +485,7 @@ static BufferDesc *ReadBuffer_start(SMgrRelation smgr, char relpersistence, Fork
 static bool PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy);
 static void PinBuffer_Locked(BufferDesc *buf);
 static void UnpinBuffer(BufferDesc *buf, bool fixOwner);
+static void LockSharedBufferExclusive(BufferDesc *buf);
 static void BufferSync(int flags);
 static uint32 WaitBufHdrUnlocked(BufferDesc *buf);
 static int	BgBufferSyncWriteOne(int buf_id, bool skip_recently_used,
@@ -966,6 +967,9 @@ ReadBuffer_extend(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	 * difference between an exclusive lock and a cleanup-strength lock. (Note
 	 * that we cannot use LockBuffer() or LockBufferForCleanup() here, because
 	 * they assert that the buffer is already valid.)
+	 *
+	 * Because the buffer isn't valid it's safe to not use
+	 * LockSharedBufferExclusive().
 	 */
 	if ((mode == RBM_ZERO_AND_LOCK || mode == RBM_ZERO_AND_CLEANUP_LOCK) &&
 		!isLocalBuf)
@@ -1055,8 +1059,7 @@ ReadBuffer_start(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 		if (!isLocalBuf)
 		{
 			if (mode == RBM_ZERO_AND_LOCK)
-				LWLockAcquire(BufferDescriptorGetContentLock(bufHdr),
-							  LW_EXCLUSIVE);
+				LockSharedBufferExclusive(bufHdr);
 			else if (mode == RBM_ZERO_AND_CLEANUP_LOCK)
 				LockBufferForCleanup(BufferDescriptorGetBuffer(bufHdr));
 		}
@@ -4916,6 +4919,47 @@ UnlockBuffers(void)
 	}
 }
 
+static LWLockWaitCheckRes
+BufferLockWaitCheckUnderIO(LWLock *lock, LWLockMode mode, uint64_t cb_data)
+{
+	BufferDesc *buf = (BufferDesc *) cb_data;
+	uint32 buf_state = pg_atomic_read_u32(&buf->state);
+
+	/* we have the buffer pinned */
+	Assert(buf_state & BM_VALID);
+
+	if (buf_state & BM_IO_IN_PROGRESS)
+		return LW_WAIT_DONE;
+	else
+		return LW_WAIT_NEEDS_LOCK;
+}
+
+/*
+ * The buffer could be in the process of being asynchronously written
+ * out. In that case the IO is share-locked, so we'd not be able to
+ * acquire the lock until the IO is completed, presumably by the
+ * owner. Even if deadlock risks could be avoided, that'd be
+ * problematic, because we'd have to wait for the owner to do so.
+ *
+ * To avoid that risk / issue, BufferLockWaitCheckUnderIO checks if
+ * there is currently IO in progress, and if not, causes
+ * LWLockAcquireEx() to return false. Most of the time
+ * LWLockAcquireEx() will acquire the exclusive lock immediately, in
+ * which case BufferLockWaitCheckUnderIO won't get called (there can't
+ * be write IO in progress without a lock).
+ */
+static void
+LockSharedBufferExclusive(BufferDesc *buf)
+{
+	while (unlikely(!LWLockAcquireEx(BufferDescriptorGetContentLock(buf),
+									 LW_EXCLUSIVE,
+									 BufferLockWaitCheckUnderIO,
+									 (uint64) buf)))
+	{
+		WaitIO(buf);
+	}
+}
+
 /*
  * Acquire or release the content_lock for the buffer.
  */
@@ -4935,7 +4979,7 @@ LockBuffer(Buffer buffer, int mode)
 	else if (mode == BUFFER_LOCK_SHARE)
 		LWLockAcquire(BufferDescriptorGetContentLock(buf), LW_SHARED);
 	else if (mode == BUFFER_LOCK_EXCLUSIVE)
-		LWLockAcquire(BufferDescriptorGetContentLock(buf), LW_EXCLUSIVE);
+		LockSharedBufferExclusive(buf);
 	else
 		elog(ERROR, "unrecognized buffer lock mode: %d", mode);
 }
