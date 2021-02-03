@@ -2191,8 +2191,9 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 	smgrzeroextend(relation->rd_smgr, forkNum, start_nblocks,
 				   extendby, false);
 
-	/* Ensure taht the returned buffer cannot be reached by another backend first */
-	LWLockAcquire(BufferDescriptorGetContentLock(return_buf_hdr), LW_EXCLUSIVE);
+	/* Ensure that the returned buffer cannot be reached by another backend first */
+	LWLockAcquire(BufferDescriptorGetContentLock(return_buf_hdr),
+				  LW_EXCLUSIVE);
 
 	/* Mark all buffers as having completed */
 	dlist_foreach(iter, &be_state->acquired_buffers)
