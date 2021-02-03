@@ -11,7 +11,7 @@ task:
     - pw useradd postgres
     - chown -R postgres:postgres .
   build_script:
-    - su postgres -c './configure --enable-cassert --enable-debug --enable-tap-tests --with-posix-aio --with-includes=/usr/local/include --with-libs=/usr/local/lib'
+    - su postgres -c './configure --enable-cassert --enable-debug --enable-tap-tests --with-includes=/usr/local/include --with-libs=/usr/local/lib'
     - su postgres -c 'make -s -j4'
   freebsd_worker_buf_script:
     - su postgres -c 'echo aio_type=worker > /tmp/extra.conf'
@@ -20,16 +20,6 @@ task:
     - su postgres -c 'TEMP_CONFIG=/tmp/extra.conf make -s check'
   freebsd_worker_dio_script:
     - su postgres -c 'echo aio_type=worker > /tmp/extra.conf'
-    - su postgres -c 'echo io_data_direct=on >> /tmp/extra.conf'
-    - su postgres -c 'echo io_wal_direct=on >> /tmp/extra.conf'
-    - su postgres -c 'TEMP_CONFIG=/tmp/extra.conf make -s check'
-  freebsd_posix_buf_script:
-    - su postgres -c 'echo aio_type=posix > /tmp/extra.conf'
-    - su postgres -c 'echo io_data_direct=off >> /tmp/extra.conf'
-    - su postgres -c 'echo io_wal_direct=off >> /tmp/extra.conf'
-    - su postgres -c 'TEMP_CONFIG=/tmp/extra.conf make -s check'
-  freebsd_posix_dio_script:
-    - su postgres -c 'echo aio_type=posix > /tmp/extra.conf'
     - su postgres -c 'echo io_data_direct=on >> /tmp/extra.conf'
     - su postgres -c 'echo io_wal_direct=on >> /tmp/extra.conf'
     - su postgres -c 'TEMP_CONFIG=/tmp/extra.conf make -s check'
@@ -46,7 +36,7 @@ task:
     - cpan -T IPC::Run
   build_script:
     - export PERL5LIB=~/perl5/lib/perl5
-    - ./configure --prefix=$HOME/install --enable-cassert --enable-debug --enable-tap-tests --with-posix-aio --without-readline
+    - ./configure --prefix=$HOME/install --enable-cassert --enable-debug --enable-tap-tests --without-readline
     - make -s -j12
     - make -s install
   macos_worker_buf_script:
@@ -58,18 +48,6 @@ task:
   macos_worker_dio_script:
     - export PERL5LIB=~/perl5/lib/perl5
     - echo aio_type=worker > /tmp/extra.conf
-    - echo io_data_direct=on >> /tmp/extra.conf
-    - echo io_wal_direct=on >> /tmp/extra.conf
-    - TEMP_CONFIG=/tmp/extra.conf make -s check
-  macos_posix_buf_script:
-    - export PERL5LIB=~/perl5/lib/perl5
-    - echo aio_type=posix > /tmp/extra.conf
-    - echo io_data_direct=off >> /tmp/extra.conf
-    - echo io_wal_direct=off >> /tmp/extra.conf
-    - TEMP_CONFIG=/tmp/extra.conf make -s check
-  macos_posix_dio_script:
-    - export PERL5LIB=~/perl5/lib/perl5
-    - echo aio_type=posix > /tmp/extra.conf
     - echo io_data_direct=on >> /tmp/extra.conf
     - echo io_wal_direct=on >> /tmp/extra.conf
     - TEMP_CONFIG=/tmp/extra.conf make -s check
