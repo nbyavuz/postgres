@@ -5343,7 +5343,7 @@ WaitIO(BufferDesc *buf)
 
 		if (pgaio_io_ref_valid(&aio_ref))
 		{
-			pgaio_io_wait_ref(&aio_ref, true);
+			pgaio_io_wait_ref(&aio_ref, false);
 			ConditionVariablePrepareToSleep(cv);
 			continue;
 		}
