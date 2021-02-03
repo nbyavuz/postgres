@@ -4922,7 +4922,7 @@ UnlockBuffers(void)
 static LWLockWaitCheckRes
 BufferLockWaitCheckUnderIO(LWLock *lock, LWLockMode mode, uint64_t cb_data)
 {
-	BufferDesc *buf = (BufferDesc *) cb_data;
+	BufferDesc *buf = (BufferDesc *) (uintptr_t) cb_data;
 	uint32 buf_state = pg_atomic_read_u32(&buf->state);
 
 	/* we have the buffer pinned */
@@ -4954,7 +4954,7 @@ LockSharedBufferExclusive(BufferDesc *buf)
 	while (unlikely(!LWLockAcquireEx(BufferDescriptorGetContentLock(buf),
 									 LW_EXCLUSIVE,
 									 BufferLockWaitCheckUnderIO,
-									 (uint64) buf)))
+									 (uint64)(uintptr_t) buf)))
 	{
 		WaitIO(buf);
 	}
