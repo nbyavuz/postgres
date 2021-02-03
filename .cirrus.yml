@@ -1,5 +1,9 @@
 # Special .cirrus.yml file to test combination of AIO/DIO features.  WIP.
 
+env:
+  # accelerate initial clone
+  CIRRUS_CLONE_DEPTH: 1
+
 task:
   name: FreeBSD
   freebsd_instance:
