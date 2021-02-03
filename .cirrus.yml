@@ -60,11 +60,16 @@ task:
   name: Linux
   container:
     dockerfile: ci/LinuxDockerfile
+  env:
+    CCACHE_SIZE: "500M"
+    CCACHE_DIR: "/tmp/ccache_dir"
+  ccache_cache:
+    folder: "/tmp/ccache_dir"
   create_user_script:
     - useradd -m postgres
     - chown -R postgres:postgres .
   build_script:
-    - su postgres -c './configure --enable-cassert --enable-debug --enable-tap-tests --with-liburing --with-tcl --with-python --with-perl --with-ldap --with-openssl --with-icu --with-llvm'
+    - su postgres -c './configure --enable-cassert --enable-debug --enable-tap-tests --with-liburing --with-tcl --with-python --with-perl --with-ldap --with-openssl --with-icu --with-llvm CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"'
     - su postgres -c 'make -s -j4'
   linux_worker_buf_script:
     - echo aio_type=worker > /tmp/extra.conf
