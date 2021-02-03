@@ -1801,8 +1801,8 @@ LWLockUpdateVar(LWLock *lock, uint64 *valptr, uint64 val)
 	}
 }
 
-void
-LWLockReleaseUnowned(LWLock *lock, LWLockMode mode)
+static void
+LWLockReleaseInternal(LWLock *lock, LWLockMode mode)
 {
 	uint32		oldstate;
 	bool		check_waiters;
@@ -1853,6 +1853,12 @@ LWLockReleaseUnowned(LWLock *lock, LWLockMode mode)
 	TRACE_POSTGRESQL_LWLOCK_RELEASE(T_NAME(lock));
 }
 
+void
+LWLockReleaseUnowned(LWLock *lock, LWLockMode mode)
+{
+	LWLockReleaseInternal(lock, mode);
+}
+
 /*
  * XXX: this doesn't do a RESUME_INTERRUPTS(), responsibility of the caller.
  */
@@ -1894,7 +1900,7 @@ LWLockRelease(LWLock *lock)
 
 	PRINT_LWDEBUG("LWLockRelease", lock, mode);
 
-	LWLockReleaseUnowned(lock, mode);
+	LWLockReleaseInternal(lock, mode);
 
 	/*
 	 * Now okay to allow cancel/die interrupts.
