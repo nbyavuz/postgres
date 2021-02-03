@@ -2302,10 +2302,7 @@ wait_ref_again:
 
 	while (true)
 	{
-		PgAioContext *context;
-
 		flags = io->flags;
-		context = &aio_ctl->contexts[io->ring];
 		pg_read_barrier();
 
 		if (io->generation != ref_generation)
@@ -2318,10 +2315,9 @@ wait_ref_again:
 
 		if (flags & PGAIOIP_INFLIGHT)
 		{
-			pgaio_drain(context, call_shared, call_local);
+			pgaio_drain(&aio_ctl->contexts[io->ring], call_shared, call_local);
 
 			flags = io->flags;
-			context = &aio_ctl->contexts[io->ring];
 			pg_read_barrier();
 
 			if (io->generation != ref_generation)
@@ -2349,8 +2345,10 @@ wait_ref_again:
 				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
 #ifdef USE_LIBURING
 			else if (aio_type == AIOTYPE_LIBURING)
-				pgaio_uring_wait_one(context, io, ref_generation,
+			{
+				pgaio_uring_wait_one(&aio_ctl->contexts[io->ring], io, ref_generation,
 									 WAIT_EVENT_AIO_IO_COMPLETE_ANY);
+			}
 #endif
 		}
 		else
