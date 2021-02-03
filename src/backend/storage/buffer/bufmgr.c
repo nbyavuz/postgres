@@ -3250,6 +3250,9 @@ BgBufferSync(struct pg_streaming_write *pgsw, WritebackContext *wb_context)
 
 	IssuePendingWritebacks(wb_context, pgsw);
 
+	/* don't start sleeping with still pending IOs */
+	pgaio_submit_pending(true);
+
 	/* Return true if OK to hibernate */
 	return (bufs_to_lap == 0 && recent_alloc == 0);
 }
