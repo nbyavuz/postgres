@@ -3562,7 +3562,7 @@ pgaio_uring_completion_check_wake(LWLock *lock, LWLockMode mode, struct PGPROC *
 {
 	PgAioUringWaitRef *wr = (PgAioUringWaitRef*) wakee->lwWaitData;
 
-	if (wr->aio == NULL)
+	if (!wr || wr->aio == NULL)
 		return LW_WAIT_NEEDS_LOCK;
 	else
 	{
