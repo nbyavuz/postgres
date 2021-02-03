@@ -1154,9 +1154,11 @@ pgaio_postmaster_child_init(void)
 	my_aio->foreign_completed_total_count = 0;
 	my_aio->retry_total_count = 0;
 
+#ifdef USE_LIBURING
 	my_aio->wr.context = NULL;
 	my_aio->wr.aio = NULL;
 	my_aio->wr.ref_generation = PG_UINT32_MAX;
+#endif
 }
 
 void
