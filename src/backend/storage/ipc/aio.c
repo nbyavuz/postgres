@@ -2413,7 +2413,7 @@ wait_ref_out:
 
 	Assert(flags & PGAIOIP_DONE);
 
-	if (unlikely(flags & (PGAIOIP_SOFT_FAILURE | PGAIOIP_HARD_FAILURE)))
+	if (unlikely(flags & PGAIOIP_SOFT_FAILURE))
 	{
 		/* can retry soft failures, but not hard ones */
 		/* FIXME: limit number of soft retries */
