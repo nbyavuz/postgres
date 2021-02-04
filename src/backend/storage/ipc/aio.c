@@ -2699,11 +2699,6 @@ pgaio_io_retry(PgAioInProgress *io)
 	bool need_retry;
 	PgAioRetryCB retry_cb = NULL;
 
-	retry_cb = io_action_cbs[io->scb].retry;
-
-	if (!retry_cb)
-		elog(PANIC, "non-retryable aio being retried");
-
 	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 
 	/* could concurrently have been unset / retried */
@@ -2741,6 +2736,15 @@ pgaio_io_retry(PgAioInProgress *io)
 				errhidecontext(true));
 		return;
 	}
+
+	/*
+	 * Only fetch after the above check, otherwise another backend could have
+	 * already retried the IO, and subsequently io->scb could have changed.
+	 */
+	retry_cb = io_action_cbs[io->scb].retry;
+
+	if (!retry_cb)
+		elog(PANIC, "non-retryable aio being retried");
 
 	retry_cb(io);
 
