@@ -1331,6 +1331,12 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 			))
 		result = 4096;
 #endif
+#if 0
+	if (io->op == PGAIO_OP_FSYNC &&
+		io->scb != PGAIO_SCB_FSYNC_RAW &&
+		!(io->flags & PGAIOIP_RETRY))
+		result = -EAGAIN;
+#endif
 
 	/* treat 0 length write as ENOSPC */
 	if (result == 0 && io->op == PGAIO_OP_WRITE)
@@ -1387,9 +1393,10 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 			case PGAIO_OP_FSYNC:
 			case PGAIO_OP_FLUSH_RANGE:
 			case PGAIO_OP_NOP:
-				/* XXX: should we treat EINTR/EAGAIN as retryable? */
 				cur->result = result;
-				if (result < 0)
+				if (result == -EAGAIN || result == -EINTR)
+					new_flags |= PGAIOIP_SOFT_FAILURE;
+				else if (result < 0)
 					new_flags |= PGAIOIP_HARD_FAILURE;
 				break;
 
@@ -4290,6 +4297,9 @@ pgaio_fsync_wal_retry(PgAioInProgress *io)
 static bool
 pgaio_fsync_wal_complete(PgAioInProgress *io)
 {
+	if (io->flags & PGAIOIP_SOFT_FAILURE)
+		return false;
+
 	if (io->result != 0)
 		elog(PANIC, "fsync_wal needs better error handling");
 
