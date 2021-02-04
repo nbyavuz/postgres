@@ -181,9 +181,9 @@ extern void pgaio_io_start_write_wal(PgAioInProgress *io, int fd,
 									 uint32 offset, uint32 nbytes,
 									 char *bufdata,
 									 uint32 write_no);
-extern void pgaio_io_start_write_generic(PgAioInProgress *io, int fd,
-										 uint64 offset, uint32 nbytes,
-										 char *bufdata);
+extern void pgaio_io_start_write_raw(PgAioInProgress *io, int fd,
+									 uint64 offset, uint32 nbytes,
+									 char *bufdata);
 
 extern void pgaio_io_start_fsync_raw(PgAioInProgress *io, int fd,
 									 bool datasync);

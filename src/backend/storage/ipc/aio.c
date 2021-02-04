@@ -96,7 +96,7 @@ typedef enum pg_attribute_packed_desired() PgAioSharedCallback
 	PGAIO_SCB_WRITE_SB,
 	PGAIO_SCB_WRITE_SMGR,
 	PGAIO_SCB_WRITE_WAL,
-	PGAIO_SCB_WRITE_GENERIC,
+	PGAIO_SCB_WRITE_RAW,
 
 	PGAIO_SCB_FSYNC_RAW,
 	PGAIO_SCB_FSYNC_WAL,
@@ -587,8 +587,8 @@ static bool pgaio_write_wal_complete(PgAioInProgress *io);
 static void pgaio_write_wal_retry(PgAioInProgress *io);
 static void pgaio_write_wal_desc(PgAioInProgress *io, StringInfo s);
 
-static bool pgaio_write_generic_complete(PgAioInProgress *io);
-static void pgaio_write_generic_desc(PgAioInProgress *io, StringInfo s);
+static bool pgaio_write_raw_complete(PgAioInProgress *io);
+static void pgaio_write_raw_desc(PgAioInProgress *io, StringInfo s);
 
 
 /*
@@ -678,12 +678,12 @@ static const PgAioActionCBs io_action_cbs[] =
 		.desc = pgaio_write_wal_desc,
 	},
 
-	[PGAIO_SCB_WRITE_GENERIC] =
+	[PGAIO_SCB_WRITE_RAW] =
 	{
 		.op = PGAIO_OP_WRITE,
-		.name = "generic",
-		.complete = pgaio_write_generic_complete,
-		.desc = pgaio_write_generic_desc,
+		.name = "raw",
+		.complete = pgaio_write_raw_complete,
+		.desc = pgaio_write_raw_desc,
 	},
 
 	[PGAIO_SCB_FSYNC_RAW] =
@@ -4159,13 +4159,13 @@ pgaio_io_start_write_wal(PgAioInProgress *io, int fd, uint32 offset, uint32 nbyt
 }
 
 void
-pgaio_io_start_write_generic(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes, char *bufdata)
+pgaio_io_start_write_raw(PgAioInProgress *io, int fd, uint64 offset, uint32 nbytes, char *bufdata)
 {
 	pgaio_io_prepare(io, PGAIO_OP_WRITE);
 
 	pgaio_io_prep_write(io, fd, bufdata, offset, nbytes);
 
-	pgaio_io_stage(io, PGAIO_SCB_WRITE_GENERIC);
+	pgaio_io_stage(io, PGAIO_SCB_WRITE_RAW);
 }
 
 void
@@ -4565,7 +4565,7 @@ pgaio_write_wal_desc(PgAioInProgress *io, StringInfo s)
 }
 
 static bool
-pgaio_write_generic_complete(PgAioInProgress *io)
+pgaio_write_raw_complete(PgAioInProgress *io)
 {
 	/* FIXME: retries for partial writes */
 	/* FIXME: this should just be in local completion callback */
@@ -4573,14 +4573,14 @@ pgaio_write_generic_complete(PgAioInProgress *io)
 	{
 		ereport(PANIC,
 				(errcode_for_file_access(),
-				 errmsg("could not write to generic file: %s",
+				 errmsg("could not write to raw file: %s",
 						strerror(-io->result))));
 	}
 	else if (io->op_data.write.nbytes != io->op_data.write.already_done)
 	{
 		ereport(PANIC,
 				(errcode_for_file_access(),
-				 errmsg("could not write to generic file: wrote only %d of %d bytes",
+				 errmsg("could not write to raw file: wrote only %d of %d bytes",
 						io->op_data.write.already_done, io->op_data.write.nbytes)));
 	}
 
@@ -4588,7 +4588,7 @@ pgaio_write_generic_complete(PgAioInProgress *io)
 }
 
 static void
-pgaio_write_generic_desc(PgAioInProgress *io, StringInfo s)
+pgaio_write_raw_desc(PgAioInProgress *io, StringInfo s)
 {
 	appendStringInfo(s, "fd: %d, offset: %llu, nbytes: %u, already_done: %u, bufdata: %p",
 					 io->op_data.write.fd,
