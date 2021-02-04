@@ -4729,7 +4729,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 			{
 				PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
 
-				pgaio_io_start_write_generic(aio, fd, nbytes, XLOG_BLCKSZ, XLogCtl->zerobuf);
+				pgaio_io_start_write_raw(aio, fd, nbytes, XLOG_BLCKSZ, XLogCtl->zerobuf);
 				pg_streaming_write_write(pgsw, aio, XLogFileInitComplete, NULL);
 			}
 		}
