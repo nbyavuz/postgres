@@ -540,6 +540,7 @@ static void pgaio_worker_do(PgAioInProgress *io);
 #ifdef USE_LIBURING
 /* io_uring related functions */
 static int pgaio_uring_submit(int max_submit, bool drain);
+static void pgaio_uring_io_retry(PgAioInProgress *io);
 static int pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared);
 static void pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 generation, uint32 wait_event_info);
 
@@ -1856,13 +1857,7 @@ pgaio_combine_pending(void)
 	{
 		PgAioInProgress *cur = dlist_container(PgAioInProgress, io_node, iter.cur);
 
-		/* can happen when failing partway through io submission */
-		if (cur->merge_with_idx != PGAIO_MERGE_INVALID)
-		{
-			elog(DEBUG1, "already merged request (%zu), giving up on merging",
-				 cur - aio_ctl->in_progress_io);
-			return;
-		}
+		Assert(cur->merge_with_idx == PGAIO_MERGE_INVALID);
 
 		if (last == NULL)
 		{
@@ -1928,6 +1923,33 @@ pgaio_synchronous_submit(void)
 	return nsubmitted;
 }
 
+static void
+pgaio_worker_submit_one(PgAioInProgress *io)
+{
+	uint32 io_index;
+
+	io_index = io - aio_ctl->in_progress_io;
+
+	if (pgaio_worker_need_synchronous(io))
+	{
+		/* Perform the IO synchronously in this process. */
+		pgaio_worker_do(io);
+	}
+	else
+	{
+		/*
+		 * Push it on the submission queue and wake a worker, but if the
+		 * queue is full then handle it synchronously rather than waiting.
+		 * XXX Is this fair enough?
+		 */
+		if (squeue32_enqueue(aio_ctl->aio_submission_queue, io_index))
+			ConditionVariableSignal(&aio_ctl->submission_queue_not_empty);
+		else
+			pgaio_worker_do(io);
+	}
+	pgaio_complete_ios(false);
+}
+
 static int
 pgaio_worker_submit(int max_submit, bool drain)
 {
@@ -1937,38 +1959,27 @@ pgaio_worker_submit(int max_submit, bool drain)
 	{
 		dlist_node *node;
 		PgAioInProgress *io;
-		uint32 io_index;
 
 		node = dlist_head_node(&my_aio->pending);
 		io = dlist_container(PgAioInProgress, io_node, node);
-		io_index = io - aio_ctl->in_progress_io;
 
 		pgaio_io_prepare_submit(io, io->ring);
 
-		if (pgaio_worker_need_synchronous(io))
-		{
-			/* Perform the IO synchronously in this process. */
-			pgaio_worker_do(io);
-		}
-		else
-		{
-			/*
-			 * Push it on the submission queue and wake a worker, but if the
-			 * queue is full then handle it synchronously rather than waiting.
-			 * XXX Is this fair enough?
-			 */
-			if (squeue32_enqueue(aio_ctl->aio_submission_queue, io_index))
-				ConditionVariableSignal(&aio_ctl->submission_queue_not_empty);
-			else
-				pgaio_worker_do(io);
-		}
-		pgaio_complete_ios(false);
-
+		pgaio_worker_submit_one(io);
 		++nios;
 	}
 
 	return nios;
 }
+
+static void
+pgaio_worker_io_retry(PgAioInProgress *io)
+{
+	WRITE_ONCE_F(io->flags) |= PGAIOIP_INFLIGHT;
+
+	pgaio_worker_submit_one(io);
+}
+
 
 static void
 pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, bool will_wait)
@@ -2122,11 +2133,7 @@ pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 		dlist_delete_from(&my_aio->pending, &cur->io_node);
 		my_aio->pending_count--;
 
-		if (cur->flags & PGAIOIP_RETRY)
-		{
-			/* XXX: more error checks */
-		}
-		else if (cur->user_referenced)
+		if (cur->user_referenced)
 		{
 			Assert(my_aio_id == cur->owner_id);
 			Assert(my_aio->outstanding_count > 0);
@@ -2717,7 +2724,6 @@ pgaio_io_retry(PgAioInProgress *io)
 						   PGAIOIP_HARD_FAILURE |
 						   PGAIOIP_SOFT_FAILURE)) |
 			PGAIOIP_IN_PROGRESS |
-			PGAIOIP_PENDING |
 			PGAIOIP_RETRY;
 
 		need_retry = true;
@@ -2730,7 +2736,7 @@ pgaio_io_retry(PgAioInProgress *io)
 
 	if (!need_retry)
 	{
-		ereport(LOG, errmsg("was about to retry %zd, but somebody else did already",
+		ereport(DEBUG2, errmsg("was about to retry %zd, but somebody else did already",
 							io - aio_ctl->in_progress_io),
 				errhidestmt(true),
 				errhidecontext(true));
@@ -2746,13 +2752,49 @@ pgaio_io_retry(PgAioInProgress *io)
 	if (!retry_cb)
 		elog(PANIC, "non-retryable aio being retried");
 
-	retry_cb(io);
+	/*
+	 * Need to enforce limit during retries too, otherwise submissions in
+	 * other backends could lead us to exhaust resources.
+	 */
+	pgaio_apply_backend_limit();
 
-	dlist_push_tail(&my_aio->pending, &io->io_node);
-	my_aio->pending_count++;
+#ifdef PGAIO_VERBOSE
+	if (message_level_is_interesting(DEBUG2))
+	{
+		MemoryContext oldcontext = MemoryContextSwitchTo(ErrorContext);
+		StringInfoData s;
+
+		initStringInfo(&s);
+
+		pgaio_io_print(io, &s);
+
+		ereport(DEBUG2,
+				errmsg("retrying %s",
+					   s.data),
+				errhidestmt(true),
+				errhidecontext(true));
+		pfree(s.data);
+		MemoryContextSwitchTo(oldcontext);
+	}
+#endif
+
 	my_aio->retry_total_count++;
 
-	pgaio_submit_pending(false);
+	/* we currently don't merge IOs during retries */
+	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
+
+	retry_cb(io);
+
+	START_CRIT_SECTION();
+	if (aio_type == AIOTYPE_WORKER)
+		pgaio_worker_io_retry(io);
+#ifdef USE_LIBURING
+	else if (aio_type == AIOTYPE_LIBURING)
+		pgaio_uring_io_retry(io);
+#endif
+	else
+		elog(ERROR, "unexpected aio_type");
+	END_CRIT_SECTION();
 }
 
 void
@@ -3356,7 +3398,6 @@ pgaio_uring_submit(int max_submit, bool drain)
 	struct io_uring_sqe *sqe[PGAIO_SUBMIT_BATCH_SIZE];
 	PgAioContext *context;
 	int nios = 0;
-	int our_nios = 0;
 
 	context = pgaio_acquire_context();
 
@@ -3393,14 +3434,6 @@ pgaio_uring_submit(int max_submit, bool drain)
 		pgaio_uring_sq_from_io(context, ios[nios], sqe[nios]);
 
 		nios++;
-		/*
-		 * Don't increase our inflight count for requests initiated by another
-		 * backend.
-		 */
-		if (io->owner_id == my_aio_id)
-			our_nios++;
-		else
-			pg_atomic_fetch_add_u32(&aio_ctl->backend_state[io->owner_id].inflight_count, 1);
 	}
 
 	Assert(nios > 0);
@@ -3408,8 +3441,7 @@ pgaio_uring_submit(int max_submit, bool drain)
 	{
 		int ret;
 
-		if (our_nios)
-			pg_atomic_add_fetch_u32(&my_aio->inflight_count, our_nios);
+		pg_atomic_add_fetch_u32(&my_aio->inflight_count, nios);
 		my_aio->submissions_total_count++;
 
 again:
@@ -3463,6 +3495,49 @@ again:
 					/* call_local = */ false);
 
 	return nios;
+}
+
+static void
+pgaio_uring_io_retry(PgAioInProgress *io)
+{
+	PgAioContext *context;
+	struct io_uring_sqe *sqe;
+
+	/*
+	 * Need to use the same context as last time - other backends could be
+	 * trying to read this IO's completion, potentially wait on the wrong
+	 * context. Outside of retries ->generation incrementing protects against
+	 * that, but we can't do that for retries.
+	 */
+	context = &aio_ctl->contexts[io->ring];
+
+	LWLockAcquire(&context->submission_lock, LW_EXCLUSIVE);
+
+	sqe = io_uring_get_sqe(&context->io_uring_ring);
+	pgaio_uring_sq_from_io(context, io, sqe);
+
+	WRITE_ONCE_F(io->flags) |= PGAIOIP_INFLIGHT;
+	pg_atomic_fetch_add_u32(&aio_ctl->backend_state[io->owner_id].inflight_count, 1);
+
+	while (true)
+	{
+		int ret;
+
+		pgstat_report_wait_start(WAIT_EVENT_AIO_SUBMIT);
+		ret = io_uring_submit(&context->io_uring_ring);
+		pgstat_report_wait_end();
+
+		if (likely(ret == 1))
+			break;
+		else if (ret != -EINTR)
+			elog(PANIC, "failed: %d/%s",
+				 ret, strerror(-ret));
+	}
+
+	LWLockRelease(&context->submission_lock);
+
+	/* see pgaio_uring_submit() */
+	ConditionVariableBroadcast(&io->cv);
 }
 
 static int
