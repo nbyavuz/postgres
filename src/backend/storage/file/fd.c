@@ -3411,8 +3411,24 @@ sync_completed(pg_streaming_write *pgsw, void *pgsw_private, int result, void *w
 	sync_walkdir_state *sync_state = (sync_walkdir_state *) pgsw_private;
 	sync_entry *entry = (sync_entry *) write_private;
 
+	if (result < 0)
+		errno = -result;
 	fsync_fname_close(entry->fd, result < 0, entry->fname, entry->isdir, sync_state->elevel);
 	pfree(entry);
+}
+
+static bool
+sync_retry(pg_streaming_write *pgsw, void *pgsw_private, PgAioInProgress *aio, void *write_private)
+{
+	int result = pgaio_io_result(aio);
+
+	if (result == -EINTR || result == -EAGAIN)
+	{
+		pgaio_io_retry(aio);
+		return true;
+	}
+
+	return false;
 }
 
 /*
@@ -3631,7 +3647,7 @@ pre_sync_fname(const char *fname, bool isdir, int elevel, uintptr_t state)
 
 	aio = pg_streaming_write_get_io(sync_state->pgsw);
 	pgaio_io_start_flush_range_raw(aio, fd, 0, 0);
-	pg_streaming_write_write(sync_state->pgsw, aio, pre_sync_completed, entry);
+	pg_streaming_write_write(sync_state->pgsw, aio, pre_sync_completed, NULL, entry);
 }
 
 #endif							/* PG_FLUSH_DATA_WORKS */
@@ -3662,7 +3678,7 @@ datadir_fsync_fname(const char *fname, bool isdir, int elevel, uintptr_t state)
 
 	aio = pg_streaming_write_get_io(sync_state->pgsw);
 	pgaio_io_start_fsync_raw(aio, fd, false);
-	pg_streaming_write_write(sync_state->pgsw, aio, sync_completed, entry);
+	pg_streaming_write_write(sync_state->pgsw, aio, sync_completed, sync_retry, entry);
 }
 
 static void
