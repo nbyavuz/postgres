@@ -2048,6 +2048,8 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 
 			content_lock = BufferDescriptorGetContentLock(cur_buf_hdr);
 
+			aio = pg_streaming_write_get_io(be_state->pgsw);
+
 			/*
 			 * NB: this protect against deadlocks due to holding multiple
 			 * buffer locks, as well as avoids unnecessary blocking (see
@@ -2055,8 +2057,6 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 			 */
 			if (LWLockConditionalAcquire(content_lock, LW_SHARED))
 			{
-				aio = pg_streaming_write_get_io(be_state->pgsw);
-
 				// XXX: could use strategy reject logic here too
 				if (AsyncFlushBuffer(aio, cur_buf_hdr, NULL))
 				{
