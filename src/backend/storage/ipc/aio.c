@@ -146,10 +146,8 @@ typedef enum PgAioInProgressFlags
 	/* request failed partly, e.g. a short write */
 	PGAIOIP_SOFT_FAILURE = 1 << 12,
 
-	PGAIOIP_SHARED_FAILED = 1 << 13,
-
 	/* local completion callback was called */
-	PGAIOIP_LOCAL_CALLBACK_CALLED = 1 << 14,
+	PGAIOIP_LOCAL_CALLBACK_CALLED = 1 << 13,
 
 } PgAioInProgressFlags;
 
@@ -528,6 +526,7 @@ static void pgaio_call_local_callbacks(bool in_error);
 static int pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io);
 static int pgaio_synchronous_submit(void);
 static void pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local);
+static void pgaio_io_retry_soft_failed(PgAioInProgress *io, uint64 ref_generation);
 
 /* printing functions */
 static const char *pgaio_io_shared_callback_string(PgAioSharedCallback a);
@@ -1486,6 +1485,14 @@ pgaio_complete_ios(bool in_error)
 
 			if (finished)
 			{
+				/* if a soft failure is done, we can't retry */
+				if (io->flags & PGAIOIP_SOFT_FAILURE)
+				{
+					WRITE_ONCE_F(io->flags) =
+						(io->flags & ~PGAIOIP_SOFT_FAILURE) |
+						PGAIOIP_HARD_FAILURE;
+				}
+
 				dlist_push_tail(&local_recycle_requests, &io->io_node);
 			}
 			else
@@ -1495,8 +1502,7 @@ pgaio_complete_ios(bool in_error)
 				LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 				WRITE_ONCE_F(io->flags) =
 					(io->flags & ~(PGAIOIP_REAPED | PGAIOIP_IN_PROGRESS)) |
-					PGAIOIP_DONE |
-					PGAIOIP_SHARED_FAILED;
+					PGAIOIP_DONE;
 				dlist_push_tail(&aio_ctl->reaped_uncompleted, &io->io_node);
 				LWLockRelease(SharedAIOCtlLock);
 
@@ -1515,8 +1521,7 @@ pgaio_complete_ios(bool in_error)
 			WRITE_ONCE_F(io->flags) =
 				(io->flags & ~(PGAIOIP_REAPED | PGAIOIP_IN_PROGRESS)) |
 				PGAIOIP_DONE |
-				PGAIOIP_HARD_FAILURE |
-				PGAIOIP_SHARED_FAILED;
+				PGAIOIP_HARD_FAILURE;
 			dlist_push_tail(&aio_ctl->reaped_uncompleted, &io->io_node);
 			LWLockRelease(SharedAIOCtlLock);
 		}
@@ -1554,7 +1559,6 @@ pgaio_complete_ios(bool in_error)
 			Assert(cur->flags & PGAIOIP_REAPED);
 			Assert(!(cur->flags & PGAIOIP_DONE));
 			Assert(!(cur->flags & PGAIOIP_INFLIGHT));
-			Assert(!(cur->flags & (PGAIOIP_SHARED_FAILED)));
 			Assert(!(cur->flags & (PGAIOIP_SOFT_FAILURE)));
 			Assert(cur->merge_with_idx == PGAIO_MERGE_INVALID);
 
@@ -1597,8 +1601,9 @@ pgaio_complete_ios(bool in_error)
 
 #ifdef PGAIO_VERBOSE
 				ereport(DEBUG4,
-						errmsg("removing aio %zu from issued_abandoned complete_ios",
-							   cur - aio_ctl->in_progress_io),
+						errmsg("removing aio %zu/%llu from issued_abandoned complete_ios",
+							   cur - aio_ctl->in_progress_io,
+							   (long long unsigned) cur->generation),
 						errhidecontext(1),
 						errhidestmt(1));
 #endif
@@ -2129,6 +2134,7 @@ pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 		Assert(cur->flags & PGAIOIP_PENDING);
 		Assert(!(cur->flags & PGAIOIP_PREP));
 		Assert(!(cur->flags & PGAIOIP_IDLE));
+		Assert(my_aio_id == cur->owner_id);
 
 		cur->ring = ring;
 
@@ -2142,7 +2148,6 @@ pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 
 		if (cur->user_referenced)
 		{
-			Assert(my_aio_id == cur->owner_id);
 			Assert(my_aio->outstanding_count > 0);
 			dlist_delete_from(&my_aio->outstanding, &cur->owner_node);
 			my_aio->outstanding_count--;
@@ -2427,21 +2432,11 @@ wait_ref_out:
 
 	Assert(flags & PGAIOIP_DONE);
 
+	/* can retry soft failures, but not hard ones */
 	if (unlikely(flags & PGAIOIP_SOFT_FAILURE))
 	{
-		/* can retry soft failures, but not hard ones */
-		/* FIXME: limit number of soft retries */
-		if (flags & PGAIOIP_SOFT_FAILURE)
-		{
-			pgaio_io_retry(io);
-			pgaio_io_wait_ref_int(ref, call_shared, call_local);
-		}
-		else
-		{
-			pgaio_io_print(io, NULL);
-			elog(WARNING, "request %zd failed permanently",
-				 io - aio_ctl->in_progress_io);
-		}
+		pgaio_io_retry_soft_failed(io, ref_generation);
+		pgaio_io_wait_ref_int(ref, call_shared, call_local);
 
 		return;
 	}
@@ -2707,57 +2702,12 @@ pgaio_io_on_completion_local(PgAioInProgress *io, PgAioOnCompletionLocalContext 
 	io->on_completion_local = ocb;
 }
 
-void
-pgaio_io_retry(PgAioInProgress *io)
+static void
+pgaio_io_retry_common(PgAioInProgress *io)
 {
-	bool need_retry;
-	PgAioRetryCB retry_cb = NULL;
-
-	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
-
-	/* could concurrently have been unset / retried */
-	if (io->flags & PGAIOIP_SHARED_FAILED)
-	{
-		Assert(!(io->flags & PGAIOIP_FOREIGN_DONE));
-
-		dlist_delete(&io->io_node);
-
-		WRITE_ONCE_F(io->flags) =
-			(io->flags & ~(PGAIOIP_SHARED_FAILED |
-						   PGAIOIP_DONE |
-						   PGAIOIP_FOREIGN_DONE |
-						   PGAIOIP_SHARED_CALLBACK_CALLED |
-						   PGAIOIP_LOCAL_CALLBACK_CALLED |
-						   PGAIOIP_HARD_FAILURE |
-						   PGAIOIP_SOFT_FAILURE)) |
-			PGAIOIP_IN_PROGRESS |
-			PGAIOIP_RETRY;
-
-		need_retry = true;
-	}
-	else
-	{
-		need_retry = false;
-	}
-	LWLockRelease(SharedAIOCtlLock);
-
-	if (!need_retry)
-	{
-		ereport(DEBUG2, errmsg("was about to retry %zd, but somebody else did already",
-							io - aio_ctl->in_progress_io),
-				errhidestmt(true),
-				errhidecontext(true));
-		return;
-	}
-
-	/*
-	 * Only fetch after the above check, otherwise another backend could have
-	 * already retried the IO, and subsequently io->scb could have changed.
-	 */
-	retry_cb = io_action_cbs[io->scb].retry;
-
-	if (!retry_cb)
-		elog(PANIC, "non-retryable aio being retried");
+	/* we currently don't merge IOs during retries */
+	Assert(!(io->flags & PGAIOIP_DONE));
+	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
 
 	/*
 	 * Need to enforce limit during retries too, otherwise submissions in
@@ -2787,11 +2737,6 @@ pgaio_io_retry(PgAioInProgress *io)
 
 	my_aio->retry_total_count++;
 
-	/* we currently don't merge IOs during retries */
-	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
-
-	retry_cb(io);
-
 	START_CRIT_SECTION();
 	if (aio_type == AIOTYPE_WORKER)
 		pgaio_worker_io_retry(io);
@@ -2802,6 +2747,119 @@ pgaio_io_retry(PgAioInProgress *io)
 	else
 		elog(ERROR, "unexpected aio_type");
 	END_CRIT_SECTION();
+}
+
+static void
+pgaio_io_retry_soft_failed(PgAioInProgress *io, uint64 ref_generation)
+{
+	bool need_retry;
+	PgAioIPFlags flags;
+	PgAioRetryCB retry_cb = NULL;
+
+	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
+
+	/* could concurrently have been unset / retried */
+	flags = io->flags;
+
+	if (io->generation != ref_generation)
+	{
+		need_retry = false;
+	}
+	else if (
+		(flags & PGAIOIP_DONE) &&
+		flags & (PGAIOIP_HARD_FAILURE | PGAIOIP_SOFT_FAILURE))
+	{
+		Assert(!(io->flags & PGAIOIP_FOREIGN_DONE));
+		Assert(!(io->flags & PGAIOIP_HARD_FAILURE));
+		Assert(!(io->flags & PGAIOIP_REAPED));
+		Assert(io->flags & PGAIOIP_DONE);
+
+		dlist_delete(&io->io_node);
+
+		WRITE_ONCE_F(io->flags) =
+			(flags & ~(PGAIOIP_DONE |
+					   PGAIOIP_FOREIGN_DONE |
+					   PGAIOIP_SHARED_CALLBACK_CALLED |
+					   PGAIOIP_LOCAL_CALLBACK_CALLED |
+					   PGAIOIP_HARD_FAILURE |
+					   PGAIOIP_SOFT_FAILURE)) |
+			PGAIOIP_IN_PROGRESS |
+			PGAIOIP_RETRY;
+
+		need_retry = true;
+	}
+	else
+	{
+		need_retry = false;
+	}
+	LWLockRelease(SharedAIOCtlLock);
+
+	if (!need_retry)
+	{
+		ereport(DEBUG2, errmsg("was about to retry %zd/%llu, but somebody else did already",
+							   io - aio_ctl->in_progress_io,
+							   (long long unsigned) ref_generation),
+				errhidestmt(true),
+				errhidecontext(true));
+		return;
+	}
+
+	/* the io is still in-progress */
+	Assert(io->system_referenced);
+
+	/*
+	 * Only fetch after the above check, otherwise another backend could have
+	 * already retried the IO, and subsequently io->scb could have changed.
+	 */
+	retry_cb = io_action_cbs[io->scb].retry;
+
+	if (!retry_cb)
+		elog(PANIC, "non-retryable aio being retried");
+
+	retry_cb(io);
+
+	pgaio_io_retry_common(io);
+}
+
+/*
+ * Retry failed IO. Needs to have been submitted by this backend, and
+ * referenced resources, like fds, still need to be valid.
+ */
+void
+pgaio_io_retry(PgAioInProgress *io)
+{
+	Assert(io->user_referenced);
+	Assert(!io->system_referenced);
+	Assert(io->owner_id == my_aio_id);
+	Assert(io->flags & PGAIOIP_DONE);
+	Assert(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED);
+	Assert(io->flags & PGAIOIP_HARD_FAILURE);
+
+	/*
+	 * The IO has completed already, so we need to mark it as in-flight
+	 * again.
+	 */
+	Assert(my_aio->outstanding_count > 0);
+	dlist_delete_from(&my_aio->outstanding, &io->owner_node);
+	my_aio->outstanding_count--;
+	io->system_referenced = true;
+
+	dlist_push_tail(&my_aio->issued, &io->owner_node);
+	my_aio->issued_count++;
+
+	WRITE_ONCE_F(io->flags) =
+		(io->flags & ~(PGAIOIP_DONE |
+					   PGAIOIP_FOREIGN_DONE |
+					   PGAIOIP_SHARED_CALLBACK_CALLED |
+					   PGAIOIP_LOCAL_CALLBACK_CALLED |
+					   PGAIOIP_HARD_FAILURE |
+					   PGAIOIP_SOFT_FAILURE)) |
+		PGAIOIP_IN_PROGRESS |
+		PGAIOIP_RETRY;
+
+	/* can reuse original fd */
+
+	pgaio_io_retry_common(io);
 }
 
 void
@@ -3134,7 +3192,6 @@ pgaio_io_flag_string(PgAioIPFlags flags, StringInfo s)
 	STRINGIFY_FLAG(PGAIOIP_RETRY);
 	STRINGIFY_FLAG(PGAIOIP_HARD_FAILURE);
 	STRINGIFY_FLAG(PGAIOIP_SOFT_FAILURE);
-	STRINGIFY_FLAG(PGAIOIP_SHARED_FAILED);
 
 #undef STRINGIFY_FLAG
 }
