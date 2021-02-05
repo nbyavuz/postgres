@@ -1593,6 +1593,20 @@ SlruSyncFileTagComplete(pg_streaming_write *pgsw, void *pgsw_private, int result
 	SyncRequestCompleted(entry, result >= 0, result >= 0 ? 0 : -result);
 }
 
+static bool
+SlruSyncFileTagRetry(pg_streaming_write *pgsw, void *pgsw_private, PgAioInProgress *aio, void *write_private)
+{
+	int result = pgaio_io_result(aio);
+
+	if (result == -EINTR || result == -EAGAIN)
+	{
+		pgaio_io_retry(aio);
+		return true;
+	}
+
+	return false;
+}
+
 /*
  * Individual SLRUs (clog, ...) have to provide a sync.c handler function so
  * that they can provide the correct "SlruCtl" (otherwise we don't know how to
@@ -1614,5 +1628,5 @@ SlruSyncFileTag(SlruCtl ctl, struct pg_streaming_write *pgsw, InflightSyncEntry 
 	entry->handler_data = fd;
 	aio = pg_streaming_write_get_io(pgsw);
 	pgaio_io_start_fsync_raw(aio, fd, false);
-	pg_streaming_write_write(pgsw, aio, SlruSyncFileTagComplete, entry);
+	pg_streaming_write_write(pgsw, aio, SlruSyncFileTagComplete, SlruSyncFileTagRetry, entry);
 }

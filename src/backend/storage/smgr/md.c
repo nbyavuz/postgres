@@ -1651,12 +1651,26 @@ static void
 mdsyncfiletag_complete(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private)
 {
 	InflightSyncEntry *entry = (InflightSyncEntry *) write_private;
-	File file = (int)entry->handler_data;
+	File file = (int) entry->handler_data;
 
 	if (file != -1)
 		FileClose(file);
 
 	SyncRequestCompleted(entry, result >= 0, result >= 0 ? 0 : -result);
+}
+
+static bool
+mdsyncfiletag_retry(pg_streaming_write *pgsw, void *pgsw_private, PgAioInProgress *aio, void *write_private)
+{
+	int result = pgaio_io_result(aio);
+
+	if (result == -EINTR || result == -EAGAIN)
+	{
+		pgaio_io_retry(aio);
+		return true;
+	}
+
+	return false;
 }
 
 /*
@@ -1700,7 +1714,7 @@ mdsyncfiletag(pg_streaming_write *pgsw, InflightSyncEntry *entry)
 	/* Sync the file. */
 	aio = pg_streaming_write_get_io(pgsw);
 	if (FileStartSync(aio, file))
-		pg_streaming_write_write(pgsw, aio, mdsyncfiletag_complete, entry);
+		pg_streaming_write_write(pgsw, aio, mdsyncfiletag_complete, mdsyncfiletag_retry, entry);
 	else
 	{
 		pg_streaming_write_release_io(pgsw, aio);
