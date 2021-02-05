@@ -37,6 +37,9 @@ struct pg_streaming_write
 	/* available writes (unused or completed) */
 	dlist_head available;
 
+	uint32 max_since_submit;
+	uint32 since_submit;
+
 	/*
 	 * IOs returned by pg_streaming_write_get_io, before
 	 * pg_streaming_write_release_io or pg_streaming_write_write has been
@@ -62,6 +65,14 @@ pg_streaming_write_alloc(uint32 iodepth, void *private_data)
 	pgsw->iodepth = iodepth;
 	pgsw->private_data = private_data;
 
+	/*
+	 * Submit on a regular basis. Otherwise we'll always have to wait for some
+	 * IO to complete when reaching iodepth. But we also want to mostly
+	 * achieve large IOs...
+	 */
+	pgsw->max_since_submit = Max((iodepth / 4) * 3, 1);
+	pgsw->since_submit = 0;
+
 	dlist_init(&pgsw->available);
 	dlist_init(&pgsw->issued);
 	dlist_init(&pgsw->purgatory);
@@ -82,6 +93,12 @@ PgAioInProgress *
 pg_streaming_write_get_io(pg_streaming_write *pgsw)
 {
 	PgStreamingWriteItem *this_write;
+
+	if (pgsw->since_submit >= pgsw->max_since_submit)
+	{
+		pgaio_submit_pending(false);
+		pgsw->since_submit = 0;
+	}
 
 	/* loop in case the callback issues further writes */
 	while (dlist_is_empty(&pgsw->available))
@@ -123,6 +140,8 @@ pg_streaming_write_get_io(pg_streaming_write *pgsw)
 						   pgsw->inflight_count),
 			errhidestmt(true),
 			errhidecontext(true));
+
+	pgsw->since_submit++;
 
 	return this_write->aio;
 }
