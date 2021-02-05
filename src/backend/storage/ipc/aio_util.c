@@ -17,6 +17,8 @@ typedef struct PgStreamingWriteItem
 	struct pg_streaming_write *pgsw;
 
 	pg_streaming_write_completed on_completion_user;
+	pg_streaming_write_retry on_failure_user;
+
 	PgAioOnCompletionLocalContext on_completion_aio;
 } PgStreamingWriteItem;
 
@@ -177,7 +179,9 @@ pg_streaming_write_release_io(pg_streaming_write *pgsw, PgAioInProgress *io)
 
 void
 pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io,
-						 pg_streaming_write_completed on_completion, void *private_data)
+						 pg_streaming_write_completed on_completion,
+						 pg_streaming_write_retry on_failure,
+						 void *private_data)
 {
 	PgStreamingWriteItem *this_write;
 
@@ -194,6 +198,7 @@ pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io,
 	pgaio_io_on_completion_local(this_write->aio, &this_write->on_completion_aio);
 
 	this_write->on_completion_user = on_completion;
+	this_write->on_failure_user = on_failure;
 	this_write->private_data = private_data;
 	this_write->in_progress = true;
 
@@ -219,32 +224,52 @@ pg_streaming_write_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress 
 	PgStreamingWriteItem *this_write =
 		pgaio_ocb_container(PgStreamingWriteItem, on_completion_aio, ocb);
 	pg_streaming_write *pgsw = this_write->pgsw;
-	void *private_data;
+	void *private_data = this_write->private_data;
 	int result;
 
 	Assert(this_write->in_progress);
 	Assert(!this_write->in_purgatory);
 	Assert(pgaio_io_done(io));
-	Assert(pgaio_io_success(io));
+
+	if (!pgaio_io_success(io) && this_write->on_failure_user)
+	{
+		ereport(DEBUG3,
+				errmsg("pgsw completion retry AIO %u/%llu: succ: %d, res: %d, pgsw %zu, pgsw has now %d inflight",
+					   pgaio_io_id(io),
+					   (long long unsigned) pgaio_io_generation(io),
+					   pgaio_io_success(io),
+					   pgaio_io_result(io),
+					   this_write - pgsw->all_items,
+					   pgsw->inflight_count),
+				errhidestmt(true),
+				errhidecontext(true));
+
+		if (this_write->on_failure_user(pgsw, pgsw->private_data, io, private_data))
+		{
+			return;
+		}
+	}
+
+	result = pgaio_io_result(io);
 
 	dlist_delete_from(&pgsw->issued, &this_write->node);
 	Assert(pgsw->inflight_count > 0);
 	pgsw->inflight_count--;
 
+	this_write->private_data = NULL;
+	this_write->in_progress = false;
+
 	ereport(DEBUG3,
-			errmsg("pgsw completion AIO %u/%llu, pgsw %zu, pgsw has now %d inflight",
+			errmsg("pgsw completion AIO %u/%llu: succ: %d, res: %d, pgsw %zu, pgsw has now %d inflight",
 				   pgaio_io_id(io),
 				   (long long unsigned) pgaio_io_generation(io),
+				   pgaio_io_success(io),
+				   result,
 				   this_write - pgsw->all_items,
 				   pgsw->inflight_count),
 			errhidestmt(true),
 			errhidecontext(true));
 
-	private_data = this_write->private_data;
-	this_write->private_data = NULL;
-	this_write->in_progress = false;
-
-	result = pgaio_io_result(io);
 	pgaio_io_recycle(this_write->aio);
 	dlist_push_tail(&pgsw->available, &this_write->node);
 

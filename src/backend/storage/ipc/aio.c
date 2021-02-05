@@ -1243,7 +1243,7 @@ pgaio_process_io_rw_completion(PgAioInProgress *myio,
 		else
 			*new_flags |= PGAIOIP_HARD_FAILURE;
 
-		ereport(DEBUG1,
+		ereport(DEBUG2,
 				errcode_for_file_access(),
 				errmsg("aio %zd: failed to %s: %s of %u-%u bytes at offset %llu+%u: %s",
 					   myio - aio_ctl->in_progress_io,
@@ -1331,8 +1331,12 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 		result = 4096;
 #endif
 #if 0
+	if (io->scb == PGAIO_SCB_WRITE_RAW &&
+		!(io->flags & PGAIOIP_RETRY))
+		result = -EAGAIN;
+#endif
+#if 0
 	if (io->op == PGAIO_OP_FSYNC &&
-		io->scb != PGAIO_SCB_FSYNC_RAW &&
 		!(io->flags & PGAIOIP_RETRY))
 		result = -EAGAIN;
 #endif
@@ -4331,9 +4335,7 @@ pgaio_nop_desc(PgAioInProgress *io, StringInfo s)
 static bool
 pgaio_fsync_raw_complete(PgAioInProgress *io)
 {
-	if (io->result != 0)
-		elog(PANIC, "fsync needs better error handling");
-
+	/* can't retry automatically, don't know which file etc */
 	return true;
 }
 
@@ -4624,23 +4626,7 @@ pgaio_write_wal_desc(PgAioInProgress *io, StringInfo s)
 static bool
 pgaio_write_raw_complete(PgAioInProgress *io)
 {
-	/* FIXME: retries for partial writes */
-	/* FIXME: this should just be in local completion callback */
-	if (io->result < 0)
-	{
-		ereport(PANIC,
-				(errcode_for_file_access(),
-				 errmsg("could not write to raw file: %s",
-						strerror(-io->result))));
-	}
-	else if (io->op_data.write.nbytes != io->op_data.write.already_done)
-	{
-		ereport(PANIC,
-				(errcode_for_file_access(),
-				 errmsg("could not write to raw file: wrote only %d of %d bytes",
-						io->op_data.write.already_done, io->op_data.write.nbytes)));
-	}
-
+	/* can't retry automatically, don't know which file etc */
 	return true;
 }
 

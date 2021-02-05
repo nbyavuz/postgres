@@ -1938,6 +1938,8 @@ bulk_extend_undirty_complete(pg_streaming_write *pgsw, void *pgsw_private, int r
 	BulkExtendOneBuffer *ex_buf = (BulkExtendOneBuffer *) write_private;
 	BufferTag	tag;
 
+	Assert(result == BLCKSZ);
+
 	/* the buffer lock has already been released by ReadBufferCompleteWrite */
 
 	tag = ex_buf->buf_hdr->tag;
@@ -2062,7 +2064,9 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 					buffer_io = true;
 
 					pg_streaming_write_write(be_state->pgsw, aio,
-											 bulk_extend_undirty_complete, cur_ex_buf);
+											 bulk_extend_undirty_complete,
+											 NULL,
+											 cur_ex_buf);
 				}
 				else
 				{
@@ -2598,6 +2602,8 @@ buffer_sync_complete(pg_streaming_write *pgsw, void *pgsw_private, int result, v
 	BufferDesc *bufHdr = (BufferDesc *) write_private;
 	BufferTag	tag;
 
+	Assert(result == BLCKSZ);
+
 	/* the buffer lock has already been released by ReadBufferCompleteWrite */
 
 	tag = bufHdr->tag;
@@ -2647,7 +2653,7 @@ BufferSyncWriteOne(pg_streaming_write *pgsw, BufferDesc *bufHdr)
 
 		if (AsyncFlushBuffer(aio, bufHdr, NULL))
 		{
-			pg_streaming_write_write(pgsw, aio, buffer_sync_complete, bufHdr);
+			pg_streaming_write_write(pgsw, aio, buffer_sync_complete, NULL, bufHdr);
 			BgWriterStats.m_buf_written_checkpoints++;
 			did_write = true;
 		}
@@ -3343,7 +3349,7 @@ BgBufferSyncWriteOne(int buf_id, bool skip_recently_used,
 
 	if (AsyncFlushBuffer(aio, bufHdr, NULL))
 	{
-		pg_streaming_write_write(pgsw, aio, buffer_sync_complete, bufHdr);
+		pg_streaming_write_write(pgsw, aio, buffer_sync_complete, NULL, bufHdr);
 		result |= BUF_WRITTEN;
 	}
 	else
@@ -5900,7 +5906,7 @@ IssuePendingWritebacks(WritebackContext *context, pg_streaming_write *pgsw)
 					break;
 				}
 
-				pg_streaming_write_write(pgsw, aio, NULL, NULL);
+				pg_streaming_write_write(pgsw, aio, NULL, NULL, NULL);
 				startblock += initblocks;
 				nblocks -= initblocks;
 			}

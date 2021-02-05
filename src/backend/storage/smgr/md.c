@@ -504,6 +504,29 @@ mdextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 static void
 zeroextend_complete(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private)
 {
+	MdfdVec    *v = (MdfdVec *) write_private;
+
+	if (result < 0)
+	{
+		errno = -result;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not extend file \"%s\": %m",
+						FilePathName(v->mdfd_vfd)),
+				 errhint("Check free disk space.")));
+	}
+
+	/* short write: complain appropriately */
+	if (result != BLCKSZ)
+	{
+		// FIXME: used to report block number, need to pass it in
+		ereport(ERROR,
+				(errcode(ERRCODE_DISK_FULL),
+				 errmsg("could not extend file \"%s\": wrote only %d of %d bytes",
+						FilePathName(v->mdfd_vfd),
+						result, BLCKSZ),
+				 errhint("Check free disk space.")));
+	}
 }
 
 BlockNumber
@@ -585,30 +608,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 
 			pgaio_io_start_write_smgr(aio, reln, forknum, i, zerobuf, skipFsync);
 
-			pg_streaming_write_write(pgsw, aio, zeroextend_complete, (void*) &i);
-
-			/* FIXME: ensure errors are handled equivalently */
-#if 0
-			int			nbytes;
-
-			if ((nbytes = FileWrite(v->mdfd_vfd, zerobuf, BLCKSZ,
-									i * BLCKSZ, WAIT_EVENT_DATA_FILE_EXTEND)) != BLCKSZ)
-			{
-				if (nbytes < 0)
-					ereport(ERROR,
-							(errcode_for_file_access(),
-							 errmsg("could not extend file \"%s\": %m",
-									FilePathName(v->mdfd_vfd)),
-							 errhint("Check free disk space.")));
-				/* short write: complain appropriately */
-				ereport(ERROR,
-						(errcode(ERRCODE_DISK_FULL),
-						 errmsg("could not extend file \"%s\": wrote only %d of %d bytes at block %u",
-								FilePathName(v->mdfd_vfd),
-								nbytes, BLCKSZ, blocknum),
-						 errhint("Check free disk space.")));
-			}
-#endif
+			pg_streaming_write_write(pgsw, aio, zeroextend_complete, NULL, v);
 		}
 
 		if (!skipFsync && !SmgrIsTemp(reln))
