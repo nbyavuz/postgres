@@ -4585,8 +4585,60 @@ XLogNeedsFlush(XLogRecPtr record)
 }
 
 static void
-XLogFileInitComplete(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private)
+XLogFileInitWriteComplete(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private)
 {
+	if (result != XLOG_BLCKSZ)
+	{
+		char *tmppath = write_private;
+
+		errno = result;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write to file \"%s\": %m", tmppath)));
+	}
+}
+
+static bool
+XLogFileInitWriteRetry(pg_streaming_write *pgsw, void *pgsw_private, PgAioInProgress *aio, void *write_private)
+{
+	int result = pgaio_io_result(aio);
+
+	if (result == -EINTR || result == -EAGAIN ||
+		(result > 0 && result < XLOG_BLCKSZ))
+	{
+		pgaio_io_retry(aio);
+		return true;
+	}
+
+	return false;
+}
+
+static void
+XLogFileInitSyncComplete(pg_streaming_write *pgsw, void *pgsw_private, int result, void *write_private)
+{
+	if (result != 0)
+	{
+		char *tmppath = write_private;
+
+		errno = result;
+		ereport(PANIC,
+				(errcode_for_file_access(),
+				 errmsg("could not fsync file \"%s\": %m", tmppath)));
+	}
+}
+
+static bool
+XLogFileInitSyncRetry(pg_streaming_write *pgsw, void *pgsw_private, PgAioInProgress *aio, void *write_private)
+{
+	int result = pgaio_io_result(aio);
+
+	if (result == -EINTR || result == -EAGAIN)
+	{
+		pgaio_io_retry(aio);
+		return true;
+	}
+
+	return false;
 }
 
 /*
@@ -4730,7 +4782,8 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 				PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
 
 				pgaio_io_start_write_raw(aio, fd, nbytes, XLOG_BLCKSZ, XLogCtl->zerobuf);
-				pg_streaming_write_write(pgsw, aio, XLogFileInitComplete, NULL);
+				pg_streaming_write_write(pgsw, aio, XLogFileInitWriteComplete, XLogFileInitWriteRetry,
+										 tmppath);
 			}
 		}
 #endif
@@ -4777,7 +4830,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 
 			aio = pg_streaming_write_get_io(pgsw);
 			pgaio_io_start_fsync_raw(aio, fd, false);
-			pg_streaming_write_write(pgsw, aio, XLogFileInitComplete, NULL);
+			pg_streaming_write_write(pgsw, aio, XLogFileInitSyncComplete, XLogFileInitSyncRetry, tmppath);
 		}
 		pg_streaming_write_wait_all(pgsw);
 		pg_streaming_write_free(pgsw);
