@@ -2112,8 +2112,12 @@ pgaio_submit_pending(bool drain)
 {
 	Assert(my_aio);
 
+	/*
+	 * We allow shared callbacks to be called even when not draining, as we
+	 * might be forced to drain due to backend IO concurrency limits.
+	 */
 	pgaio_submit_pending_internal(drain,
-								  /* call_shared */ drain,
+								  /* call_shared */ true,
 								  /* call_local */ drain,
 								  /* will_wait */ false);
 }
@@ -2124,7 +2128,11 @@ pgaio_closing_possibly_referenced(void)
 	if (!my_aio)
 		return;
 
-	pgaio_submit_pending(false);
+	/* the callback could trigger further IO or such ATM */
+	pgaio_submit_pending_internal(false,
+								  /* call_shared */ false,
+								  /* call_local */ false,
+								  /* will_wait */ false);
 }
 
 static void
