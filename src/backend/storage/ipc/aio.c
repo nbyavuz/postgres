@@ -1327,6 +1327,7 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 			io->scb == PGAIO_SCB_WRITE_SMGR
 			|| io->scb == PGAIO_SCB_WRITE_SB
 			|| io->scb == PGAIO_SCB_WRITE_WAL
+			|| io->scb == PGAIO_SCB_WRITE_RAW
 			))
 		result = 4096;
 #endif
