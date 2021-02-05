@@ -1948,7 +1948,7 @@ bulk_extend_undirty_complete(pg_streaming_write *pgsw, void *pgsw_private, int r
 
 	if (bulk_extend_buffer_inval(ex_buf->buf_hdr))
 	{
-		dlist_push_head(&be_state->acquired_buffers, &ex_buf->node);
+		dlist_push_tail(&be_state->acquired_buffers, &ex_buf->node);
 		be_state->acquired_buffers_count++;
 	}
 	else
@@ -2113,7 +2113,7 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 		}
 		else if (buffer_usable)
 		{
-			dlist_push_head(&be_state->acquired_buffers, &cur_ex_buf->node);
+			dlist_push_tail(&be_state->acquired_buffers, &cur_ex_buf->node);
 			be_state->acquired_buffers_count++;
 		}
 		else
