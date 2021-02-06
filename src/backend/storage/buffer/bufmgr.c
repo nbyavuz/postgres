@@ -2037,7 +2037,7 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 		ReservePrivateRefCountEntry();
 		ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
 
-		cur_buf_hdr = StrategyGetBuffer(NULL, &cur_buf_state);
+		cur_buf_hdr = StrategyGetBuffer(strategy, &cur_buf_state);
 		cur_ex_buf->buf_hdr = cur_buf_hdr;
 
 		Assert(BUF_STATE_GET_REFCOUNT(cur_buf_state) == 0);
@@ -2182,7 +2182,7 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 		/* lock to install new identity */
 		buf_state = LockBufHdr(new_buf_hdr);
 
-		buf_state |= BM_TAG_VALID | BM_IO_IN_PROGRESS | BUF_USAGECOUNT_ONE * BM_MAX_USAGE_COUNT;
+		buf_state |= BM_TAG_VALID | BM_IO_IN_PROGRESS | BUF_USAGECOUNT_ONE;
 
 		if (relpersistence == RELPERSISTENCE_PERMANENT || forkNum == INIT_FORKNUM)
 			buf_state |= BM_PERMANENT;
