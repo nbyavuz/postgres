@@ -1913,6 +1913,7 @@ bulk_extend_buffer_inval(BufferDesc *buf_hdr)
 typedef struct BulkExtendOneBuffer
 {
 	BufferDesc *buf_hdr;
+	bool in_progress;
 	dlist_node node;
 } BulkExtendOneBuffer;
 
@@ -1940,9 +1941,13 @@ bulk_extend_undirty_complete(pg_streaming_write *pgsw, void *pgsw_private, int r
 
 	Assert(result == BLCKSZ);
 
+	Assert(ex_buf->in_progress);
+	ex_buf->in_progress = false;
+
 	/* the buffer lock has already been released by ReadBufferCompleteWrite */
 
 	tag = ex_buf->buf_hdr->tag;
+	Assert(be_state->pending_buffers_count > 0);
 	be_state->pending_buffers_count--;
 	dlist_delete_from(&be_state->pending_buffers, &ex_buf->node);
 
@@ -2020,12 +2025,14 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 		if ((be_state->acquired_buffers_count + be_state->pending_buffers_count) >= extendby)
 		{
 			pg_streaming_write_wait_all(be_state->pgsw);
+			Assert(be_state->pending_buffers_count == 0);
 			continue;
 		}
 
 		Assert(!dlist_is_empty(&be_state->allocated_buffers));
 		cur_ex_buf = dlist_container(BulkExtendOneBuffer, node,
 									 dlist_pop_head_node(&be_state->allocated_buffers));
+		Assert(!cur_ex_buf->in_progress);
 
 		ReservePrivateRefCountEntry();
 		ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
@@ -2110,6 +2117,7 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int extendby, BufferAc
 		{
 			dlist_push_tail(&be_state->pending_buffers, &cur_ex_buf->node);
 			be_state->pending_buffers_count++;
+			cur_ex_buf->in_progress = true;
 		}
 		else if (buffer_usable)
 		{
