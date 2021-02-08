@@ -3946,45 +3946,6 @@ xlogwrite_again:
 	 */
 	if (LogwrtResult.WriteInit < write_pos.write_init_min)
 	{
-#if 0
-		{
-			XLogRecPtr	reserved_upto = XLogBytePosToEndRecPtr(XLogCtl->Insert.CurrBytePos);
-			XLogRecPtr	completed = WaitXLogInsertionsToFinish(WriteRqst.WriteInit);
-
-			ereport(DEBUG1,
-					errmsg("xlog write write cur/target: "
-						   "WriteInit: %X/%X->%X/%X: %u, "
-						   "WriteDone: %X/%X->%X/%X, "
-						   "FlushInit: %X/%X->%X/%X, "
-						   "FlushDone: %X/%X->%X/%X, "
-						   "Reserved: %X/%X, "
-						   "Completed: %X/%X, "
-						   "Reserved - Completed: %lu, "
-						   "Completed - prev WriteInit: %lu, "
-						   "Completed - new WriteInit: %lu, ",
-						   (uint32) (LogwrtResult.WriteInit >> 32), (uint32) (LogwrtResult.WriteInit),
-						   (uint32) (WriteRqst.WriteInit >> 32), (uint32) (WriteRqst.WriteInit),
-						   (uint32) (WriteRqst.WriteInit - LogwrtResult.WriteInit),
-
-						   (uint32) (LogwrtResult.WriteDone >> 32), (uint32) (LogwrtResult.WriteDone),
-						   (uint32) (WriteRqst.WriteDone >> 32), (uint32) (WriteRqst.WriteDone),
-
-						   (uint32) (LogwrtResult.FlushInit >> 32), (uint32) (LogwrtResult.FlushInit),
-						   (uint32) (WriteRqst.FlushInit >> 32), (uint32) (WriteRqst.FlushInit),
-
-						   (uint32) (LogwrtResult.FlushDone >> 32), (uint32) (LogwrtResult.FlushDone),
-						   (uint32) (WriteRqst.FlushDone >> 32), (uint32) (WriteRqst.FlushDone),
-
-						   (uint32) (reserved_upto >> 32), (uint32) reserved_upto,
-						   (uint32) (completed >> 32), (uint32) completed,
-						   reserved_upto - completed,
-						   completed - LogwrtResult.WriteInit,
-						   completed - WriteRqst.WriteInit),
-					errhidestmt(true),
-					errhidecontext(true));
-		}
-#endif
-
 		pgWalUsage.wal_writes++;
 
 		if (XLogWriteIssueWrites(&write_pos, flexible))
@@ -3993,12 +3954,6 @@ xlogwrite_again:
 			holding_lock = false;
 			goto xlogwrite_again;
 		}
-#if 0
-		ereport(LOG,
-				errmsg("write done"),
-				errhidestmt(true),
-				errhidecontext(true));
-#endif
 
 		performed_io = true;
 
