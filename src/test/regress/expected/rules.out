@@ -1786,9 +1786,10 @@ pg_stat_aios| SELECT s.id,
     s.flags,
     s.ring,
     s.owner_pid,
+    s.merge_with,
     s.result,
     s."desc"
-   FROM pg_stat_get_aios() s(id, gen, op, scb, flags, ring, owner_pid, result, "desc");
+   FROM pg_stat_get_aios() s(id, gen, op, scb, flags, ring, owner_pid, merge_with, result, "desc");
 pg_stat_all_indexes| SELECT c.oid AS relid,
     i.oid AS indexrelid,
     n.nspname AS schemaname,

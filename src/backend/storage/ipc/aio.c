@@ -5638,7 +5638,7 @@ pg_stat_get_aio_backends(PG_FUNCTION_ARGS)
 Datum
 pg_stat_get_aios(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_GET_AIOS_COLS	9
+#define PG_STAT_GET_AIOS_COLS	10
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	TupleDesc	tupdesc;
@@ -5719,10 +5719,15 @@ pg_stat_get_aios(PG_FUNCTION_ARGS)
 		else
 			nulls[ 6] = true;
 
-		values[ 7] = Int32GetDatum(io_copy.result);
+		if (io_copy.merge_with_idx != PGAIO_MERGE_INVALID)
+			values[ 7] = Int32GetDatum(io_copy.merge_with_idx);
+		else
+			nulls[ 7] = true;
+
+		values[ 8] = Int32GetDatum(io_copy.result);
 
 		pgaio_io_shared_desc(&io_copy, &tmps);
-		values[ 8] = PointerGetDatum(cstring_to_text(tmps.data));
+		values[ 9] = PointerGetDatum(cstring_to_text(tmps.data));
 		resetStringInfo(&tmps);
 
 		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
