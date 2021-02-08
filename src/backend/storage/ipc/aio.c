@@ -539,7 +539,6 @@ static void pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_l
 static void pgaio_io_retry_soft_failed(PgAioInProgress *io, uint64 ref_generation);
 static void pgaio_process_io_completion(PgAioInProgress *io, int result);
 static void pgaio_wait_for_issued_internal(int n, int fd);
-static uint32 pgaio_io_index(PgAioInProgress *index);
 
 /* printing functions */
 static const char *pgaio_io_shared_callback_string(PgAioSharedCallback a);
@@ -4193,7 +4192,7 @@ pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, struct io_uri
 static void
 pgaio_posix_preflight(PgAioInProgress *io)
 {
-	size_t io_index = pgaio_io_index(io);
+	size_t io_index = pgaio_io_id(io);
 
 	io->submitter_id = my_aio_id;
 	pg_atomic_add_fetch_u32(&my_aio->inflight_count, 1);
@@ -4339,7 +4338,7 @@ pgaio_posix_poll_aiocb(PgAioInProgress *io)
 	 * XXX Explain theory about why the queue must have enough room for a newly
 	 * completed IO.
 	 */
-	if (!squeue32_enqueue(aio_completion_queue, pgaio_io_index(io)))
+	if (!squeue32_enqueue(aio_completion_queue, pgaio_io_id(io)))
 		elog(PANIC, "shared completion queue unexpectedly full");
 
 	/*
@@ -5738,8 +5737,12 @@ pg_stat_get_aios(PG_FUNCTION_ARGS)
 static bool
 pgaio_io_matches_fd(PgAioInProgress *io, int fd)
 {
-	/* Shouldn't be asking for IOs we didn't initiate. */
-	Assert(io->owner_id == my_aio_id);
+#ifdef USE_POSIX_AIO
+	/* XXX review sanity of this */
+	/* We only want to match IOs that were submitted by this process. */
+	if (aio_type != AIOTYPE_POSIX || io->submitter_id != my_aio_id)
+		return false;
+#endif
 
 	switch (io->op)
 	{
@@ -5830,10 +5833,4 @@ pgaio_closing_fd(int fd)
 		pgaio_wait_for_issued_internal(-1, fd);
 #endif
 #endif
-}
-
-static uint32
-pgaio_io_index(PgAioInProgress *io)
-{
-	return io - aio_ctl->in_progress_io;
 }
