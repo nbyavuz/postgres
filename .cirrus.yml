@@ -132,17 +132,6 @@ task:
     - echo io_data_direct=on >> /tmp/extra.conf
     - echo io_wal_direct=on >> /tmp/extra.conf
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=/tmp/extra.conf make -s check'
-  linux_posix_buf_script:
-    - echo aio_type=posix > /tmp/extra.conf
-    - echo io_data_direct=off >> /tmp/extra.conf
-    - echo io_wal_direct=off >> /tmp/extra.conf
-    - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=/tmp/extra.conf make -s check'
-  linux_posix_dio_script:
-    - echo aio_type=posix > /tmp/extra.conf
-    - echo io_data_direct=on >> /tmp/extra.conf
-    - echo io_wal_direct=on >> /tmp/extra.conf
-    - echo restart_after_crash=false >> /tmp/extra.conf
-    - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=/tmp/extra.conf make -s check'
   linux_io_uring_buf_script:
     - echo aio_type=io_uring > /tmp/extra.conf
     - echo io_data_direct=off >> /tmp/extra.conf
@@ -150,6 +139,17 @@ task:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=/tmp/extra.conf make -s check'
   linux_io_uring_dio_script:
     - echo aio_type=io_uring > /tmp/extra.conf
+    - echo io_data_direct=on >> /tmp/extra.conf
+    - echo io_wal_direct=on >> /tmp/extra.conf
+    - echo restart_after_crash=false >> /tmp/extra.conf
+    - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=/tmp/extra.conf make -s check'
+  linux_posix_buf_script:
+    - echo aio_type=posix > /tmp/extra.conf
+    - echo io_data_direct=off >> /tmp/extra.conf
+    - echo io_wal_direct=off >> /tmp/extra.conf
+    - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=/tmp/extra.conf make -s check'
+  linux_posix_dio_script:
+    - echo aio_type=posix > /tmp/extra.conf
     - echo io_data_direct=on >> /tmp/extra.conf
     - echo io_wal_direct=on >> /tmp/extra.conf
     - echo restart_after_crash=false >> /tmp/extra.conf
