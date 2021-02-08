@@ -5390,6 +5390,8 @@ XLogFileClose(void)
 		(void) posix_fadvise(openLogFile, 0, 0, POSIX_FADV_DONTNEED);
 #endif
 
+	pgaio_closing_fd(openLogFile);
+
 	if (close(openLogFile) != 0)
 	{
 		char		xlogfname[MAXFNAMELEN];

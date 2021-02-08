@@ -1212,6 +1212,7 @@ LruDelete(File file)
 	vfdP = &VfdCache[file];
 
 	pgaio_closing_possibly_referenced();
+	pgaio_closing_fd(vfdP->fd);
 
 	/*
 	 * Close the file.  We aren't expecting this to fail; if it does, better
@@ -1893,6 +1894,7 @@ FileClose(File file)
 	if (!FileIsNotOpen(file))
 	{
 		pgaio_closing_possibly_referenced();
+		pgaio_closing_fd(vfdP->fd);
 
 		/* close the file */
 		if (close(vfdP->fd) != 0)

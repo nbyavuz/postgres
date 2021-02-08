@@ -36,6 +36,7 @@ typedef enum AioType
 {
 	AIOTYPE_WORKER = 0,
 	AIOTYPE_LIBURING,
+	AIOTYPE_POSIX,
 } AioType;
 
 /* We'll default to bgworker. */
@@ -118,6 +119,7 @@ extern void pgaio_print_list(struct dlist_head *head, struct StringInfoData *s, 
 extern void pgaio_submit_pending(bool drain);
 
 extern void pgaio_closing_possibly_referenced(void);
+extern void pgaio_closing_fd(int fd);
 
 extern void pgaio_io_ref(PgAioInProgress *io, PgAioIoRef *ref);
 

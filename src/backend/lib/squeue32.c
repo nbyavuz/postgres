@@ -144,6 +144,8 @@ enq_try_again:
 	goto enq_try_again;
 }
 
+extern int MyProcPid;
+
 /*
  * Dequeue a value.  Returns true on success, and false if the queue is empty.
  */
