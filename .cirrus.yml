@@ -212,11 +212,11 @@ task:
   always:
     gcc_u_warning_script:
       - ./configure --enable-cassert --with-liburing CC="ccache gcc"
-      - make -s clean && make s -j4
+      - make -s clean && make -s -j4
   always:
     gcc_pu_warning_script:
       - ./configure --enable-cassert --with-posix-aio --with-liburing CC="ccache gcc"
-      - make -s clean && make s -j4
+      - make -s clean && make -s -j4
   # gcc with asserts enabled
   always:
     gcc_a_warning_script:
@@ -229,11 +229,11 @@ task:
   always:
     gcc_au_warning_script:
       - ./configure --enable-cassert --with-liburing CC="ccache gcc"
-      - make -s clean && make s -j4
+      - make -s clean && make -s -j4
   always:
     gcc_apu_warning_script:
       - ./configure --enable-cassert --with-posix-aio --with-liburing CC="ccache gcc"
-      - make -s clean && make s -j4
+      - make -s clean && make -s -j4
   # clang with asserts disabled
   always:
     clang_warning_script:
@@ -246,11 +246,11 @@ task:
   always:
     clang_u_warning_script:
       - ./configure --enable-cassert --with-liburing CC="ccache clang"
-      - make -s clean && make s -j4
+      - make -s clean && make -s -j4
   always:
     clang_pu_warning_script:
       - ./configure --enable-cassert --with-posix-aio --with-liburing CC="ccache clang"
-      - make -s clean && make s -j4
+      - make -s clean && make -s -j4
   # clang with asserts enabled
   always:
     clang_a_warning_script:
@@ -263,8 +263,8 @@ task:
   always:
     clang_au_warning_script:
       - ./configure --enable-cassert --with-liburing CC="ccache clang"
-      - make -s clean && make s -j4
+      - make -s clean && make -s -j4
   always:
     clang_apu_warning_script:
       - ./configure --enable-cassert --with-posix-aio --with-liburing CC="ccache clang"
-      - make -s clean && make s -j4
+      - make -s clean && make -s -j4
