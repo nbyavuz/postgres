@@ -3169,7 +3169,7 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 	else
 		lastnonpartialidx = -1;
 
-	while (LogwrtResult.WriteInit < write_pos->write_init_min)
+	while (LogwrtResult.WriteInit < write_pos->write_init_opt)
 	{
 		/*
 		 * Make sure we're not ahead of the insert process.  This could happen
@@ -3196,7 +3196,6 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 				XLogBytePosToRecPtr(XLogCtl->Insert.CurrBytePos);
 
 			Assert(write_pos->write_init_opt <= newinsertpos);
-			Assert(write_pos->write_init_min > (PageEndPtr - XLOG_BLCKSZ));
 
 			if (write_pos->write_init_opt < newinsertpos)
 			{
@@ -3204,6 +3203,19 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 				ispartialpage = write_pos->write_init_opt < PageEndPtr;
 				//elog(LOG, "last ditch 1, new partial %d", ispartialpage);
 			}
+
+			if (LogwrtResult.WriteInit >= write_pos->write_init_min)
+			{
+				ereport(DEBUG3,
+						errmsg("break due to partial min %X/%X, opt %X/%X",
+							   (uint32)(write_pos->write_init_min >> 32), (uint32) write_pos->write_init_min,
+							   (uint32)(write_pos->write_init_opt >> 32), (uint32) write_pos->write_init_opt),
+						errhidestmt(true),
+						errhidecontext(true));
+				break;
+			}
+
+			Assert(write_pos->write_init_min > (PageEndPtr - XLOG_BLCKSZ));
 
 			/*
 			 * Safe to use WaitXLogInsertionsToFinish even while holding lock,
@@ -3579,11 +3591,11 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 		//elog(DEBUG1, "gonna write again: %d", writecount);
 	}
 
-	if (LogwrtResult.WriteInit < write_pos->write_done_opt)
-		elog(DEBUG1, "still would have more to write: opt is: %X/%X, %d bytes to %X/%X",
+	if (LogwrtResult.WriteInit < write_pos->write_init_opt)
+		elog(DEBUG2, "still would have more to write: opt is: %X/%X, %d bytes to %X/%X",
 			 (uint32)(LogwrtResult.WriteInit >> 32), (uint32) LogwrtResult.WriteInit,
-			 (int)(write_pos->write_done_opt - LogwrtResult.WriteInit),
-			 (uint32)(write_pos->write_done_opt >> 32), (uint32) write_pos->write_done_opt);
+			 (int)(write_pos->write_init_opt - LogwrtResult.WriteInit),
+			 (uint32)(write_pos->write_init_opt >> 32), (uint32) write_pos->write_init_opt);
 
 
 	Assert(npages == 0);
@@ -3761,17 +3773,19 @@ xlogwrite_again:
 	}
 
 	if (write_pos.write_done_min <= LogwrtResult.WriteInit &&
-		write_pos.write_init_min <=  LogwrtResult.WriteInit &&
+		write_pos.write_init_min <= LogwrtResult.WriteInit &&
 		write_pos.flush_done_min <= LogwrtResult.FlushInit &&
 		write_pos.flush_init_min <= LogwrtResult.FlushInit)
 	{
-		if (write_pos.write_done_min <= LogwrtResult.WriteInit)
+		if (write_pos.write_done_min > LogwrtResult.WriteDone)
 		{
 			XLogIOQueueWaitFor(XLogCtl->writes, write_pos.write_done_min, false);
 			Assert(write_pos.write_done_min <= LogwrtResult.WriteDone);
 		}
-		if (write_pos.flush_done_min <= LogwrtResult.FlushInit)
+		if (write_pos.flush_done_min > LogwrtResult.FlushDone)
 		{
+			Assert(sync_method != SYNC_METHOD_OPEN &&
+				   sync_method != SYNC_METHOD_OPEN_DSYNC);
 			XLogIOQueueWaitFor(XLogCtl->flushes, write_pos.flush_done_min, false);
 			Assert(write_pos.flush_done_min <= LogwrtResult.FlushDone);
 		}
@@ -3848,7 +3862,7 @@ xlogwrite_again:
 	}
 
 	if (!performed_io && tried_lock)
-		elog(DEBUG1, "about to again wait for lock");
+		elog(DEBUG3, "about to again wait for lock");
 
 	if (!LWLockAcquireEx(WALWriteLock, LW_EXCLUSIVE, XLogWriteLockCheck, write_pos.write_init_min))
 	{
