@@ -513,6 +513,10 @@ typedef struct PgAioCtl
 	ConditionVariable submission_queue_not_empty;
 	squeue32 *aio_submission_queue;
 
+#ifdef USE_POSIX_AIO
+	/* Queue for shared completion notifications in POSIX AIO mode. */
+	squeue32 *posix_completion_queue;
+#endif
 
 	int backend_state_count;
 	PgAioPerBackend *backend_state;
@@ -788,9 +792,6 @@ struct io_uring local_ring;
 
 #ifdef USE_POSIX_AIO
 
-/* Shared completion queue, used if aio_type is posix. */
-squeue32 *aio_completion_queue;
-
 static sig_atomic_t pgaio_posix_set_latch_on_return = false;
 
 /* AIO_LISTIO_MAX is missing on glibc systems.  16 is pretty conservative. */
@@ -925,13 +926,6 @@ AioShmemInit(void)
 	bool		found;
 	uint32		TotalProcs = MaxBackends + NUM_AUXILIARY_PROCS;
 
-#ifdef USE_POSIX_AIO
-	aio_completion_queue = (squeue32 *)
-		ShmemInitStruct("PgAioCompletionQueue", AioCompletionQueueShmemSize(), &found);
-	if (!found)
-		squeue32_init(aio_completion_queue, max_aio_in_progress);
-#endif
-
 	aio_ctl = (PgAioCtl *)
 		ShmemInitStruct("PgAio", AioCtlShmemSize(), &found);
 
@@ -1062,10 +1056,19 @@ AioShmemInit(void)
 			}
 		}
 #endif
-
+#ifdef USE_POSIX_AIO
+		if (aio_type == AIOTYPE_POSIX)
+		{
+			aio_ctl->posix_completion_queue = (squeue32 *)
+				ShmemInitStruct("PgAioCompletionQueue", AioCompletionQueueShmemSize(), &found);
+			Assert(!found);
+			squeue32_init(aio_ctl->posix_completion_queue, max_aio_in_progress);
+		}
+#endif
 	}
 
 #if USE_POSIX_AIO
+	if (aio_type == AIOTYPE_POSIX)
 	{
 		struct sigaction sa;
 
@@ -4342,7 +4345,7 @@ pgaio_posix_poll_aiocb(PgAioInProgress *io)
 	 * XXX Explain theory about why the queue must have enough room for a newly
 	 * completed IO.
 	 */
-	if (!squeue32_enqueue(aio_completion_queue, pgaio_io_id(io)))
+	if (!squeue32_enqueue(aio_ctl->posix_completion_queue, pgaio_io_id(io)))
 		elog(PANIC, "shared completion queue unexpectedly full");
 
 	/*
@@ -4401,7 +4404,7 @@ pgaio_posix_drain(PgAioContext *context)
 	int ndrained = 0;
 
 	/* Reap as many completed IOs as we can without waiting. */
-	while (squeue32_dequeue(aio_completion_queue, &io_index))
+	while (squeue32_dequeue(aio_ctl->posix_completion_queue, &io_index))
 	{
 		PgAioInProgress *io = &aio_ctl->in_progress_io[io_index];
 		int merged_result;
