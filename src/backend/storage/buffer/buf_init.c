@@ -141,6 +141,8 @@ InitBufferPool(void)
 		GetBufferDescriptor(NBuffers - 1)->freeNext = FREENEXT_END_OF_LIST;
 	}
 
+	BufReserveInit();
+
 	/* Init other shared buffer-management stuff */
 	StrategyInitialize(!foundDescs);
 

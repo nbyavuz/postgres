@@ -313,6 +313,10 @@ extern void ReadBufferCompleteRead(Buffer buffer, char *bufdata, int mode, bool 
 extern void ReadBufferCompleteRawRead(const AioBufferTag *tag, char *bufdata, bool failed);
 extern void ReadBufferCompleteWrite(Buffer buffer, bool release_lock, bool failed);
 
+extern Buffer AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn, PgAioIoRef *aio_ref);
+extern bool AsyncFlushVictim(Buffer buffer, XLogRecPtr *lsn, PgAioIoRef *aio_ref);
+extern bool TryReuseBuffer(Buffer buffer);
+extern void OwnUnusedBuffer(Buffer buffer);
 
 /* freelist.c */
 extern BufferDesc *StrategyGetBuffer(BufferAccessStrategy strategy,
@@ -335,6 +339,11 @@ extern uint32 BufTableHashCode(BufferTag *tagPtr);
 extern int	BufTableLookup(BufferTag *tagPtr, uint32 hashcode);
 extern int	BufTableInsert(BufferTag *tagPtr, uint32 hashcode, int buf_id);
 extern void BufTableDelete(BufferTag *tagPtr, uint32 hashcode);
+
+/* in buf_reserve.c */
+
+extern BufferDesc *BufReserveGetFree(BufferAccessStrategy strategy, bool block);
+extern void BufReserveInit(void);
 
 /* localbuf.c */
 extern PrefetchBufferResult PrefetchLocalBuffer(SMgrRelation smgr,

@@ -163,7 +163,7 @@ ExtendRelation(Relation relation, BulkInsertState bistate, int options, bool use
 		 * FIXME: There should probably be some chunking, either from here, or
 		 * inside BulkExtendBuffered.
 		 */
-		buf = BulkExtendBuffered(relation, MAIN_FORKNUM, extendby,
+		buf = BulkExtendBuffered(relation, MAIN_FORKNUM, &extendby,
 								 bistate ? bistate->strategy : NULL);
 
 		newblockno = BufferGetBlockNumber(buf);
