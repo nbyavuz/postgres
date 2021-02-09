@@ -5778,16 +5778,16 @@ static void
 pgaio_wait_for_issued_internal(int n, int fd)
 {
 	dlist_iter iter;
-	PgAioInProgress *io;
-	PgAioIoRef ref;
 
 	dlist_foreach(iter, &my_aio->issued)
 	{
-		io = dlist_container(PgAioInProgress, owner_node, iter.cur);
+		PgAioInProgress *io = dlist_container(PgAioInProgress, owner_node, iter.cur);
 
 		if (io->flags & PGAIOIP_INFLIGHT &&
 			(fd < 0 || pgaio_io_matches_fd(io, fd)))
 		{
+			PgAioIoRef ref;
+
 			pgaio_io_ref_internal(io, &ref);
 			pgaio_io_print(io, NULL);
 			pgaio_io_wait_ref(&ref, false);
@@ -5799,6 +5799,9 @@ pgaio_wait_for_issued_internal(int n, int fd)
 	/* XXX explain dirty read of issued_abandoned */
 	while (!dlist_is_empty(&my_aio->issued_abandoned))
 	{
+		PgAioInProgress *io = NULL;
+		PgAioIoRef ref;
+
 		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 		dlist_foreach(iter, &my_aio->issued_abandoned)
 		{
