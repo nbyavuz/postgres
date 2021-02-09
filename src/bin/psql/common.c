@@ -596,7 +596,7 @@ PSQLexecWatch(const char *query, const printQueryOpt *opt)
 {
 	PGresult   *res;
 	double		elapsed_msec = 0;
-	instr_time	before;
+	instr_time	before = 0;
 	instr_time	after;
 
 	if (!pset.db)
@@ -1294,8 +1294,8 @@ SendQuery(const char *query)
 			 pset.crosstab_flag || !is_select_command(query))
 	{
 		/* Default fetch-it-all-and-print mode */
-		instr_time	before,
-					after;
+		instr_time	before = 0;
+		instr_time	after;
 
 		if (pset.timing)
 			INSTR_TIME_SET_CURRENT(before);
@@ -1469,8 +1469,8 @@ DescribeQuery(const char *query, double *elapsed_msec)
 {
 	PGresult   *results;
 	bool		OK;
-	instr_time	before,
-				after;
+	instr_time	before = 0;
+	instr_time	after;
 
 	*elapsed_msec = 0;
 
@@ -1595,8 +1595,8 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 	int			ntuples;
 	int			fetch_count;
 	char		fetch_cmd[64];
-	instr_time	before,
-				after;
+	instr_time	before = 0;
+	instr_time	after;
 	int			flush_error;
 
 	*elapsed_msec = 0;

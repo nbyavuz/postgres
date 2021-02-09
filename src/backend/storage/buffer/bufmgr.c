@@ -1119,7 +1119,8 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	bool		isLocalBuf = SmgrIsTemp(smgr);
 	BufferDesc *bufHdr;
 	Buffer		buf;
-	instr_time	io_start, io_time;
+	instr_time	io_start = 0;
+	instr_time	io_time;
 
 	if (blockNum == P_NEW)
 		return ReadBuffer_extend(smgr, relpersistence, forkNum,
@@ -3531,8 +3532,8 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 {
 	XLogRecPtr	recptr;
 	ErrorContextCallback errcallback;
-	instr_time	io_start,
-				io_time;
+	instr_time	io_start = 0;
+	instr_time	io_time;
 	Block		bufBlock;
 	char	   *bufToWrite;
 	uint32		buf_state;
