@@ -113,6 +113,7 @@ task:
   create_user_script:
     - useradd -m postgres
     - chown -R postgres:postgres .
+    - mkdir -p /tmp/ccache_dir
     - chown -R postgres:postgres /tmp/ccache_dir
     # kvm kernel / image uses a low default ulimit
     - echo '* - memlock 134217728' > /etc/security/limits.d/postgres.conf
