@@ -4597,7 +4597,7 @@ static int
 pgaio_posix_submit_one(PgAioInProgress *io,
 					   pgaio_posix_listio_buffer *listio_buffer)
 {
-	int rc;
+	int rc = -1;
 
 	switch (io->op)
 	{
