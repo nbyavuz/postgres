@@ -799,10 +799,11 @@ static sig_atomic_t pgaio_posix_set_latch_on_return = false;
 #endif
 
 /* Realtime signals are missing on macOS systems.  We have to work harder. */
-#ifdef SIGRTMIN
+#if defined(SIGRTMIN) && !defined(MISSING_LIO_REALTIME_SIGNALS)
 #define PGAIO_POSIX_SIGNO SIGRTMIN
 #else
 #define MISSING_POSIX_REALTIME_SIGNALS
+#define MISSING_LIO_LISTIO_NOTIFICATIONS
 #define PGAIO_POSIX_SIGNO SIGIO
 volatile sig_atomic_t *my_inflight_io;
 volatile sig_atomic_t my_inflight_io_count;
@@ -4281,56 +4282,54 @@ pgaio_posix_poll_aiocb(PgAioInProgress *io)
 #endif
 
 	/*
-	 * XXX Unfortunately the Glibc implementation can occasionally deadlock,
-	 * because its aio_error() and aio_return() functions are not async-signal
-	 * safe, as required by POSIX.  Specifically, they use malloc/free and
-	 * pthead mutexes that can deadlock against the user context.
+	 * XXX Unfortunately the glibc implementation can occasionally deadlock
+	 * here, because its aio_error() and aio_return() functions are not
+	 * async-signal safe, as required by POSIX.  Specifically, they use
+	 * pthead mutexes that can deadlock against the user context.  Would it
+	 * help if we blocked the signal while submitting?
 	 */
 
 	Assert(io->submitter_id == my_aio_id);
 
 	/* Check if the IO has completed and has an error status. */
 	error_status = aio_error(&io->posix_aiocb);
-	if (likely(error_status == 0))
+	if (error_status == 0)
 	{
+		/* The IO succeeded.  Retrieve the return status. */
 		io->posix_returned_generation = io->generation;
-
-		/* Retrieve the return status and release kernel resource. */
 		return_status = aio_return(&io->posix_aiocb);
 		if (return_status < 0)
-		{
-			/* XXX */
-			elog(PANIC, "aio_return() failed after success: %m");
-		}
+			elog(PANIC, "aio_return() failed with error status 0: %m");
 		io->result = return_status;
 		pgaio_posix_postflight(io);
 	}
+	else if (error_status < 0)
+	{
+		/*
+		 * On macOS, we might poll an aiocb that is about to be submitted, or
+		 * that we recently failed to submit, so it's unknown to the kernel.
+		 * On other systems EINVAL would imply that we've received a spurious
+		 * signal.
+		 */
+		if (errno != EINVAL)
+			elog(PANIC, "aio_error() failed: %m");
+		return;
+	}
+	else if (error_status == EINPROGRESS)
+	{
+		/*
+		 * The IO is still running.  Expected only on macOS.  On other systems
+		 * it would imply a spurious signal.
+		 */
+		return;
+	}
 	else
 	{
-		/* Did aio_error() itself fail? */
-		if (error_status < 0)
-		{
-			/* XXX */
-			elog(PANIC, "aio_error() failed: %m");
-		}
-
-		/*
-		 * Still running?  Should only happen on macOS where we have to check
-		 * every outstanding IO potentially repeatedly, or if a hand-crafted
-		 * signal was sent, not from the kernel AIO system.
-		 */
-		if (error_status == EINPROGRESS)
-			return;
-
+		/* The IO failed.  Ignore the return value. */
 		io->posix_returned_generation = io->generation;
-
-		/*
-		 * Release kernel resource.  The return value isn't used (we already
-		 * code an error status), and seems to vary across platforms.
-		 */
 		aio_return(&io->posix_aiocb);
 
-		/* Set the error using a negative result. */
+		/* Set the error using a negative result value. */
 		io->result = -error_status;
 		pgaio_posix_postflight(io);
 	}
@@ -4364,8 +4363,13 @@ pgaio_posix_signal_handler(int sig, siginfo_t *si, void *uap)
 	PgAioInProgress *io;
 
 #ifndef MISSING_POSIX_REALTIME_SIGNALS
-	io = &aio_ctl->in_progress_io[si->si_value.sival_int];
-	pgaio_posix_poll_aiocb(io);
+	/* Defend against spurious signals. */
+	if (si->si_value.sival_int >= 0 &&
+		si->si_value.sival_int < max_aio_in_progress)
+	{
+		io = &aio_ctl->in_progress_io[si->si_value.sival_int];
+		pgaio_posix_poll_aiocb(io);
+	}
 #else
 	/*
 	 * Without realtime signals and signal queuing, unhandled signals are
@@ -4412,22 +4416,25 @@ pgaio_posix_drain(PgAioContext *context)
 	return ndrained;
 }
 
-static PgAioInProgress *
-pgaio_io_for_posix_aiocb(struct aiocb *cb)
-{
-	return (PgAioInProgress *)
-		(((char *) cb) - offsetof(PgAioInProgress, posix_aiocb));
-}
-
 typedef struct pgaio_posix_listio_buffer
 {
 	int nios;
 	struct aiocb *cbs[AIO_LISTIO_MAX];
 } pgaio_posix_listio_buffer;
 
+#ifndef MISSING_LIO_LISTIO_NOTIFICATIONS
+static PgAioInProgress *
+pgaio_io_for_posix_aiocb(struct aiocb *cb)
+{
+	return (PgAioInProgress *)
+		(((char *) cb) - offsetof(PgAioInProgress, posix_aiocb));
+}
+#endif
+
 static int
 pgaio_posix_flush_listio(pgaio_posix_listio_buffer *lb)
 {
+#ifndef MISSING_LIO_LISTIO_NOTIFICATIONS
 	uint64 io_generation[AIO_LISTIO_MAX];
 	int rc;
 
@@ -4513,10 +4520,12 @@ pgaio_posix_flush_listio(pgaio_posix_listio_buffer *lb)
 		}
 	}
 	lb->nios = 0;
+#endif
 
 	return 0;
 }
 
+#ifndef MISSING_LIO_LISTIO_NOTIFICATIONS
 static int
 pgaio_posix_add_listio(pgaio_posix_listio_buffer *lb, PgAioInProgress *io)
 {
@@ -4533,6 +4542,7 @@ pgaio_posix_add_listio(pgaio_posix_listio_buffer *lb, PgAioInProgress *io)
 
 	return 0;
 }
+#endif
 
 /*
  * Assumes that io->posix_aiocb is cleared, but has the aio_filedes and
@@ -4570,13 +4580,23 @@ pgaio_posix_start_rw(PgAioInProgress *io, pgaio_posix_listio_buffer *lb,
 		/*
 		 * This might be a single PG IO, or a chain of reads into contiguous
 		 * memory, so that it takes only a single iovec.  We'll batch it up
-		 * with other such single iovec requests.
+		 * with other such single iovec requests, if lio_listio(2) works.
 		 */
 		cb->aio_buf = iov[0].iov_base;
 		cb->aio_nbytes = iov[0].iov_len;
 		cb->aio_lio_opcode = lio_opcode;
 
+#ifdef MISSING_LIO_LISTIO_NOTIFICATIONS
+		/*
+		 * macOS doesn't send nofications for individual aiocbs subnmitted with
+		 * lio_listio(2).  We could use it anyway, and depend on a notification
+		 * sent when the whole batch has completed, but that adds a lot of
+		 * latency.  Let's just submit individual requests on that OS.
+		 */
+		return lio_opcode == LIO_WRITE ? aio_write(cb) : aio_read(cb);
+#else
 		return pgaio_posix_add_listio(lb, io);
+#endif
 	}
 }
 
