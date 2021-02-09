@@ -1748,6 +1748,7 @@ AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn, PgAioIoRef 
 	while (true)
 	{
 		uint32 cur_buf_state;
+		XLogRecPtr page_lsn;
 
 		cur_buf_hdr = StrategyGetBuffer(strategy, &cur_buf_state);
 
@@ -1764,6 +1765,8 @@ AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn, PgAioIoRef 
 			pg_atomic_write_u32(&cur_buf_hdr->state, cur_buf_state);
 		}
 
+		page_lsn = BufferGetLSN(cur_buf_hdr);
+
 		/* Pin the buffer and then release the buffer spinlock */
 		PinBuffer_Locked(cur_buf_hdr);
 
@@ -1774,6 +1777,20 @@ AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn, PgAioIoRef 
 		else
 		{
 			LWLock *content_lock;
+
+			if (cur_buf_state & BM_PERMANENT)
+			{
+				if (XLogAsyncFlush(page_lsn))
+				{
+					*lsn = page_lsn;
+					break;
+				}
+				else if (XLogNeedsFlush(page_lsn))
+				{
+					*lsn = page_lsn;
+					break;
+				}
+			}
 
 			if (aio == NULL)
 				aio = pgaio_io_get();

@@ -4328,6 +4328,40 @@ XLogFlush(XLogRecPtr record)
 			 (uint32) (LogwrtResult.FlushDone >> 32), (uint32) LogwrtResult.FlushDone);
 }
 
+bool
+XLogAsyncFlush(XLogRecPtr record)
+{
+	XLogwrtRqst WriteRqst = {0};
+	bool performed_io;
+
+	/* Quick exit if already known flushed */
+	if (record <= LogwrtResult.FlushDone)
+		return false;
+
+	if (!XLogInsertAllowed())
+	{
+		UpdateMinRecoveryPoint(record, false);
+		return false;
+	}
+
+	/*
+	 * FIXME: this doesn't work well when using O_DIRECT + wal_sync_method =
+	 * fdatasync.
+	 */
+	WriteRqst.WriteInit = record;
+	WriteRqst.WriteDone = 0;
+	if (sync_method == SYNC_METHOD_OPEN ||
+		sync_method == SYNC_METHOD_OPEN_DSYNC)
+		WriteRqst.FlushInit = 0;
+	else
+		WriteRqst.FlushInit = record;
+	WriteRqst.FlushDone = 0;
+
+	performed_io = XLogWrite(WriteRqst, false);
+
+	return performed_io;
+}
+
 /*
  * Write & flush xlog, but without specifying exactly where to.
  *
