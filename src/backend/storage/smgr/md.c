@@ -573,6 +573,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 	{
 		int segstartblock = curblocknum % ((BlockNumber) RELSEG_SIZE);
 		int segendblock = (curblocknum % ((BlockNumber) RELSEG_SIZE)) + remblocks;
+		bool fallocate_succeeded = false;
 
 		if (segendblock > RELSEG_SIZE)
 			segendblock = RELSEG_SIZE;
@@ -597,18 +598,22 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 				errno = ret;
 				elog(ERROR, "fallocate failed: %m");
 			}
+			else
+				fallocate_succeeded = true;
 		}
 #endif
-
-		for (BlockNumber i = segstartblock; i < segendblock; i++, curblocknum++)
+		if (!fallocate_succeeded)
 		{
-			PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
+			for (BlockNumber i = segstartblock; i < segendblock; i++)
+			{
+				PgAioInProgress *aio = pg_streaming_write_get_io(pgsw);
 
-			pgaio_assoc_bounce_buffer(aio, bb);
+				pgaio_assoc_bounce_buffer(aio, bb);
 
-			pgaio_io_start_write_smgr(aio, reln, forknum, i, zerobuf, skipFsync);
+				pgaio_io_start_write_smgr(aio, reln, forknum, i, zerobuf, skipFsync);
 
-			pg_streaming_write_write(pgsw, aio, zeroextend_complete, NULL, v);
+				pg_streaming_write_write(pgsw, aio, zeroextend_complete, NULL, v);
+			}
 		}
 
 		if (!skipFsync && !SmgrIsTemp(reln))
@@ -617,6 +622,7 @@ mdzeroextend(SMgrRelation reln, ForkNumber forknum,
 		Assert(_mdnblocks(reln, forknum, v) <= ((BlockNumber) RELSEG_SIZE));
 
 		remblocks -= segendblock - segstartblock;
+		curblocknum += segendblock - segstartblock;
 	}
 
 	pgaio_bounce_buffer_release(bb);
