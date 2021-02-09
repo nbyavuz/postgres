@@ -1948,23 +1948,6 @@ OwnUnusedBuffer(Buffer buf_id)
 	ResourceOwnerRememberBuffer(CurrentResourceOwner, buf_id);
 }
 
-typedef struct BulkExtendOneBuffer
-{
-	BufferDesc *buf_hdr;
-	dlist_node node;
-} BulkExtendOneBuffer;
-
-typedef struct BulkExtendBufferedState
-{
-	int acquired_buffers_count;
-
-	dlist_head acquired_buffers;
-
-	dlist_head allocated_buffers;
-
-	BulkExtendOneBuffer ios[];
-} BulkExtendBufferedState;
-
 /*
  * WIP interface to more efficient relation extension.
  *
@@ -1982,65 +1965,46 @@ typedef struct BulkExtendBufferedState
 extern Buffer
 BulkExtendBuffered(Relation relation, ForkNumber forkNum, int *extendby_p, BufferAccessStrategy strategy)
 {
-	BulkExtendBufferedState *be_state;
 	bool		need_extension_lock = !RELATION_IS_LOCAL(relation);
 	BlockNumber start_nblocks;
 	SMgrRelation smgr;
 	BufferDesc *return_buf_hdr = NULL;
 	char relpersistence = relation->rd_rel->relpersistence;
-	dlist_iter iter;
 	BlockNumber extendto;
-	bool first;
-	int extendby = *extendby_p;
+	int extendby_target = *extendby_p;
+	int extendby_actual = 0;
+	BufferDesc **bufferdescs;
 
 	RelationOpenSmgr(relation);
 	smgr = relation->rd_smgr;
 
-	be_state = palloc0(offsetof(BulkExtendBufferedState, ios) + sizeof(BulkExtendOneBuffer) * extendby);
+	bufferdescs = (BufferDesc **) palloc0(sizeof(BufferDesc *) * extendby_target);
 
-	dlist_init(&be_state->acquired_buffers);
-	dlist_init(&be_state->allocated_buffers);
-
-	for (int i = 0; i < extendby; i++)
-	{
-		dlist_push_tail(&be_state->allocated_buffers, &be_state->ios[i].node);
-	}
-
-	first = true;
-	while (be_state->acquired_buffers_count < extendby)
+	for (int i = 0; i < extendby_target; i++)
 	{
 		BufferDesc *cur_buf_hdr;
-		BulkExtendOneBuffer *cur_ex_buf = NULL;
 
 		ReservePrivateRefCountEntry();
 		ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
 
-		cur_buf_hdr = BufReserveGetFree(strategy, first);
+		cur_buf_hdr = BufReserveGetFree(strategy, i == 0);
 
 		if (!cur_buf_hdr)
 		{
-			Assert(be_state->acquired_buffers_count > 0);
+			Assert(i > 0);
 			break;
 		}
 
-		Assert(!dlist_is_empty(&be_state->allocated_buffers));
-		cur_ex_buf = dlist_container(BulkExtendOneBuffer, node,
-									 dlist_pop_head_node(&be_state->allocated_buffers));
-		cur_ex_buf->buf_hdr = cur_buf_hdr;
-
-		dlist_push_tail(&be_state->acquired_buffers, &cur_ex_buf->node);
-		be_state->acquired_buffers_count++;
-
-		first = false;
+		bufferdescs[extendby_actual] = cur_buf_hdr;
+		extendby_actual++;
 	}
 
 	ereport(DEBUG3,
-			errmsg("extending by %d, requested %d", be_state->acquired_buffers_count, extendby),
+			errmsg("extending by %d, requested %d", extendby_actual, extendby_target),
 			errhidestmt(true),
 			errhidecontext(true));
 
-	extendby = be_state->acquired_buffers_count;
-	*extendby_p = extendby;
+	*extendby_p = extendby_actual;
 
 	/*
 	 * Now we have our hands on N buffers that are guaranteed to be clean
@@ -2059,19 +2023,16 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int *extendby_p, Buffe
 	 * Set up identities of all the new buffers. This way there cannot be race
 	 * conditions where other backends lock the returned page first.
 	 */
-	first = true;
-	dlist_foreach(iter, &be_state->acquired_buffers)
+	for (int i = 0; i < extendby_actual; i++)
 	{
-		BulkExtendOneBuffer *ex_buf = dlist_container(BulkExtendOneBuffer, node, iter.cur);
-		BufferDesc *new_buf_hdr = ex_buf->buf_hdr;
+		BufferDesc *new_buf_hdr = bufferdescs[i];
 		BufferTag	new_tag;
 		uint32		new_hash;
 		int			existing_buf;
 		uint32		buf_state;
 		LWLock	   *partition_lock;
 
-		Assert(extendto < start_nblocks + extendby);
-		Assert(ex_buf->buf_hdr);
+		Assert(extendto < start_nblocks + extendby_actual);
 
 		INIT_BUFFERTAG(new_tag, smgr->smgr_rnode.node, forkNum, extendto);
 		new_hash = BufTableHashCode(&new_tag);
@@ -2099,36 +2060,42 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int *extendby_p, Buffe
 
 		LWLockRelease(partition_lock);
 
-		if (first)
+		if (i == 0)
 		{
-			return_buf_hdr = ex_buf->buf_hdr;
-			first = false;
+			return_buf_hdr = new_buf_hdr;
 		}
 
 		extendto++;
 	}
-	Assert(extendto == start_nblocks + extendby);
+	Assert(extendto == start_nblocks + extendby_actual);
 
 	/* finally extend the relation */
 	smgrzeroextend(relation->rd_smgr, forkNum, start_nblocks,
-				   extendby, false);
+				   extendby_actual, false);
 
 	/* Ensure that the returned buffer cannot be reached by another backend first */
 	LWLockAcquire(BufferDescriptorGetContentLock(return_buf_hdr),
 				  LW_EXCLUSIVE);
 
-	/* Mark all buffers as having completed */
-	dlist_foreach(iter, &be_state->acquired_buffers)
+	/*
+	 * New buffers are zero-filled
+	*
+	 * This is a separate loop to avoid stalls due to locking operations
+	 */
+	for (int i = 0; i < extendby_actual; i++)
 	{
-		BulkExtendOneBuffer *ex_buf = dlist_container(BulkExtendOneBuffer, node, iter.cur);
-		BufferDesc *new_buf_hdr = ex_buf->buf_hdr;
+		BufferDesc *new_buf_hdr = bufferdescs[i];
 		Block		new_buf_block;
-		uint32		buf_state;
 
 		new_buf_block = BufHdrGetBlock(new_buf_hdr);
-
-		/* new buffers are zero-filled */
 		memset((char *) new_buf_block, 0, BLCKSZ);
+	}
+
+	/* Mark all buffers as having completed */
+	for (int i = 0; i < extendby_actual; i++)
+	{
+		BufferDesc *new_buf_hdr = bufferdescs[i];
+		uint32		buf_state;
 
 		buf_state = LockBufHdr(new_buf_hdr);
 		buf_state &= ~(BM_IO_IN_PROGRESS | BM_IO_ERROR);
@@ -2142,6 +2109,8 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int *extendby_p, Buffe
 
 	if (need_extension_lock)
 		UnlockRelationForExtension(relation, ExclusiveLock);
+
+	pfree(bufferdescs);
 
 	return BufferDescriptorGetBuffer(return_buf_hdr);
 }

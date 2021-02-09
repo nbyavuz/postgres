@@ -135,8 +135,8 @@ ExtendRelation(Relation relation, BulkInsertState bistate, int options, bool use
 	Buffer buf;
 	Page		page;
 
-	/* FIXME: There should be a better approach to both of these exceptions */
-	if (RELATION_IS_LOCAL(relation) || !use_fsm)
+	/* FIXME: There should be a better approach to these exceptions */
+	if (RELATION_IS_LOCAL(relation) || (!use_fsm && bistate == NULL))
 	{
 		LockRelationForExtension(relation, ExclusiveLock);
 		buf = ReadBufferBI(relation, P_NEW, RBM_ZERO_AND_LOCK, bistate);
@@ -168,14 +168,27 @@ ExtendRelation(Relation relation, BulkInsertState bistate, int options, bool use
 
 		newblockno = BufferGetBlockNumber(buf);
 
-		for (int i = newblockno + 1; i < newblockno + extendby; i++)
+		if (bistate)
 		{
-			RecordPageWithFreeSpace(relation, i, BLCKSZ - SizeOfPageHeaderData);
+			if (extendby > 1)
+				bistate->next_free = newblockno + 1;
+			else
+				bistate->next_free = InvalidBlockNumber;
+
+			bistate->last_free = newblockno + extendby;
 		}
 
-		if (use_fsm && extendby > 1)
+		if (use_fsm)
 		{
-			FreeSpaceMapVacuumRange(relation, newblockno, newblockno + extendby);
+			for (int i = newblockno + 1; i < newblockno + extendby; i++)
+			{
+				RecordPageWithFreeSpace(relation, i, BLCKSZ - SizeOfPageHeaderData);
+			}
+
+			if (extendby > 1)
+			{
+				FreeSpaceMapVacuumRange(relation, newblockno, newblockno + extendby);
+			}
 		}
 	}
 
@@ -191,7 +204,7 @@ ExtendRelation(Relation relation, BulkInsertState bistate, int options, bool use
 			 BufferGetBlockNumber(buf),
 			 RelationGetRelationName(relation));
 
-	PageInit(page, BufferGetPageSize(buf), 0);
+	PageInitZeroed(page, BufferGetPageSize(buf), 0);
 	MarkBufferDirty(buf);
 
 	return buf;
@@ -497,7 +510,7 @@ loop:
 		 */
 		if (PageIsNew(page))
 		{
-			PageInit(page, BufferGetPageSize(buffer), 0);
+			PageInitZeroed(page, BufferGetPageSize(buffer), 0);
 			MarkBufferDirty(buffer);
 		}
 
@@ -527,32 +540,37 @@ loop:
 		/*
 		 * FIXME: definitely needs a better solution.
 		 */
-		if (!use_fsm && bistate && bistate->current_buf != InvalidBuffer)
+		if (!use_fsm && bistate
+			&& bistate->next_free != InvalidBlockNumber
+			&& bistate->next_free <= bistate->last_free)
 		{
-			BlockNumber blocknum = BufferGetBlockNumber(bistate->current_buf) + 1;
+			Assert(bistate->last_free != InvalidBlockNumber);
 
-			RelationOpenSmgr(relation);
-
-			if (blocknum < smgrnblocks(relation->rd_smgr, MAIN_FORKNUM))
+			targetBlock = bistate->next_free;
+			if (bistate->next_free + 1 >= bistate->last_free)
 			{
-				targetBlock = blocknum;
-
-				goto loop;
+				bistate->next_free = InvalidBlockNumber;
+				bistate->last_free = InvalidBlockNumber;
 			}
+			else
+				bistate->next_free++;
 		}
-
-		/* Without FSM, always fall out of the loop and extend */
-		if (!use_fsm)
+		else if (!use_fsm)
+		{
+			/* Without FSM, always fall out of the loop and extend */
 			break;
-
-		/*
-		 * Update FSM as to condition of this page, and ask for another page
-		 * to try.
-		 */
-		targetBlock = RecordAndGetPageWithFreeSpace(relation,
-													targetBlock,
-													pageFreeSpace,
-													len + saveFreeSpace);
+		}
+		else
+		{
+			/*
+			 * Update FSM as to condition of this page, and ask for another page
+			 * to try.
+			 */
+			targetBlock = RecordAndGetPageWithFreeSpace(relation,
+														targetBlock,
+														pageFreeSpace,
+														len + saveFreeSpace);
+		}
 	}
 
 	buffer = ExtendRelation(relation, bistate, options, use_fsm);

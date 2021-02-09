@@ -33,6 +33,23 @@ bool		ignore_checksum_failure = false;
  * ----------------------------------------------------------------
  */
 
+static bool
+PageIsZeroes(Page page)
+{
+	size_t	   *pagebytes;
+
+	pagebytes = (size_t *) page;
+	for (int i = 0; i < (BLCKSZ / sizeof(size_t)); i++)
+	{
+		if (pagebytes[i] != 0)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
 /*
  * PageInit
  *		Initializes the contents of a page.
@@ -58,6 +75,29 @@ PageInit(Page page, Size pageSize, Size specialSize)
 	p->pd_special = pageSize - specialSize;
 	PageSetPageSizeAndVersion(page, pageSize, PG_PAGE_LAYOUT_VERSION);
 	/* p->pd_prune_xid = InvalidTransactionId;		done by above MemSet */
+}
+
+/*
+ * Like PageInit(), but assumes the page is already zeroes.
+ */
+void
+PageInitZeroed(Page page, Size pageSize, Size specialSize)
+{
+	PageHeader	p = (PageHeader) page;
+
+	specialSize = MAXALIGN(specialSize);
+
+	Assert(pageSize == BLCKSZ);
+	Assert(pageSize > specialSize + SizeOfPageHeaderData);
+
+	Assert(PageIsZeroes(page));
+
+	p->pd_flags = 0;
+	p->pd_lower = SizeOfPageHeaderData;
+	p->pd_upper = pageSize - specialSize;
+	p->pd_special = pageSize - specialSize;
+	PageSetPageSizeAndVersion(page, pageSize, PG_PAGE_LAYOUT_VERSION);
+	/* p->pd_prune_xid = InvalidTransactionId;		page was zeroes */
 }
 
 
@@ -89,11 +129,8 @@ bool
 PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags)
 {
 	PageHeader	p = (PageHeader) page;
-	size_t	   *pagebytes;
-	int			i;
 	bool		checksum_failure = false;
 	bool		header_sane = false;
-	bool		all_zeroes = false;
 	uint16		checksum = 0;
 
 	/*
@@ -126,19 +163,7 @@ PageIsVerifiedExtended(Page page, BlockNumber blkno, int flags)
 			return true;
 	}
 
-	/* Check all-zeroes case */
-	all_zeroes = true;
-	pagebytes = (size_t *) page;
-	for (i = 0; i < (BLCKSZ / sizeof(size_t)); i++)
-	{
-		if (pagebytes[i] != 0)
-		{
-			all_zeroes = false;
-			break;
-		}
-	}
-
-	if (all_zeroes)
+	if (PageIsZeroes(page))
 		return true;
 
 	/*
