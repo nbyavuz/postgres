@@ -231,7 +231,7 @@ task:
   always:
     clang_p_warning_script:
       - ./configure --enable-cassert --with-posix-aio CC="ccache clang"
-        - make -s clean && make -s -j4
+      - make -s clean && make -s -j4
   always:
     clang_u_warning_script:
       - ./configure --enable-cassert --with-liburing CC="ccache clang"
