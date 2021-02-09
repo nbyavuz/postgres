@@ -1221,8 +1221,6 @@ pgaio_at_abort(void)
 {
 	pgaio_complete_ios(/* in_error = */ true);
 
-	pgaio_submit_pending(false);
-
 	while (!dlist_is_empty(&my_aio->outstanding))
 	{
 		PgAioInProgress *io = dlist_head_element(PgAioInProgress, owner_node, &my_aio->outstanding);
@@ -1236,18 +1234,18 @@ pgaio_at_abort(void)
 
 		pgaio_io_release(io);
 	}
+
+	/*
+	 * Submit pending requests *after* releasing all IO references. That
+	 * ensures that local callback won't get called.
+	 */
+	pgaio_submit_pending(false);
 }
 
 void
 pgaio_at_commit(void)
 {
 	Assert(dlist_is_empty(&local_recycle_requests));
-
-	if (my_aio->pending_count != 0)
-	{
-		elog(WARNING, "unsubmitted IOs %d", my_aio->pending_count);
-		pgaio_submit_pending(false);
-	}
 
 	while (!dlist_is_empty(&my_aio->outstanding))
 	{
@@ -1265,6 +1263,13 @@ pgaio_at_commit(void)
 		elog(WARNING, "leaked issued io %zu", io - aio_ctl->in_progress_io);
 
 		pgaio_io_release(io);
+	}
+
+	/* see pgaio_at_abort() */
+	if (my_aio->pending_count != 0)
+	{
+		elog(WARNING, "unsubmitted IOs %d", my_aio->pending_count);
+		pgaio_submit_pending(false);
 	}
 }
 
