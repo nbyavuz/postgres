@@ -506,12 +506,9 @@ typedef struct PgAioCtl
 	dlist_head unused_bounce_buffers;
 	uint32 unused_bounce_buffers_count;
 
-	/*
-	 * When using worker mode, these condition variables are used for sleeping
-	 * on aio_submission_queue.
-	 */
-	ConditionVariable submission_queue_not_empty;
-	squeue32 *aio_submission_queue;
+	/* Queue for IO submissions in worker mode. */
+	ConditionVariable worker_submission_queue_not_empty;
+	squeue32 *worker_submission_queue;
 
 #ifdef USE_POSIX_AIO
 	/* Queue for shared completion notifications in POSIX AIO mode. */
@@ -1001,13 +998,13 @@ AioShmemInit(void)
 
 		if (aio_type == AIOTYPE_WORKER)
 		{
-			aio_ctl->aio_submission_queue =
+			aio_ctl->worker_submission_queue =
 				ShmemInitStruct("aio submission queue",
 								AioSubmissionQueueShmemSize(),
 								&found);
 			Assert(!found);
-			squeue32_init(aio_ctl->aio_submission_queue, aio_worker_queue_size);
-			ConditionVariableInit(&aio_ctl->submission_queue_not_empty);
+			squeue32_init(aio_ctl->worker_submission_queue, aio_worker_queue_size);
+			ConditionVariableInit(&aio_ctl->worker_submission_queue_not_empty);
 		}
 #ifdef USE_LIBURING
 		else if (aio_type == AIOTYPE_LIBURING)
@@ -2053,8 +2050,8 @@ pgaio_worker_submit_one(PgAioInProgress *io)
 		 * queue is full then handle it synchronously rather than waiting.
 		 * XXX Is this fair enough?
 		 */
-		if (squeue32_enqueue(aio_ctl->aio_submission_queue, io_index))
-			ConditionVariableSignal(&aio_ctl->submission_queue_not_empty);
+		if (squeue32_enqueue(aio_ctl->worker_submission_queue, io_index))
+			ConditionVariableSignal(&aio_ctl->worker_submission_queue_not_empty);
 		else
 			pgaio_worker_do(io);
 	}
@@ -5565,7 +5562,7 @@ AioWorkerMain(void)
 	{
 		uint32 io_index;
 
-		if (squeue32_dequeue(aio_ctl->aio_submission_queue, &io_index))
+		if (squeue32_dequeue(aio_ctl->worker_submission_queue, &io_index))
 		{
 			/* Do IO and completions.  This'll signal anyone waiting. */
 			/*
@@ -5581,7 +5578,7 @@ AioWorkerMain(void)
 		else
 		{
 			/* Nothing in the queue.  Go to sleep. */
-			ConditionVariableSleep(&aio_ctl->submission_queue_not_empty,
+			ConditionVariableSleep(&aio_ctl->worker_submission_queue_not_empty,
 								   WAIT_EVENT_AIO_WORKER_MAIN);
 		}
 	}
