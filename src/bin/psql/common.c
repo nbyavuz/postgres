@@ -596,7 +596,7 @@ PSQLexecWatch(const char *query, const printQueryOpt *opt)
 {
 	PGresult   *res;
 	double		elapsed_msec = 0;
-	instr_time	before = 0;
+	instr_time	before;
 	instr_time	after;
 
 	if (!pset.db)
@@ -609,6 +609,8 @@ PSQLexecWatch(const char *query, const printQueryOpt *opt)
 
 	if (pset.timing)
 		INSTR_TIME_SET_CURRENT(before);
+	else
+		INSTR_TIME_SET_ZERO(before);
 
 	res = PQexec(pset.db, query);
 
@@ -1294,11 +1296,13 @@ SendQuery(const char *query)
 			 pset.crosstab_flag || !is_select_command(query))
 	{
 		/* Default fetch-it-all-and-print mode */
-		instr_time	before = 0;
+		instr_time	before;
 		instr_time	after;
 
 		if (pset.timing)
 			INSTR_TIME_SET_CURRENT(before);
+		else
+			INSTR_TIME_SET_ZERO(before);
 
 		results = PQexec(pset.db, query);
 
@@ -1469,13 +1473,15 @@ DescribeQuery(const char *query, double *elapsed_msec)
 {
 	PGresult   *results;
 	bool		OK;
-	instr_time	before = 0;
+	instr_time	before;
 	instr_time	after;
 
 	*elapsed_msec = 0;
 
 	if (pset.timing)
 		INSTR_TIME_SET_CURRENT(before);
+	else
+		INSTR_TIME_SET_ZERO(before);
 
 	/*
 	 * To parse the query but not execute it, we prepare it, using the unnamed
@@ -1595,7 +1601,7 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 	int			ntuples;
 	int			fetch_count;
 	char		fetch_cmd[64];
-	instr_time	before = 0;
+	instr_time	before;
 	instr_time	after;
 	int			flush_error;
 
@@ -1608,6 +1614,8 @@ ExecQueryUsingCursor(const char *query, double *elapsed_msec)
 
 	if (pset.timing)
 		INSTR_TIME_SET_CURRENT(before);
+	else
+		INSTR_TIME_SET_ZERO(before);
 
 	/* if we're not in a transaction, start one */
 	if (PQtransactionStatus(pset.db) == PQTRANS_IDLE)

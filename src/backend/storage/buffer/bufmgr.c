@@ -1119,7 +1119,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	bool		isLocalBuf = SmgrIsTemp(smgr);
 	BufferDesc *bufHdr;
 	Buffer		buf;
-	instr_time	io_start = 0;
+	instr_time	io_start;
 	instr_time	io_time;
 
 	if (blockNum == P_NEW)
@@ -1149,6 +1149,8 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	{
 		if (track_io_timing)
 			INSTR_TIME_SET_CURRENT(io_start);
+		else
+			INSTR_TIME_SET_ZERO(io_start);
 
 		smgrread(smgr, forkNum, blockNum, (char *) bufBlock);
 
@@ -3532,7 +3534,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 {
 	XLogRecPtr	recptr;
 	ErrorContextCallback errcallback;
-	instr_time	io_start = 0;
+	instr_time	io_start;
 	instr_time	io_time;
 	Block		bufBlock;
 	char	   *bufToWrite;
@@ -3618,6 +3620,8 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	{
 		if (track_io_timing)
 			INSTR_TIME_SET_CURRENT(io_start);
+		else
+			INSTR_TIME_SET_ZERO(io_start);
 
 		/*
 		 * bufToWrite is either the shared buffer or a copy, as appropriate.
