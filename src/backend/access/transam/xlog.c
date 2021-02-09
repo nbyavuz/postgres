@@ -3719,7 +3719,7 @@ static bool pg_noinline
 XLogWrite(XLogwrtRqst WriteRqstTmp, bool flexible)
 {
 	bool		performed_io = false;
-	bool		holding_lock = false;
+	bool		holding_lock PG_USED_FOR_ASSERTS_ONLY = false;
 	XLogWritePos write_pos = {0};
 	bool		statted = false;
 	bool		did_wait_for_insert = false;
