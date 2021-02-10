@@ -316,6 +316,9 @@ BackgroundWriterMain(void)
 			}
 		}
 
+		/* finish IO before sleeping, to avoid blocking other backends */
+		pg_streaming_write_wait_all(pgsw);
+
 		/*
 		 * Sleep until we are signaled or BgWriterDelay has elapsed.
 		 *
@@ -352,8 +355,6 @@ BackgroundWriterMain(void)
 		{
 			/* Ask for notification at next buffer allocation */
 			StrategyNotifyBgWriter(MyProc->pgprocno);
-
-			pg_streaming_write_wait_all(pgsw);
 
 			/* Sleep ... */
 			(void) WaitLatch(MyLatch,
