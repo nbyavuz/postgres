@@ -2828,7 +2828,8 @@ BufferSync(int flags)
 		 *
 		 * (This will check for barrier events even if it doesn't sleep.)
 		 */
-		CheckpointWriteDelay(flags, (double) num_processed / num_to_scan);
+		CheckpointWriteDelay(flags, pgsw,
+							 (double) num_processed / num_to_scan);
 	}
 
 	pg_streaming_write_wait_all(pgsw);

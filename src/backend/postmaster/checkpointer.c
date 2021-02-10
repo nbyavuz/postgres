@@ -672,7 +672,7 @@ ImmediateCheckpointRequested(void)
  * fraction between 0.0 meaning none, and 1.0 meaning all done.
  */
 void
-CheckpointWriteDelay(int flags, double progress)
+CheckpointWriteDelay(int flags, pg_streaming_write *pgsw, double progress)
 {
 	static int	absorb_counter = WRITES_PER_ABSORB;
 
@@ -712,6 +712,7 @@ CheckpointWriteDelay(int flags, double progress)
 		 * for other processes.
 		 */
 		pgaio_submit_pending(true);
+		pg_streaming_write_wait_all(pgsw);
 
 		/*
 		 * This sleep used to be connected to bgwriter_delay, typically 200ms.
