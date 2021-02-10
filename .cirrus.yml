@@ -179,7 +179,7 @@ task:
     - set IgnoreWarnIntDirInTempDetected=true
     - msbuild pgsql.sln
   pg_test_fsync_script:
-    - src/bin/pg_test_fsync/pg_test_fsync.exe -s 1 || echo 1
+    - Debug\pg_test_fsync\pg_test_fsync.exe -s 1 || echo 1
   windows_worker_buf_script:
     - set PATH=C:\strawberry\perl\bin;%PATH%
     - set TEMP_CONFIG=%TEMP%\extra.conf
