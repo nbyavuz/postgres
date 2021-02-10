@@ -60,6 +60,7 @@ task:
   osx_instance:
     image: catalina-base
   install_script:
+    - sudo chmod 777 /cores
     - uname -a
     - cpan -T IPC::Run
   build_script:
