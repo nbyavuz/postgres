@@ -4554,7 +4554,7 @@ pgaio_posix_start_rw(PgAioInProgress *io, pgaio_posix_listio_buffer *lb,
 {
 	struct aiocb *cb = &io->posix_aiocb;
 	struct iovec iov[IOV_MAX];
-	int iovcnt;
+	int iovcnt PG_USED_FOR_ASSERTS_ONLY;
 
 	iovcnt = pgaio_fill_iov(iov, io);
 
