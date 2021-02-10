@@ -7,7 +7,7 @@ env:
 task:
   name: FreeBSD
   freebsd_instance:
-    image_family: freebsd-12-1
+    image_family: freebsd-12-2
   env:
     CCACHE_SIZE: "500M"
     CCACHE_DIR: "/tmp/ccache_dir"
