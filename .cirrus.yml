@@ -16,6 +16,9 @@ task:
   install_script:
     - uname -a
     - pkg install -y readline flex bison gmake perl5 p5-IPC-Run ccache
+  info_script:
+    - type bison || true
+    - bison --version || true
   create_user_script:
     - pw useradd postgres
     - chown -R postgres:postgres .
