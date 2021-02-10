@@ -229,8 +229,6 @@ BufReserveCheckClean(void)
 
 			if (valid)
 			{
-				ReleaseBuffer(entry->buffer);
-
 				if (pgaio_io_ref_valid(&entry->aio_ref))
 				{
 					ereport(DEBUG2,

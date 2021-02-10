@@ -1745,13 +1745,13 @@ AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn, PgAioIoRef 
 	pgaio_io_ref_clear(aio_ref);
 	*lsn = InvalidXLogRecPtr;
 
-	ReservePrivateRefCountEntry();
-	ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
-
 	while (true)
 	{
 		uint32 cur_buf_state;
 		XLogRecPtr page_lsn;
+
+		ReservePrivateRefCountEntry();
+		ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
 
 		cur_buf_hdr = StrategyGetBuffer(strategy, &cur_buf_state);
 
@@ -1814,6 +1814,8 @@ AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn, PgAioIoRef 
 
 				break;
 			}
+
+			UnpinBuffer(cur_buf_hdr, true);
 		}
 	}
 
@@ -1829,6 +1831,7 @@ AsyncFlushVictim(Buffer buf_id, XLogRecPtr *lsn, PgAioIoRef *aio_ref)
 {
 	BufferDesc *buf_hdr = GetBufferDescriptor(buf_id - 1);
 	uint32 buf_state;
+	bool valid;
 
 	ReservePrivateRefCountEntry();
 	ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
@@ -1838,12 +1841,15 @@ AsyncFlushVictim(Buffer buf_id, XLogRecPtr *lsn, PgAioIoRef *aio_ref)
 	if (BUF_STATE_GET_REFCOUNT(buf_state) == 0 &&
 		BUF_STATE_GET_USAGECOUNT(buf_state) == 0)
 	{
-		PinBuffer_Locked(buf_hdr);
-
 		if (buf_state & BM_DIRTY)
 		{
-			LWLock *content_lock = BufferDescriptorGetContentLock(buf_hdr);
-			PgAioInProgress *aio = pgaio_io_get();
+			LWLock *content_lock;
+			PgAioInProgress *aio;
+
+			PinBuffer_Locked(buf_hdr);
+
+			content_lock = BufferDescriptorGetContentLock(buf_hdr);
+			aio = pgaio_io_get();
 
 			/*
 			 * NB: this protect against deadlocks due to holding multiple
@@ -1853,34 +1859,32 @@ AsyncFlushVictim(Buffer buf_id, XLogRecPtr *lsn, PgAioIoRef *aio_ref)
 			if (LWLockConditionalAcquire(content_lock, LW_SHARED))
 			{
 				if (AsyncFlushBuffer(aio, buf_hdr, NULL))
-				{
 					pgaio_io_ref(aio, aio_ref);
-				}
 				else
-				{
 					pgaio_io_ref_clear(aio_ref);
-				}
-				pgaio_io_release(aio);
-				return true;
 
+				valid = true;
 			}
 			else
-			{
-				pgaio_io_release(aio);
-				return false;
-			}
+				valid = false;
+
+			UnpinBuffer(buf_hdr, true);
+			pgaio_io_release(aio);
 		}
 		else
 		{
+			UnlockBufHdr(buf_hdr, buf_state);
+			valid = true;
 			pgaio_io_ref_clear(aio_ref);
-			return true;
 		}
 	}
 	else
 	{
 		UnlockBufHdr(buf_hdr, buf_state);
-		return false;
+		valid = false;
 	}
+
+	return valid;
 }
 
 bool
