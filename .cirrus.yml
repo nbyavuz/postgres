@@ -65,7 +65,7 @@ task:
     - cpan -T IPC::Run
   build_script:
     - export PERL5LIB=~/perl5/lib/perl5
-    - ./configure --prefix=$HOME/install --enable-cassert --enable-debug --enable-tap-tests --without-readline --with-posix-aio
+    - ./configure --prefix=$HOME/install --enable-cassert --enable-debug --enable-tap-tests --without-readline --with-posix-aio CFLAGS="-O0"
     - make -s -j12
     - make -s install
   macos_worker_buf_script:
