@@ -194,7 +194,7 @@ BufReserveFillClean(BufferAccessStrategy strategy)
 		ReleaseBuffer(clean->buffer);
 	}
 
-	pgaio_submit_pending(true);
+	pgaio_submit_pending(false);
 }
 
 static void
@@ -361,6 +361,10 @@ BufferDesc *
 BufReserveGetFree(BufferAccessStrategy strategy, bool block)
 {
 	BufferDesc *ret = NULL;
+	static int recursion = 0;
+
+	Assert(recursion == 0);
+	recursion++;
 
 	while (true)
 	{
@@ -413,6 +417,8 @@ BufReserveGetFree(BufferAccessStrategy strategy, bool block)
 	{
 		BufferCheckOneLocalPin(BufferDescriptorGetBuffer(ret));
 	}
+
+	recursion--;
 	return ret;
 }
 

@@ -782,6 +782,8 @@ static dlist_head local_recycle_requests;
 
 int MyAioWorkerId;
 
+static int aio_local_callback_depth = 0;
+
 #ifdef USE_LIBURING
 /* io_uring local state */
 struct io_uring local_ring;
@@ -1220,6 +1222,9 @@ pgaio_postmaster_child_init(void)
 void
 pgaio_at_abort(void)
 {
+	/* could have failed within a callback, so reset */
+	aio_local_callback_depth = 0;
+
 	pgaio_complete_ios(/* in_error = */ true);
 
 	while (!dlist_is_empty(&my_aio->outstanding))
@@ -1246,6 +1251,7 @@ pgaio_at_abort(void)
 void
 pgaio_at_commit(void)
 {
+	Assert(aio_local_callback_depth == 0);
 	Assert(dlist_is_empty(&local_recycle_requests));
 
 	while (!dlist_is_empty(&my_aio->outstanding))
@@ -1761,7 +1767,10 @@ pgaio_io_call_local_callback(PgAioInProgress *io, bool in_error)
 	if (!in_error)
 	{
 		check_stack_depth();
+		aio_local_callback_depth++;
 		io->on_completion_local->callback(io->on_completion_local, io);
+		Assert(aio_local_callback_depth > 0);
+		aio_local_callback_depth--;
 	}
 }
 
@@ -1771,25 +1780,26 @@ pgaio_io_call_local_callback(PgAioInProgress *io, bool in_error)
 static void
 pgaio_call_local_callbacks(bool in_error)
 {
-	if (my_aio->local_completed_count != 0 &&
-		CritSectionCount == 0)
+	if (my_aio->local_completed_count != 0)
 	{
-		/* FIXME: this isn't safe against errors */
-		static int local_callback_depth = 0;
+		/*
+		 * Don't call local callbacks in a critical section. If a specific IO
+		 * is required to finish within the critical section, and that IO uses
+		 * a local callback, pgaio_io_wait_ref_int() will call that callback
+		 * regardless of the callback depth.
+		 */
+		if (CritSectionCount != 0)
+			return;
 
-		if (local_callback_depth == 0)
+		if (aio_local_callback_depth > 0)
+			return;
+
+		while (!dlist_is_empty(&my_aio->local_completed))
 		{
-			local_callback_depth++;
+			dlist_node *node = dlist_pop_head_node(&my_aio->local_completed);
+			PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, node);
 
-			while (!dlist_is_empty(&my_aio->local_completed))
-			{
-				dlist_node *node = dlist_pop_head_node(&my_aio->local_completed);
-				PgAioInProgress *io = dlist_container(PgAioInProgress, io_node, node);
-
-				pgaio_io_call_local_callback(io, in_error);
-			}
-
-			local_callback_depth--;
+			pgaio_io_call_local_callback(io, in_error);
 		}
 	}
 }
@@ -2195,8 +2205,10 @@ pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, boo
 	RESUME_INTERRUPTS();
 
 	if (call_shared)
-	{
 		pgaio_complete_ios(false);
+
+	if (call_local)
+	{
 		pgaio_transfer_foreign_to_local();
 		pgaio_call_local_callbacks(/* in_error = */ false);
 	}
