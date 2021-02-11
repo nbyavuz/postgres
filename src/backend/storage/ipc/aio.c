@@ -3048,7 +3048,7 @@ pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
 				errhidecontext(1),
 				errhidestmt(1));
 #endif
-		pgaio_submit_pending(true);
+		pgaio_submit_pending(false);
 	}
 
 	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);

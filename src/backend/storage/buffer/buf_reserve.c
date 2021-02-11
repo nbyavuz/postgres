@@ -310,7 +310,7 @@ BufReserveWaitOneClean(void)
 				errhidestmt(true),
 				errhidecontext(true));
 
-		pgaio_io_wait_ref(&entry->aio_ref, true);
+		pgaio_io_wait_ref(&entry->aio_ref, false);
 
 		entry->in_writeback = false;
 
