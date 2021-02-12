@@ -2087,7 +2087,7 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
-		{"io_wal_pad_partial", PGC_SIGHUP, RESOURCES_DISK,
+		{"io_wal_pad_partial", PGC_SUSET, RESOURCES_DISK,
 			gettext_noop("pad WAL files upon flash"),
 		},
 		&io_wal_pad_partial,
