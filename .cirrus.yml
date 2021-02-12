@@ -177,7 +177,7 @@ task:
     - set PATH=C:\strawberry\perl\bin;%PATH%
     - perl src/tools/msvc/mkvcbuild.pl
     - set IgnoreWarnIntDirInTempDetected=true
-    - msbuild pgsql.sln
+    - msbuild -m pgsql.sln
   pg_test_fsync_script:
     - Debug\pg_test_fsync\pg_test_fsync.exe -s 1 || echo 1
   windows_worker_buf_script:
