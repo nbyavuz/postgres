@@ -31,21 +31,21 @@ typedef struct PgAioIoRef
 	uint32 generation_lower;
 } PgAioIoRef;
 
-/* Enum for aio_type GUC. */
-typedef enum AioType
+/* Enum for io_method GUC. */
+typedef enum IoMethod
 {
-	AIOTYPE_WORKER = 0,
-	AIOTYPE_LIBURING,
-	AIOTYPE_POSIX,
-} AioType;
+	IOMETHOD_WORKER = 0,
+	IOMETHOD_LIBURING,
+	IOMETHOD_POSIX,
+} IoMethod;
 
 /* We'll default to bgworker. */
-#define DEFAULT_AIO_TYPE AIOTYPE_WORKER
+#define DEFAULT_IO_METHOD IOMETHOD_WORKER
 
 /* GUCs */
-extern int aio_type;
-extern int aio_workers;
-extern int aio_worker_queue_size;
+extern int io_method;
+extern int io_workers;
+extern int io_worker_queue_size;
 
 /* (future) GUC controlling global MAX number of in-progress IO entries */
 /* FIXME: this is per context right now */
@@ -57,7 +57,7 @@ extern int max_aio_bounce_buffers;
 /* max per backend concurrency */
 extern int io_max_concurrency;
 
-extern int MyAioWorkerId;
+extern int MyIoWorkerId;
 
 /* initialization */
 extern void pgaio_postmaster_init(void);
@@ -223,13 +223,11 @@ extern char *pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb);
 
 
 /* --------------------------------------------------------------------------------
- * IO backend implementation related functions
+ * IO backend implementation related functions that are exposed to other modules.
  * --------------------------------------------------------------------------------
  */
 
-extern void AioWorkerMain(void);
-extern bool IsAioWorker(void);
-
+extern void IoWorkerMain(void);
 
 /* --------------------------------------------------------------------------------
  * Helpers. In aio_util.c.

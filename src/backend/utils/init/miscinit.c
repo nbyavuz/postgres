@@ -278,8 +278,8 @@ GetBackendTypeDesc(BackendType backendType)
 		case B_LOGGER:
 			backendDesc = "logger";
 			break;
-		case B_AIO_WORKER:
-			backendDesc = "aio worker";
+		case B_IO_WORKER:
+			backendDesc = "io worker";
 			break;
 	}
 

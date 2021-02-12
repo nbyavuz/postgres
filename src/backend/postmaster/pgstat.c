@@ -116,7 +116,7 @@
  * MaxBackends includes autovacuum workers and background workers as well.
  * ----------
  */
-#define NumBackendStatSlots (MaxBackends + MAX_AIO_WORKERS + NUM_AUXPROCTYPES)
+#define NumBackendStatSlots (MaxBackends + MAX_IO_WORKERS + NUM_AUXPROCTYPES)
 
 
 /* ----------
@@ -3113,10 +3113,10 @@ pgstat_initialize(void)
 		 * in the range from 1 to MaxBackends (inclusive), so we use slots
 		 * beyond that.
 		 */
-		if (AmAioWorkerProcess())
-			MyBEEntry = &BackendStatusArray[MaxBackends + MyAioWorkerId];
+		if (AmIoWorkerProcess())
+			MyBEEntry = &BackendStatusArray[MaxBackends + MyIoWorkerId];
 		else
-			MyBEEntry = &BackendStatusArray[MaxBackends + MAX_AIO_WORKERS + MyAuxProcType];
+			MyBEEntry = &BackendStatusArray[MaxBackends + MAX_IO_WORKERS + MyAuxProcType];
 	}
 
 	/*
@@ -3897,9 +3897,6 @@ pgstat_get_wait_activity(WaitEventActivity w)
 
 	switch (w)
 	{
-		case WAIT_EVENT_AIO_WORKER_MAIN:
-			event_name = "AioWorkerMain";
-			break;
 		case WAIT_EVENT_ARCHIVER_MAIN:
 			event_name = "ArchiverMain";
 			break;
@@ -3914,6 +3911,9 @@ pgstat_get_wait_activity(WaitEventActivity w)
 			break;
 		case WAIT_EVENT_CHECKPOINTER_MAIN:
 			event_name = "CheckpointerMain";
+			break;
+		case WAIT_EVENT_IO_WORKER_MAIN:
+			event_name = "IoWorkerMain";
 			break;
 		case WAIT_EVENT_LOGICAL_APPLY_MAIN:
 			event_name = "LogicalApplyMain";

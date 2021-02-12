@@ -267,7 +267,7 @@ static const PgAioActionCBs io_action_cbs[] =
 };
 
 /* GUCs */
-int aio_type;
+int io_method;
 int max_aio_in_progress = 32768; /* XXX: Multiple of MaxBackends instead? */
 int max_aio_in_flight = 4096;
 int max_aio_bounce_buffers = 1024;
@@ -275,14 +275,14 @@ int io_max_concurrency = 128;
 
 static int aio_local_callback_depth = 0;
 
-/* Options for aio_type. */
-const struct config_enum_entry aio_type_options[] = {
-	{"worker", AIOTYPE_WORKER, false},
+/* Options for io_method. */
+const struct config_enum_entry io_method_options[] = {
+	{"worker", IOMETHOD_WORKER, false},
 #ifdef USE_LIBURING
-	{"io_uring", AIOTYPE_LIBURING, false},
+	{"io_uring", IOMETHOD_LIBURING, false},
 #endif
 #ifdef USE_POSIX_AIO
-	{"posix", AIOTYPE_POSIX, false},
+	{"posix", IOMETHOD_POSIX, false},
 #endif
 	{NULL, 0, false}
 };
@@ -429,14 +429,14 @@ AioShmemInit(void)
 		}
 
 		/* Initialize IO-engine specific resources. */
-		if (aio_type == AIOTYPE_WORKER)
+		if (io_method == IOMETHOD_WORKER)
 			AioWorkerShmemInit();
 #ifdef USE_LIBURING
-		else if (aio_type == AIOTYPE_LIBURING)
+		else if (io_method == IOMETHOD_LIBURING)
 			AioUringShmemInit();
 #endif
 #ifdef USE_POSIX_AIO
-		else if (aio_type == AIOTYPE_POSIX)
+		else if (io_method == IOMETHOD_POSIX)
 			AioPosixShmemInit();
 #endif
 	}
@@ -454,14 +454,14 @@ pgaio_postmaster_init(void)
 void
 pgaio_postmaster_child_init_local(void)
 {
-	if (aio_type == AIOTYPE_WORKER)
+	if (io_method == IOMETHOD_WORKER)
 		;
 #ifdef USE_LIBURING
-	else if (aio_type == AIOTYPE_LIBURING)
+	else if (io_method == IOMETHOD_LIBURING)
 		pgaio_uring_postmaster_child_init_local();
 #endif
 #ifdef USE_POSIX_AIO
-	else if (aio_type == AIOTYPE_POSIX)
+	else if (io_method == IOMETHOD_POSIX)
 		pgaio_posix_postmaster_child_init_local();
 #endif
 }
@@ -526,7 +526,7 @@ pgaio_postmaster_child_init(void)
 	Assert(!my_aio);
 
 #ifdef USE_LIBURING
-	if (aio_type == AIOTYPE_LIBURING)
+	if (io_method == IOMETHOD_LIBURING)
 	{
 		/* no locking needed here, only affects this process */
 		for (int i = 0; i < aio_ctl->num_contexts; i++)
@@ -946,7 +946,7 @@ pgaio_complete_ios(bool in_error)
 		}
 
 #ifdef USE_POSIX_AIO
-		if (aio_type == AIOTYPE_POSIX)
+		if (io_method == IOMETHOD_POSIX)
 		{
 			/*
 			 * The owner may be blocked in pgail_posix_wait_one(), but we
@@ -1159,7 +1159,7 @@ pgaio_drain(PgAioContext *context, bool block, bool call_shared, bool call_local
 {
 	int ndrained = 0;
 
-	if (aio_type == AIOTYPE_WORKER)
+	if (io_method == IOMETHOD_WORKER)
 	{
 		/*
 		 * Worker mode has no completion queue, because the worker processes
@@ -1167,11 +1167,11 @@ pgaio_drain(PgAioContext *context, bool block, bool call_shared, bool call_local
 		 */
 	}
 #ifdef USE_LIBURING
-	else if (aio_type == AIOTYPE_LIBURING)
+	else if (io_method == IOMETHOD_LIBURING)
 		ndrained = pgaio_uring_drain(context, block, call_shared);
 #endif
 #ifdef USE_POSIX_AIO
-	else if (aio_type == AIOTYPE_POSIX)
+	else if (io_method == IOMETHOD_POSIX)
 		ndrained = pgaio_posix_drain(context);
 #endif
 
@@ -1221,7 +1221,7 @@ pgaio_transfer_foreign_to_local(void)
 static bool
 pgaio_can_scatter_gather(void)
 {
-	if (aio_type == AIOTYPE_WORKER)
+	if (io_method == IOMETHOD_WORKER)
 	{
 		/*
 		 * We may not have true scatter/gather on this platform (see fallback
@@ -1232,11 +1232,11 @@ pgaio_can_scatter_gather(void)
 		return true;
 	}
 #ifdef USE_LIBURING
-	if (aio_type == AIOTYPE_LIBURING)
+	if (io_method == IOMETHOD_LIBURING)
 		return true;
 #endif
 #if defined(HAVE_AIO_READV) && defined(HAVE_AIO_WRITEV)
-	if (aio_type == AIOTYPE_POSIX)
+	if (io_method == IOMETHOD_POSIX)
 	{
 		/*
 		 * aio_readv() and aio_writev() are non-standard extensions found in
@@ -1418,11 +1418,11 @@ pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, boo
 
 	/*
 	 * FIXME: currently the pgaio_synchronous_submit() path is only compatible
-	 * with AIOTYPE_WORKER: There's e.g. a danger we'd wait for io_uring
+	 * with IOMETHOD_WORKER: There's e.g. a danger we'd wait for io_uring
 	 * events, which could stall (or trigger asserts), as
 	 * pgaio_io_wait_ref_int() right now has no way of detecting that case.
 	 */
-	if (aio_type != AIOTYPE_WORKER)
+	if (io_method != IOMETHOD_WORKER)
 		will_wait = false;
 
 	/*
@@ -1453,18 +1453,18 @@ pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, boo
 		START_CRIT_SECTION();
 		if (my_aio->pending_count == 1 && will_wait)
 			did_submit = pgaio_synchronous_submit();
-		else if (aio_type == AIOTYPE_WORKER)
+		else if (io_method == IOMETHOD_WORKER)
 			did_submit = pgaio_worker_submit(max_submit, drain);
 #ifdef USE_LIBURING
-		else if (aio_type == AIOTYPE_LIBURING)
+		else if (io_method == IOMETHOD_LIBURING)
 			did_submit = pgaio_uring_submit(max_submit, drain);
 #endif
 #ifdef USE_POSIX_AIO
-		else if (aio_type == AIOTYPE_POSIX)
+		else if (io_method == IOMETHOD_POSIX)
 			did_submit = pgaio_posix_submit(max_submit, drain);
 #endif
 		else
-			elog(ERROR, "unexpected aio_type");
+			elog(ERROR, "unexpected io_method");
 		total_submitted += did_submit;
 		Assert(did_submit > 0 && did_submit <= max_submit);
 		END_CRIT_SECTION();
@@ -1774,24 +1774,24 @@ wait_ref_again:
 			pgaio_submit_pending_internal(call_shared, call_shared, call_local,
 										  /* will_wait = */ false);
 		}
-		else if (aio_type != AIOTYPE_WORKER && (flags & PGAIOIP_INFLIGHT))
+		else if (io_method != IOMETHOD_WORKER && (flags & PGAIOIP_INFLIGHT))
 		{
 			/* note that this is allowed to spuriously return */
-			if (aio_type == AIOTYPE_WORKER)
+			if (io_method == IOMETHOD_WORKER)
 				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
 #ifdef USE_LIBURING
-			else if (aio_type == AIOTYPE_LIBURING)
+			else if (io_method == IOMETHOD_LIBURING)
 				pgaio_uring_wait_one(&aio_ctl->contexts[io->ring], io, ref_generation,
 									 WAIT_EVENT_AIO_IO_COMPLETE_ANY);
 #endif
 #ifdef USE_POSIX_AIO
-			else if (aio_type == AIOTYPE_POSIX)
+			else if (io_method == IOMETHOD_POSIX)
 				pgaio_posix_wait_one(io, ref_generation);
 #endif
 		}
 #ifdef USE_POSIX_AIO
 		/* XXX untangle this */
-		else if (aio_type == AIOTYPE_POSIX)
+		else if (io_method == IOMETHOD_POSIX)
 			pgaio_posix_wait_one(io, ref_generation);
 #endif
 		else
@@ -2143,18 +2143,18 @@ pgaio_io_retry_common(PgAioInProgress *io)
 	my_aio->retry_total_count++;
 
 	START_CRIT_SECTION();
-	if (aio_type == AIOTYPE_WORKER)
+	if (io_method == IOMETHOD_WORKER)
 		pgaio_worker_io_retry(io);
 #ifdef USE_LIBURING
-	else if (aio_type == AIOTYPE_LIBURING)
+	else if (io_method == IOMETHOD_LIBURING)
 		pgaio_uring_io_retry(io);
 #endif
 #ifdef USE_POSIX_AIO
-	else if (aio_type == AIOTYPE_POSIX)
+	else if (io_method == IOMETHOD_POSIX)
 		pgaio_posix_io_retry(io);
 #endif
 	else
-		elog(ERROR, "unexpected aio_type");
+		elog(ERROR, "unexpected io_method");
 	END_CRIT_SECTION();
 }
 
@@ -3536,7 +3536,7 @@ pgaio_io_matches_fd(PgAioInProgress *io, int fd)
 #ifdef USE_POSIX_AIO
 	/* XXX review sanity of this */
 	/* We only want to match IOs that were submitted by this process. */
-	if (aio_type != AIOTYPE_POSIX || io->submitter_id != my_aio_id)
+	if (io_method != IOMETHOD_POSIX || io->submitter_id != my_aio_id)
 		return false;
 #endif
 
@@ -3628,7 +3628,7 @@ pgaio_closing_fd(int fd)
 {
 #ifdef USE_POSIX_AIO
 #if !defined(__freebsd__)
-	if (aio_type == AIOTYPE_POSIX)
+	if (io_method == IOMETHOD_POSIX)
 		pgaio_wait_for_issued_internal(-1, fd);
 #endif
 #endif

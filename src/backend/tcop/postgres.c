@@ -3101,7 +3101,7 @@ ProcessInterrupts(void)
 			 */
 			proc_exit(1);
 		}
-		else if (IsAioWorker())
+		else if (AmIoWorkerProcess())
 			proc_exit(0);
 		else if (RecoveryConflictPending && RecoveryConflictRetryable)
 		{

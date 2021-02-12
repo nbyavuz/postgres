@@ -330,7 +330,7 @@ typedef enum
 								 * ckpt */
 	PM_SHUTDOWN_2,				/* waiting for archiver and walsenders to
 								 * exit */
-	PM_SHUTDOWN_AIO,			/* waiting for aio workers to exit */
+	PM_SHUTDOWN_IO,				/* waiting for io workers to exit */
 	PM_WAIT_DEAD_END,			/* waiting for dead_end children to exit */
 	PM_NO_CHILDREN				/* all important children have exited */
 } PMState;
@@ -388,9 +388,9 @@ static bool LoadedSSL = false;
 static DNSServiceRef bonjour_sdref = NULL;
 #endif
 
-/* State for AIO worker management. */
-static int aio_worker_count = 0;
-static pid_t aio_worker_pids[MAX_AIO_WORKERS];
+/* State for IO worker management. */
+static int io_worker_count = 0;
+static pid_t io_worker_pids[MAX_IO_WORKERS];
 
 /*
  * postmaster.c - function prototypes
@@ -436,9 +436,9 @@ static void TerminateChildren(int signal);
 static int	CountChildren(int target);
 static bool assign_backendlist_entry(RegisteredBgWorker *rw);
 static void maybe_start_bgworkers(void);
-static bool maybe_reap_aio_worker(int pid);
-static void maybe_adjust_aio_workers(void);
-static void signal_aio_workers(int signal);
+static bool maybe_reap_io_worker(int pid);
+static void maybe_adjust_io_workers(void);
+static void signal_io_workers(int signal);
 static bool CreateOptsFile(int argc, char *argv[], char *fullprogname);
 static pid_t StartChildProcess(AuxProcType type, int id);
 static void StartAutovacuumWorker(void);
@@ -561,7 +561,7 @@ static void ShmemBackendArrayRemove(Backend *bn);
 #define StartCheckpointer()		StartChildProcess(CheckpointerProcess, -1)
 #define StartWalWriter()		StartChildProcess(WalWriterProcess, -1)
 #define StartWalReceiver()		StartChildProcess(WalReceiverProcess, -1)
-#define StartAioWorker(id)		StartChildProcess(AioWorkerProcess, id)
+#define StartIoWorker(id)		StartChildProcess(IoWorkerProcess, id)
 
 /* Macros to check exit status of a child process */
 #define EXIT_STATUS_0(st)  ((st) == 0)
@@ -1019,7 +1019,7 @@ PostmasterMain(int argc, char *argv[])
 	InitializeMaxBackends();
 
 	/*
-	 * As AIO might create interal FDs, and will trigger shared memory
+	 * As AIO might create internal FDs, and will trigger shared memory
 	 * allocations, need to do this before reset_shared() and
 	 * set_max_safe_fds().
 	 */
@@ -1412,7 +1412,7 @@ PostmasterMain(int argc, char *argv[])
 	pmState = PM_STARTUP;
 
 	/* Make sure we can perform I/O while starting up. */
-	maybe_adjust_aio_workers();
+	maybe_adjust_io_workers();
 
 	/*
 	 * We're ready to rock and roll...
@@ -2725,7 +2725,7 @@ SIGHUP_handler(SIGNAL_ARGS)
 			signal_child(SysLoggerPID, SIGHUP);
 		if (PgStatPID != 0)
 			signal_child(PgStatPID, SIGHUP);
-		signal_aio_workers(SIGHUP);
+		signal_io_workers(SIGHUP);
 
 		/* Reload authentication config files too */
 		if (!load_hba())
@@ -3241,16 +3241,16 @@ reaper(SIGNAL_ARGS)
 			continue;
 		}
 
-		/* Was it an AIO worker? */
-		if (maybe_reap_aio_worker(pid))
+		/* Was it an IO worker? */
+		if (maybe_reap_io_worker(pid))
 		{
 			if (!EXIT_STATUS_0(exitstatus) && !EXIT_STATUS_1(exitstatus))
-				HandleChildCrash(pid, exitstatus,_("aio worker"));
+				HandleChildCrash(pid, exitstatus,_("io worker"));
 
-			maybe_adjust_aio_workers();
+			maybe_adjust_io_workers();
 
-			if (aio_worker_count == 0 &&
-				pmState >= PM_SHUTDOWN_AIO)
+			if (io_worker_count == 0 &&
+				pmState >= PM_SHUTDOWN_IO)
 			{
 				pmState = PM_WAIT_DEAD_END;
 			}
@@ -3671,8 +3671,8 @@ HandleChildCrash(int pid, int exitstatus, const char *procname)
 		signal_child(AutoVacPID, (SendStop ? SIGSTOP : SIGQUIT));
 	}
 
-	/* Take care of aio workers too */
-	signal_aio_workers(SIGQUIT);
+	/* Take care of io workers too */
+	signal_io_workers(SIGQUIT);
 
 	/*
 	 * Force a power-cycle of the pgarch process too.  (This isn't absolutely
@@ -3936,7 +3936,7 @@ PostmasterStateMachine(void)
 						signal_child(PgArchPID, SIGQUIT);
 					if (PgStatPID != 0)
 						signal_child(PgStatPID, SIGQUIT);
-					signal_aio_workers(SIGQUIT);
+					signal_io_workers(SIGQUIT);
 				}
 			}
 		}
@@ -3952,18 +3952,17 @@ PostmasterStateMachine(void)
 		 */
 		if (PgArchPID == 0 && CountChildren(BACKEND_TYPE_ALL) == 0)
 		{
-			pmState = PM_SHUTDOWN_AIO;
-			signal_aio_workers(SIGUSR2);
+			pmState = PM_SHUTDOWN_IO;
+			signal_io_workers(SIGUSR2);
 		}
 	}
 
-	if (pmState == PM_SHUTDOWN_AIO)
+	if (pmState == PM_SHUTDOWN_IO)
 	{
 		/*
-		 * PM_SHUTDOWN_AIO state ends when there's only dead_end children
-		 * left.
+		 * PM_SHUTDOWN_IO state ends when there's only dead_end children left.
 		 */
-		if (aio_worker_count == 0)
+		if (io_worker_count == 0)
 			pmState = PM_WAIT_DEAD_END;
 	}
 
@@ -3986,7 +3985,7 @@ PostmasterStateMachine(void)
 		 * shutdown-and-immediately-restart scenario.
 		 */
 		if (dlist_is_empty(&BackendList) &&
-			aio_worker_count == 0 && PgArchPID == 0 && PgStatPID == 0)
+			io_worker_count == 0 && PgArchPID == 0 && PgStatPID == 0)
 		{
 			/* These other guys should be dead already */
 			Assert(StartupPID == 0);
@@ -4071,7 +4070,7 @@ PostmasterStateMachine(void)
 		pmState = PM_STARTUP;
 
 		/* Make sure we can perform I/O while starting up. */
-		maybe_adjust_aio_workers();
+		maybe_adjust_io_workers();
 
 		StartupPID = StartupDataBase();
 		Assert(StartupPID != 0);
@@ -4192,7 +4191,7 @@ TerminateChildren(int signal)
 		signal_child(PgArchPID, signal);
 	if (PgStatPID != 0)
 		signal_child(PgStatPID, signal);
-	signal_aio_workers(signal);
+	signal_io_workers(signal);
 }
 
 /*
@@ -5556,9 +5555,9 @@ StartChildProcess(AuxProcType type, int id)
 				ereport(LOG,
 						(errmsg("could not fork WAL receiver process: %m")));
 				break;
-			case AioWorkerProcess:
+			case IoWorkerProcess:
 				ereport(LOG,
-						(errmsg("could not fork AIO worker process: %m")));
+						(errmsg("could not fork IO worker process: %m")));
 				break;
 			default:
 				ereport(LOG,
@@ -5941,7 +5940,7 @@ bgworker_should_start_now(BgWorkerStartTime start_time)
 	{
 		case PM_NO_CHILDREN:
 		case PM_WAIT_DEAD_END:
-		case PM_SHUTDOWN_AIO:
+		case PM_SHUTDOWN_IO:
 		case PM_SHUTDOWN_2:
 		case PM_SHUTDOWN:
 		case PM_WAIT_BACKENDS:
@@ -6157,14 +6156,14 @@ maybe_start_bgworkers(void)
 }
 
 static bool
-maybe_reap_aio_worker(int pid)
+maybe_reap_io_worker(int pid)
 {
-	for (int id = 0; id < MAX_AIO_WORKERS; ++id)
+	for (int id = 0; id < MAX_IO_WORKERS; ++id)
 	{
-		if (aio_worker_pids[id] == pid)
+		if (io_worker_pids[id] == pid)
 		{
-			--aio_worker_count;
-			aio_worker_pids[id] = 0;
+			--io_worker_count;
+			io_worker_pids[id] = 0;
 			return true;
 		}
 	}
@@ -6172,11 +6171,11 @@ maybe_reap_aio_worker(int pid)
 }
 
 static void
-maybe_adjust_aio_workers(void)
+maybe_adjust_io_workers(void)
 {
-	if (aio_type != AIOTYPE_WORKER)
+	if (io_method != IOMETHOD_WORKER)
 	{
-		Assert(aio_worker_count == 0);
+		Assert(io_worker_count == 0);
 		return;
 	}
 
@@ -6184,7 +6183,7 @@ maybe_adjust_aio_workers(void)
 	 * If we're in final shutting down state, then we're just waiting for all
 	 * processes to exit.
 	 */
-	if (pmState >= PM_SHUTDOWN_AIO)
+	if (pmState >= PM_SHUTDOWN_IO)
 		return;
 
 	/* Don't start new workers during an immediate shutdown either. */
@@ -6199,42 +6198,42 @@ maybe_adjust_aio_workers(void)
 		return;
 
 	/* Not enough running? */
-	while (aio_worker_count < aio_workers)
+	while (io_worker_count < io_workers)
 	{
 		int pid;
 		int id;
 
-		/* Find the lowest unused AIO worker ID. */
-		for (id = 0; id < MAX_AIO_WORKERS; ++id)
+		/* Find the lowest unused IO worker ID. */
+		for (id = 0; id < MAX_IO_WORKERS; ++id)
 		{
-			if (aio_worker_pids[id] == 0)
+			if (io_worker_pids[id] == 0)
 				break;
 		}
-		if (id == MAX_AIO_WORKERS)
-			elog(ERROR, "could not find a free AIO worker ID");
+		if (id == MAX_IO_WORKERS)
+			elog(ERROR, "could not find a free IO worker ID");
 
 		Assert(pmState < PM_STOP_BACKENDS);
 
 		/* Try to launch one. */
-		pid = StartAioWorker(id);
+		pid = StartIoWorker(id);
 		if (pid > 0)
 		{
-			aio_worker_pids[id] = pid;
-			++aio_worker_count;
+			io_worker_pids[id] = pid;
+			++io_worker_count;
 		}
 		else
 			break;		/* XXX try again soon? */
 	}
 
 	/* Too many running? */
-	if (aio_worker_count > aio_workers)
+	if (io_worker_count > io_workers)
 	{
-		/* Ask the highest used AIO worker ID to exit. */
-		for (int id = MAX_AIO_WORKERS - 1; id >= 0; --id)
+		/* Ask the highest used IO worker ID to exit. */
+		for (int id = MAX_IO_WORKERS - 1; id >= 0; --id)
 		{
-			if (aio_worker_pids[id] != 0)
+			if (io_worker_pids[id] != 0)
 			{
-				kill(aio_worker_pids[id], SIGUSR2);
+				kill(io_worker_pids[id], SIGUSR2);
 				break;
 			}
 		}
@@ -6242,19 +6241,19 @@ maybe_adjust_aio_workers(void)
 }
 
 static void
-signal_aio_workers(int signal)
+signal_io_workers(int signal)
 {
-	for (int i = 0; i < MAX_AIO_WORKERS; ++i)
-		if (aio_worker_pids[i] != 0)
-			signal_child(aio_worker_pids[i], signal);
+	for (int i = 0; i < MAX_IO_WORKERS; ++i)
+		if (io_worker_pids[i] != 0)
+			signal_child(io_worker_pids[i], signal);
 }
 
 void
-assign_aio_workers(int newval, void *extra)
+assign_io_workers(int newval, void *extra)
 {
-	aio_workers = newval;
+	io_workers = newval;
 	if (!IsUnderPostmaster && pmState > PM_INIT)
-		maybe_adjust_aio_workers();
+		maybe_adjust_io_workers();
 }
 
 /*

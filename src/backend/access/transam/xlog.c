@@ -5157,7 +5157,7 @@ XLogFileForIO(XLogIO *xio)
 
 		if (xio->tli != ThisTimeLineID)
 		{
-			Assert(AmAioWorkerProcess());
+			Assert(AmIoWorkerProcess());
 			ThisTimeLineID = xio->tli;
 		}
 

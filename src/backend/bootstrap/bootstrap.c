@@ -261,7 +261,7 @@ AuxiliaryProcessMain(int argc, char *argv[])
 				MyAuxProcType = atoi(optarg);
 				break;
 			case 'Z':
-				MyAioWorkerId = atoi(optarg);
+				MyIoWorkerId = atoi(optarg);
 				break;
 			case 'X':
 				{
@@ -333,8 +333,8 @@ AuxiliaryProcessMain(int argc, char *argv[])
 		case WalReceiverProcess:
 			MyBackendType = B_WAL_RECEIVER;
 			break;
-		case AioWorkerProcess:
-			MyBackendType = B_AIO_WORKER;
+		case IoWorkerProcess:
+			MyBackendType = B_IO_WORKER;
 			break;
 		default:
 			MyBackendType = B_INVALID;
@@ -394,18 +394,18 @@ AuxiliaryProcessMain(int argc, char *argv[])
 		 * indexed in the range from 1 to MaxBackends (inclusive), so we use
 		 * slots above MaxBackends for auxiliary processes.
 		 */
-		if (MyAuxProcType == AioWorkerProcess)
+		if (MyAuxProcType == IoWorkerProcess)
 		{
-			/* Use the AIO worker ID to choose a slot. */
-			if (MyAioWorkerId < 0 || MyAioWorkerId > MAX_AIO_WORKERS)
-				elog(ERROR, "unexpected or missing aio worker ID: %d",
-					 MyAioWorkerId);
-			ProcSignalInit(MaxBackends + MyAioWorkerId + 1);
+			/* Use the IO worker ID to choose a slot. */
+			if (MyIoWorkerId < 0 || MyIoWorkerId > MAX_IO_WORKERS)
+				elog(ERROR, "unexpected or missing io worker ID: %d",
+					 MyIoWorkerId);
+			ProcSignalInit(MaxBackends + MyIoWorkerId + 1);
 		}
 		else
 		{
 			/* The other auxiliary process types have only one process each. */
-			ProcSignalInit(MaxBackends + MAX_AIO_WORKERS + MyAuxProcType + 1);
+			ProcSignalInit(MaxBackends + MAX_IO_WORKERS + MyAuxProcType + 1);
 		}
 
 		pgaio_postmaster_child_init();
@@ -481,9 +481,9 @@ AuxiliaryProcessMain(int argc, char *argv[])
 			WalReceiverMain();
 			proc_exit(1);		/* should never return */
 
-		case AioWorkerProcess:
-			/* don't set signals, aio worker has its own agenda */
-			AioWorkerMain();
+		case IoWorkerProcess:
+			/* don't set signals, io worker has its own agenda */
+			IoWorkerMain();
 			proc_exit(1);		/* should never return */
 
 		default:

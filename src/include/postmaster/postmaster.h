@@ -54,7 +54,7 @@ extern int	MaxLivePostmasterChildren(void);
 
 extern bool PostmasterMarkPIDForWorkerNotify(int);
 
-extern void assign_aio_workers(int newval, void *extra);
+extern void assign_io_workers(int newval, void *extra);
 
 #ifdef EXEC_BACKEND
 extern pid_t postmaster_forkexec(int argc, char *argv[]);

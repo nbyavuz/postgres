@@ -35,15 +35,15 @@
 #include "tcop/tcopprot.h"
 
 /* GUCs */
-int aio_worker_queue_size;
-int aio_workers;
+int io_worker_queue_size;
+int io_workers;
 
-int MyAioWorkerId;
+int MyIoWorkerId;
 
 Size
 AioWorkerShmemSize(void)
 {
-	return squeue32_estimate(aio_worker_queue_size);
+	return squeue32_estimate(io_worker_queue_size);
 }
 
 void
@@ -55,7 +55,7 @@ AioWorkerShmemInit(void)
 		ShmemInitStruct("AioWorkerSubmissionQueue", AioWorkerShmemSize(),
 						&found);
 	Assert(!found);
-	squeue32_init(aio_ctl->worker_submission_queue, aio_worker_queue_size);
+	squeue32_init(aio_ctl->worker_submission_queue, io_worker_queue_size);
 	ConditionVariableInit(&aio_ctl->worker_submission_queue_not_empty);
 }
 
@@ -127,14 +127,8 @@ pgaio_worker_io_retry(PgAioInProgress *io)
 	pgaio_worker_submit_one(io);
 }
 
-bool
-IsAioWorker(void)
-{
-	return MyBackendType == B_AIO_WORKER;
-}
-
 void
-AioWorkerMain(void)
+IoWorkerMain(void)
 {
 	/* TODO review all signals */
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
@@ -176,7 +170,7 @@ AioWorkerMain(void)
 		{
 			/* Nothing in the queue.  Go to sleep. */
 			ConditionVariableSleep(&aio_ctl->worker_submission_queue_not_empty,
-								   WAIT_EVENT_AIO_WORKER_MAIN);
+								   WAIT_EVENT_IO_WORKER_MAIN);
 		}
 	}
 }

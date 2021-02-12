@@ -509,7 +509,7 @@ extern const struct config_enum_entry archive_mode_options[];
 extern const struct config_enum_entry recovery_target_action_options[];
 extern const struct config_enum_entry sync_method_options[];
 extern const struct config_enum_entry dynamic_shared_memory_options[];
-extern const struct config_enum_entry aio_type_options[];
+extern const struct config_enum_entry io_method_options[];
 
 /*
  * GUC option variables that are exported from this module
@@ -3110,25 +3110,25 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"aio_workers",
+		{"io_workers",
 			PGC_SIGHUP,
 			RESOURCES_ASYNCHRONOUS,
-			gettext_noop("Number of AIO worker processes, for aio_type=worker."),
+			gettext_noop("Number of IO worker processes, for io_method=worker."),
 			NULL,
 		},
-		&aio_workers,
-		8, 1, MAX_AIO_WORKERS,
-		NULL, assign_aio_workers, NULL
+		&io_workers,
+		8, 1, MAX_IO_WORKERS,
+		NULL, assign_io_workers, NULL
 	},
 
 	{
-		{"aio_worker_queue_size",
+		{"io_worker_queue_size",
 			PGC_POSTMASTER,
 			RESOURCES_ASYNCHRONOUS,
-			gettext_noop("Size of the request queue, for aio_type=worker."),
+			gettext_noop("Size of the submission queue, for io_method=worker."),
 			NULL,
 		},
-		&aio_worker_queue_size,
+		&io_worker_queue_size,
 		64, 1, 4096,
 		NULL, NULL, NULL
 	},
@@ -4935,12 +4935,12 @@ static struct config_enum ConfigureNamesEnum[] =
 	},
 
 	{
-		{"aio_type", PGC_POSTMASTER, RESOURCES_MEM,
-			gettext_noop("Selects the asynchronous I/O type used."),
+		{"io_method", PGC_POSTMASTER, RESOURCES_MEM,
+			gettext_noop("Selects the method of asynchronous I/O to use."),
 			NULL
 		},
-		&aio_type,
-		DEFAULT_AIO_TYPE, aio_type_options,
+		&io_method,
+		DEFAULT_IO_METHOD, io_method_options,
 		NULL, NULL, NULL
 	},
 

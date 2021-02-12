@@ -85,7 +85,7 @@ typedef struct
  * possible auxiliary process type.  (This scheme assumes there is not
  * more than one of any auxiliary process type at a time.)
  */
-#define NumProcSignalSlots	(MaxBackends + NUM_AUXPROCTYPES + MAX_AIO_WORKERS)
+#define NumProcSignalSlots	(MaxBackends + NUM_AUXPROCTYPES + MAX_IO_WORKERS)
 
 /* Check whether the relevant type bit is set in the flags. */
 #define BARRIER_SHOULD_CHECK(flags, type) \
