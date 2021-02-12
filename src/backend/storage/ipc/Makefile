@@ -31,9 +31,8 @@ OBJS = \
 	standby.o
 
 ifeq ($(with_liburing),yes)
+override CPPFLAGS += $(LIBURING_CFLAGS)
 OBJS += aio_uring.o
-aio_uring.o: override CPPFLAGS += $(LIBURING_CFLAGS)
-aio_uring.bc: override CPPFLAGS += $(LIBURING_CFLAGS)
 endif
 
 ifeq ($(with_posix_aio),yes)
