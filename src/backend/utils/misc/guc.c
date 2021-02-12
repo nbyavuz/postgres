@@ -2069,7 +2069,7 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
-		{"io_wal_direct", PGC_SIGHUP, RESOURCES_DISK,
+		{"io_wal_direct", PGC_SUSET, RESOURCES_DISK,
 			gettext_noop("wal file IO uses direct IO."),
 		},
 		&io_wal_direct,
@@ -2078,7 +2078,7 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
-		{"io_wal_init_direct", PGC_SIGHUP, RESOURCES_DISK,
+		{"io_wal_init_direct", PGC_SUSET, RESOURCES_DISK,
 			gettext_noop("wal file initialization IO uses direct IO."),
 		},
 		&io_wal_init_direct,
