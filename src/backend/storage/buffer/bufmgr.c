@@ -1748,7 +1748,7 @@ AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn, PgAioIoRef 
 	while (true)
 	{
 		uint32 cur_buf_state;
-		XLogRecPtr page_lsn;
+		XLogRecPtr page_lsn = InvalidXLogRecPtr;
 
 		ReservePrivateRefCountEntry();
 		ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
@@ -1768,8 +1768,6 @@ AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn, PgAioIoRef 
 			pg_atomic_write_u32(&cur_buf_hdr->state, cur_buf_state);
 		}
 
-		page_lsn = BufferGetLSN(cur_buf_hdr);
-
 		/* Pin the buffer and then release the buffer spinlock */
 		PinBuffer_Locked(cur_buf_hdr);
 
@@ -1780,6 +1778,10 @@ AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn, PgAioIoRef 
 		else
 		{
 			LWLock *content_lock;
+
+			Assert(cur_buf_state & BM_PERMANENT);
+
+			page_lsn = BufferGetLSN(cur_buf_hdr);
 
 			if (cur_buf_state & BM_PERMANENT)
 			{
