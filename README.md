@@ -2,7 +2,7 @@
 
 Can we get through `make check`?
 
-| OS     | aio\_type | Buffered I/O | Direct I/O |
+| OS     | io\_method | Buffered I/O | Direct I/O |
 |--------|-----------|--------------|------------|
 | Linux  | worker    | [![Build Status](https://api.cirrus-ci.com/github/anarazel/postgres.svg?branch=aio&task=Linux&script=linux_worker_buf)](https://cirrus-ci.com/github/anarazel/postgres/aio) | [![Build Status](https://api.cirrus-ci.com/github/anarazel/postgres.svg?branch=aio&task=Linux&script=linux_worker_dio)](https://cirrus-ci.com/github/anarazel/postgres/aio) |
 | Linux  | io\_uring | [![Build Status](https://api.cirrus-ci.com/github/anarazel/postgres.svg?branch=aio&task=Linux&script=linux_io_uring_buf)](https://cirrus-ci.com/github/anarazel/postgres/aio) | [![Build Status](https://api.cirrus-ci.com/github/anarazel/postgres.svg?branch=aio&task=Linux&script=linux_io_uring_dio)](https://cirrus-ci.com/github/anarazel/postgres/aio) |

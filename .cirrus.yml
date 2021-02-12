@@ -28,25 +28,25 @@ task:
     - su postgres -c './configure --enable-cassert --enable-debug --enable-tap-tests --with-posix-aio --with-includes=/usr/local/include --with-libs=/usr/local/lib CC="ccache cc"'
     - su postgres -c 'make -s -j4'
   freebsd_worker_buf_script:
-    - su postgres -c 'echo aio_type=worker > /tmp/extra.conf'
+    - su postgres -c 'echo io_method=worker > /tmp/extra.conf'
     - su postgres -c 'echo io_data_direct=off >> /tmp/extra.conf'
     - su postgres -c 'echo io_wal_direct=off >> /tmp/extra.conf'
     - su postgres -c 'echo io_wal_init_direct=off >> /tmp/extra.conf'
     - su postgres -c 'TEMP_CONFIG=/tmp/extra.conf make -s check'
   freebsd_worker_dio_script:
-    - su postgres -c 'echo aio_type=worker > /tmp/extra.conf'
+    - su postgres -c 'echo io_method=worker > /tmp/extra.conf'
     - su postgres -c 'echo io_data_direct=on >> /tmp/extra.conf'
     - su postgres -c 'echo io_wal_direct=on >> /tmp/extra.conf'
     - su postgres -c 'echo io_wal_init_direct=on >> /tmp/extra.conf'
     - su postgres -c 'TEMP_CONFIG=/tmp/extra.conf make -s check'
   freebsd_posix_buf_script:
-    - su postgres -c 'echo aio_type=posix > /tmp/extra.conf'
+    - su postgres -c 'echo io_method=posix > /tmp/extra.conf'
     - su postgres -c 'echo io_data_direct=off >> /tmp/extra.conf'
     - su postgres -c 'echo io_wal_direct=off >> /tmp/extra.conf'
     - su postgres -c 'echo io_wal_init_direct=off >> /tmp/extra.conf'
     - su postgres -c 'TEMP_CONFIG=/tmp/extra.conf make -s check'
   freebsd_posix_dio_script:
-    - su postgres -c 'echo aio_type=posix > /tmp/extra.conf'
+    - su postgres -c 'echo io_method=posix > /tmp/extra.conf'
     - su postgres -c 'echo io_data_direct=on >> /tmp/extra.conf'
     - su postgres -c 'echo io_wal_direct=on >> /tmp/extra.conf'
     - su postgres -c 'echo io_wal_init_direct=on >> /tmp/extra.conf'
@@ -71,7 +71,7 @@ task:
   macos_worker_buf_script:
     - ulimit -c unlimited
     - export PERL5LIB=~/perl5/lib/perl5
-    - echo aio_type=worker > /tmp/extra.conf
+    - echo io_method=worker > /tmp/extra.conf
     - echo io_data_direct=off >> /tmp/extra.conf
     - echo io_wal_direct=off >> /tmp/extra.conf
     - echo io_wal_init_direct=off >> /tmp/extra.conf
@@ -79,7 +79,7 @@ task:
   macos_worker_dio_script:
     - ulimit -c unlimited
     - export PERL5LIB=~/perl5/lib/perl5
-    - echo aio_type=worker > /tmp/extra.conf
+    - echo io_method=worker > /tmp/extra.conf
     - echo io_data_direct=on >> /tmp/extra.conf
     - echo io_wal_direct=on >> /tmp/extra.conf
     - echo io_wal_init_direct=on >> /tmp/extra.conf
@@ -87,7 +87,7 @@ task:
   macos_posix_buf_script:
     - ulimit -c unlimited
     - export PERL5LIB=~/perl5/lib/perl5
-    - echo aio_type=posix > /tmp/extra.conf
+    - echo io_method=posix > /tmp/extra.conf
     - echo io_data_direct=off >> /tmp/extra.conf
     - echo io_wal_direct=off >> /tmp/extra.conf
     - echo io_wal_init_direct=off >> /tmp/extra.conf
@@ -95,7 +95,7 @@ task:
   macos_posix_dio_script:
     - ulimit -c unlimited
     - export PERL5LIB=~/perl5/lib/perl5
-    - echo aio_type=posix > /tmp/extra.conf
+    - echo io_method=posix > /tmp/extra.conf
     - echo io_data_direct=on >> /tmp/extra.conf
     - echo io_wal_direct=on >> /tmp/extra.conf
     - echo io_wal_init_direct=on >> /tmp/extra.conf
@@ -136,25 +136,25 @@ task:
     - su postgres -c './configure --enable-cassert --enable-debug --enable-tap-tests --with-posix-aio --with-liburing --with-tcl --with-python --with-perl --with-ldap --with-openssl --with-icu --with-llvm CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"'
     - su postgres -c 'make -s -j4'
   linux_worker_buf_script:
-    - echo aio_type=worker > /tmp/extra.conf
+    - echo io_method=worker > /tmp/extra.conf
     - echo io_data_direct=off >> /tmp/extra.conf
     - echo io_wal_direct=off >> /tmp/extra.conf
     - echo io_wal_init_direct=off >> /tmp/extra.conf
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=/tmp/extra.conf make -s check'
   linux_worker_dio_script:
-    - echo aio_type=worker > /tmp/extra.conf
+    - echo io_method=worker > /tmp/extra.conf
     - echo io_data_direct=on >> /tmp/extra.conf
     - echo io_wal_direct=on >> /tmp/extra.conf
     - echo io_wal_init_direct=on >> /tmp/extra.conf
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=/tmp/extra.conf make -s check'
   linux_io_uring_buf_script:
-    - echo aio_type=io_uring > /tmp/extra.conf
+    - echo io_method=io_uring > /tmp/extra.conf
     - echo io_data_direct=off >> /tmp/extra.conf
     - echo io_wal_direct=off >> /tmp/extra.conf
     - echo io_wal_init_direct=off >> /tmp/extra.conf
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=/tmp/extra.conf make -s check'
   linux_io_uring_dio_script:
-    - echo aio_type=io_uring > /tmp/extra.conf
+    - echo io_method=io_uring > /tmp/extra.conf
     - echo io_data_direct=on >> /tmp/extra.conf
     - echo io_wal_direct=on >> /tmp/extra.conf
     - echo io_wal_init_direct=on >> /tmp/extra.conf
@@ -183,7 +183,7 @@ task:
   windows_worker_buf_script:
     - set PATH=C:\strawberry\perl\bin;%PATH%
     - set TEMP_CONFIG=%TEMP%\extra.conf
-    - echo aio_type=worker > %TEMP_CONFIG%
+    - echo io_method=worker > %TEMP_CONFIG%
     - echo io_data_direct=off >> %TEMP_CONFIG%
     - echo io_wal_direct=off >> %TEMP_CONFIG%
     - echo io_wal_init_direct=off >> %TEMP_CONFIG%
@@ -191,7 +191,7 @@ task:
   windows_worker_dio_script:
     - set PATH=C:\strawberry\perl\bin;%PATH%
     - set TEMP_CONFIG=%TEMP%\extra.conf
-    - echo aio_type=worker > %TEMP_CONFIG%
+    - echo io_method=worker > %TEMP_CONFIG%
     - echo io_data_direct=on >> %TEMP_CONFIG%
     - echo io_wal_direct=on >> %TEMP_CONFIG%
     - echo io_wal_init_direct=on >> %TEMP_CONFIG%
