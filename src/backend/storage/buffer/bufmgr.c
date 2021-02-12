@@ -2316,6 +2316,19 @@ PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy)
 	}
 	else
 	{
+		uint32		buf_state = pg_atomic_read_u32(&buf->state);
+
+		/*
+		 * Most of the tiem when we previously pinned the buffer, it's already
+		 * valid. However, when we're asynchronously reading data we might
+		 * independently read that buffer again. Which needs to notice that
+		 * the buffer isn't yet valid - but the tag has to be.
+		 */
+		result = buf_state & BM_VALID;
+
+		if (!result)
+			Assert(buf_state & BM_TAG_VALID);
+
 		/*
 		 * If we previously pinned the buffer, it must surely be valid.
 		 *
@@ -2326,7 +2339,6 @@ PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy)
 		 * that the buffer page is legitimately non-accessible here.  We
 		 * cannot meddle with that.
 		 */
-		result = true;
 	}
 
 	ref->refcount++;
