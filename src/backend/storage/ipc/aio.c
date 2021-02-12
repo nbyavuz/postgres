@@ -1,10 +1,21 @@
+/*-------------------------------------------------------------------------
+ *
+ * aio.c
+ *	  Asynchronous I/O subsytem.
+ *
+ * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1994, Regents of the University of California
+ *
+ * IDENTIFICATION
+ *	  src/backend/storage/ipc/aio.c
+ *
+ *-------------------------------------------------------------------------
+ */
 /*
  * Big picture changes needed:
  * - backend local recycleable IOs
  * - retries for AIOs that cannot be retried shared (e.g. XLogFileInit())
  * - docs / comments / cleanup
- * - split aio.c in multiple files (aio.c, aio_uring.c, aio_worker.c, aio_cb.c)
- *   - introduce aio_internal.h for that purpose
  * - move more of the shared callback logic into bufmgr.c etc
  * - merging of IOs when submitting individual IOs, not when submitting all pending IOs
  * - Shrink size of PgAioInProgress
@@ -31,6 +42,7 @@
 #include "port/pg_iovec.h"
 #include "postmaster/interrupt.h"
 #include "storage/aio.h"
+#include "storage/aio_internal.h"
 #include "storage/buf.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
@@ -46,530 +58,34 @@
 #include "utils/memutils.h"
 #include "utils/resowner_private.h"
 
-#ifdef USE_LIBURING
-#include <liburing.h>
-#endif
-
-#ifdef USE_POSIX_AIO
-#include <aio.h>
-#endif
-
 #define PGAIO_VERBOSE
 
-
-/*
- * FIXME: This is just so large because merging happens when submitting
- * pending requests, rather than when staging them.
- */
-#define PGAIO_SUBMIT_BATCH_SIZE 256
-#define PGAIO_MAX_LOCAL_REAPED 128
-#define PGAIO_MAX_COMBINE 16
-
-#define PGAIO_NUM_CONTEXTS 8
-
-/*
- * The type of AIO.
- *
- * To keep PgAioInProgress smaller try to tell the compiler to only use the
- * minimal space. We could alternatively just use a uint8, but then we'd need
- * casts in more places...
- */
-typedef enum pg_attribute_packed_desired() PgAioOp
-{
-	/* intentionally the zero value, to help catch zeroed memory etc */
-	PGAIO_OP_INVALID = 0,
-
-	PGAIO_OP_READ,
-	PGAIO_OP_WRITE,
-
-	PGAIO_OP_FSYNC,
-
-	PGAIO_OP_FLUSH_RANGE,
-
-	PGAIO_OP_NOP,
-} PgAioOp;
-
-typedef enum pg_attribute_packed_desired() PgAioSharedCallback
-{
-	/* intentionally the zero value, to help catch zeroed memory etc */
-	PGAIO_SCB_INVALID = 0,
-
-	PGAIO_SCB_READ_SB,
-	PGAIO_SCB_READ_SMGR,
-
-	PGAIO_SCB_WRITE_SB,
-	PGAIO_SCB_WRITE_SMGR,
-	PGAIO_SCB_WRITE_WAL,
-	PGAIO_SCB_WRITE_RAW,
-
-	PGAIO_SCB_FSYNC_RAW,
-	PGAIO_SCB_FSYNC_WAL,
-
-	PGAIO_SCB_FLUSH_RANGE_RAW,
-	PGAIO_SCB_FLUSH_RANGE_SMGR,
-
-	PGAIO_SCB_NOP,
-} PgAioSharedCallback;
-
-
-typedef enum PgAioInProgressFlags
-{
-	/* request in the ->unused list */
-	PGAIOIP_UNUSED = 1 << 0,
-
-	/*  */
-	PGAIOIP_IDLE = 1 << 1,
-
-	PGAIOIP_PREP = 1 << 2,
-
-	/*  */
-	PGAIOIP_IN_PROGRESS = 1 << 3,
-
-	/* somewhere */
-	PGAIOIP_PENDING = 1 << 4,
-
-	/* request in kernel */
-	PGAIOIP_INFLIGHT = 1 << 5,
-
-	/* request reaped */
-	PGAIOIP_REAPED = 1 << 6,
-
-	/* shared completion callback was called */
-	PGAIOIP_SHARED_CALLBACK_CALLED = 1 << 7,
-
-	/* completed */
-	PGAIOIP_DONE = 1 << 8,
-
-	PGAIOIP_FOREIGN_DONE = 1 << 9,
-
-	PGAIOIP_RETRY = 1 << 10,
-
-	/* request failed completely */
-	PGAIOIP_HARD_FAILURE = 1 << 11,
-
-	/* request failed partly, e.g. a short write */
-	PGAIOIP_SOFT_FAILURE = 1 << 12,
-
-	/* local completion callback was called */
-	PGAIOIP_LOCAL_CALLBACK_CALLED = 1 << 13,
-} PgAioInProgressFlags;
-
-typedef uint16 PgAioIPFlags;
-
-struct PgAioInProgress
-{
-	/* basic IO types supported by aio.c */
-	PgAioOp op;
-
-	/* shared callback for this IO, see io_action_cbs */
-	PgAioSharedCallback scb;
-
-	/* which AIO ring is this entry active for */
-	uint8 ring;
-
-	PgAioIPFlags flags;
-
-	bool user_referenced;
-	bool system_referenced;
-
-	/* index into allProcs, or PG_UINT32_MAX for process local IO */
-	uint32 owner_id;
-
-	/* the IOs result, depends on operation. E.g. the length of a read */
-	int32 result;
-
-	/*
-	 * Single callback that can be registered on an IO to be called upon
-	 * completion. Note that this is reset whenever an IO is recycled..
-	 */
-	PgAioOnCompletionLocalContext *on_completion_local;
-
-	/*
-	 * Membership in one of
-	 * PgAioCtl->unused,
-	 * PgAioPerBackend->unused,
-	 * PgAioPerBackend->outstanding,
-	 * PgAioPerBackend->issued,
-	 */
-	dlist_node owner_node;
-
-	/*
-	 * Membership in
-	 * PgAioPerBackend->pending,
-	 * PgAioPerBackend->reaped,
-	 * local_recycle_requests
-	 * PgAioPerBackend->foreign_completed,
-	 * PgAioPerBackend->local_completed
-	 */
-	dlist_node io_node;
-
-	ConditionVariable cv;
-
-	/* index into context->iovec, or -1 */
-	int32 used_iovec;
-
-	/*
-	 * PGAIO_BB_INVALID, or index into aio_ctl->bounce_buffers
-	 */
-#define PGAIO_BB_INVALID PG_UINT32_MAX
-	uint32 bb_idx;
-
-	/*
-	 * PGAIO_MERGE_INVALID if not merged, index into aio_ctl->in_progress_io
-	 * otherwise.
-	 */
-#define PGAIO_MERGE_INVALID PG_UINT32_MAX
-	uint32 merge_with_idx;
-
-	uint64 generation;
-
-	/*
-	 * Data necessary for basic IO types (PgAioOp).
-	 *
-	 * NB: Note that fds in here may *not* be relied upon for re-issuing
-	 * requests (e.g. for partial reads/writes) - the fd might be from another
-	 * process, or closed since. That's not a problem for IOs waiting to be
-	 * issued only because the queue is flushed when closing an fd.
-	 */
-	union {
-		struct
-		{
-			int fd;
-			uint32 nbytes;
-			uint64 offset;
-			uint32 already_done;
-			char *bufdata;
-		} read;
-
-		struct
-		{
-			int fd;
-			uint32 nbytes;
-			uint64 offset;
-			uint32 already_done;
-			char *bufdata;
-		} write;
-
-		struct
-		{
-			int fd;
-			bool datasync;
-		} fsync;
-
-		struct
-		{
-			int fd;
-			uint32 nbytes;
-			uint64 offset;
-		} flush_range;
-	} op_data;
-
-	union {
-		struct
-		{
-			Buffer buffid;
-			BackendId backend;
-			int mode;
-		} read_sb;
-
-		struct
-		{
-			AioBufferTag tag;
-		} read_smgr;
-
-		struct
-		{
-			Buffer buffid;
-			BackendId backend;
-			bool release_lock;
-		} write_sb;
-
-		struct
-		{
-			AioBufferTag tag;
-		} write_smgr;
-
-		struct
-		{
-			uint32 write_no;
-		} write_wal;
-
-		struct
-		{
-			uint32 flush_no;
-		} fsync_wal;
-
-		struct
-		{
-			AioBufferTag tag;
-		} flush_range_smgr;
-	} scb_data;
-
-#ifdef USE_POSIX_AIO
-	uint32 submitter_id;
-	struct aiocb posix_aiocb;
-	uint64 posix_returned_generation;
-	size_t inflight_slot;
-#endif
-};
-
-/* typedef in header */
-struct PgAioBounceBuffer
-{
-	pg_atomic_uint32 refcount;
-	dlist_node node;
-	char *buffer;
-};
-
-/*
- * An iovec that can represent the biggest possible iovec (due to combining)
- * we may need for a single IO submission.
- */
-typedef struct PgAioIovec
-{
-	slist_node node;
-	struct iovec iovec[PGAIO_MAX_COMBINE];
-} PgAioIovec;
-
-#ifdef USE_LIBURING
-typedef struct PgAioUringWaitRef
-{
-	PgAioInProgress *aio;
-	struct PgAioContext *context;
-	uint64 ref_generation;
-} PgAioUringWaitRef;
-#endif
-
-/*
- * XXX: Really want a proclist like structure that works with integer
- * offsets. Given the limited number of IOs ever existing, using full pointers
- * is completely unnecessary.
- */
-
-typedef struct PgAioPerBackend
-{
-	uint32 last_context;
-
-	/*
-	 * Local unused IOs. There's only a limited number of these. Used to
-	 * reduce overhead of the central unused list.
-	 *
-	 * FIXME: Actually use.
-	 *
-	 * Could be singly linked list.
-	 *
-	 * PgAioInProgress->owner_node
-	 */
-	dlist_head unused;
-	uint32 unused_count;
-
-	/*
-	 * IOs handed out to code within the backend.
-	 *
-	 * PgAioInProgress->owner_node
-	 */
-	dlist_head outstanding;
-	uint32 outstanding_count;
-
-	/*
-	 * Requests waiting to be issued to the kernel. They are submitted to the
-	 * kernel in batches, for efficiency (local merging of IOs, and better
-	 * kernel side queue processing).
-	 *
-	 * Could be singly linked list.
-	 *
-	 * PgAioInProgress->io_node
-	 */
-	dlist_head pending;
-	uint32 pending_count;
-
-	/*
-	 * Requests issued by backend that have not yet completed yet (but may be
-	 * foreign_completed) and are still referenced by backend code (see
-	 * issued_abandoned for those).
-	 *
-	 * PgAioInProgress->owner_node
-	 */
-	dlist_head issued;
-	uint32 issued_count;
-
-	/*
-	 * Requests issued by backend that have not yet completed yet (but may be
-	 * foreign_completed) and that are not referenced by backend code anymore (see
-	 * issued for those).
-	 *
-	 * PgAioInProgress->owner_node
-	 */
-	dlist_head issued_abandoned;
-	uint32 issued_abandoned_count;
-
-	/*
-	 * PgAioInProgress that are issued to the ringbuffer, and have not yet
-	 * been processed (but they may have completed without the completions
-	 * having been processed).
-	 */
-	pg_atomic_uint32 inflight_count;
-
-	/*
-	 * Requests where we've received a kernel completion, but haven't yet
-	 * processed them.  This is needed to handle failing callbacks.
-	 *
-	 * Could be singly linked list.
-	 *
-	 * PgAioInProgress->io_node
-	 */
-	dlist_head reaped;
-
-	/*
-	 * IOs that were completed, but not yet recycled.
-	 *
-	 * PgAioInProgress->io_node
-	 */
-	dlist_head local_completed;
-	uint32 local_completed_count;
-
-	/*
-	 * IOs where the completion was received in another backend.
-	 *
-	 * Could be singly linked list.
-	 *
-	 * PgAioInProgress->io_node
-	 */
-	slock_t foreign_completed_lock;
-	uint32 foreign_completed_count;
-	dlist_head foreign_completed;
-
-	/*
-	 * Stats.
-	 */
-	uint64 executed_total_count; /* un-merged */
-	uint64 issued_total_count; /* merged */
-	uint64 submissions_total_count; /* number of submission syscalls */
-	uint64 foreign_completed_total_count;
-	uint64 retry_total_count;
-
-#ifdef USE_LIBURING
-	PgAioUringWaitRef wr;
-#endif
-} PgAioPerBackend;
-
-typedef struct PgAioContext
-{
-#ifdef USE_LIBURING
-	LWLock submission_lock;
-	LWLock completion_lock;
-
-	struct io_uring io_uring_ring;
-
-	/*
-	 * For many versions of io_uring iovecs need to be in shared memory. The
-	 * lists of available iovecs are split to be under the submission /
-	 * completion locks - that allows to avoid additional lock acquisitions in
-	 * the common cases.
-	 */
-	PgAioIovec *iovecs;
-
-	/* locked by submission lock */
-	slist_head unused_iovecs;
-	uint32 unused_iovecs_count;
-
-	/* locked by completion lock */
-	slist_head reaped_iovecs;
-	uint32 reaped_iovecs_count;
-#else
-	/* msvc doesn't like empty structs */
-	int pro_forma_member;
-#endif
-
-	/* XXX: probably worth padding to a cacheline boundary here */
-} PgAioContext;
-
-typedef struct PgAioCtl
-{
-	/* PgAioInProgress that are not used */
-	dlist_head unused_ios;
-
-	/*
-	 * Number of PgAioInProgressIOs that are in use. This includes pending
-	 * requests, as well as requests actually issues to the queue.
-	 *
-	 * Protected by SharedAIOCtlLock.
-	 */
-	uint32 used_count;
-
-	/*
-	 * Protected by SharedAIOCtlLock.
-	 */
-	dlist_head reaped_uncompleted;
-
-	PgAioBounceBuffer *bounce_buffers;
-	dlist_head unused_bounce_buffers;
-	uint32 unused_bounce_buffers_count;
-
-	/* Queue for IO submissions in worker mode. */
-	ConditionVariable worker_submission_queue_not_empty;
-	squeue32 *worker_submission_queue;
-
-#ifdef USE_POSIX_AIO
-	/* Queue for shared completion notifications in POSIX AIO mode. */
-	squeue32 *posix_completion_queue;
-#endif
-
-	int backend_state_count;
-	PgAioPerBackend *backend_state;
-
-	uint32 num_contexts;
-	PgAioContext *contexts;
-
-	PgAioInProgress in_progress_io[FLEXIBLE_ARRAY_MEMBER];
-} PgAioCtl;
+/* global list of in-progress IO */
+PgAioCtl *aio_ctl;
+
+/* current backend's per-backend state */
+PgAioPerBackend *my_aio;
+int my_aio_id;
+
+/* FIXME: move into PgAioPerBackend / subsume into ->reaped */
+static dlist_head local_recycle_requests;
 
 /* general pgaio helper functions */
-static void pgaio_complete_ios(bool in_error);
 static void pgaio_apply_backend_limit(void);
 static void pgaio_io_prepare(PgAioInProgress *io, PgAioOp op);
 static void pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb);
-static void pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring);
 static void pgaio_bounce_buffer_release_internal(PgAioBounceBuffer *bb, bool holding_lock, bool release_resowner);
 static void pgaio_io_ref_internal(PgAioInProgress *io, PgAioIoRef *ref);
 static void pgaio_transfer_foreign_to_local(void);
 static void pgaio_call_local_callbacks(bool in_error);
-static int pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io);
 static int pgaio_synchronous_submit(void);
 static void pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local);
 static void pgaio_io_retry_soft_failed(PgAioInProgress *io, uint64 ref_generation);
-static void pgaio_process_io_completion(PgAioInProgress *io, int result);
 static void pgaio_wait_for_issued_internal(int n, int fd);
 
 /* printing functions */
 static const char *pgaio_io_shared_callback_string(PgAioSharedCallback a);
 static const char *pgaio_io_operation_string(PgAioOp op);
-
-/* aio worker related functions */
-static int pgaio_worker_submit(int max_submit, bool drain);
-static void pgaio_worker_do(PgAioInProgress *io);
-
-#ifdef USE_LIBURING
-/* io_uring related functions */
-static int pgaio_uring_submit(int max_submit, bool drain);
-static void pgaio_uring_io_retry(PgAioInProgress *io);
-static int pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared);
-static void pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 generation, uint32 wait_event_info);
-
-static void pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, struct io_uring_sqe *sqe);
-static void pgaio_uring_io_from_cqe(PgAioContext *context, struct io_uring_cqe *cqe);
-static void pgaio_uring_iovec_transfer(PgAioContext *context);
-
-#endif
-
-#ifdef USE_POSIX_AIO
-/* POSIX AIO related functions */
-static int pgaio_posix_drain(PgAioContext *context);
-static int pgaio_posix_submit(int max_submit, bool drain);
-static void pgaio_posix_io_retry(PgAioInProgress *io);
-static void pgaio_posix_signal_handler(int sig, siginfo_t *si, void *uap);
-static void pgaio_posix_wait_one(PgAioInProgress *io, uint64 ref_generation);
-#endif
 
 /* IO callbacks */
 static void pgaio_invalid_desc(PgAioInProgress *io, StringInfo s);
@@ -752,64 +268,12 @@ static const PgAioActionCBs io_action_cbs[] =
 
 /* GUCs */
 int aio_type;
-int aio_worker_queue_size;
-int aio_workers;
-
-/* (future) GUC controlling global MAX number of in-progress IO entries */
-/* FIXME: find a good naming pattern */
-extern int max_aio_in_progress;
-/* FIXME: this is per context right now */
-extern int max_aio_in_flight;
-extern int max_aio_bounce_buffers;
-
-/* max per backend concurrency */
-extern int io_max_concurrency;
-
 int max_aio_in_progress = 32768; /* XXX: Multiple of MaxBackends instead? */
 int max_aio_in_flight = 4096;
 int max_aio_bounce_buffers = 1024;
 int io_max_concurrency = 128;
 
-/* global list of in-progress IO */
-static PgAioCtl *aio_ctl;
-
-/* current backend's per-backend-state */
-static PgAioPerBackend *my_aio;
-static int my_aio_id;
-
-/* FIXME: move into PgAioPerBackend / subsume into ->reaped */
-static dlist_head local_recycle_requests;
-
-int MyAioWorkerId;
-
 static int aio_local_callback_depth = 0;
-
-#ifdef USE_LIBURING
-/* io_uring local state */
-struct io_uring local_ring;
-#endif
-
-#ifdef USE_POSIX_AIO
-
-static sig_atomic_t pgaio_posix_set_latch_on_return = false;
-
-/* AIO_LISTIO_MAX is missing on glibc systems.  16 is pretty conservative. */
-#ifndef AIO_LISTIO_MAX
-#define AIO_LISTIO_MAX 16
-#endif
-
-/* Realtime signals are missing on macOS systems.  We have to work harder. */
-#if defined(SIGRTMIN) && !defined(MISSING_LIO_REALTIME_SIGNALS)
-#define PGAIO_POSIX_SIGNO SIGRTMIN
-#else
-#define MISSING_POSIX_REALTIME_SIGNALS
-#define MISSING_LIO_LISTIO_NOTIFICATIONS
-#define PGAIO_POSIX_SIGNO SIGIO
-volatile sig_atomic_t *my_inflight_io;
-volatile sig_atomic_t my_inflight_io_count;
-#endif
-
-#endif
 
 /* Options for aio_type. */
 const struct config_enum_entry aio_type_options[] = {
@@ -822,12 +286,6 @@ const struct config_enum_entry aio_type_options[] = {
 #endif
 	{NULL, 0, false}
 };
-
-/*
- * Ensure that flags is written once, rather than potentially multiple times
- * (e.g. once and'ing it, and once or'ing it).
- */
-#define WRITE_ONCE_F(flags) *(volatile PgAioIPFlags*) &(flags)
 
 static Size
 AioCtlShmemSize(void)
@@ -866,40 +324,6 @@ AioBounceShmemSize(void)
 	return sz;
 }
 
-static Size
-AioContextShmemSize(void)
-{
-	return mul_size(PGAIO_NUM_CONTEXTS,	sizeof(PgAioContext));
-}
-
-static Size
-AioContextIovecsShmemSize(void)
-{
-	return mul_size(PGAIO_NUM_CONTEXTS,
-					mul_size(sizeof(PgAioIovec), max_aio_in_flight));
-}
-
-static Size
-AioSubmissionQueueShmemSize(void)
-{
-	/*
-	 * For worker mode, we need a submission queue.  XXX We should probably
-	 * have more than one.
-	 */
-	if (aio_type == AIOTYPE_WORKER)
-		return squeue32_estimate(aio_worker_queue_size);
-	else
-		return 0;
-}
-
-#ifdef USE_POSIX_AIO
-static Size
-AioCompletionQueueShmemSize(void)
-{
-	return squeue32_estimate(max_aio_in_progress);
-}
-#endif
-
 Size
 AioShmemSize(void)
 {
@@ -907,13 +331,16 @@ AioShmemSize(void)
 
 	sz = add_size(sz, AioCtlShmemSize());
 	sz = add_size(sz, AioCtlBackendShmemSize());
-	sz = add_size(sz, AioSubmissionQueueShmemSize());
 	sz = add_size(sz, AioBounceShmemSize());
-	sz = add_size(sz, AioContextShmemSize());
-	sz = add_size(sz, AioContextIovecsShmemSize());
+
+	sz = add_size(sz, AioWorkerShmemSize());
+
+#ifdef USE_LIBURING
+	sz = add_size(sz, AioUringShmemSize());
+#endif
 
 #ifdef USE_POSIX_AIO
-	sz = add_size(sz, AioCompletionQueueShmemSize());
+	sz = add_size(sz, AioPosixShmemSize());
 #endif
 
 	return sz;
@@ -935,6 +362,7 @@ AioShmemInit(void)
 		dlist_init(&aio_ctl->unused_ios);
 		dlist_init(&aio_ctl->reaped_uncompleted);
 
+		/* Initialize IOs. */
 		for (int i = 0; i < max_aio_in_progress; i++)
 		{
 			PgAioInProgress *io = &aio_ctl->in_progress_io[i];
@@ -948,6 +376,7 @@ AioShmemInit(void)
 			io->merge_with_idx = PGAIO_MERGE_INVALID;
 		}
 
+		/* Initialize per-backend memory. */
 		aio_ctl->backend_state_count = TotalProcs;
 		aio_ctl->backend_state = (PgAioPerBackend *)
 			ShmemInitStruct("PgAioBackend", AioCtlBackendShmemSize(), &found);
@@ -969,6 +398,7 @@ AioShmemInit(void)
 			SpinLockInit(&bs->foreign_completed_lock);
 		}
 
+		/* Initialize bounce buffers. */
 		{
 			char *p;
 			char *blocks;
@@ -998,97 +428,18 @@ AioShmemInit(void)
 			}
 		}
 
+		/* Initialize IO-engine specific resources. */
 		if (aio_type == AIOTYPE_WORKER)
-		{
-			aio_ctl->worker_submission_queue =
-				ShmemInitStruct("aio submission queue",
-								AioSubmissionQueueShmemSize(),
-								&found);
-			Assert(!found);
-			squeue32_init(aio_ctl->worker_submission_queue, aio_worker_queue_size);
-			ConditionVariableInit(&aio_ctl->worker_submission_queue_not_empty);
-		}
+			AioWorkerShmemInit();
 #ifdef USE_LIBURING
 		else if (aio_type == AIOTYPE_LIBURING)
-		{
-			PgAioIovec *iovecs;
-
-			aio_ctl->num_contexts = PGAIO_NUM_CONTEXTS;
-			aio_ctl->contexts = ShmemInitStruct("PgAioContexts", AioContextShmemSize(), &found);
-			Assert(!found);
-
-			iovecs = (PgAioIovec *)
-			ShmemInitStruct("PgAioContextsIovecs", AioContextIovecsShmemSize(), &found);
-			Assert(!found);
-			memset(iovecs, 0, AioContextIovecsShmemSize());
-
-			for (int contextno = 0; contextno < aio_ctl->num_contexts; contextno++)
-			{
-				PgAioContext *context = &aio_ctl->contexts[contextno];
-				int ret;
-
-				LWLockInitialize(&context->submission_lock, LWTRANCHE_AIO_CONTEXT_SUBMISSION);
-				LWLockInitialize(&context->completion_lock, LWTRANCHE_AIO_CONTEXT_COMPLETION);
-
-				slist_init(&context->unused_iovecs);
-				slist_init(&context->reaped_iovecs);
-
-				context->iovecs = iovecs;
-				iovecs += max_aio_in_flight;
-
-				for (uint32 i = 0; i < max_aio_in_flight; i++)
-				{
-					slist_push_head(&context->unused_iovecs, &context->iovecs[i].node);
-					context->unused_iovecs_count++;
-				}
-
-				/*
-				 * XXX: Probably worth sharing the WQ between the different
-				 * rings, when supported by the kernel. Could also cause
-				 * additional contention, I guess?
-				 */
-				if (!AcquireExternalFD())
-					elog(ERROR, "io_uring_queue_init: %m");
-				ret = io_uring_queue_init(max_aio_in_flight, &context->io_uring_ring, 0);
-				if (ret < 0)
-					elog(ERROR, "io_uring_queue_init failed: %s", strerror(-ret));
-			}
-		}
+			AioUringShmemInit();
 #endif
 #ifdef USE_POSIX_AIO
-		if (aio_type == AIOTYPE_POSIX)
-		{
-			aio_ctl->posix_completion_queue = (squeue32 *)
-				ShmemInitStruct("PgAioCompletionQueue", AioCompletionQueueShmemSize(), &found);
-			Assert(!found);
-			squeue32_init(aio_ctl->posix_completion_queue, max_aio_in_progress);
-		}
+		else if (aio_type == AIOTYPE_POSIX)
+			AioPosixShmemInit();
 #endif
 	}
-
-#if USE_POSIX_AIO
-	if (aio_type == AIOTYPE_POSIX)
-	{
-		struct sigaction sa;
-
-		/*
-		 * Any system that supports POSIX AIO should also support sigaction()
-		 * with a three-argument signal handler.  (macOS doesn't exactly
-		 * support it correctly, but it still compiles).
-		 */
-		sa.sa_sigaction = pgaio_posix_signal_handler;
-		sa.sa_flags = SA_RESTART | SA_SIGINFO;
-		sigemptyset(&sa.sa_mask);
-		if (sigaction(PGAIO_POSIX_SIGNO, &sa, NULL) < 0)
-			elog(ERROR, "could not install signal handler: %m");
-	}
-#ifdef MISSING_POSIX_REALTIME_SIGNALS
-	my_inflight_io = malloc(max_aio_in_flight * sizeof(sig_atomic_t));
-	for (size_t i = 0; i < max_aio_in_flight; ++i)
-		my_inflight_io[i] = (sig_atomic_t) -1;
-	my_inflight_io_count = 0;
-#endif
-#endif
 }
 
 void
@@ -1103,19 +454,15 @@ pgaio_postmaster_init(void)
 void
 pgaio_postmaster_child_init_local(void)
 {
+	if (aio_type == AIOTYPE_WORKER)
+		;
 #ifdef USE_LIBURING
-	/*
-	 *
-	 */
-	if (aio_type == AIOTYPE_LIBURING) {
-		int ret;
-
-		ret = io_uring_queue_init(32, &local_ring, 0);
-		if (ret < 0)
-		{
-			elog(ERROR, "io_uring_queue_init failed: %s", strerror(-ret));
-		}
-	}
+	else if (aio_type == AIOTYPE_LIBURING)
+		pgaio_uring_postmaster_child_init_local();
+#endif
+#ifdef USE_POSIX_AIO
+	else if (aio_type == AIOTYPE_POSIX)
+		pgaio_posix_postmaster_child_init_local();
 #endif
 }
 
@@ -1369,7 +716,7 @@ pgaio_process_io_rw_completion(PgAioInProgress *myio,
 	*running_result_p = running_result;
 }
 
-static void
+void
 pgaio_process_io_completion(PgAioInProgress *io, int result)
 {
 	int running_result;
@@ -1518,7 +865,7 @@ pgaio_io_call_shared_complete(PgAioInProgress *io)
 	return io_action_cbs[io->scb].complete(io);
 }
 
-static void pg_noinline
+void
 pgaio_complete_ios(bool in_error)
 {
 	int pending_count_before = my_aio->pending_count;
@@ -1807,7 +1154,7 @@ pgaio_call_local_callbacks(bool in_error)
 /*
  * Receive completions in ring.
  */
-static int pg_noinline
+int
 pgaio_drain(PgAioContext *context, bool block, bool call_shared, bool call_local)
 {
 	int ndrained = 0;
@@ -2008,17 +1355,6 @@ pgaio_combine_pending(void)
 	}
 }
 
-static bool
-pgaio_worker_need_synchronous(PgAioInProgress *io)
-{
-	/* Single user mode doesn't have any AIO workers. */
-	if (!IsUnderPostmaster)
-		return true;
-
-	/* We don't know how to open the file. */
-	return io_action_cbs[io->scb].retry == NULL;
-}
-
 static int
 pgaio_synchronous_submit(void)
 {
@@ -2033,71 +1369,13 @@ pgaio_synchronous_submit(void)
 		io = dlist_container(PgAioInProgress, io_node, node);
 
 		pgaio_io_prepare_submit(io, io->ring);
-		pgaio_worker_do(io);
+		pgaio_do_synchronously(io);
 
 		++nsubmitted;
 	}
 
 	return nsubmitted;
 }
-
-static void
-pgaio_worker_submit_one(PgAioInProgress *io)
-{
-	uint32 io_index;
-
-	io_index = io - aio_ctl->in_progress_io;
-
-	if (pgaio_worker_need_synchronous(io))
-	{
-		/* Perform the IO synchronously in this process. */
-		pgaio_worker_do(io);
-	}
-	else
-	{
-		/*
-		 * Push it on the submission queue and wake a worker, but if the
-		 * queue is full then handle it synchronously rather than waiting.
-		 * XXX Is this fair enough?
-		 */
-		if (squeue32_enqueue(aio_ctl->worker_submission_queue, io_index))
-			ConditionVariableSignal(&aio_ctl->worker_submission_queue_not_empty);
-		else
-			pgaio_worker_do(io);
-	}
-	pgaio_complete_ios(false);
-}
-
-static int
-pgaio_worker_submit(int max_submit, bool drain)
-{
-	int nios = 0;
-
-	while (!dlist_is_empty(&my_aio->pending) && nios < max_submit)
-	{
-		dlist_node *node;
-		PgAioInProgress *io;
-
-		node = dlist_head_node(&my_aio->pending);
-		io = dlist_container(PgAioInProgress, io_node, node);
-
-		pgaio_io_prepare_submit(io, io->ring);
-
-		pgaio_worker_submit_one(io);
-		++nios;
-	}
-
-	return nios;
-}
-
-static void
-pgaio_worker_io_retry(PgAioInProgress *io)
-{
-	WRITE_ONCE_F(io->flags) |= PGAIOIP_INFLIGHT;
-
-	pgaio_worker_submit_one(io);
-}
-
 
 static void
 pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, bool will_wait)
@@ -2242,7 +1520,7 @@ pgaio_closing_possibly_referenced(void)
 								  /* will_wait */ false);
 }
 
-static void
+void
 pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
 {
 	PgAioInProgress *cur;
@@ -2503,16 +1781,12 @@ wait_ref_again:
 				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
 #ifdef USE_LIBURING
 			else if (aio_type == AIOTYPE_LIBURING)
-			{
 				pgaio_uring_wait_one(&aio_ctl->contexts[io->ring], io, ref_generation,
 									 WAIT_EVENT_AIO_IO_COMPLETE_ANY);
-			}
 #endif
 #ifdef USE_POSIX_AIO
 			else if (aio_type == AIOTYPE_POSIX)
-			{
 				pgaio_posix_wait_one(io, ref_generation);
-			}
 #endif
 		}
 #ifdef USE_POSIX_AIO
@@ -2995,6 +2269,24 @@ pgaio_io_retry(PgAioInProgress *io)
 	/* can reuse original fd */
 
 	pgaio_io_retry_common(io);
+}
+
+/*
+ * Can any process perform this IO?
+ */
+bool
+pgaio_io_is_openable(PgAioInProgress *io)
+{
+	return io_action_cbs[io->scb].retry;
+}
+
+/*
+ * Make sure the fd is valid in this process.
+ */
+void
+pgaio_io_open(PgAioInProgress *io)
+{
+	io_action_cbs[io->scb].retry(io);
 }
 
 void
@@ -3543,1303 +2835,6 @@ pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb)
 	io->bb_idx = bb - aio_ctl->bounce_buffers;
 	pg_atomic_fetch_add_u32(&bb->refcount, 1);
 }
-
-#ifdef USE_LIBURING
-
-/* --------------------------------------------------------------------------------
- * io_uring related code
- * --------------------------------------------------------------------------------
- */
-
-static PgAioContext *
-pgaio_acquire_context(void)
-{
-	PgAioContext *context;
-	int init_last_context = my_aio->last_context;
-
-	/*
-	 * First try to acquire a context without blocking on the lock. We start
-	 * with the last context we successfully used, which should lead to
-	 * backends spreading to different contexts over time.
-	 */
-	for (int i = 0; i < aio_ctl->num_contexts; i++)
-	{
-		context = &aio_ctl->contexts[my_aio->last_context];
-
-		if (LWLockConditionalAcquire(&context->submission_lock, LW_EXCLUSIVE))
-		{
-			return context;
-		}
-
-		if (++my_aio->last_context == aio_ctl->num_contexts)
-			my_aio->last_context = 0;
-	}
-
-	/*
-	 * Couldn't acquire any without blocking. Block on the last + 1.;
-	 */
-	if (++my_aio->last_context == aio_ctl->num_contexts)
-		my_aio->last_context = 0;
-	context = &aio_ctl->contexts[my_aio->last_context];
-
-	elog(DEBUG2, "blocking acquiring io context %d, started on %d",
-		 my_aio->last_context, init_last_context);
-
-	LWLockAcquire(&context->submission_lock, LW_EXCLUSIVE);
-
-	return context;
-}
-
-static int
-pgaio_uring_submit(int max_submit, bool drain)
-{
-	PgAioInProgress *ios[PGAIO_SUBMIT_BATCH_SIZE];
-	struct io_uring_sqe *sqe[PGAIO_SUBMIT_BATCH_SIZE];
-	PgAioContext *context;
-	int nios = 0;
-
-	context = pgaio_acquire_context();
-
-	Assert(max_submit != 0 && max_submit <= my_aio->pending_count);
-
-	while (!dlist_is_empty(&my_aio->pending))
-	{
-		dlist_node *node;
-		PgAioInProgress *io;
-
-		if (nios == max_submit)
-			break;
-
-		/*
-		 * XXX: Should there be a per-ring limit? If so, we'd probably best
-		 * apply it here.
-		 */
-
-		sqe[nios] = io_uring_get_sqe(&context->io_uring_ring);
-
-		if (!sqe[nios])
-		{
-			Assert(nios != 0);
-			elog(WARNING, "io_uring_get_sqe() returned NULL?");
-			break;
-		}
-
-		node = dlist_head_node(&my_aio->pending);
-		io = dlist_container(PgAioInProgress, io_node, node);
-		ios[nios] = io;
-
-		pgaio_io_prepare_submit(io, context - aio_ctl->contexts);
-
-		pgaio_uring_sq_from_io(context, ios[nios], sqe[nios]);
-
-		nios++;
-	}
-
-	Assert(nios > 0);
-
-	{
-		int ret;
-
-		pg_atomic_add_fetch_u32(&my_aio->inflight_count, nios);
-		my_aio->submissions_total_count++;
-
-again:
-		pgstat_report_wait_start(WAIT_EVENT_AIO_SUBMIT);
-		ret = io_uring_submit(&context->io_uring_ring);
-		pgstat_report_wait_end();
-
-		if (ret == -EINTR)
-			goto again;
-
-		if (ret < 0)
-			elog(PANIC, "failed: %d/%s",
-				 ret, strerror(-ret));
-	}
-
-	LWLockRelease(&context->submission_lock);
-
-	/*
-	 * Others might have been waiting for this IO. Because it wasn't
-	 * marked as in-flight until now, they might be waiting for the
-	 * CV. Wake'em up.
-	 *
-	 * As other backends might be consuming the completion, we need to be
-	 * careful about other backends resetting merge_with_idx. We still could
-	 * end up broadcasting on IOs that we don't care about, but that's
-	 * harmless.
-	 */
-	for (int i = 0; i < nios; i++)
-	{
-		PgAioInProgress *cur = ios[i];
-
-		while (true)
-		{
-			uint32 next_idx;
-
-			ConditionVariableBroadcast(&cur->cv);
-
-			next_idx = cur->merge_with_idx;
-			pg_compiler_barrier();
-			if (next_idx == PGAIO_MERGE_INVALID)
-				break;
-			cur = &aio_ctl->in_progress_io[next_idx];
-		}
-	}
-
-	/* callbacks will be called later, by pgaio_submit_pending_internal() */
-	if (drain)
-		pgaio_drain(context,
-					/* block = */ false,
-					/* call_shared = */ false,
-					/* call_local = */ false);
-
-	return nios;
-}
-
-static void
-pgaio_uring_io_retry(PgAioInProgress *io)
-{
-	PgAioContext *context;
-	struct io_uring_sqe *sqe;
-
-	/*
-	 * Need to use the same context as last time - other backends could be
-	 * trying to read this IO's completion, potentially wait on the wrong
-	 * context. Outside of retries ->generation incrementing protects against
-	 * that, but we can't do that for retries.
-	 */
-	context = &aio_ctl->contexts[io->ring];
-
-	LWLockAcquire(&context->submission_lock, LW_EXCLUSIVE);
-
-	sqe = io_uring_get_sqe(&context->io_uring_ring);
-	pgaio_uring_sq_from_io(context, io, sqe);
-
-	WRITE_ONCE_F(io->flags) |= PGAIOIP_INFLIGHT;
-	pg_atomic_fetch_add_u32(&aio_ctl->backend_state[io->owner_id].inflight_count, 1);
-
-	while (true)
-	{
-		int ret;
-
-		pgstat_report_wait_start(WAIT_EVENT_AIO_SUBMIT);
-		ret = io_uring_submit(&context->io_uring_ring);
-		pgstat_report_wait_end();
-
-		if (likely(ret == 1))
-			break;
-		else if (ret != -EINTR)
-			elog(PANIC, "failed: %d/%s",
-				 ret, strerror(-ret));
-	}
-
-	LWLockRelease(&context->submission_lock);
-
-	/* see pgaio_uring_submit() */
-	ConditionVariableBroadcast(&io->cv);
-}
-
-static int
-pgaio_uring_drain_locked(PgAioContext *context)
-{
-	uint32 processed = 0;
-	int ready;
-
-	Assert(LWLockHeldByMe(&context->completion_lock));
-
-	/*
-	 * Don't drain more events than available right now. Otherwise it's
-	 * plausible that one backend could get stuck, for a while, receiving CQEs
-	 * without actually processing them.
-	 */
-	ready = io_uring_cq_ready(&context->io_uring_ring);
-
-	while (ready > 0)
-	{
-		struct io_uring_cqe *reaped_cqes[PGAIO_MAX_LOCAL_REAPED];
-		uint32 processed_one;
-
-		START_CRIT_SECTION();
-
-		ereport(DEBUG3,
-				errmsg("context [%zu]: drain %d ready",
-					   context - aio_ctl->contexts,
-					   ready),
-				errhidestmt(true),
-				errhidecontext(true));
-
-		processed_one =
-			io_uring_peek_batch_cqe(&context->io_uring_ring,
-									reaped_cqes,
-									Min(PGAIO_MAX_LOCAL_REAPED, ready));
-		Assert(processed_one <= ready);
-
-		ready -= processed_one;
-		processed += processed_one;
-
-		for (int i = 0; i < processed_one; i++)
-		{
-			struct io_uring_cqe *cqe = reaped_cqes[i];
-
-			pgaio_uring_io_from_cqe(context, cqe);
-
-			io_uring_cqe_seen(&context->io_uring_ring, cqe);
-		}
-
-		END_CRIT_SECTION();
-	}
-
-	if (context->reaped_iovecs_count > context->unused_iovecs_count &&
-		LWLockConditionalAcquire(&context->submission_lock, LW_EXCLUSIVE))
-	{
-		ereport(DEBUG4,
-				errmsg("plenty reaped iovecs (%d), transferring",
-					   context->reaped_iovecs_count),
-				errhidestmt(true),
-				errhidecontext(true));
-
-		pgaio_uring_iovec_transfer(context);
-		LWLockRelease(&context->submission_lock);
-	}
-
-	return processed;
-}
-
-static LWLockWaitCheckRes
-pgaio_uring_completion_check_wait(LWLock *lock, LWLockMode mode, uint64_t cb_data)
-{
-	PgAioUringWaitRef *wr = (PgAioUringWaitRef*) cb_data;
-
-	if (wr->aio == NULL)
-	{
-		return LW_WAIT_DONE;
-	}
-	else
-	{
-		PgAioUringWaitRef *wr = (PgAioUringWaitRef*) cb_data;
-		PgAioIPFlags flags;
-
-		flags = wr->aio->flags;
-
-		pg_read_barrier();
-
-		if (wr->ref_generation == wr->aio->generation &&
-			(flags & PGAIOIP_INFLIGHT))
-		{
-			return LW_WAIT_NEEDS_LOCK;
-		}
-		else
-		{
-			return LW_WAIT_DONE;
-		}
-	}
-}
-
-static LWLockWaitCheckRes
-pgaio_uring_completion_check_wake(LWLock *lock, LWLockMode mode, struct PGPROC *wakee, uint64_t cb_data)
-{
-	PgAioUringWaitRef *wr = (PgAioUringWaitRef*) wakee->lwWaitData;
-
-	if (!wr || wr->aio == NULL)
-		return LW_WAIT_NEEDS_LOCK;
-	else
-	{
-		PgAioIPFlags flags;
-
-		flags = wr->aio->flags;
-
-		pg_read_barrier();
-
-		if (wr->ref_generation == wr->aio->generation &&
-			(flags & PGAIOIP_INFLIGHT))
-		{
-			return LW_WAIT_NEEDS_LOCK;
-		}
-		else
-		{
-			return LW_WAIT_DONE;
-		}
-	}
-}
-
-static int
-pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared)
-{
-	uint32 processed = 0;
-
-	Assert(!LWLockHeldByMe(&context->completion_lock));
-
-	while (io_uring_cq_ready(&context->io_uring_ring))
-	{
-		if (block)
-		{
-			Assert(my_aio->wr.context == NULL);
-			Assert(my_aio->wr.aio == NULL);
-			Assert(my_aio->wr.ref_generation == UINT32_MAX);
-
-			my_aio->wr.context = context;
-
-			if (!LWLockAcquireEx(&context->completion_lock, LW_EXCLUSIVE,
-								pgaio_uring_completion_check_wait, (uint64) &my_aio->wr))
-			{
-				my_aio->wr.context = NULL;
-				continue;
-			}
-		}
-		else
-		{
-			if (!LWLockConditionalAcquire(&context->completion_lock, LW_EXCLUSIVE))
-				break;
-		}
-
-		processed = pgaio_uring_drain_locked(context);
-
-		/*
-		 * If allowed, call shared callbacks under lock - that prevent
-		 * other backends to first have to wait on the completion_lock for
-		 * pgaio_uring_wait_one, then again below pgaio_drain(), and then
-		 * again on the condition variable for the AIO.
-		 */
-		if (call_shared)
-			pgaio_complete_ios(false);
-
-		LWLockReleaseEx(&context->completion_lock,
-						pgaio_uring_completion_check_wake, 0);
-		my_aio->wr.context = NULL;
-		break;
-	}
-
-	return processed;
-}
-
-static void
-pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info)
-{
-	PgAioIPFlags flags;
-	int loops = 0;
-
-	Assert(my_aio->wr.context == NULL);
-	Assert(my_aio->wr.aio == NULL);
-	Assert(my_aio->wr.ref_generation == UINT32_MAX);
-
-	my_aio->wr.context = context;
-	my_aio->wr.aio = io;
-	my_aio->wr.ref_generation = ref_generation;
-
-uring_wait_one_again:
-
-	if (LWLockAcquireEx(&context->completion_lock, LW_EXCLUSIVE,
-						pgaio_uring_completion_check_wait, (uint64) &my_aio->wr))
-	{
-		ereport(DEBUG3,
-				errmsg("[%d] got the lock, before waiting for %zu/%llu, %d ready",
-					   (int)(context - aio_ctl->contexts),
-					   io - aio_ctl->in_progress_io,
-					   (long long unsigned) io->generation,
-					   io_uring_cq_ready(&context->io_uring_ring)),
-				errhidestmt(true),
-				errhidecontext(true));
-
-		flags = io->flags;
-
-		pg_read_barrier();
-
-		if (!io_uring_cq_ready(&context->io_uring_ring) &&
-			io->generation == ref_generation &&
-			(flags & PGAIOIP_INFLIGHT))
-		{
-			int ret;
-			struct io_uring_cqe *cqes;
-
-			/*
-			 * XXX: Temporary, non-assert, sanity checks, some of these are
-			 * hard to hit in assert builds and lead to rare and hard to debug
-			 * hangs.
-			 */
-			if (io->generation != ref_generation ||
-				&aio_ctl->contexts[io->ring] != context)
-			{
-				ereport(PANIC,
-						errmsg("generation/context changed while locked: ref_gen: %llu, real_gen: %llu, orig ring: %d, cur ring: %d",
-							   (long long unsigned) ref_generation,
-							   (long long unsigned) io->generation,
-							   (int)(context - aio_ctl->contexts),
-							   io->ring),
-						errhidestmt(true),
-						errhidecontext(true));
-			}
-
-			pgstat_report_wait_start(wait_event_info);
-			ret = io_uring_wait_cqes(&context->io_uring_ring, &cqes, 1, NULL, NULL);
-			pgstat_report_wait_end();
-
-			if (ret < 0 && errno == EINTR)
-			{
-				elog(DEBUG3, "got interrupted");
-			}
-			else if (ret != 0)
-				elog(WARNING, "unexpected: %d/%s: %m", ret, strerror(-ret));
-
-			/* see XXX above */
-			if (io->generation != ref_generation ||
-				&aio_ctl->contexts[io->ring] != context)
-			{
-				ereport(PANIC,
-						errmsg("generation/context changed while locked, after wait: ref_gen: %llu, real_gen: %llu, orig ring: %d, cur ring: %d",
-							   (long long unsigned) ref_generation,
-							   (long long unsigned) io->generation,
-							   (int)(context - aio_ctl->contexts),
-							   io->ring),
-						errhidestmt(true),
-						errhidecontext(true));
-			}
-
-			ereport(DEBUG3,
-					errmsg("[%d] after waiting for %zu, %d ready",
-						   (int)(context - aio_ctl->contexts),
-						   io - aio_ctl->in_progress_io,
-						   io_uring_cq_ready(&context->io_uring_ring)),
-					errhidestmt(true),
-					errhidecontext(true));
-		}
-		else
-		{
-			ereport(DEBUG3,
-					errmsg("[%d] got ready under lock, without wait %zu, %d ready",
-						   (int)(context - aio_ctl->contexts),
-						   io - aio_ctl->in_progress_io,
-						   io_uring_cq_ready(&context->io_uring_ring)),
-					errhidestmt(true),
-					errhidecontext(true));
-		}
-
-		/*
-		 * Drain and call shared callbacks under lock while we already have it
-		 * - that avoids others to first have to wait on the completion_lock
-		 * for pgaio_uring_wait_one, then again in pgaio_drain(), and then
-		 * again on the condition variable for the AIO.
-		 */
-		if (io_uring_cq_ready(&context->io_uring_ring))
-		{
-			pgaio_uring_drain_locked(context);
-			pgaio_complete_ios(false);
-		}
-
-		LWLockReleaseEx(&context->completion_lock,
-						pgaio_uring_completion_check_wake, 0);
-	}
-	else
-	{
-		ereport(DEBUG3,
-				errmsg("[%d] somebody else got the lock while waiting for %zu/%lu, %d ready",
-					   (int)(context - aio_ctl->contexts),
-					   io - aio_ctl->in_progress_io, io->generation,
-					   io_uring_cq_ready(&context->io_uring_ring)),
-				errhidestmt(true),
-				errhidecontext(true));
-	}
-
-	/*
-	 * If the IO is still INFLIGHT (e.g. we just got completions for other
-	 * IOs, or didn't get the lock), try again. We could return to
-	 * pgaio_io_wait_ref_int(), but it's a bit more efficient to loop here.
-	 */
-	flags = io->flags;
-	pg_read_barrier();
-	if (io->generation == ref_generation &&
-		(flags & PGAIOIP_INFLIGHT))
-	{
-		loops++;
-		ereport(DEBUG3,
-				errmsg("[%d] will need to wait on %zu/%lu again, %d loops",
-					   (int)(context - aio_ctl->contexts),
-					   io - aio_ctl->in_progress_io, io->generation,
-					   loops),
-				errhidestmt(true),
-				errhidecontext(true));
-		goto uring_wait_one_again;
-	}
-
-	my_aio->wr.context = NULL;
-	my_aio->wr.aio = NULL;
-	my_aio->wr.ref_generation = PG_UINT32_MAX;
-}
-
-static void
-pgaio_uring_io_from_cqe(PgAioContext *context, struct io_uring_cqe *cqe)
-{
-	uint32 prev_inflight_count PG_USED_FOR_ASSERTS_ONLY;
-	PgAioInProgress *io;
-
-	io = io_uring_cqe_get_data(cqe);
-	Assert(io != NULL);
-
-	if (io->used_iovec != -1)
-	{
-		PgAioIovec *iovec = &context->iovecs[io->used_iovec];
-
-		io->used_iovec = -1;
-		slist_push_head(&context->reaped_iovecs, &iovec->node);
-		context->reaped_iovecs_count++;
-	}
-
-	/* XXX: this doesn't need to be under the lock */
-	prev_inflight_count = pg_atomic_fetch_sub_u32(&aio_ctl->backend_state[io->owner_id].inflight_count, 1);
-	Assert(prev_inflight_count > 0);
-
-	pgaio_process_io_completion(io, cqe->res);
-}
-
-static void
-pgaio_uring_iovec_transfer(PgAioContext *context)
-{
-	Assert(LWLockHeldByMe(&context->submission_lock));
-	Assert(LWLockHeldByMe(&context->completion_lock));
-
-	while (!slist_is_empty(&context->reaped_iovecs))
-	{
-		slist_push_head(&context->unused_iovecs, slist_pop_head_node(&context->reaped_iovecs));
-	}
-
-	context->unused_iovecs_count += context->reaped_iovecs_count;
-	context->reaped_iovecs_count = 0;
-}
-
-static struct PgAioIovec *
-pgaio_uring_iovec_get(PgAioContext *context, PgAioInProgress *io)
-{
-	slist_node *node;
-	PgAioIovec *iov;
-
-	if (context->unused_iovecs_count == 0)
-	{
-		ereport(DEBUG2,
-				errmsg("out of unused iovecs, transferring %d reaped ones",
-					   context->reaped_iovecs_count),
-				errhidestmt(true),
-				errhidecontext(true));
-		LWLockAcquire(&context->completion_lock, LW_EXCLUSIVE);
-		Assert(context->reaped_iovecs_count > 0);
-		pgaio_uring_iovec_transfer(context);
-		LWLockRelease(&context->completion_lock);
-		Assert(context->unused_iovecs_count > 0);
-	}
-
-	context->unused_iovecs_count--;
-	node = slist_pop_head_node(&context->unused_iovecs);
-	iov = slist_container(PgAioIovec, node, node);
-
-	io->used_iovec = iov - context->iovecs;
-
-	return iov;
-}
-
-static void
-pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, struct io_uring_sqe *sqe)
-{
-	PgAioIovec *iovec;
-	int iovcnt = 0;
-
-	io->used_iovec = -1;
-
-	switch (io->op)
-	{
-		case PGAIO_OP_READ:
-			iovec = pgaio_uring_iovec_get(context, io);
-			iovcnt = pgaio_fill_iov(iovec->iovec, io);
-
-			io_uring_prep_readv(sqe,
-								io->op_data.read.fd,
-								iovec->iovec,
-								iovcnt,
-								io->op_data.read.offset
-								+ io->op_data.read.already_done);
-			break;
-
-		case PGAIO_OP_WRITE:
-			iovec = pgaio_uring_iovec_get(context, io);
-			iovcnt = pgaio_fill_iov(iovec->iovec, io);
-
-			io_uring_prep_writev(sqe,
-								 io->op_data.write.fd,
-								 iovec->iovec,
-								 iovcnt,
-								 io->op_data.write.offset
-								 + io->op_data.write.already_done);
-			break;
-
-		case PGAIO_OP_FSYNC:
-			io_uring_prep_fsync(sqe,
-								io->op_data.fsync.fd,
-								io->op_data.fsync.datasync ? IORING_FSYNC_DATASYNC : 0);
-			break;
-
-		case PGAIO_OP_FLUSH_RANGE:
-			io_uring_prep_rw(IORING_OP_SYNC_FILE_RANGE,
-							 sqe,
-							 io->op_data.flush_range.fd,
-							 NULL,
-							 io->op_data.flush_range.nbytes,
-							 io->op_data.flush_range.offset);
-			sqe->sync_range_flags = SYNC_FILE_RANGE_WRITE;
-			break;
-
-		case PGAIO_OP_NOP:
-			elog(ERROR, "not yet");
-			break;
-
-		case PGAIO_OP_INVALID:
-			elog(ERROR, "invalid");
-	}
-
-	io_uring_sqe_set_data(sqe, io);
-}
-
-#endif
-
-#ifdef USE_POSIX_AIO
-
-/* --------------------------------------------------------------------------------
- * POSIX AIO related code
- * --------------------------------------------------------------------------------
- */
-
-/*
- * Set up the POSIX aiocb struct for an IO.
- */
-static void
-pgaio_posix_preflight(PgAioInProgress *io)
-{
-	size_t io_index = pgaio_io_id(io);
-
-	io->submitter_id = my_aio_id;
-	pg_atomic_add_fetch_u32(&my_aio->inflight_count, 1);
-
-	/* Reguest a signal on completion. */
-	memset(&io->posix_aiocb, 0, sizeof(io->posix_aiocb));
-	io->posix_aiocb.aio_sigevent.sigev_notify = SIGEV_SIGNAL;
-	io->posix_aiocb.aio_sigevent.sigev_signo = PGAIO_POSIX_SIGNO;
-
-#ifndef MISSING_POSIX_REALTIME_SIGNALS
-	/*
-	 * On most systems, we can ask for the IO index to be passed to the signal
-	 * handler.
-	 */
-	io->posix_aiocb.aio_sigevent.sigev_value.sival_int = io_index;
-#else
-	/*
-	 * On macOS (or other systems when testing with MISSING_POSIX_REALTIME_SIGNALS
-	 * defined), the signal handler will need to poll all outstanding IOs
-	 * whenever a signal arrives, because the kernel isn't smart enough to pass
-	 * through sigev_value.
-	 *
-	 * We do a search for a free slot in an array of sig_atomic_t, so that it's
-	 * safe to do this while the signal handler can be removing values at any
-	 * time ; it's a bit ugly, but we'll probably find a slot near the
-	 * beginning.  sig_atomic_t can be signed or unsigned, but it must at least
-	 * big enough to hold indexes into in_progress_io.
-	 */
-	StaticAssertStmt(sizeof(sig_atomic_t) >= sizeof(int),
-					 "sig_atomic_t too small to hold an AIO index");
-
-	for (size_t slot = 0; slot < max_aio_in_flight; ++slot)
-	{
-		if (my_inflight_io[slot] == (sig_atomic_t) -1)
-		{
-			my_inflight_io[slot] = io_index;
-			io->inflight_slot = slot;
-
-			/* Track the upper bound to limit the signal handler's search. */
-			if (slot >= my_inflight_io_count)
-				my_inflight_io_count = slot + 1;
-
-			return;
-		}
-	}
-
-	elog(PANIC, "too many IOs in flight");
-#endif
-}
-
-/*
- * Called in user context when we fail to submit an IO, and in signal handler
- * context when an IO completes.
- */
-static void
-pgaio_posix_postflight(PgAioInProgress *io)
-{
-	Assert(io->submitter_id == my_aio_id);
-	pg_atomic_fetch_sub_u32(&my_aio->inflight_count, 1);
-
-#ifdef MISSING_POSIX_REALTIME_SIGNALS
-	/* Poor old macOS can stop polling this one on every signal now. */
-	my_inflight_io[io->inflight_slot] = (sig_atomic_t) -1;
-#endif
-}
-
-/*
- * Check if an IO that was submitted by this process has completed, and if so,
- * retrieve the result and put the IO on the shared completion queue for
- * processing by any process.
- */
-static void
-pgaio_posix_poll_aiocb(PgAioInProgress *io)
-{
-	ssize_t	return_status;
-	int		error_status;
-
-#ifdef PG_HAVE_ATOMIC_U64_SIMULATION
-	/* Spinlocks are not safe in this context. */
-#error "Cannot use squeue32 from signal handler without atomics"
-#endif
-
-	/*
-	 * XXX Unfortunately the glibc implementation can occasionally deadlock
-	 * here, because its aio_error() and aio_return() functions are not
-	 * async-signal safe, as required by POSIX.  Specifically, they use
-	 * pthead mutexes that can deadlock against the user context.  Would it
-	 * help if we blocked the signal while submitting?
-	 */
-
-	Assert(io->submitter_id == my_aio_id);
-
-	/* Check if the IO has completed and has an error status. */
-	error_status = aio_error(&io->posix_aiocb);
-	if (error_status == 0)
-	{
-		/* The IO succeeded.  Retrieve the return status. */
-		io->posix_returned_generation = io->generation;
-		return_status = aio_return(&io->posix_aiocb);
-		if (return_status < 0)
-			elog(PANIC, "aio_return() failed with error status 0: %m");
-		io->result = return_status;
-		pgaio_posix_postflight(io);
-	}
-	else if (error_status < 0)
-	{
-		/*
-		 * On macOS, we might poll an aiocb that is about to be submitted, or
-		 * that we recently failed to submit, so it's unknown to the kernel.
-		 * On other systems EINVAL would imply that we've received a spurious
-		 * signal.
-		 */
-		if (errno != EINVAL)
-			elog(PANIC, "aio_error() failed: %m");
-		return;
-	}
-	else if (error_status == EINPROGRESS)
-	{
-		/*
-		 * The IO is still running.  Expected only on macOS.  On other systems
-		 * it would imply a spurious signal.
-		 */
-		return;
-	}
-	else
-	{
-		/* The IO failed.  Ignore the return value. */
-		io->posix_returned_generation = io->generation;
-		aio_return(&io->posix_aiocb);
-
-		/* Set the error using a negative result value. */
-		io->result = -error_status;
-		pgaio_posix_postflight(io);
-	}
-
-	/*
-	 * Push this into the shared completion queue so that any backend can
-	 * handle it.  This is async-signal-safe, since it's based on atomic
-	 * operations.
-	 *
-	 * XXX Explain theory about why the queue must have enough room for a newly
-	 * completed IO.
-	 */
-	if (!squeue32_enqueue(aio_ctl->posix_completion_queue, pgaio_io_id(io)))
-		elog(PANIC, "shared completion queue unexpectedly full");
-
-	/*
-	 * Set our latch if requested to do so by pgaio_posix_wait_one(), to close
-	 * a race.
-	 */
-	if (pgaio_posix_set_latch_on_return)
-		SetLatch(MyLatch);
-}
-
-/*
- * Whenever an IO initated by this process completes, we receive a signal.
- */
-static void
-pgaio_posix_signal_handler(int sig, siginfo_t *si, void *uap)
-{
-	int		save_errno = errno;
-	PgAioInProgress *io;
-
-#ifndef MISSING_POSIX_REALTIME_SIGNALS
-	/* Defend against spurious signals. */
-	if (si->si_value.sival_int >= 0 &&
-		si->si_value.sival_int < max_aio_in_progress)
-	{
-		io = &aio_ctl->in_progress_io[si->si_value.sival_int];
-		pgaio_posix_poll_aiocb(io);
-	}
-#else
-	/*
-	 * Without realtime signals and signal queuing, unhandled signals are
-	 * merged and don't carry an si_value which we can use to point to our IO
-	 * object.  This is going to require O(n^2) checks in the number of
-	 * concurrent IOs.  Oh well.
-	 */
-	size_t count = my_inflight_io_count;
-
-	for (size_t i = 0; i < count; ++i)
-	{
-		int index = my_inflight_io[i];
-
-		if (index != (sig_atomic_t) -1)
-		{
-			io = &aio_ctl->in_progress_io[index];
-			pgaio_posix_poll_aiocb(io);
-		}
-	}
-#endif
-
-	errno = save_errno;
-}
-
-static int
-pgaio_posix_drain(PgAioContext *context)
-{
-	uint32 io_index;
-	int ndrained = 0;
-
-	/* Reap as many completed IOs as we can without waiting. */
-	while (squeue32_dequeue(aio_ctl->posix_completion_queue, &io_index))
-	{
-		PgAioInProgress *io = &aio_ctl->in_progress_io[io_index];
-		int merged_result;
-
-		merged_result = io->result;
-		io->result = 0;
-
-		pgaio_process_io_completion(io, merged_result);
-		++ndrained;
-	}
-
-	return ndrained;
-}
-
-typedef struct pgaio_posix_listio_buffer
-{
-	int nios;
-	struct aiocb *cbs[AIO_LISTIO_MAX];
-} pgaio_posix_listio_buffer;
-
-#ifndef MISSING_LIO_LISTIO_NOTIFICATIONS
-static PgAioInProgress *
-pgaio_io_for_posix_aiocb(struct aiocb *cb)
-{
-	return (PgAioInProgress *)
-		(((char *) cb) - offsetof(PgAioInProgress, posix_aiocb));
-}
-#endif
-
-static int
-pgaio_posix_flush_listio(pgaio_posix_listio_buffer *lb)
-{
-#ifndef MISSING_LIO_LISTIO_NOTIFICATIONS
-	uint64 io_generation[AIO_LISTIO_MAX];
-	int rc;
-
-	if (lb->nios == 0)
-		return 0;
-
-	/* Record the generation of all IOs we're going to submit to the kernel. */
-	for (int i = 0; i < lb->nios; ++i)
-		io_generation[i] = pgaio_io_for_posix_aiocb(lb->cbs[i])->generation;
-
-	/* Try to initiate all of these IOs in one system call. */
-	rc = lio_listio(LIO_NOWAIT, lb->cbs, lb->nios, NULL);
-	if (rc < 0)
-	{
-		if (errno == EAGAIN || errno == EINTR || errno == EIO)
-		{
-			int listio_errno = errno;
-
-			/*
-			 * POSIX says that for these three errors only, some of the IOs may
-			 * have been queued.  Any that were queued will also be processed
-			 * by the signal handler (and then could be concurrently recycled
-			 * by another process), and any that weren't will need to be
-			 * processed by us.
-			 */
-			for (int i = 0; i < lb->nios; ++i)
-			{
-				PgAioInProgress *io;
-				int			error_status;
-
-				io = pgaio_io_for_posix_aiocb(lb->cbs[i]);
-				error_status = aio_error(&io->posix_aiocb);
-				if (error_status == 0 || error_status == EINPROGRESS)
-				{
-					/*
-					 * Successfully submitted an IO.  The signal handler will
-					 * handle the rest.  It's also possible that the aiocb has
-					 * already been recycled for another request, and that's
-					 * what we're seeig here, but that still means that the
-					 * request we're interested in was successfully initated.
-					 */
-					continue;
-				}
-				else if (error_status == EINVAL)
-				{
-					if (io->posix_returned_generation >= io_generation[i])
-					{
-						/*
-						 * Successfully submitted an IO, and the signal handler
-						 * has already called aio_return(), and by now the
-						 * aiocb has been recycled for some other request.
-						 */
-						 continue;
-					}
-					/*
-					 * We failed to initiate this IO, so the kernel doesn't
-					 * recognize the aiocb.  It seems more cromulent to report
-					 * the EAGAIN etc that we received from lio_listio() rather
-					 * than EINVAL, so let's do that.
-					 */
-					error_status = listio_errno;
-				}
-				pgaio_process_io_completion(pgaio_io_for_posix_aiocb(lb->cbs[i]),
-											-error_status);
-				pgaio_posix_postflight(pgaio_io_for_posix_aiocb(lb->cbs[i]));
-			}
-		}
-		else
-		{
-			int error_status = errno;
-
-			/*
-			 * The only other error documented by POSIX is EINVAL.  Whether we
-			 * get that or something undocumented, replicate the error we got
-			 * from lio_listio() into all the IOs.
-			 */
-			for (int i = 0; i < lb->nios; ++i)
-			{
-				pgaio_process_io_completion(pgaio_io_for_posix_aiocb(lb->cbs[i]),
-											-error_status);
-				pgaio_posix_postflight(pgaio_io_for_posix_aiocb(lb->cbs[i]));
-			}
-		}
-	}
-	lb->nios = 0;
-#endif
-
-	return 0;
-}
-
-#ifndef MISSING_LIO_LISTIO_NOTIFICATIONS
-static int
-pgaio_posix_add_listio(pgaio_posix_listio_buffer *lb, PgAioInProgress *io)
-{
-	if (lb->nios == AIO_LISTIO_MAX)
-	{
-		int rc;
-
-		rc = pgaio_posix_flush_listio(lb);
-		if (rc < 0)
-			return rc;
-	}
-	lb->cbs[lb->nios] = &io->posix_aiocb;
-	++lb->nios;
-
-	return 0;
-}
-#endif
-
-/*
- * Assumes that io->posix_aiocb is cleared, but has the aio_filedes and
- * aio_offset already set.
- */
-static int
-pgaio_posix_start_rw(PgAioInProgress *io, pgaio_posix_listio_buffer *lb,
-					 int lio_opcode)
-{
-	struct aiocb *cb = &io->posix_aiocb;
-	struct iovec iov[IOV_MAX];
-	int iovcnt PG_USED_FOR_ASSERTS_ONLY;
-
-	iovcnt = pgaio_fill_iov(iov, io);
-
-#if defined(HAVE_AIO_READV) && defined(HAVE_AIO_WRITEV)
-	if (iovcnt > 1)
-	{
-		/*
-		 * We can't do scatter/gather in a listio on any known OS, but it's
-		 * better to use FreeBSD's nonstandard separate system calls than pass
-		 * up the opportunity for scatter/gather IO.  Note that this case
-		 * should only be reachable if pgaio_can_scatter_gather() returned
-		 * true.
-		 */
-		cb->aio_iov = iov;
-		cb->aio_iovcnt = iovcnt;
-		return lio_opcode == LIO_WRITE ? aio_writev(cb) : aio_readv(cb);
-	}
-	else
-#endif
-	{
-		Assert(iovcnt == 1);
-
-		/*
-		 * This might be a single PG IO, or a chain of reads into contiguous
-		 * memory, so that it takes only a single iovec.  We'll batch it up
-		 * with other such single iovec requests, if lio_listio(2) works.
-		 */
-		cb->aio_buf = iov[0].iov_base;
-		cb->aio_nbytes = iov[0].iov_len;
-		cb->aio_lio_opcode = lio_opcode;
-
-#ifdef MISSING_LIO_LISTIO_NOTIFICATIONS
-		/*
-		 * macOS doesn't send nofications for individual aiocbs subnmitted with
-		 * lio_listio(2).  We could use it anyway, and depend on a notification
-		 * sent when the whole batch has completed, but that adds a lot of
-		 * latency.  Let's just submit individual requests on that OS.
-		 */
-		return lio_opcode == LIO_WRITE ? aio_write(cb) : aio_read(cb);
-#else
-		return pgaio_posix_add_listio(lb, io);
-#endif
-	}
-}
-
-#ifdef O_DSYNC
-#define PG_O_DSYNC O_DSYNC
-#else
-/* On systems with no O_DSYNC, just use the stronger O_SYNC. */
-#define PG_O_DSYNC O_SYNC
-#endif
-
-/*
- * Queue up an IO request for the kernel in listio_buffer where possible, and
- * otherwise tell the kernel to initiate the IO immediately.
- *
- * Assumes that io->posix_aiocb has aio_sigevent already set.
- */
-static int
-pgaio_posix_submit_one(PgAioInProgress *io,
-					   pgaio_posix_listio_buffer *listio_buffer)
-{
-	int rc = -1;
-
-	switch (io->op)
-	{
-		case PGAIO_OP_READ:
-			io->posix_aiocb.aio_fildes = io->op_data.read.fd;
-			io->posix_aiocb.aio_offset = io->op_data.read.offset +
-				io->op_data.read.already_done;
-			rc = pgaio_posix_start_rw(io, listio_buffer, LIO_READ);
-			break;
-		case PGAIO_OP_WRITE:
-			io->posix_aiocb.aio_fildes = io->op_data.write.fd;
-			io->posix_aiocb.aio_offset = io->op_data.write.offset +
-				io->op_data.write.already_done;
-			rc = pgaio_posix_start_rw(io, listio_buffer, LIO_WRITE);
-			break;
-		case PGAIO_OP_FSYNC:
-			io->posix_aiocb.aio_fildes = io->op_data.fsync.fd;
-			rc = aio_fsync(io->op_data.fsync.datasync ? PG_O_DSYNC : O_SYNC,
-						   &io->posix_aiocb);
-			break;
-		case PGAIO_OP_FLUSH_RANGE:
-			/*
-			 * This is supposed to represent Linux's sync_file_range(),
-			 * which initiates writeback for only a certain range of a
-			 * file.  Initiating fdatasync() seems close to the intended
-			 * behavior.  XXX this is a bad idea
-			 */
-			io->posix_aiocb.aio_fildes = io->op_data.flush_range.fd;
-			rc = aio_fsync(PG_O_DSYNC, &io->posix_aiocb);
-			break;
-		case PGAIO_OP_NOP:
-			rc = 0;
-			break;
-		case PGAIO_OP_INVALID:
-			rc = -1;
-			errno = EOPNOTSUPP;
-			break;
-	}
-
-	return rc;
-}
-
-static int
-pgaio_posix_submit(int max_submit, bool drain)
-{
-	PgAioInProgress *ios[PGAIO_SUBMIT_BATCH_SIZE];
-	int nios = 0;
-	pgaio_posix_listio_buffer listio_buffer = {0};
-
-	while (!dlist_is_empty(&my_aio->pending))
-	{
-		dlist_node *node;
-		PgAioInProgress *io;
-		int rc;
-
-		if (nios == max_submit)
-			break;
-
-		node = dlist_pop_head_node(&my_aio->pending);
-		io = dlist_container(PgAioInProgress, io_node, node);
-
-		pgaio_io_prepare_submit(io, 0);
-
-		pgaio_posix_preflight(io);
-
-		my_aio->submissions_total_count++;
-
-		rc = pgaio_posix_submit_one(io, &listio_buffer);
-
-		/*
-		 * If we got an error while submitting, then we can process the I/O
-		 * immediately.  Errors reporting via lio_listio() batch submission
-		 * have been handled already, so this is where we report errors for the
-		 * other system calls.
-		 */
-		if (rc < 0)
-		{
-			pgaio_process_io_completion(io, -errno);
-			pgaio_posix_postflight(io);
-		}
-
-		ios[nios] = io;
-		++nios;
-	}
-	pgaio_posix_flush_listio(&listio_buffer);
-
-	/* XXXX copied from uring submit */
-	/*
-	 * Others might have been waiting for this IO. Because it wasn't
-	 * marked as in-flight until now, they might be waiting for the
-	 * CV. Wake'em up.
-	 */
-	for (int i = 0; i < nios; i++)
-	{
-		PgAioInProgress *cur = ios[i];
-
-		while (true)
-		{
-			ConditionVariableBroadcast(&cur->cv);
-			if (cur->merge_with_idx == PGAIO_MERGE_INVALID)
-				break;
-			cur = &aio_ctl->in_progress_io[cur->merge_with_idx];
-		}
-	}
-
-	/* callbacks will be called later by pgaio_submit() */
-	if (drain)
-		pgaio_drain(NULL,
-					/* block = */ false,
-					/* call_shared = */ false,
-					/* call_local = */ false);
-
-	return nios;
-}
-
-static void
-pgaio_posix_io_retry(PgAioInProgress *io)
-{
-	pgaio_posix_listio_buffer listio_buffer = {0};
-	int rc;
-
-	/*
-	 * XXX If the failure was EAGAIN, should we apply back pressure by waiting
-	 * for one IO to complete?  We don't know what kind of limit we've hit.
-	 */
-
-	/* Close race with pgaio_posix_wait_one(). */
-	if (io->submitter_id != my_aio_id)
-	{
-		io->generation++;
-		pg_write_barrier();
-		SetLatch(&ProcGlobal->allProcs[io->submitter_id].procLatch);
-	}
-
-	pgaio_posix_preflight(io);
-
-	WRITE_ONCE_F(io->flags) |= PGAIOIP_INFLIGHT;
-
-	rc = pgaio_posix_submit_one(io, &listio_buffer);
-	if (rc < 0)
-	{
-		pgaio_process_io_completion(io, -errno);
-		pgaio_posix_postflight(io);
-	}
-	pgaio_posix_flush_listio(&listio_buffer);
-
-	ConditionVariableBroadcast(&io->cv);
-}
-
-static void
-pgaio_posix_wait_one(PgAioInProgress *io, uint64 ref_generation)
-{
-	bool submitted_by_me;
-
-	/*
-	 * Check if this process submitted the IO.  This is a dirty read of
-	 * io->submitter_id, but we'll detect concurrent changes with a generation
-	 * check and a latch.
-	 */
-	submitted_by_me = io->submitter_id == my_aio_id;
-
-	/*
-	 * If the PGAIO_POSIX_SIGNO handler runs between our checks and
-	 * WaitLatch(), we need a race-free way to wake up and check the flags
-	 * agaon.  So ask it to set our latch.
-	 */
-	if (submitted_by_me)
-		pgaio_posix_set_latch_on_return = true;
-
-	for (;;)
-	{
-		pgaio_drain(0,
-					/* block = */ false,
-					/* call_shared = */ true,
-					/* call local = */ false);
-		if (!(io->flags & PGAIOIP_INFLIGHT))
-			break;
-		pg_read_barrier();
-		if (io->generation != ref_generation)
-			break;
-
-		if (submitted_by_me)
-		{
-			/*
-			 * XXX It might be nice to use aio_suspend() here, and not need the
-			 * latch, but it's hard to coordinate with the signal handler.
-			 * Behavior is undefined for aio_suspend() on an aiocb that has
-			 * already returned.  Need to try again.
-			 */
-			WaitLatch(MyLatch, WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, -1,
-					  WAIT_EVENT_AIO_IO_COMPLETE_ONE_LOCAL);
-			ResetLatch(MyLatch);
-		}
-		else
-		{
-			/*
-			 * XXX Improve signalling here.
-			 */
-			ConditionVariableTimedSleep(&io->cv, 100,
-										WAIT_EVENT_AIO_IO_COMPLETE_ONE);
-		}
-	}
-
-	if (submitted_by_me)
-		pgaio_posix_set_latch_on_return = false;
-
-	CHECK_FOR_INTERRUPTS();
-}
-
-#endif
 
 
 /* --------------------------------------------------------------------------------
@@ -5443,7 +3438,7 @@ pgaio_fill_one_iov(struct iovec *iov, const PgAioInProgress *io, bool first)
  * merged IOs.  Return the number of iovecs (which may be smaller than the
  * number of IOs).
  */
-static int
+int
 pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io)
 {
 	struct iovec *iov;
@@ -5473,32 +3468,20 @@ pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io)
 	return iov + 1 - iovs;
 }
 
-static void
-pgaio_worker_do(PgAioInProgress *io)
+/*
+ * Run an IO with a traditional blocking system call.  This is used by worker
+ * mode to simulate AIO in worker processes, but it can also be used in other
+ * modes if there's only a single IO to be submitted and we know we'll wait
+ * for it anyway, saving some overheads.  XXX make that statement true
+ */
+void
+pgaio_do_synchronously(PgAioInProgress *io)
 {
 	ssize_t result = 0;
 	struct iovec iov[IOV_MAX];
 	int iovcnt = 0;
-	bool fd_usable;
 
 	Assert(io->flags & PGAIOIP_INFLIGHT);
-
-	/*
-	 * When running in a worker process, we can't use the file descriptor;
-	 * instead we have to open the file, with appropriate caching.
-	 */
-	fd_usable = !AmAioWorkerProcess();
-
-	/*
-	 * If this is not the process originating the request (can happen via
-	 * pgaio_synchronous_submit()), we need to open the files locally to rely
-	 * on the fd.
-	 */
-	if (!fd_usable)
-	{
-		Assert(io_action_cbs[io->scb].retry != NULL);
-		io_action_cbs[io->scb].retry(io);
-	}
 
 	/* Perform IO. */
 	switch (io->op)
@@ -5531,6 +3514,7 @@ pgaio_worker_do(PgAioInProgress *io)
 						  io->op_data.flush_range.offset,
 						  io->op_data.flush_range.nbytes);
 			/* never errors */
+			/* XXX previously we would PANIC on errors here */
 			result = 0;
 			pgstat_report_wait_end();
 			break;
@@ -5546,54 +3530,108 @@ pgaio_worker_do(PgAioInProgress *io)
 	pgaio_process_io_completion(io, result < 0 ? -errno : result);
 }
 
-bool
-IsAioWorker(void)
+static bool
+pgaio_io_matches_fd(PgAioInProgress *io, int fd)
 {
-	return MyBackendType == B_AIO_WORKER;
+#ifdef USE_POSIX_AIO
+	/* XXX review sanity of this */
+	/* We only want to match IOs that were submitted by this process. */
+	if (aio_type != AIOTYPE_POSIX || io->submitter_id != my_aio_id)
+		return false;
+#endif
+
+	switch (io->op)
+	{
+		case PGAIO_OP_READ:
+			return fd == io->op_data.read.fd;
+		case PGAIO_OP_WRITE:
+			return fd == io->op_data.write.fd;
+		case PGAIO_OP_FSYNC:
+			return fd == io->op_data.fsync.fd;
+		case PGAIO_OP_FLUSH_RANGE:
+			return fd == io->op_data.flush_range.fd;
+		default:
+			return false;
+	}
 }
 
-void
-AioWorkerMain(void)
+/*
+ * Workhorse routine to wait for all IOs issued by this process to complete.
+ * If n >= 0, then only wait for at most n IOs.  If fd is >= 0, then only wait
+ * for IOs on the given descriptor.
+ */
+static void
+pgaio_wait_for_issued_internal(int n, int fd)
 {
-	/* TODO review all signals */
-	pqsignal(SIGHUP, SignalHandlerForConfigReload);
-	pqsignal(SIGINT, die); /* to allow manually triggering worker restart */
-	/*
-	 * Ignore SIGTERM, will get explicit shutdown via SIGUSR2 later in the
-	 * shutdown sequence, similar to checkpointer.
-	 */
-	pqsignal(SIGTERM, SIG_IGN);
-	/* SIGQUIT handler was already set up by InitPostmasterChild */
-	pqsignal(SIGALRM, SIG_IGN);
-	pqsignal(SIGPIPE, SIG_IGN);
-	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
-	pqsignal(SIGUSR2, die);
-	PG_SETMASK(&UnBlockSig);
+	dlist_iter iter;
 
-	for (;;)
+	dlist_foreach(iter, &my_aio->issued)
 	{
-		uint32 io_index;
+		PgAioInProgress *io = dlist_container(PgAioInProgress, owner_node, iter.cur);
 
-		if (squeue32_dequeue(aio_ctl->worker_submission_queue, &io_index))
+		if (io->flags & PGAIOIP_INFLIGHT &&
+			(fd < 0 || pgaio_io_matches_fd(io, fd)))
 		{
-			/* Do IO and completions.  This'll signal anyone waiting. */
-			/*
-			 * XXX I think we might need this to be in a critical section, so
-			 * that we can't lose track of an IO without taking the system
-			 * down.  But we're not allowed to, because the IO handler might
-			 * reach smgropen() which allocates.
-			 */
-			ConditionVariableCancelSleep();
-			pgaio_worker_do(&aio_ctl->in_progress_io[io_index]);
-			pgaio_complete_ios(false);
-		}
-		else
-		{
-			/* Nothing in the queue.  Go to sleep. */
-			ConditionVariableSleep(&aio_ctl->worker_submission_queue_not_empty,
-								   WAIT_EVENT_AIO_WORKER_MAIN);
+			PgAioIoRef ref;
+
+			pgaio_io_ref_internal(io, &ref);
+			pgaio_io_print(io, NULL);
+			pgaio_io_wait_ref(&ref, false);
+			if (n > 0 && --n == 0)
+				return;
 		}
 	}
+
+	/* XXX explain dirty read of issued_abandoned */
+	while (!dlist_is_empty(&my_aio->issued_abandoned))
+	{
+		PgAioInProgress *io = NULL;
+		PgAioIoRef ref;
+
+		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
+		dlist_foreach(iter, &my_aio->issued_abandoned)
+		{
+			io = dlist_container(PgAioInProgress, owner_node, iter.cur);
+
+			if (io->flags & PGAIOIP_INFLIGHT &&
+				(fd < 0 || pgaio_io_matches_fd(io, fd)))
+			{
+				pgaio_io_ref_internal(io, &ref);
+				break;
+			}
+			else
+				io = NULL;
+		}
+		LWLockRelease(SharedAIOCtlLock);
+
+		if (!io)
+			break;
+
+		pgaio_io_print(io, NULL);
+		pgaio_io_wait_ref(&ref, false);
+		pgaio_complete_ios(false);
+		pgaio_transfer_foreign_to_local();
+		if (n > 0 && --n == 0)
+			return;
+	}
+}
+
+/*
+ * Should be called before closing any fd that might have asynchronous I/O
+ * operations.  Since some POSIX AIO implementations cancel IOs (or worse,
+ * confuse files) when the fd is concurrently closed, we'll default to waiting
+ * for anything in flight on this fd to complete first, except on systems where
+ * we're sure that isn't necessary.
+ */
+void
+pgaio_closing_fd(int fd)
+{
+#ifdef USE_POSIX_AIO
+#if !defined(__freebsd__)
+	if (aio_type == AIOTYPE_POSIX)
+		pgaio_wait_for_issued_internal(-1, fd);
+#endif
+#endif
 }
 
 /* --------------------------------------------------------------------------------
@@ -5774,108 +3812,4 @@ pg_stat_get_aios(PG_FUNCTION_ARGS)
 	tuplestore_donestoring(tupstore);
 
 	return (Datum) 0;
-}
-
-static bool
-pgaio_io_matches_fd(PgAioInProgress *io, int fd)
-{
-#ifdef USE_POSIX_AIO
-	/* XXX review sanity of this */
-	/* We only want to match IOs that were submitted by this process. */
-	if (aio_type != AIOTYPE_POSIX || io->submitter_id != my_aio_id)
-		return false;
-#endif
-
-	switch (io->op)
-	{
-		case PGAIO_OP_READ:
-			return fd == io->op_data.read.fd;
-		case PGAIO_OP_WRITE:
-			return fd == io->op_data.write.fd;
-		case PGAIO_OP_FSYNC:
-			return fd == io->op_data.fsync.fd;
-		case PGAIO_OP_FLUSH_RANGE:
-			return fd == io->op_data.flush_range.fd;
-		default:
-			return false;
-	}
-}
-
-/*
- * Workhorse routine to wait for all IOs issued by this process to complete.
- * If n >= 0, then only wait for at most n IOs.  If fd is >= 0, then only wait
- * for IOs on the given descriptor.
- */
-static void
-pgaio_wait_for_issued_internal(int n, int fd)
-{
-	dlist_iter iter;
-
-	dlist_foreach(iter, &my_aio->issued)
-	{
-		PgAioInProgress *io = dlist_container(PgAioInProgress, owner_node, iter.cur);
-
-		if (io->flags & PGAIOIP_INFLIGHT &&
-			(fd < 0 || pgaio_io_matches_fd(io, fd)))
-		{
-			PgAioIoRef ref;
-
-			pgaio_io_ref_internal(io, &ref);
-			pgaio_io_print(io, NULL);
-			pgaio_io_wait_ref(&ref, false);
-			if (n > 0 && --n == 0)
-				return;
-		}
-	}
-
-	/* XXX explain dirty read of issued_abandoned */
-	while (!dlist_is_empty(&my_aio->issued_abandoned))
-	{
-		PgAioInProgress *io = NULL;
-		PgAioIoRef ref;
-
-		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
-		dlist_foreach(iter, &my_aio->issued_abandoned)
-		{
-			io = dlist_container(PgAioInProgress, owner_node, iter.cur);
-
-			if (io->flags & PGAIOIP_INFLIGHT &&
-				(fd < 0 || pgaio_io_matches_fd(io, fd)))
-			{
-				pgaio_io_ref_internal(io, &ref);
-				break;
-			}
-			else
-				io = NULL;
-		}
-		LWLockRelease(SharedAIOCtlLock);
-
-		if (!io)
-			break;
-
-		pgaio_io_print(io, NULL);
-		pgaio_io_wait_ref(&ref, false);
-		pgaio_complete_ios(false);
-		pgaio_transfer_foreign_to_local();
-		if (n > 0 && --n == 0)
-			return;
-	}
-}
-
-/*
- * Should be called before closing any fd that might have asynchronous I/O
- * operations.  Since some POSIX AIO implementations cancel IOs (or worse,
- * confuse files) when the fd is concurrently closed, we'll default to waiting
- * for anything in flight on this fd to complete first, except on systems where
- * we're sure that isn't necessary.
- */
-void
-pgaio_closing_fd(int fd)
-{
-#ifdef USE_POSIX_AIO
-#if !defined(__freebsd__)
-	if (aio_type == AIOTYPE_POSIX)
-		pgaio_wait_for_issued_internal(-1, fd);
-#endif
-#endif
 }

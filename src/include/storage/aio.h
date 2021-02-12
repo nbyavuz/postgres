@@ -47,6 +47,16 @@ extern int aio_type;
 extern int aio_workers;
 extern int aio_worker_queue_size;
 
+/* (future) GUC controlling global MAX number of in-progress IO entries */
+/* FIXME: this is per context right now */
+extern int max_aio_in_flight;
+/* FIXME: find a good naming pattern */
+extern int max_aio_in_progress;
+extern int max_aio_bounce_buffers;
+
+/* max per backend concurrency */
+extern int io_max_concurrency;
+
 extern int MyAioWorkerId;
 
 /* initialization */

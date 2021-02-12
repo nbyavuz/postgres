@@ -10,6 +10,7 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = \
 	aio.o \
+	aio_worker.o \
 	aio_util.o \
 	barrier.o \
 	dsm.o \
@@ -29,7 +30,14 @@ OBJS = \
 	sinvaladt.o \
 	standby.o
 
-aio.o: override CPPFLAGS += $(LIBURING_CFLAGS)
-aio.bc: override CPPFLAGS += $(LIBURING_CFLAGS)
+ifeq ($(with_liburing),yes)
+OBJS += aio_uring.o
+aio_uring.o: override CPPFLAGS += $(LIBURING_CFLAGS)
+aio_uring.bc: override CPPFLAGS += $(LIBURING_CFLAGS)
+endif
+
+ifeq ($(with_posix_aio),yes)
+OBJS += aio_posix.o
+endif
 
 include $(top_srcdir)/src/backend/common.mk
