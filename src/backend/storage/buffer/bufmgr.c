@@ -2050,7 +2050,7 @@ BulkExtendBuffered(Relation relation, ForkNumber forkNum, int *extendby_p, Buffe
 		if (existing_buf >= 0)
 		{
 			/* FIXME: This is probably possible when extension fails due to ENOSPC or such */
-			elog(PANIC, "buffer beyond EOF");
+			elog(ERROR, "buffer beyond EOF");
 		}
 
 		/* lock to install new identity */
