@@ -218,29 +218,8 @@ again:
 	 * Others might have been waiting for this IO. Because it wasn't
 	 * marked as in-flight until now, they might be waiting for the
 	 * CV. Wake'em up.
-	 *
-	 * As other backends might be consuming the completion, we need to be
-	 * careful about other backends resetting merge_with_idx. We still could
-	 * end up broadcasting on IOs that we don't care about, but that's
-	 * harmless.
 	 */
-	for (int i = 0; i < nios; i++)
-	{
-		PgAioInProgress *cur = ios[i];
-
-		while (true)
-		{
-			uint32 next_idx;
-
-			ConditionVariableBroadcast(&cur->cv);
-
-			next_idx = cur->merge_with_idx;
-			pg_compiler_barrier();
-			if (next_idx == PGAIO_MERGE_INVALID)
-				break;
-			cur = &aio_ctl->in_progress_io[next_idx];
-		}
-	}
+	pgaio_broadcast_ios(ios, nios);
 
 	/* callbacks will be called later, by pgaio_submit_pending_internal() */
 	if (drain)

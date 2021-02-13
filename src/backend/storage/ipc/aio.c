@@ -1089,6 +1089,35 @@ pgaio_complete_ios(bool in_error)
 	END_CRIT_SECTION();
 }
 
+/*
+ * Broadcast on a set of IOs (and merged IOs).
+ *
+ * We need to be careful about other backends resetting merge_with_idx.  We
+ * still could end up broadcasting on IOs that we don't care about, but that's
+ * harmless.
+ */
+void
+pgaio_broadcast_ios(PgAioInProgress **ios, int nios)
+{
+	for (int i = 0; i < nios; i++)
+	{
+		PgAioInProgress *cur = ios[i];
+
+		while (true)
+		{
+			uint32 next_idx;
+
+			ConditionVariableBroadcast(&cur->cv);
+
+			next_idx = cur->merge_with_idx;
+			pg_compiler_barrier();
+			if (next_idx == PGAIO_MERGE_INVALID)
+				break;
+			cur = &aio_ctl->in_progress_io[next_idx];
+		}
+	}
+}
+
 static void
 pgaio_io_call_local_callback(PgAioInProgress *io, bool in_error)
 {

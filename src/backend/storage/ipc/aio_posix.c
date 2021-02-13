@@ -623,18 +623,7 @@ pgaio_posix_submit(int max_submit, bool drain)
 	 * marked as in-flight until now, they might be waiting for the
 	 * CV. Wake'em up.
 	 */
-	for (int i = 0; i < nios; i++)
-	{
-		PgAioInProgress *cur = ios[i];
-
-		while (true)
-		{
-			ConditionVariableBroadcast(&cur->cv);
-			if (cur->merge_with_idx == PGAIO_MERGE_INVALID)
-				break;
-			cur = &aio_ctl->in_progress_io[cur->merge_with_idx];
-		}
-	}
+	pgaio_broadcast_ios(ios, nios);
 
 	/* callbacks will be called later by pgaio_submit() */
 	if (drain)

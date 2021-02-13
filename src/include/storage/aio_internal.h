@@ -521,6 +521,7 @@ extern bool pgaio_io_is_openable(PgAioInProgress *io);
 extern void pgaio_io_open(PgAioInProgress *io);
 extern void pgaio_do_synchronously(PgAioInProgress *io);
 extern void pgaio_complete_ios(bool in_error);
+extern void pgaio_broadcast_ios(PgAioInProgress **ios, int nios);
 
 /* Declarations for functions in aio_worker.c that are visible to aio.c. */
 extern Size AioWorkerShmemSize(void);
