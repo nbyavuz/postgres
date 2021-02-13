@@ -743,7 +743,7 @@ vacuum_log_cleanup_info(Relation rel, LVRelStats *vacrelstats)
 }
 
 static PgStreamingReadNextStatus
-vacuum_pgsr_next_single(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
+vacuum_scan_pgsr_next(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
 {
 	VacuumScanState *vss = (VacuumScanState *) pgsr_private;
 	Buffer buf;
@@ -936,7 +936,7 @@ lazy_scan_heap(Relation onerel, VacuumParams *params, LVRelStats *vacrelstats,
 		int iodepth = Max(Min(128, NBuffers / 128), 1);
 
 		pgsr = pg_streaming_read_alloc(iodepth, (uintptr_t) &vss,
-									   vacuum_pgsr_next_single,
+									   vacuum_scan_pgsr_next,
 									   vacuum_pgsr_release);
 	}
 
@@ -1886,6 +1886,57 @@ lazy_vacuum_all_indexes(Relation onerel, Relation *Irel,
 								 vacrelstats->num_index_scans);
 }
 
+typedef struct VacuumHeapBlockState
+{
+	BlockNumber blkno;
+	Buffer buffer;
+	int start_tupindex;
+	int end_tupindex;
+} VacuumHeapBlockState;
+
+typedef struct VacuumHeapState
+{
+	Relation relation;
+	LVRelStats *vacrelstats;
+	BlockNumber last_block;
+	int next_tupindex;
+} VacuumHeapState;
+
+static PgStreamingReadNextStatus
+vacuum_heap_pgsr_next(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
+{
+	VacuumHeapState *vhs = (VacuumHeapState *) pgsr_private;
+	LVDeadTuples *dead_tuples = vhs->vacrelstats->dead_tuples;
+	VacuumHeapBlockState *bs;
+	bool		already_valid;
+
+	if (vhs->next_tupindex == dead_tuples->num_tuples)
+		return PGSR_NEXT_END;
+
+	bs = palloc0(sizeof(*bs));
+	bs->blkno = ItemPointerGetBlockNumber(&dead_tuples->itemptrs[vhs->next_tupindex]);
+	bs->start_tupindex = vhs->next_tupindex;
+	bs->end_tupindex = vhs->next_tupindex;
+
+	for (; vhs->next_tupindex < dead_tuples->num_tuples; vhs->next_tupindex++)
+	{
+		BlockNumber curblkno = ItemPointerGetBlockNumber(&dead_tuples->itemptrs[vhs->next_tupindex]);
+
+		if (bs->blkno != curblkno)
+			break;				/* past end of tuples for this block */
+		bs->end_tupindex = vhs->next_tupindex;
+	}
+
+	bs->buffer = ReadBufferAsync(vhs->relation, MAIN_FORKNUM, bs->blkno,
+								RBM_NORMAL, vac_strategy, &already_valid,
+								&aio);
+	*read_private = (uintptr_t) bs;
+
+	if (already_valid)
+		return PGSR_NEXT_NO_IO;
+	else
+		return PGSR_NEXT_IO;
+}
 
 /*
  *	lazy_vacuum_heap() -- second pass over the heap
@@ -1901,6 +1952,8 @@ lazy_vacuum_all_indexes(Relation onerel, Relation *Irel,
 static void
 lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats)
 {
+	VacuumHeapState vhs;
+	PgStreamingRead *pgsr;
 	int			tupindex;
 	int			npages;
 	PGRUsage	ru0;
@@ -1915,40 +1968,60 @@ lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats)
 	update_vacuum_error_info(vacrelstats, &saved_err_info, VACUUM_ERRCB_PHASE_VACUUM_HEAP,
 							 InvalidBlockNumber, InvalidOffsetNumber);
 
+	vhs.relation = onerel;
+	vhs.vacrelstats = vacrelstats;
+	vhs.last_block = InvalidBlockNumber;
+	vhs.next_tupindex = 0;
+	pgsr = pg_streaming_read_alloc(512, (uintptr_t) &vhs,
+								   vacuum_heap_pgsr_next,
+								   vacuum_pgsr_release);
+
 	pg_rusage_init(&ru0);
 	npages = 0;
 
 	tupindex = 0;
-	while (tupindex < vacrelstats->dead_tuples->num_tuples)
+
+	while (true)
 	{
-		BlockNumber tblk;
-		Buffer		buf;
-		Page		page;
-		Size		freespace;
+		VacuumHeapBlockState *bs = (VacuumHeapBlockState *) pg_streaming_read_get_next(pgsr);
 
-		vacuum_delay_point();
+		if (bs == NULL)
+			break;
 
-		tblk = ItemPointerGetBlockNumber(&vacrelstats->dead_tuples->itemptrs[tupindex]);
-		vacrelstats->blkno = tblk;
-		buf = ReadBufferExtended(onerel, MAIN_FORKNUM, tblk, RBM_NORMAL,
-								 vac_strategy);
-		if (!ConditionalLockBufferForCleanup(buf))
+		Assert(bs->start_tupindex == tupindex);
+
+		vacrelstats->blkno = bs->blkno;
+
+		if (!ConditionalLockBufferForCleanup(bs->buffer))
 		{
-			ReleaseBuffer(buf);
-			++tupindex;
-			continue;
+			elog(WARNING, "conditional lock failed");
+			tupindex = bs->end_tupindex;
+			tupindex++;
+
+			ReleaseBuffer(bs->buffer);
 		}
-		tupindex = lazy_vacuum_page(onerel, tblk, buf, tupindex, vacrelstats,
-									&vmbuffer);
+		else
+		{
+			Page		page;
+			Size		freespace;
 
-		/* Now that we've compacted the page, record its available space */
-		page = BufferGetPage(buf);
-		freespace = PageGetHeapFreeSpace(page);
+			tupindex = lazy_vacuum_page(onerel, bs->blkno, bs->buffer, tupindex, vacrelstats,
+										&vmbuffer);
 
-		UnlockReleaseBuffer(buf);
-		RecordPageWithFreeSpace(onerel, tblk, freespace);
-		npages++;
+			/* Now that we've compacted the page, record its available space */
+			page = BufferGetPage(bs->buffer);
+			freespace = PageGetHeapFreeSpace(page);
+
+			UnlockReleaseBuffer(bs->buffer);
+			RecordPageWithFreeSpace(onerel, bs->blkno, freespace);
+			npages++;
+		}
+
+		Assert(bs->end_tupindex + 1 == tupindex);
+		vacuum_delay_point();
 	}
+
+	pg_streaming_read_free(pgsr);
 
 	/* Clear the block number information */
 	vacrelstats->blkno = InvalidBlockNumber;
