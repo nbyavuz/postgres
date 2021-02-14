@@ -31,7 +31,8 @@ extern void BackgroundWriterMain(void) pg_attribute_noreturn();
 extern void CheckpointerMain(void) pg_attribute_noreturn();
 
 extern void RequestCheckpoint(int flags);
-extern void CheckpointWriteDelay(int flags, double progress);
+struct pg_streaming_write;
+extern void CheckpointWriteDelay(int flags, struct pg_streaming_write *pgsw, double progress);
 
 extern bool ForwardSyncRequest(const FileTag *ftag, SyncRequestType type);
 
