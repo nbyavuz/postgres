@@ -18,7 +18,7 @@
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  src/backend/storage/ipc/aio_worker.c
+ *	  src/backend/storage/aio/aio_worker.c
  *
  *-------------------------------------------------------------------------
  */
