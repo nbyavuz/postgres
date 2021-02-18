@@ -38,7 +38,6 @@ struct pg_streaming_write
 	dlist_head available;
 
 	uint32 max_since_submit;
-	uint32 since_submit;
 
 	/*
 	 * IOs returned by pg_streaming_write_get_io, before
@@ -71,7 +70,6 @@ pg_streaming_write_alloc(uint32 iodepth, void *private_data)
 	 * achieve large IOs...
 	 */
 	pgsw->max_since_submit = Max((iodepth / 4) * 3, 1);
-	pgsw->since_submit = 0;
 
 	dlist_init(&pgsw->available);
 	dlist_init(&pgsw->issued);
@@ -94,11 +92,7 @@ pg_streaming_write_get_io(pg_streaming_write *pgsw)
 {
 	PgStreamingWriteItem *this_write;
 
-	if (pgsw->since_submit >= pgsw->max_since_submit)
-	{
-		pgaio_submit_pending(false);
-		pgsw->since_submit = 0;
-	}
+	pgaio_limit_pending(false, pgsw->max_since_submit);
 
 	/* loop in case the callback issues further writes */
 	while (dlist_is_empty(&pgsw->available))
@@ -140,8 +134,6 @@ pg_streaming_write_get_io(pg_streaming_write *pgsw)
 						   pgsw->inflight_count),
 			errhidestmt(true),
 			errhidecontext(true));
-
-	pgsw->since_submit++;
 
 	return this_write->aio;
 }
@@ -373,8 +365,6 @@ struct PgStreamingRead
 	uint32 completed_count;
 	/* number of current requests in flight */
 	int32 inflight_count;
-	/* number of requests not yet submitted */
-	int32 pending_count;
 	/* number of requests that didn't require IO (debugging only) */
 	int32 no_io_count;
 
@@ -522,7 +512,6 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	this_read->valid = true;
 	dlist_push_tail(&pgsr->issued, &this_read->node);
 	dlist_push_tail(&pgsr->in_order, &this_read->sequence_node);
-	pgsr->pending_count++;
 	pgsr->inflight_count++;
 	pgsr->prefetched_total_count++;
 
@@ -530,7 +519,6 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 
 	if (status == PGSR_NEXT_END)
 	{
-		pgsr->pending_count--;
 		pgsr->inflight_count--;
 		pgsr->prefetched_total_count--;
 		pgsr->hit_end = true;
@@ -544,7 +532,6 @@ pg_streaming_read_prefetch_one(PgStreamingRead *pgsr)
 	else if (status == PGSR_NEXT_NO_IO)
 	{
 		Assert(this_read->read_private != 0);
-		pgsr->pending_count--;
 		pgsr->inflight_count--;
 		pgsr->no_io_count++;
 		pgsr->completed_count++;
@@ -619,22 +606,9 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
 		   (pgsr->completed_count < pgsr->current_window))
 	{
 		pg_streaming_read_prefetch_one(pgsr);
-
-		if (pgsr->pending_count >= min_issue)
-		{
-			pgsr->submitted_total_count += pgsr->pending_count;
-			pgsr->pending_count = 0;
-			pgaio_submit_pending(true);
-		}
+		pgaio_limit_pending(false, min_issue);
 
 		CHECK_FOR_INTERRUPTS();
-	}
-
-	if (pgsr->pending_count >= min_issue)
-	{
-		pgsr->submitted_total_count += pgsr->pending_count;
-		pgsr->pending_count = 0;
-		pgaio_submit_pending(true);
 	}
 }
 

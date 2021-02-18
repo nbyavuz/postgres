@@ -1537,6 +1537,13 @@ pgaio_submit_pending(bool drain)
 }
 
 void
+pgaio_limit_pending(bool drain, int limit_to)
+{
+	if (limit_to <= my_aio->pending_count)
+		pgaio_submit_pending(drain);
+}
+
+void
 pgaio_closing_possibly_referenced(void)
 {
 	if (!my_aio)
