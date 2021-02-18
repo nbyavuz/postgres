@@ -194,7 +194,7 @@ BufReserveFillClean(BufferAccessStrategy strategy)
 		ReleaseBuffer(clean->buffer);
 	}
 
-	pgaio_submit_pending(false);
+	pgaio_limit_pending(false, bbr.clean_batch_size / 2);
 }
 
 static void
@@ -473,7 +473,7 @@ BufReserveInit(void)
 	bbr.clean_max_size = Min(Max(NBuffers / 128, 1), 256);
 	bbr.clean_target_size = bbr.clean_max_size; // XXX: make smarter
 
-	bbr.clean_batch_size = Min(16, bbr.clean_target_size);
+	bbr.clean_batch_size = Min(64, bbr.clean_target_size);
 
 	on_shmem_exit(BufReserveAtExit, 0);
 }

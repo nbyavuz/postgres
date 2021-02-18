@@ -1,6 +1,7 @@
 #include "postgres.h"
 
 #include "storage/aio.h"
+#include "storage/aio_internal.h"
 #include "miscadmin.h"
 
 /* typedef is in header */
@@ -70,6 +71,13 @@ pg_streaming_write_alloc(uint32 iodepth, void *private_data)
 	 * achieve large IOs...
 	 */
 	pgsw->max_since_submit = Max((iodepth / 4) * 3, 1);
+
+	/*
+	 * Avoid submission of previous IOs while preparing "our" IO. XXX: this
+	 * should be done in a nicer way.
+	 */
+	if (pgsw->max_since_submit > (PGAIO_SUBMIT_BATCH_SIZE - PGAIO_MAX_COMBINE))
+		pgsw->max_since_submit = PGAIO_SUBMIT_BATCH_SIZE - PGAIO_MAX_COMBINE;
 
 	dlist_init(&pgsw->available);
 	dlist_init(&pgsw->issued);
@@ -216,9 +224,7 @@ pg_streaming_write_write(pg_streaming_write *pgsw, PgAioInProgress *io,
 	dlist_push_tail(&pgsw->issued, &this_write->node);
 	pgsw->inflight_count++;
 
-	/*
-	 * XXX: It'd make sense to trigger io submission more often.
-	 */
+	pgaio_limit_pending(false, pgsw->max_since_submit);
 
 	ereport(DEBUG3, errmsg("pgsw write AIO %u/%llu, pgsw %zu, pgsw has now %d inflight",
 						   pgaio_io_id(io),
