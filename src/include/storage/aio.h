@@ -161,6 +161,8 @@ struct SMgrRelationData;
 /* --------------------------------------------------------------------------------
  * Low level IO preparation routines. These are called as part of
  * pgaio_io_start_*.
+ *
+ * Implemented in aio_io.c
  * --------------------------------------------------------------------------------
  */
 
@@ -174,6 +176,8 @@ extern void pgaio_io_prep_nop(PgAioInProgress *io);
 
 /* --------------------------------------------------------------------------------
  * IO start routines
+ *
+ * Implemented in aio_scb.c
  * --------------------------------------------------------------------------------
  */
 

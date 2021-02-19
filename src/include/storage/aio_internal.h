@@ -514,16 +514,21 @@ extern PgAioPerBackend *my_aio;
 extern int my_aio_id;
 
 /* Declarations for functions in aio.c that are visible to aio_XXX.c. */
-extern void pgaio_process_io_completion(PgAioInProgress *io, int result);
-extern int pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io);
 extern void pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring);
 extern int pgaio_drain(PgAioContext *context, bool block, bool call_shared, bool call_local);
-extern void pgaio_do_synchronously(PgAioInProgress *io);
 extern void pgaio_complete_ios(bool in_error);
 extern void pgaio_broadcast_ios(PgAioInProgress **ios, int nios);
 extern void pgaio_io_prepare(PgAioInProgress *io, PgAioOp op);
 extern void pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb);
 extern void pgaio_io_unprepare(PgAioInProgress *io, PgAioOp op);
+
+/* Declarations for aio_io.c */
+extern void pgaio_combine_pending(void);
+extern void pgaio_process_io_completion(PgAioInProgress *io, int result);
+extern int pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io);
+extern bool pgaio_io_matches_fd(PgAioInProgress *io, int fd);
+extern void pgaio_do_synchronously(PgAioInProgress *io);
+extern const char *pgaio_io_operation_string(PgAioOp op);
 
 /* Declarations for aio_scb.c */
 extern bool pgaio_io_call_shared_complete(PgAioInProgress *io);
