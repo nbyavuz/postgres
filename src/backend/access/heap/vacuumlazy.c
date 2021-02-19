@@ -1994,7 +1994,6 @@ lazy_vacuum_heap(Relation onerel, LVRelStats *vacrelstats)
 
 		if (!ConditionalLockBufferForCleanup(bs->buffer))
 		{
-			elog(WARNING, "conditional lock failed");
 			tupindex = bs->end_tupindex;
 			tupindex++;
 
