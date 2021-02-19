@@ -10,8 +10,9 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = \
 	aio.o \
-	aio_worker.o \
-	aio_util.o
+	aio_scb.o \
+	aio_util.o \
+	aio_worker.o
 
 ifeq ($(with_liburing),yes)
 override CPPFLAGS += $(LIBURING_CFLAGS)

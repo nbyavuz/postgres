@@ -67,7 +67,7 @@ pgaio_worker_need_synchronous(PgAioInProgress *io)
 		return true;
 
 	/* Not all IOs support the file being (re)opened by a worker. */
-	return !pgaio_io_is_openable(io);
+	return !pgaio_io_has_shared_open(io);
 }
 
 static void
@@ -162,7 +162,7 @@ IoWorkerMain(void)
 			 */
 			ConditionVariableCancelSleep();
 
-			pgaio_io_open(io);
+			pgaio_io_call_shared_open(io);
 			pgaio_do_synchronously(io);
 			pgaio_complete_ios(false);
 		}

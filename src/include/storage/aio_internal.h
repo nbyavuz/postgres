@@ -19,6 +19,7 @@
 #include "lib/squeue32.h"
 #include "port/atomics.h"
 #include "port/pg_iovec.h"
+#include "storage/aio.h"
 #include "storage/condition_variable.h"
 #include "storage/lwlock.h"
 
@@ -517,11 +518,21 @@ extern void pgaio_process_io_completion(PgAioInProgress *io, int result);
 extern int pgaio_fill_iov(struct iovec *iovs, const PgAioInProgress *io);
 extern void pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring);
 extern int pgaio_drain(PgAioContext *context, bool block, bool call_shared, bool call_local);
-extern bool pgaio_io_is_openable(PgAioInProgress *io);
-extern void pgaio_io_open(PgAioInProgress *io);
 extern void pgaio_do_synchronously(PgAioInProgress *io);
 extern void pgaio_complete_ios(bool in_error);
 extern void pgaio_broadcast_ios(PgAioInProgress **ios, int nios);
+extern void pgaio_io_prepare(PgAioInProgress *io, PgAioOp op);
+extern void pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb);
+extern void pgaio_io_unprepare(PgAioInProgress *io, PgAioOp op);
+
+/* Declarations for aio_scb.c */
+extern bool pgaio_io_call_shared_complete(PgAioInProgress *io);
+extern void pgaio_io_call_shared_retry(PgAioInProgress *io);
+extern void pgaio_io_call_shared_open(PgAioInProgress *io);
+extern void pgaio_io_call_shared_desc(PgAioInProgress *io, struct StringInfoData *s);
+extern bool pgaio_io_has_shared_open(PgAioInProgress *io);
+extern PgAioOp pgaio_shared_callback_op(PgAioSharedCallback scb);
+extern const char * pgaio_io_shared_callback_string(PgAioSharedCallback a);
 
 /*
  * Check if an IO has been recycled IO as indicated by ref_generation. Updates
