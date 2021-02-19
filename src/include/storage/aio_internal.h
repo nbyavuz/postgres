@@ -22,6 +22,7 @@
 #include "storage/aio.h"
 #include "storage/condition_variable.h"
 #include "storage/lwlock.h"
+#include "lib/ilist.h"
 
 #ifdef USE_LIBURING
 #include <liburing.h>		/* for struct io_uring */

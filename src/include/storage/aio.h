@@ -15,7 +15,6 @@
 #define AIO_H
 
 #include "common/relpath.h"
-#include "lib/ilist.h"
 #include "storage/block.h"
 #include "storage/buf.h"
 #include "storage/relfilenode.h"
