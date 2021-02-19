@@ -90,7 +90,7 @@ static int aio_local_callback_depth = 0;
 const struct config_enum_entry io_method_options[] = {
 	{"worker", IOMETHOD_WORKER, false},
 #ifdef USE_LIBURING
-	{"io_uring", IOMETHOD_LIBURING, false},
+	{"io_uring", IOMETHOD_IO_URING, false},
 #endif
 #ifdef USE_POSIX_AIO
 	{"posix", IOMETHOD_POSIX, false},
@@ -243,7 +243,7 @@ AioShmemInit(void)
 		if (io_method == IOMETHOD_WORKER)
 			AioWorkerShmemInit();
 #ifdef USE_LIBURING
-		else if (io_method == IOMETHOD_LIBURING)
+		else if (io_method == IOMETHOD_IO_URING)
 			AioUringShmemInit();
 #endif
 #ifdef USE_POSIX_AIO
@@ -268,7 +268,7 @@ pgaio_postmaster_child_init_local(void)
 	if (io_method == IOMETHOD_WORKER)
 		;
 #ifdef USE_LIBURING
-	else if (io_method == IOMETHOD_LIBURING)
+	else if (io_method == IOMETHOD_IO_URING)
 		pgaio_uring_postmaster_child_init_local();
 #endif
 #ifdef USE_POSIX_AIO
@@ -337,7 +337,7 @@ pgaio_postmaster_child_init(void)
 	Assert(!my_aio);
 
 #ifdef USE_LIBURING
-	if (io_method == IOMETHOD_LIBURING)
+	if (io_method == IOMETHOD_IO_URING)
 	{
 		/* no locking needed here, only affects this process */
 		for (int i = 0; i < aio_ctl->num_contexts; i++)
@@ -769,7 +769,7 @@ pgaio_drain(PgAioContext *context, bool block, bool call_shared, bool call_local
 		 */
 	}
 #ifdef USE_LIBURING
-	else if (io_method == IOMETHOD_LIBURING)
+	else if (io_method == IOMETHOD_IO_URING)
 		ndrained = pgaio_uring_drain(context, block, call_shared);
 #endif
 #ifdef USE_POSIX_AIO
@@ -917,7 +917,7 @@ pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, boo
 		else if (io_method == IOMETHOD_WORKER)
 			did_submit = pgaio_worker_submit(max_submit, drain);
 #ifdef USE_LIBURING
-		else if (io_method == IOMETHOD_LIBURING)
+		else if (io_method == IOMETHOD_IO_URING)
 			did_submit = pgaio_uring_submit(max_submit, drain);
 #endif
 #ifdef USE_POSIX_AIO
@@ -1234,7 +1234,7 @@ wait_ref_again:
 			if (io_method == IOMETHOD_WORKER)
 				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
 #ifdef USE_LIBURING
-			else if (io_method == IOMETHOD_LIBURING)
+			else if (io_method == IOMETHOD_IO_URING)
 				pgaio_uring_wait_one(&aio_ctl->contexts[io->ring], io, ref_generation,
 									 WAIT_EVENT_AIO_IO_COMPLETE_ANY);
 #endif
@@ -1602,7 +1602,7 @@ pgaio_io_retry_common(PgAioInProgress *io)
 	if (io_method == IOMETHOD_WORKER)
 		pgaio_worker_io_retry(io);
 #ifdef USE_LIBURING
-	else if (io_method == IOMETHOD_LIBURING)
+	else if (io_method == IOMETHOD_IO_URING)
 		pgaio_uring_io_retry(io);
 #endif
 #ifdef USE_POSIX_AIO

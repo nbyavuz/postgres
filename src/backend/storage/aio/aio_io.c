@@ -113,7 +113,7 @@ pgaio_can_scatter_gather(void)
 		return true;
 	}
 #ifdef USE_LIBURING
-	if (io_method == IOMETHOD_LIBURING)
+	if (io_method == IOMETHOD_IO_URING)
 		return true;
 #endif
 #if defined(HAVE_AIO_READV) && defined(HAVE_AIO_WRITEV)
