@@ -82,6 +82,7 @@ static int pgaio_synchronous_submit(void);
 static void pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local);
 static void pgaio_io_retry_soft_failed(PgAioInProgress *io, uint64 ref_generation);
 static void pgaio_wait_for_issued_internal(int n, int fd);
+static inline PgAioInProgress *pgaio_io_from_ref(PgAioIoRef *ref, uint64 *ref_generation);
 
 /* printing functions */
 static const char *pgaio_io_shared_callback_string(PgAioSharedCallback a);
@@ -1742,13 +1743,7 @@ pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local)
 		done_flags |= PGAIOIP_REAPED;
 	}
 
-	Assert(ref->aio_index < max_aio_in_progress);
-
-	io = &aio_ctl->in_progress_io[ref->aio_index];
-	ref_generation = ((uint64) ref->generation_upper) << 32 |
-		ref->generation_lower;
-
-	Assert(ref_generation != 0);
+	io = pgaio_io_from_ref(ref, &ref_generation);
 
 	am_owner = io->owner_id == my_aio_id;
 	flags = io->flags;
@@ -1901,13 +1896,8 @@ pgaio_io_check_ref(PgAioIoRef *ref)
 	PgAioIPFlags flags;
 	PgAioContext *context;
 
-	Assert(ref->aio_index < max_aio_in_progress);
+	io = pgaio_io_from_ref(ref, &ref_generation);
 
-	io = &aio_ctl->in_progress_io[ref->aio_index];
-	ref_generation = ((uint64) ref->generation_upper) << 32 |
-		ref->generation_lower;
-
-	Assert(ref_generation != 0);
 
 	flags = io->flags;
 	pg_read_barrier();
@@ -2124,6 +2114,22 @@ pgaio_io_ref(PgAioInProgress *io, PgAioIoRef *ref)
 {
 	Assert(io->user_referenced);
 	pgaio_io_ref_internal(io, ref);
+}
+
+static inline PgAioInProgress *
+pgaio_io_from_ref(PgAioIoRef *ref, uint64 *ref_generation)
+{
+	PgAioInProgress *io;
+
+	Assert(ref->aio_index < max_aio_in_progress);
+
+	io = &aio_ctl->in_progress_io[ref->aio_index];
+	*ref_generation = ((uint64) ref->generation_upper) << 32 |
+		ref->generation_lower;
+
+	Assert(*ref_generation != 0);
+
+	return io;
 }
 
 /*
