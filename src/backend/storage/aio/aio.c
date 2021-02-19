@@ -2351,6 +2351,11 @@ pgaio_io_recycle(PgAioInProgress *io)
 	io->on_completion_local = NULL;
 }
 
+/*
+ * Prepare idle IO to be initialized with an IO operation. After this either
+ * pgaio_io_unprepare() has to be called (if the IO actually couldn't be
+ * submitted), or the IO has to be staged with pgaio_io_stage().
+ */
 static void pg_noinline
 pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
 {
@@ -2384,6 +2389,19 @@ pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
 	WRITE_ONCE_F(io->flags) = PGAIOIP_PREP;
 }
 
+static void
+pgaio_io_unprepare(PgAioInProgress *io, PgAioOp op)
+{
+	Assert(io->op == op);
+	Assert(io->owner_id == my_aio_id);
+	Assert(io->flags == PGAIOIP_PREP);
+	Assert(io->system_referenced);
+
+	io->op = PGAIO_OP_INVALID;
+	io->system_referenced = false;
+
+	WRITE_ONCE_F(io->flags) = PGAIOIP_IDLE;
+}
 
 static void pg_noinline
 pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb)
@@ -3070,15 +3088,7 @@ pgaio_io_start_flush_range_smgr(PgAioInProgress *io, struct SMgrRelationData* sm
 	}
 	else
 	{
-		Assert(io->op == PGAIO_OP_FLUSH_RANGE);
-		Assert(io->owner_id == my_aio_id);
-		Assert(io->flags == PGAIOIP_PREP);
-		Assert(io->system_referenced);
-
-		io->op = PGAIO_OP_INVALID;
-		io->system_referenced = false;
-
-		WRITE_ONCE_F(io->flags) = PGAIOIP_IDLE;
+		pgaio_io_unprepare(io, PGAIO_OP_FLUSH_RANGE);
 	}
 
 	return ret;
