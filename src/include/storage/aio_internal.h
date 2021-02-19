@@ -523,6 +523,28 @@ extern void pgaio_do_synchronously(PgAioInProgress *io);
 extern void pgaio_complete_ios(bool in_error);
 extern void pgaio_broadcast_ios(PgAioInProgress **ios, int nios);
 
+/*
+ * Check if an IO has been recycled IO as indicated by ref_generation. Updates
+ * *flags to the current flags.
+ */
+static inline bool
+pgaio_io_recycled(PgAioInProgress *io, uint64 ref_generation, PgAioIPFlags *flags)
+{
+	/*
+	 * Load the current flags before a the generation check. Combined with
+	 * write barriers when increasing the generation that ensures that we'll
+	 * detect the cases where we read the flags for an IO
+	 */
+	*flags = io->flags;
+
+	pg_read_barrier();
+
+	if (io->generation != ref_generation)
+		return true;
+
+	return false;
+}
+
 /* Declarations for functions in aio_worker.c that are visible to aio.c. */
 extern Size AioWorkerShmemSize(void);
 extern void AioWorkerShmemInit(void);

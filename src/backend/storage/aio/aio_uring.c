@@ -351,21 +351,16 @@ pgaio_uring_completion_check_wait(LWLock *lock, LWLockMode mode, uint64_t cb_dat
 	}
 	else
 	{
-		PgAioUringWaitRef *wr = (PgAioUringWaitRef*) cb_data;
 		PgAioIPFlags flags;
 
-		flags = wr->aio->flags;
-
-		pg_read_barrier();
-
-		if (wr->ref_generation == wr->aio->generation &&
-			(flags & PGAIOIP_INFLIGHT))
+		if (pgaio_io_recycled(wr->aio, wr->aio->generation, &flags) ||
+			!(flags & PGAIOIP_INFLIGHT))
 		{
-			return LW_WAIT_NEEDS_LOCK;
+			return LW_WAIT_DONE;
 		}
 		else
 		{
-			return LW_WAIT_DONE;
+			return LW_WAIT_NEEDS_LOCK;
 		}
 	}
 }
@@ -381,18 +376,14 @@ pgaio_uring_completion_check_wake(LWLock *lock, LWLockMode mode, struct PGPROC *
 	{
 		PgAioIPFlags flags;
 
-		flags = wr->aio->flags;
-
-		pg_read_barrier();
-
-		if (wr->ref_generation == wr->aio->generation &&
-			(flags & PGAIOIP_INFLIGHT))
+		if (pgaio_io_recycled(wr->aio, wr->aio->generation, &flags) ||
+			!(flags & PGAIOIP_INFLIGHT))
 		{
-			return LW_WAIT_NEEDS_LOCK;
+			return LW_WAIT_DONE;
 		}
 		else
 		{
-			return LW_WAIT_DONE;
+			return LW_WAIT_NEEDS_LOCK;
 		}
 	}
 }
@@ -475,12 +466,8 @@ uring_wait_one_again:
 				errhidestmt(true),
 				errhidecontext(true));
 
-		flags = io->flags;
-
-		pg_read_barrier();
-
 		if (!io_uring_cq_ready(&context->io_uring_ring) &&
-			io->generation == ref_generation &&
+			!pgaio_io_recycled(io, ref_generation, &flags) &&
 			(flags & PGAIOIP_INFLIGHT))
 		{
 			int ret;
@@ -579,9 +566,7 @@ uring_wait_one_again:
 	 * IOs, or didn't get the lock), try again. We could return to
 	 * pgaio_io_wait_ref_int(), but it's a bit more efficient to loop here.
 	 */
-	flags = io->flags;
-	pg_read_barrier();
-	if (io->generation == ref_generation &&
+	if (!pgaio_io_recycled(io, ref_generation, &flags) &&
 		(flags & PGAIOIP_INFLIGHT))
 	{
 		loops++;

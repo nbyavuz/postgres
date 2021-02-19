@@ -651,6 +651,10 @@ pgaio_posix_io_retry(PgAioInProgress *io)
 	/* Close race with pgaio_posix_wait_one(). */
 	if (io->submitter_id != my_aio_id)
 	{
+		/*
+		 * AFIXME: this is broken, if somebody waits for the IO it'll signal
+		 * being done!
+		 */
 		io->generation++;
 		pg_write_barrier();
 		SetLatch(&ProcGlobal->allProcs[io->submitter_id].procLatch);
@@ -693,15 +697,15 @@ pgaio_posix_wait_one(PgAioInProgress *io, uint64 ref_generation)
 
 	for (;;)
 	{
+		PgAioIPFlags flags;
+
 		pgaio_drain(0,
 					/* block = */ false,
 					/* call_shared = */ true,
 					/* call local = */ false);
-		/* XXX fix the generation check */
-		if (!(io->flags & PGAIOIP_INFLIGHT))
-			break;
-		pg_read_barrier();
-		if (io->generation != ref_generation)
+
+		if (pgaio_io_recycled(io, ref_generation, &flags) ||
+			!(flags & PGAIOIP_INFLIGHT))
 			break;
 
 		if (submitted_by_me)

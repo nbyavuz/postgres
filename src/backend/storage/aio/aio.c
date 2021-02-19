@@ -1746,10 +1746,8 @@ pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local)
 	io = pgaio_io_from_ref(ref, &ref_generation);
 
 	am_owner = io->owner_id == my_aio_id;
-	flags = io->flags;
-	pg_read_barrier();
 
-	if (io->generation != ref_generation)
+	if (pgaio_io_recycled(io, ref_generation, &flags))
 		return;
 
 	if (am_owner && (flags & PGAIOIP_PENDING))
@@ -1767,10 +1765,7 @@ wait_ref_again:
 
 	while (true)
 	{
-		flags = io->flags;
-		pg_read_barrier();
-
-		if (io->generation != ref_generation)
+		if (pgaio_io_recycled(io, ref_generation, &flags))
 			return;
 
 		if (flags & done_flags)
@@ -1784,10 +1779,7 @@ wait_ref_again:
 						/* block = */ false,
 						call_shared, call_local);
 
-			flags = io->flags;
-			pg_read_barrier();
-
-			if (io->generation != ref_generation)
+			if (pgaio_io_recycled(io, ref_generation, &flags))
 				return;
 
 			if (flags & done_flags)
@@ -1834,9 +1826,8 @@ wait_ref_again:
 			if (IsUnderPostmaster)
 				ConditionVariablePrepareToSleep(&io->cv);
 
-			flags = io->flags;
-			pg_read_barrier();
-			if (io->generation == ref_generation && !(flags & done_flags))
+			if (!pgaio_io_recycled(io, ref_generation, &flags) &&
+				!(flags & done_flags))
 				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
 
 			if (IsUnderPostmaster)
@@ -1846,9 +1837,7 @@ wait_ref_again:
 
 wait_ref_out:
 
-	flags = io->flags;
-	pg_read_barrier();
-	if (io->generation != ref_generation)
+	if (pgaio_io_recycled(io, ref_generation, &flags))
 		return;
 
 	/*
@@ -1898,11 +1887,7 @@ pgaio_io_check_ref(PgAioIoRef *ref)
 
 	io = pgaio_io_from_ref(ref, &ref_generation);
 
-
-	flags = io->flags;
-	pg_read_barrier();
-
-	if (io->generation != ref_generation)
+	if (pgaio_io_recycled(io, ref_generation, &flags))
 		return true;
 
 	if (flags & PGAIOIP_PENDING)
@@ -1917,7 +1902,8 @@ pgaio_io_check_ref(PgAioIoRef *ref)
 	context = &aio_ctl->contexts[io->ring];
 	Assert(!(flags & (PGAIOIP_UNUSED)));
 
-	if (io->generation != ref_generation)
+	/* recheck after determining the current context */
+	if (pgaio_io_recycled(io, ref_generation, &flags))
 		return true;
 
 	if (flags & PGAIOIP_INFLIGHT)
@@ -1926,10 +1912,7 @@ pgaio_io_check_ref(PgAioIoRef *ref)
 					/* call_shared = */ true,
 					/* call_local = */ false);
 
-	flags = io->flags;
-	pg_read_barrier();
-
-	if (io->generation != ref_generation)
+	if (pgaio_io_recycled(io, ref_generation, &flags))
 		return true;
 
 	if (flags & (PGAIOIP_SOFT_FAILURE | PGAIOIP_RETRY))
@@ -2095,7 +2078,7 @@ pgaio_io_id(PgAioInProgress *io)
 uint64
 pgaio_io_generation(PgAioInProgress *io)
 {
-			return io->generation;
+	return io->generation;
 }
 
 static void
@@ -2210,15 +2193,9 @@ pgaio_io_retry_soft_failed(PgAioInProgress *io, uint64 ref_generation)
 	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
 
 	/* could concurrently have been unset / retried */
-	flags = io->flags;
-
-	if (io->generation != ref_generation)
-	{
-		need_retry = false;
-	}
-	else if (
+	if (!pgaio_io_recycled(io, ref_generation, &flags) &&
 		(flags & PGAIOIP_DONE) &&
-		flags & (PGAIOIP_HARD_FAILURE | PGAIOIP_SOFT_FAILURE))
+		(flags & (PGAIOIP_HARD_FAILURE | PGAIOIP_SOFT_FAILURE)))
 	{
 		Assert(!(io->flags & PGAIOIP_FOREIGN_DONE));
 		Assert(!(io->flags & PGAIOIP_HARD_FAILURE));
@@ -3797,25 +3774,29 @@ pg_stat_get_aios(PG_FUNCTION_ARGS)
 		Datum		values[PG_STAT_GET_AIOS_COLS];
 		bool		nulls[PG_STAT_GET_AIOS_COLS];
 		uint64 ref_generation;
-		PgAioInProgressFlags flags;
+		PgAioIPFlags flags;
 
+		/* first check if IO is in use */
 		flags = raw_io->flags;
 		if (flags & PGAIOIP_UNUSED)
 			continue;
 
+		/*
+		 * Fetch the generation from before we copy the IO to local memory. By
+		 * re-checking if still the same generation after the copy, we can
+		 * ensure the IO hasn't been recycled while copying.
+		 */
 		ref_generation = raw_io->generation;
-
 		pg_read_barrier();
+
+		/*
+		 * Copy IO to local memory - makes it easier to deal with possibility
+		 * of concurrent changes to the IO.
+		 */
 		io_copy = *raw_io;
-		pg_read_barrier();
 
-		flags = raw_io->flags;
-		pg_read_barrier();
-
-		if (raw_io->generation != ref_generation)
-			continue;
-
-		if (flags & PGAIOIP_UNUSED)
+		if (pgaio_io_recycled(raw_io, ref_generation, &flags) ||
+			flags & PGAIOIP_UNUSED)
 			continue;
 
 		memset(nulls, 0, sizeof(nulls));
