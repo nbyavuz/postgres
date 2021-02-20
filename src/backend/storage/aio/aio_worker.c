@@ -22,23 +22,25 @@
  *
  *-------------------------------------------------------------------------
  */
+
 #include "postgres.h"
 
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/interrupt.h"
-#include "storage/aio.h"
 #include "storage/aio_internal.h"
 #include "storage/condition_variable.h"
 #include "storage/shmem.h"
 #include "tcop/tcopprot.h"
+
 
 /* GUCs */
 int io_worker_queue_size;
 int io_workers;
 
 int MyIoWorkerId;
+
 
 Size
 AioWorkerShmemSize(void)

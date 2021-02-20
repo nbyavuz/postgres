@@ -1,8 +1,8 @@
 #include "postgres.h"
 
-#include "storage/aio.h"
 #include "storage/aio_internal.h"
 #include "miscadmin.h"
+
 
 /* typedef is in header */
 typedef struct PgStreamingWriteItem
@@ -50,7 +50,9 @@ struct pg_streaming_write
 	PgStreamingWriteItem all_items[FLEXIBLE_ARRAY_MEMBER];
 };
 
+
 static void pg_streaming_write_complete(PgAioOnCompletionLocalContext *ocb, PgAioInProgress *io);
+
 
 pg_streaming_write*
 pg_streaming_write_alloc(uint32 iodepth, void *private_data)

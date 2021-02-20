@@ -16,13 +16,13 @@
 #ifndef AIO_INTERNAL_H
 #define AIO_INTERNAL_H
 
+#include "lib/ilist.h"
 #include "lib/squeue32.h"
 #include "port/atomics.h"
 #include "port/pg_iovec.h"
 #include "storage/aio.h"
 #include "storage/condition_variable.h"
 #include "storage/lwlock.h"
-#include "lib/ilist.h"
 
 #ifdef USE_LIBURING
 #include <liburing.h>		/* for struct io_uring */
@@ -31,6 +31,7 @@
 #ifdef USE_POSIX_AIO
 #include <aio.h>			/* for struct aiocb */
 #endif
+
 
 /*
  * FIXME: This is just so large because merging happens when submitting
@@ -42,8 +43,12 @@
 
 #define PGAIO_NUM_CONTEXTS 8
 
+
 /*
  * The type of AIO.
+ *
+ * PgAioOp specific behaviour should be implemented in aio_io.c.
+ *
  *
  * To keep PgAioInProgress smaller try to tell the compiler to only use the
  * minimal space. We could alternatively just use a uint8, but then we'd need
@@ -64,6 +69,11 @@ typedef enum pg_attribute_packed_desired() PgAioOp
 	PGAIO_OP_NOP,
 } PgAioOp;
 
+/*
+ * The type of shared callback used for an AIO.
+ *
+ * PgAioSharedCallback specific behaviour should be implemented in aio_scb.c.
+ */
 typedef enum pg_attribute_packed_desired() PgAioSharedCallback
 {
 	/* intentionally the zero value, to help catch zeroed memory etc */
@@ -86,7 +96,6 @@ typedef enum pg_attribute_packed_desired() PgAioSharedCallback
 	PGAIO_SCB_NOP,
 } PgAioSharedCallback;
 
-
 typedef enum PgAioInProgressFlags
 {
 	/* request in the ->unused list */
@@ -95,6 +104,10 @@ typedef enum PgAioInProgressFlags
 	/*  */
 	PGAIOIP_IDLE = 1 << 1,
 
+	/*
+	 * pgaio_io_prepare() was called, but not yet pgaio_io_stage()
+	 * /pgaio_io_unprepare().
+	 */
 	PGAIOIP_PREP = 1 << 2,
 
 	/*  */
@@ -103,7 +116,7 @@ typedef enum PgAioInProgressFlags
 	/* somewhere */
 	PGAIOIP_PENDING = 1 << 4,
 
-	/* request in kernel */
+	/* request in kernel / io-method */
 	PGAIOIP_INFLIGHT = 1 << 5,
 
 	/* request reaped */
@@ -507,12 +520,15 @@ typedef struct PgAioCtl
 	PgAioInProgress in_progress_io[FLEXIBLE_ARRAY_MEMBER];
 } PgAioCtl;
 
+
 /* global list of in-progress IO */
 extern PgAioCtl *aio_ctl;
 
 /* current backend's per-backend state */
 extern PgAioPerBackend *my_aio;
 extern int my_aio_id;
+
+
 
 /* Declarations for functions in aio.c that are visible to aio_XXX.c. */
 extern void pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring);
@@ -523,6 +539,7 @@ extern void pgaio_io_prepare(PgAioInProgress *io, PgAioOp op);
 extern void pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb);
 extern void pgaio_io_unprepare(PgAioInProgress *io, PgAioOp op);
 extern void pgaio_io_flag_string(PgAioIPFlags flags, struct StringInfoData *s);
+static inline bool pgaio_io_recycled(PgAioInProgress *io, uint64 ref_generation, PgAioIPFlags *flags);
 
 /* Declarations for aio_io.c */
 extern void pgaio_combine_pending(void);
@@ -540,28 +557,6 @@ extern void pgaio_io_call_shared_desc(PgAioInProgress *io, struct StringInfoData
 extern bool pgaio_io_has_shared_open(PgAioInProgress *io);
 extern PgAioOp pgaio_shared_callback_op(PgAioSharedCallback scb);
 extern const char * pgaio_io_shared_callback_string(PgAioSharedCallback a);
-
-/*
- * Check if an IO has been recycled IO as indicated by ref_generation. Updates
- * *flags to the current flags.
- */
-static inline bool
-pgaio_io_recycled(PgAioInProgress *io, uint64 ref_generation, PgAioIPFlags *flags)
-{
-	/*
-	 * Load the current flags before a the generation check. Combined with
-	 * write barriers when increasing the generation that ensures that we'll
-	 * detect the cases where we read the flags for an IO
-	 */
-	*flags = io->flags;
-
-	pg_read_barrier();
-
-	if (io->generation != ref_generation)
-		return true;
-
-	return false;
-}
 
 /* Declarations for functions in aio_worker.c that are visible to aio.c. */
 extern Size AioWorkerShmemSize(void);
@@ -591,5 +586,28 @@ extern void pgaio_posix_io_retry(PgAioInProgress *io);
 extern int pgaio_posix_drain(PgAioContext *context);
 
 #endif
+
+
+/*
+ * Check if an IO has been recycled IO as indicated by ref_generation. Updates
+ * *flags to the current flags.
+ */
+static inline bool
+pgaio_io_recycled(PgAioInProgress *io, uint64 ref_generation, PgAioIPFlags *flags)
+{
+	/*
+	 * Load the current flags before a the generation check. Combined with
+	 * write barriers when increasing the generation that ensures that we'll
+	 * detect the cases where we read the flags for an IO
+	 */
+	*flags = io->flags;
+
+	pg_read_barrier();
+
+	if (io->generation != ref_generation)
+		return true;
+
+	return false;
+}
 
 #endif

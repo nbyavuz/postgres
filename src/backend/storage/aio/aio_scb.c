@@ -14,14 +14,46 @@
 
 #include "postgres.h"
 
-#include "storage/aio.h"
-#include "storage/aio_internal.h"
-#include "lib/stringinfo.h"
-#include "storage/smgr.h"
 #include "access/xlog_internal.h"
+#include "lib/stringinfo.h"
+#include "storage/aio_internal.h"
 #include "storage/buf.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
+#include "storage/smgr.h"
+
+
+/*
+ * Implementation of different AIO actions.
+ *
+ * To support EXEC_BACKEND environments, where we cannot rely on callback
+ * addresses being equivalent across processes, PgAioInProgress does not point
+ * directly to the type's PgAioActionCBs, but contains an index instead.
+ */
+
+/*
+ * IO completion callback.
+ */
+typedef bool (*PgAioCompletedCB)(PgAioInProgress *io);
+
+/*
+ * IO retry/reopen callback.
+ */
+typedef void (*PgAioRetryCB)(PgAioInProgress *io);
+
+/*
+ * IO desc callback.
+ */
+typedef void (*PgAioDescCB)(PgAioInProgress *io, StringInfo s);
+
+typedef struct PgAioActionCBs
+{
+	PgAioOp op;
+	const char *name;
+	PgAioRetryCB retry;
+	PgAioCompletedCB complete;
+	PgAioDescCB desc;
+} PgAioActionCBs;
 
 
 /* IO callback implementation  */
@@ -64,38 +96,6 @@ static void pgaio_write_wal_desc(PgAioInProgress *io, StringInfo s);
 static bool pgaio_write_raw_complete(PgAioInProgress *io);
 static void pgaio_write_raw_desc(PgAioInProgress *io, StringInfo s);
 
-
-/*
- * Implementation of different AIO actions.
- *
- * To support EXEC_BACKEND environments, where we cannot rely on callback
- * addresses being equivalent across processes, PgAioInProgress does not point
- * directly to the type's PgAioActionCBs, but contains an index instead.
- */
-
-/*
- * IO completion callback.
- */
-typedef bool (*PgAioCompletedCB)(PgAioInProgress *io);
-
-/*
- * IO retry/reopen callback.
- */
-typedef void (*PgAioRetryCB)(PgAioInProgress *io);
-
-/*
- * IO desc callback.
- */
-typedef void (*PgAioDescCB)(PgAioInProgress *io, StringInfo s);
-
-typedef struct PgAioActionCBs
-{
-	PgAioOp op;
-	const char *name;
-	PgAioRetryCB retry;
-	PgAioCompletedCB complete;
-	PgAioDescCB desc;
-} PgAioActionCBs;
 
 static const PgAioActionCBs io_action_cbs[] =
 {
@@ -282,7 +282,6 @@ pgaio_io_shared_callback_string(PgAioSharedCallback a)
 }
 
 
-
 /* --------------------------------------------------------------------------------
  * IO start routines (see PgAioSharedCallback for a list)
  * --------------------------------------------------------------------------------
@@ -454,7 +453,6 @@ pgaio_io_start_nop(PgAioInProgress *io)
 
 	pgaio_io_stage(io, PGAIO_SCB_NOP);
 }
-
 
 
 /* --------------------------------------------------------------------------------
@@ -723,7 +721,6 @@ pgaio_write_smgr_desc(PgAioInProgress *io, StringInfo s)
 					 io->op_data.write.already_done,
 					 io->op_data.write.bufdata);
 }
-
 
 static void
 pgaio_write_wal_retry(PgAioInProgress *io)

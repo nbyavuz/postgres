@@ -31,7 +31,6 @@
 
 #include "pgstat.h"
 #include "miscadmin.h"
-#include "storage/aio.h"
 #include "storage/aio_internal.h"
 #include "storage/latch.h"
 #include "storage/proc.h"

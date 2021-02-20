@@ -21,7 +21,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "storage/aio.h"
 #include "storage/aio_internal.h"
 #include "storage/fd.h"
 #include "pgstat.h"

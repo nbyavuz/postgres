@@ -22,28 +22,17 @@
  */
 #include "postgres.h"
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-
-#include "lib/ilist.h"
 #include "lib/squeue32.h"
 #include "lib/stringinfo.h"
-#include "libpq/pqsignal.h"
 #include "miscadmin.h"
-#include "nodes/execnodes.h"
 #include "nodes/memnodes.h"
 #include "pgstat.h"
-#include "port/pg_iovec.h"
-#include "storage/aio.h"
 #include "storage/aio_internal.h"
 #include "storage/condition_variable.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "storage/proc.h"
 #include "storage/shmem.h"
-#include "tcop/tcopprot.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/resowner_private.h"
