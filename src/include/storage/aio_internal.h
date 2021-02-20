@@ -522,6 +522,7 @@ extern void pgaio_broadcast_ios(PgAioInProgress **ios, int nios);
 extern void pgaio_io_prepare(PgAioInProgress *io, PgAioOp op);
 extern void pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb);
 extern void pgaio_io_unprepare(PgAioInProgress *io, PgAioOp op);
+extern void pgaio_io_flag_string(PgAioIPFlags flags, struct StringInfoData *s);
 
 /* Declarations for aio_io.c */
 extern void pgaio_combine_pending(void);

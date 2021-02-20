@@ -10,6 +10,7 @@ include $(top_builddir)/src/Makefile.global
 
 OBJS = \
 	aio.o \
+	aio_funcs.o \
 	aio_io.o \
 	aio_scb.o \
 	aio_util.o \
