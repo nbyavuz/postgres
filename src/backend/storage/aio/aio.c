@@ -48,7 +48,23 @@
 #include "utils/memutils.h"
 #include "utils/resowner_private.h"
 
+
 #define PGAIO_VERBOSE
+
+
+/* pgaio helper functions */
+static void pgaio_apply_backend_limit(void);
+static void pgaio_bounce_buffer_release_internal(PgAioBounceBuffer *bb, bool holding_lock, bool release_resowner);
+static void pgaio_io_ref_internal(PgAioInProgress *io, PgAioIoRef *ref);
+static void pgaio_transfer_foreign_to_local(void);
+static void pgaio_call_local_callbacks(bool in_error);
+static void pgaio_io_call_local_callback(PgAioInProgress *io, bool in_error);
+static int pgaio_synchronous_submit(void);
+static void pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local);
+static void pgaio_io_retry_soft_failed(PgAioInProgress *io, uint64 ref_generation);
+static void pgaio_wait_for_issued_internal(int n, int fd);
+static inline PgAioInProgress *pgaio_io_from_ref(PgAioIoRef *ref, uint64 *ref_generation);
+
 
 /* global list of in-progress IO */
 PgAioCtl *aio_ctl;
@@ -59,19 +75,6 @@ int my_aio_id;
 
 /* FIXME: move into PgAioPerBackend / subsume into ->reaped */
 static dlist_head local_recycle_requests;
-
-/* general pgaio helper functions */
-static void pgaio_apply_backend_limit(void);
-static void pgaio_bounce_buffer_release_internal(PgAioBounceBuffer *bb, bool holding_lock, bool release_resowner);
-static void pgaio_io_ref_internal(PgAioInProgress *io, PgAioIoRef *ref);
-static void pgaio_transfer_foreign_to_local(void);
-static void pgaio_call_local_callbacks(bool in_error);
-static int pgaio_synchronous_submit(void);
-static void pgaio_io_wait_ref_int(PgAioIoRef *ref, bool call_shared, bool call_local);
-static void pgaio_io_retry_soft_failed(PgAioInProgress *io, uint64 ref_generation);
-static void pgaio_wait_for_issued_internal(int n, int fd);
-static inline PgAioInProgress *pgaio_io_from_ref(PgAioIoRef *ref, uint64 *ref_generation);
-
 
 /* GUCs */
 int io_method;
@@ -93,6 +96,12 @@ const struct config_enum_entry io_method_options[] = {
 #endif
 	{NULL, 0, false}
 };
+
+
+/* --------------------------------------------------------------------------------
+ * Initialization and shared memory management.
+ * --------------------------------------------------------------------------------
+ */
 
 static Size
 AioCtlShmemSize(void)
@@ -372,6 +381,12 @@ pgaio_postmaster_child_init(void)
 	my_aio->wr.ref_generation = PG_UINT32_MAX;
 #endif
 }
+
+
+/* --------------------------------------------------------------------------------
+ * Functions dealing with more than IO.
+ * --------------------------------------------------------------------------------
+ */
 
 void
 pgaio_at_abort(void)
@@ -687,38 +702,6 @@ pgaio_broadcast_ios(PgAioInProgress **ios, int nios)
 	}
 }
 
-static void
-pgaio_io_call_local_callback(PgAioInProgress *io, bool in_error)
-{
-	Assert(!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED));
-	Assert(io->user_referenced);
-
-	Assert(my_aio->local_completed_count > 0);
-	dlist_delete_from(&my_aio->local_completed, &io->io_node);
-	Assert(my_aio->local_completed_count > 0);
-	my_aio->local_completed_count--;
-
-	dlist_delete_from(&my_aio->issued, &io->owner_node);
-	Assert(my_aio->issued_count > 0);
-	my_aio->issued_count--;
-	dlist_push_tail(&my_aio->outstanding, &io->owner_node);
-	my_aio->outstanding_count++;
-
-	io->flags |= PGAIOIP_LOCAL_CALLBACK_CALLED;
-
-	if (!io->on_completion_local)
-		return;
-
-	if (!in_error)
-	{
-		check_stack_depth();
-		aio_local_callback_depth++;
-		io->on_completion_local->callback(io->on_completion_local, io);
-		Assert(aio_local_callback_depth > 0);
-		aio_local_callback_depth--;
-	}
-}
-
 /*
  * Call all pending local callbacks.
  */
@@ -984,66 +967,22 @@ pgaio_closing_possibly_referenced(void)
 								  /* will_wait */ false);
 }
 
+/*
+ * Should be called before closing any fd that might have asynchronous I/O
+ * operations.  Since some POSIX AIO implementations cancel IOs (or worse,
+ * confuse files) when the fd is concurrently closed, we'll default to waiting
+ * for anything in flight on this fd to complete first, except on systems where
+ * we're sure that isn't necessary.
+ */
 void
-pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
+pgaio_closing_fd(int fd)
 {
-	PgAioInProgress *cur;
-
-	cur = io;
-
-	while (true)
-	{
-		Assert(cur->flags & PGAIOIP_PENDING);
-		Assert(!(cur->flags & PGAIOIP_PREP));
-		Assert(!(cur->flags & PGAIOIP_IDLE));
-		Assert(my_aio_id == cur->owner_id);
-
-		cur->ring = ring;
-
-		pg_write_barrier();
-
-		WRITE_ONCE_F(cur->flags) =
-			(cur->flags & ~PGAIOIP_PENDING) | PGAIOIP_INFLIGHT;
-
-		dlist_delete_from(&my_aio->pending, &cur->io_node);
-		my_aio->pending_count--;
-
-		if (cur->user_referenced)
-		{
-			Assert(my_aio->outstanding_count > 0);
-			dlist_delete_from(&my_aio->outstanding, &cur->owner_node);
-			my_aio->outstanding_count--;
-
-			dlist_push_tail(&my_aio->issued, &cur->owner_node);
-			my_aio->issued_count++;
-		}
-		else
-		{
-#ifdef PGAIO_VERBOSE
-			ereport(DEBUG4,
-					errmsg("putting aio %zu onto issued_abandoned during submit",
-						   cur - aio_ctl->in_progress_io),
-					errhidecontext(1),
-					errhidestmt(1));
+#ifdef USE_POSIX_AIO
+#if !defined(__freebsd__)
+	if (io_method == IOMETHOD_POSIX)
+		pgaio_wait_for_issued_internal(-1, fd);
 #endif
-
-			LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
-			dlist_push_tail(&my_aio->issued_abandoned, &cur->owner_node);
-			my_aio->issued_abandoned_count++;
-			LWLockRelease(SharedAIOCtlLock);
-		}
-
-		ereport(DEBUG5,
-				errmsg("readied %zu/%llu for submit",
-					   cur - aio_ctl->in_progress_io,
-					   (unsigned long long ) cur->generation),
-				errhidecontext(1),
-				errhidestmt(1));
-
-		if (cur->merge_with_idx == PGAIO_MERGE_INVALID)
-			break;
-		cur = &aio_ctl->in_progress_io[cur->merge_with_idx];
-	}
+#endif
 }
 
 static void
@@ -1143,6 +1082,581 @@ pgaio_apply_backend_limit(void)
 
 		current_inflight = pg_atomic_read_u32(&my_aio->inflight_count);
 	}
+}
+
+/*
+ * Workhorse routine to wait for all IOs issued by this process to complete.
+ * If n >= 0, then only wait for at most n IOs.  If fd is >= 0, then only wait
+ * for IOs on the given descriptor.
+ */
+static void
+pgaio_wait_for_issued_internal(int n, int fd)
+{
+	dlist_iter iter;
+
+	dlist_foreach(iter, &my_aio->issued)
+	{
+		PgAioInProgress *io = dlist_container(PgAioInProgress, owner_node, iter.cur);
+
+		if (io->flags & PGAIOIP_INFLIGHT &&
+			(fd < 0 || pgaio_io_matches_fd(io, fd)))
+		{
+			PgAioIoRef ref;
+
+			pgaio_io_ref_internal(io, &ref);
+			pgaio_io_print(io, NULL);
+			pgaio_io_wait_ref(&ref, false);
+			if (n > 0 && --n == 0)
+				return;
+		}
+	}
+
+	/* XXX explain dirty read of issued_abandoned */
+	while (!dlist_is_empty(&my_aio->issued_abandoned))
+	{
+		PgAioInProgress *io = NULL;
+		PgAioIoRef ref;
+
+		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
+		dlist_foreach(iter, &my_aio->issued_abandoned)
+		{
+			io = dlist_container(PgAioInProgress, owner_node, iter.cur);
+
+			if (io->flags & PGAIOIP_INFLIGHT &&
+				(fd < 0 || pgaio_io_matches_fd(io, fd)))
+			{
+				pgaio_io_ref_internal(io, &ref);
+				break;
+			}
+			else
+				io = NULL;
+		}
+		LWLockRelease(SharedAIOCtlLock);
+
+		if (!io)
+			break;
+
+		pgaio_io_print(io, NULL);
+		pgaio_io_wait_ref(&ref, false);
+		pgaio_complete_ios(false);
+		pgaio_transfer_foreign_to_local();
+		if (n > 0 && --n == 0)
+			return;
+	}
+}
+
+
+/* --------------------------------------------------------------------------------
+ * Functions primarily dealing with one IO.
+ * --------------------------------------------------------------------------------
+ */
+
+PgAioInProgress *
+pgaio_io_get(void)
+{
+	dlist_node *elem;
+	PgAioInProgress *io;
+
+	Assert(!LWLockHeldByMe(SharedAIOCtlLock));
+
+	// FIXME: relax?
+	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
+
+	/* FIXME: wait for an IO to complete if full */
+
+	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
+
+	while (unlikely(dlist_is_empty(&aio_ctl->unused_ios)))
+	{
+		LWLockRelease(SharedAIOCtlLock);
+		elog(WARNING, "needed to drain while getting IO (used %d inflight %d)",
+			 aio_ctl->used_count, pg_atomic_read_u32(&my_aio->inflight_count));
+
+		/*
+		 * FIXME: should we wait for IO instead?
+		 *
+		 * Also, need to protect against too many ios handed out but not used.
+		 */
+		for (int i = 0; i < aio_ctl->num_contexts; i++)
+			pgaio_drain(&aio_ctl->contexts[i],
+						/* block = */ true,
+						/* call_shared = */ true,
+						/* call_local = */ true);
+
+		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
+	}
+
+	elem = dlist_pop_head_node(&aio_ctl->unused_ios);
+	aio_ctl->used_count++;
+
+	LWLockRelease(SharedAIOCtlLock);
+
+	io = dlist_container(PgAioInProgress, owner_node, elem);
+
+#ifdef PGAIO_VERBOSE
+	ereport(DEBUG3, errmsg("acquired io %zu/%llu",
+						   io - aio_ctl->in_progress_io,
+						   (long long unsigned) io->generation),
+			errhidecontext(1),
+			errhidestmt(1));
+#endif
+
+	Assert(io->op == PGAIO_OP_INVALID);
+	Assert(io->scb == PGAIO_SCB_INVALID);
+	Assert(io->flags == PGAIOIP_UNUSED);
+	Assert(io->system_referenced);
+	Assert(io->on_completion_local == NULL);
+	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
+
+	io->user_referenced = true;
+	io->system_referenced = false;
+
+	WRITE_ONCE_F(io->flags) = PGAIOIP_IDLE;
+
+	io->owner_id = my_aio_id;
+
+	dlist_push_tail(&my_aio->outstanding, &io->owner_node);
+	my_aio->outstanding_count++;
+
+	return io;
+}
+
+void
+pgaio_io_release(PgAioInProgress *io)
+{
+	Assert(io->user_referenced);
+	Assert(io->owner_id == my_aio_id);
+
+	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
+
+	io->user_referenced = false;
+
+	if (io->flags & (PGAIOIP_IDLE |
+					 PGAIOIP_PREP |
+					 PGAIOIP_PENDING |
+					 PGAIOIP_LOCAL_CALLBACK_CALLED))
+	{
+		Assert(!(io->flags & PGAIOIP_INFLIGHT));
+
+		Assert(my_aio->outstanding_count > 0);
+		dlist_delete_from(&my_aio->outstanding, &io->owner_node);
+		my_aio->outstanding_count--;
+
+#ifdef PGAIO_VERBOSE
+		ereport(DEBUG4, errmsg("releasing plain user reference to %zu",
+							   io - aio_ctl->in_progress_io),
+				errhidecontext(1),
+				errhidestmt(1));
+#endif
+	}
+	else
+	{
+		dlist_delete_from(&my_aio->issued, &io->owner_node);
+		my_aio->issued_count--;
+
+		if (io->system_referenced)
+		{
+#ifdef PGAIO_VERBOSE
+			ereport(DEBUG4, errmsg("putting aio %zu onto issued_abandoned during release",
+								   io - aio_ctl->in_progress_io),
+					errhidecontext(1),
+					errhidestmt(1));
+#endif
+
+			dlist_push_tail(&my_aio->issued_abandoned, &io->owner_node);
+			my_aio->issued_abandoned_count++;
+		}
+		else
+		{
+			Assert(io->flags & (PGAIOIP_DONE | PGAIOIP_SHARED_CALLBACK_CALLED));
+
+#ifdef PGAIO_VERBOSE
+			ereport(DEBUG4, errmsg("not putting aio %zu onto issued_abandoned during release",
+								   io - aio_ctl->in_progress_io),
+					errhidecontext(1),
+					errhidestmt(1));
+#endif
+		}
+	}
+
+	if (!io->system_referenced)
+	{
+		Assert(!(io->flags & PGAIOIP_INFLIGHT));
+		Assert(io->flags & (PGAIOIP_IDLE |
+							PGAIOIP_PREP |
+							PGAIOIP_DONE));
+
+		if (io->flags & PGAIOIP_DONE)
+		{
+			if (io->flags & PGAIOIP_FOREIGN_DONE)
+			{
+				SpinLockAcquire(&my_aio->foreign_completed_lock);
+				Assert(io->flags & PGAIOIP_FOREIGN_DONE);
+				dlist_delete_from(&my_aio->foreign_completed, &io->io_node);
+				my_aio->foreign_completed_count--;
+				SpinLockRelease(&my_aio->foreign_completed_lock);
+			}
+			else if (!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED))
+			{
+				dlist_delete_from(&my_aio->local_completed, &io->io_node);
+				my_aio->local_completed_count--;
+				io->on_completion_local = NULL;
+			}
+
+		}
+
+		io->generation++;
+		pg_write_barrier();
+
+		io->flags = PGAIOIP_UNUSED;
+		io->op = PGAIO_OP_INVALID;
+		io->scb = PGAIO_SCB_INVALID;
+		io->owner_id = INVALID_PGPROCNO;
+		io->result = 0;
+		io->system_referenced = true;
+		io->on_completion_local = NULL;
+
+		Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
+
+		if (io->bb_idx != PGAIO_BB_INVALID)
+		{
+			pgaio_bounce_buffer_release_internal(&aio_ctl->bounce_buffers[io->bb_idx],
+												 /* holding_lock = */ true,
+												 /* release_resowner = */ false);
+			io->bb_idx = PGAIO_BB_INVALID;
+		}
+
+		dlist_push_head(&aio_ctl->unused_ios, &io->owner_node);
+		aio_ctl->used_count--;
+	}
+
+	LWLockRelease(SharedAIOCtlLock);
+}
+
+void
+pgaio_io_recycle(PgAioInProgress *io)
+{
+	Assert(io->flags & (PGAIOIP_IDLE | PGAIOIP_DONE));
+	Assert(io->user_referenced);
+	Assert(io->owner_id == my_aio_id);
+	Assert(!io->system_referenced);
+	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
+
+	if (io->bb_idx != PGAIO_BB_INVALID)
+	{
+		pgaio_bounce_buffer_release_internal(&aio_ctl->bounce_buffers[io->bb_idx],
+											 /* holding_lock = */ false,
+											 /* release_resowner = */ false);
+		io->bb_idx = PGAIO_BB_INVALID;
+	}
+
+	if (io->flags & PGAIOIP_DONE)
+	{
+		/* request needs to actually be done, including local callbacks */
+		Assert(!(io->flags & PGAIOIP_FOREIGN_DONE));
+		Assert(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED);
+
+		io->generation++;
+		pg_write_barrier();
+
+		io->flags &= ~PGAIOIP_DONE;
+		io->flags |= PGAIOIP_IDLE;
+
+		io->op = PGAIO_OP_INVALID;
+		io->scb = PGAIO_SCB_INVALID;
+	}
+
+	io->flags &= ~(PGAIOIP_SHARED_CALLBACK_CALLED |
+				   PGAIOIP_LOCAL_CALLBACK_CALLED |
+				   PGAIOIP_RETRY |
+				   PGAIOIP_HARD_FAILURE |
+				   PGAIOIP_SOFT_FAILURE);
+	Assert(io->flags == PGAIOIP_IDLE);
+	io->result = 0;
+	io->on_completion_local = NULL;
+}
+
+/*
+ * Prepare idle IO to be initialized with an IO operation. After this either
+ * pgaio_io_unprepare() has to be called (if the IO actually couldn't be
+ * submitted), or the IO has to be staged with pgaio_io_stage().
+ */
+void
+pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
+{
+	/* true for now, but not necessarily in the future */
+	Assert(io->flags == PGAIOIP_IDLE);
+	Assert(io->user_referenced);
+	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
+	Assert(io->op == PGAIO_OP_INVALID);
+	Assert(io->scb == PGAIO_SCB_INVALID);
+
+	if (my_aio->pending_count + 1 >= PGAIO_SUBMIT_BATCH_SIZE)
+	{
+#ifdef PGAIO_VERBOSE
+		ereport(DEBUG3,
+				errmsg("submitting during prep for %zu due to %u inflight",
+					   io - aio_ctl->in_progress_io,
+					   my_aio->pending_count),
+				errhidecontext(1),
+				errhidestmt(1));
+#endif
+		pgaio_submit_pending(false);
+	}
+
+	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
+
+	/* for this module */
+	io->system_referenced = true;
+	io->op = op;
+	Assert(io->owner_id == my_aio_id);
+
+	WRITE_ONCE_F(io->flags) = PGAIOIP_PREP;
+}
+
+void
+pgaio_io_unprepare(PgAioInProgress *io, PgAioOp op)
+{
+	Assert(io->op == op);
+	Assert(io->owner_id == my_aio_id);
+	Assert(io->flags == PGAIOIP_PREP);
+	Assert(io->system_referenced);
+
+	io->op = PGAIO_OP_INVALID;
+	io->system_referenced = false;
+
+	WRITE_ONCE_F(io->flags) = PGAIOIP_IDLE;
+}
+
+void
+pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb)
+{
+	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
+	Assert(io->flags == PGAIOIP_PREP);
+	Assert(io->user_referenced);
+	Assert(io->op != PGAIO_OP_INVALID);
+	Assert(io->scb == PGAIO_SCB_INVALID);
+	Assert(pgaio_shared_callback_op(scb) == io->op);
+
+	io->scb = scb;
+
+	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_PREP) | PGAIOIP_IN_PROGRESS | PGAIOIP_PENDING;
+	dlist_push_tail(&my_aio->pending, &io->io_node);
+	my_aio->pending_count++;
+
+#ifdef PGAIO_VERBOSE
+	if (message_level_is_interesting(DEBUG3))
+	{
+		MemoryContext oldcontext = MemoryContextSwitchTo(ErrorContext);
+		StringInfoData s;
+
+		/*
+		 * This code isn't ever allowed to error out, but the debugging
+		 * output is super useful...
+		 */
+		START_CRIT_SECTION();
+
+		initStringInfo(&s);
+
+		pgaio_io_print(io, &s);
+
+		ereport(DEBUG3,
+				errmsg("staged %s",
+					   s.data),
+				errhidestmt(true),
+				errhidecontext(true));
+		pfree(s.data);
+		MemoryContextSwitchTo(oldcontext);
+
+		END_CRIT_SECTION();
+	}
+#endif
+}
+
+void
+pgaio_io_prepare_submit(PgAioInProgress *io, uint32 ring)
+{
+	PgAioInProgress *cur;
+
+	cur = io;
+
+	while (true)
+	{
+		Assert(cur->flags & PGAIOIP_PENDING);
+		Assert(!(cur->flags & PGAIOIP_PREP));
+		Assert(!(cur->flags & PGAIOIP_IDLE));
+		Assert(my_aio_id == cur->owner_id);
+
+		cur->ring = ring;
+
+		pg_write_barrier();
+
+		WRITE_ONCE_F(cur->flags) =
+			(cur->flags & ~PGAIOIP_PENDING) | PGAIOIP_INFLIGHT;
+
+		dlist_delete_from(&my_aio->pending, &cur->io_node);
+		my_aio->pending_count--;
+
+		if (cur->user_referenced)
+		{
+			Assert(my_aio->outstanding_count > 0);
+			dlist_delete_from(&my_aio->outstanding, &cur->owner_node);
+			my_aio->outstanding_count--;
+
+			dlist_push_tail(&my_aio->issued, &cur->owner_node);
+			my_aio->issued_count++;
+		}
+		else
+		{
+#ifdef PGAIO_VERBOSE
+			ereport(DEBUG4,
+					errmsg("putting aio %zu onto issued_abandoned during submit",
+						   cur - aio_ctl->in_progress_io),
+					errhidecontext(1),
+					errhidestmt(1));
+#endif
+
+			LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
+			dlist_push_tail(&my_aio->issued_abandoned, &cur->owner_node);
+			my_aio->issued_abandoned_count++;
+			LWLockRelease(SharedAIOCtlLock);
+		}
+
+		ereport(DEBUG5,
+				errmsg("readied %zu/%llu for submit",
+					   cur - aio_ctl->in_progress_io,
+					   (unsigned long long ) cur->generation),
+				errhidecontext(1),
+				errhidestmt(1));
+
+		if (cur->merge_with_idx == PGAIO_MERGE_INVALID)
+			break;
+		cur = &aio_ctl->in_progress_io[cur->merge_with_idx];
+	}
+}
+
+bool
+pgaio_io_success(PgAioInProgress *io)
+{
+	Assert(io->user_referenced);
+	Assert(io->flags & PGAIOIP_DONE);
+
+	if (io->flags & (PGAIOIP_HARD_FAILURE | PGAIOIP_SOFT_FAILURE))
+		return false;
+
+	/* FIXME: is this possible? */
+	if (!(io->flags & PGAIOIP_SHARED_CALLBACK_CALLED))
+		return false;
+
+	return true;
+}
+
+int
+pgaio_io_result(PgAioInProgress *io)
+{
+	Assert(io->user_referenced);
+	Assert(io->flags & PGAIOIP_DONE);
+
+	/*
+	 * FIXME: This will currently not return correct information for partial
+	 * writes that were retried.
+	 */
+	return io->result;
+}
+
+bool
+pgaio_io_done(PgAioInProgress *io)
+{
+	Assert(io->user_referenced);
+	Assert(!(io->flags & PGAIOIP_UNUSED));
+
+	if (io->flags & PGAIOIP_SOFT_FAILURE)
+		return false;
+
+	if (io->flags & (PGAIOIP_IDLE | PGAIOIP_HARD_FAILURE))
+		return true;
+
+	if (io->flags & PGAIOIP_DONE)
+	{
+		if (io->owner_id == my_aio_id &&
+			!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED))
+			return false;
+		return true;
+	}
+
+	return false;
+}
+
+bool
+pgaio_io_pending(PgAioInProgress *io)
+{
+	Assert(io->user_referenced);
+	Assert(!(io->flags & PGAIOIP_UNUSED));
+
+	return io->flags & PGAIOIP_PENDING;
+}
+
+uint32
+pgaio_io_id(PgAioInProgress *io)
+{
+	return io - aio_ctl->in_progress_io;
+}
+
+uint64
+pgaio_io_generation(PgAioInProgress *io)
+{
+	return io->generation;
+}
+
+static void
+pgaio_io_ref_internal(PgAioInProgress *io, PgAioIoRef *ref)
+{
+	Assert(io->flags & (PGAIOIP_IDLE | PGAIOIP_PREP | PGAIOIP_IN_PROGRESS | PGAIOIP_DONE));
+
+	ref->aio_index = io - aio_ctl->in_progress_io;
+	ref->generation_upper = (uint32) (io->generation >> 32);
+	ref->generation_lower = (uint32) io->generation;
+	Assert(io->generation != 0);
+}
+
+void
+pgaio_io_ref(PgAioInProgress *io, PgAioIoRef *ref)
+{
+	Assert(io->user_referenced);
+	pgaio_io_ref_internal(io, ref);
+}
+
+static inline PgAioInProgress *
+pgaio_io_from_ref(PgAioIoRef *ref, uint64 *ref_generation)
+{
+	PgAioInProgress *io;
+
+	Assert(ref->aio_index < max_aio_in_progress);
+
+	io = &aio_ctl->in_progress_io[ref->aio_index];
+	*ref_generation = ((uint64) ref->generation_upper) << 32 |
+		ref->generation_lower;
+
+	Assert(*ref_generation != 0);
+
+	return io;
+}
+
+/*
+ * Register a completion callback that is executed locally in the backend that
+ * initiated the IO, even if the the completion of the IO has been reaped by
+ * another process (which executed the shared callback, unlocking buffers
+ * etc).  This is mainly useful for AIO using code to promptly react to
+ * individual IOs finishing, without having to individually check each of the
+ * IOs.
+ */
+void
+pgaio_io_on_completion_local(PgAioInProgress *io, PgAioOnCompletionLocalContext *ocb)
+{
+	Assert(io->flags & (PGAIOIP_IDLE | PGAIOIP_PENDING));
+	Assert(io->on_completion_local == NULL);
+
+	io->on_completion_local = ocb;
 }
 
 void
@@ -1365,198 +1879,36 @@ pgaio_io_wait(PgAioInProgress *io)
 	pgaio_io_wait_ref(&ref, /* call_local = */ true);
 }
 
-PgAioInProgress *
-pgaio_io_get(void)
+static void
+pgaio_io_call_local_callback(PgAioInProgress *io, bool in_error)
 {
-	dlist_node *elem;
-	PgAioInProgress *io;
+	Assert(!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED));
+	Assert(io->user_referenced);
 
-	Assert(!LWLockHeldByMe(SharedAIOCtlLock));
+	Assert(my_aio->local_completed_count > 0);
+	dlist_delete_from(&my_aio->local_completed, &io->io_node);
+	Assert(my_aio->local_completed_count > 0);
+	my_aio->local_completed_count--;
 
-	// FIXME: relax?
-	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
-
-	/* FIXME: wait for an IO to complete if full */
-
-	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
-
-	while (unlikely(dlist_is_empty(&aio_ctl->unused_ios)))
-	{
-		LWLockRelease(SharedAIOCtlLock);
-		elog(WARNING, "needed to drain while getting IO (used %d inflight %d)",
-			 aio_ctl->used_count, pg_atomic_read_u32(&my_aio->inflight_count));
-
-		/*
-		 * FIXME: should we wait for IO instead?
-		 *
-		 * Also, need to protect against too many ios handed out but not used.
-		 */
-		for (int i = 0; i < aio_ctl->num_contexts; i++)
-			pgaio_drain(&aio_ctl->contexts[i],
-						/* block = */ true,
-						/* call_shared = */ true,
-						/* call_local = */ true);
-
-		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
-	}
-
-	elem = dlist_pop_head_node(&aio_ctl->unused_ios);
-	aio_ctl->used_count++;
-
-	LWLockRelease(SharedAIOCtlLock);
-
-	io = dlist_container(PgAioInProgress, owner_node, elem);
-
-#ifdef PGAIO_VERBOSE
-	ereport(DEBUG3, errmsg("acquired io %zu/%llu",
-						   io - aio_ctl->in_progress_io,
-						   (long long unsigned) io->generation),
-			errhidecontext(1),
-			errhidestmt(1));
-#endif
-
-	Assert(io->op == PGAIO_OP_INVALID);
-	Assert(io->scb == PGAIO_SCB_INVALID);
-	Assert(io->flags == PGAIOIP_UNUSED);
-	Assert(io->system_referenced);
-	Assert(io->on_completion_local == NULL);
-	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
-
-	io->user_referenced = true;
-	io->system_referenced = false;
-
-	WRITE_ONCE_F(io->flags) = PGAIOIP_IDLE;
-
-	io->owner_id = my_aio_id;
-
+	dlist_delete_from(&my_aio->issued, &io->owner_node);
+	Assert(my_aio->issued_count > 0);
+	my_aio->issued_count--;
 	dlist_push_tail(&my_aio->outstanding, &io->owner_node);
 	my_aio->outstanding_count++;
 
-	return io;
-}
+	io->flags |= PGAIOIP_LOCAL_CALLBACK_CALLED;
 
-bool
-pgaio_io_success(PgAioInProgress *io)
-{
-	Assert(io->user_referenced);
-	Assert(io->flags & PGAIOIP_DONE);
+	if (!io->on_completion_local)
+		return;
 
-	if (io->flags & (PGAIOIP_HARD_FAILURE | PGAIOIP_SOFT_FAILURE))
-		return false;
-
-	/* FIXME: is this possible? */
-	if (!(io->flags & PGAIOIP_SHARED_CALLBACK_CALLED))
-		return false;
-
-	return true;
-}
-
-int
-pgaio_io_result(PgAioInProgress *io)
-{
-	Assert(io->user_referenced);
-	Assert(io->flags & PGAIOIP_DONE);
-
-	/*
-	 * FIXME: This will currently not return correct information for partial
-	 * writes that were retried.
-	 */
-	return io->result;
-}
-
-bool
-pgaio_io_done(PgAioInProgress *io)
-{
-	Assert(io->user_referenced);
-	Assert(!(io->flags & PGAIOIP_UNUSED));
-
-	if (io->flags & PGAIOIP_SOFT_FAILURE)
-		return false;
-
-	if (io->flags & (PGAIOIP_IDLE | PGAIOIP_HARD_FAILURE))
-		return true;
-
-	if (io->flags & PGAIOIP_DONE)
+	if (!in_error)
 	{
-		if (io->owner_id == my_aio_id &&
-			!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED))
-			return false;
-		return true;
+		check_stack_depth();
+		aio_local_callback_depth++;
+		io->on_completion_local->callback(io->on_completion_local, io);
+		Assert(aio_local_callback_depth > 0);
+		aio_local_callback_depth--;
 	}
-
-	return false;
-}
-
-bool
-pgaio_io_pending(PgAioInProgress *io)
-{
-	Assert(io->user_referenced);
-	Assert(!(io->flags & PGAIOIP_UNUSED));
-
-	return io->flags & PGAIOIP_PENDING;
-}
-
-uint32
-pgaio_io_id(PgAioInProgress *io)
-{
-	return io - aio_ctl->in_progress_io;
-}
-
-uint64
-pgaio_io_generation(PgAioInProgress *io)
-{
-	return io->generation;
-}
-
-static void
-pgaio_io_ref_internal(PgAioInProgress *io, PgAioIoRef *ref)
-{
-	Assert(io->flags & (PGAIOIP_IDLE | PGAIOIP_PREP | PGAIOIP_IN_PROGRESS | PGAIOIP_DONE));
-
-	ref->aio_index = io - aio_ctl->in_progress_io;
-	ref->generation_upper = (uint32) (io->generation >> 32);
-	ref->generation_lower = (uint32) io->generation;
-	Assert(io->generation != 0);
-}
-
-void
-pgaio_io_ref(PgAioInProgress *io, PgAioIoRef *ref)
-{
-	Assert(io->user_referenced);
-	pgaio_io_ref_internal(io, ref);
-}
-
-static inline PgAioInProgress *
-pgaio_io_from_ref(PgAioIoRef *ref, uint64 *ref_generation)
-{
-	PgAioInProgress *io;
-
-	Assert(ref->aio_index < max_aio_in_progress);
-
-	io = &aio_ctl->in_progress_io[ref->aio_index];
-	*ref_generation = ((uint64) ref->generation_upper) << 32 |
-		ref->generation_lower;
-
-	Assert(*ref_generation != 0);
-
-	return io;
-}
-
-/*
- * Register a completion callback that is executed locally in the backend that
- * initiated the IO, even if the the completion of the IO has been reaped by
- * another process (which executed the shared callback, unlocking buffers
- * etc).  This is mainly useful for AIO using code to promptly react to
- * individual IOs finishing, without having to individually check each of the
- * IOs.
- */
-void
-pgaio_io_on_completion_local(PgAioInProgress *io, PgAioOnCompletionLocalContext *ocb)
-{
-	Assert(io->flags & (PGAIOIP_IDLE | PGAIOIP_PENDING));
-	Assert(io->on_completion_local == NULL);
-
-	io->on_completion_local = ocb;
 }
 
 static void
@@ -1707,257 +2059,11 @@ pgaio_io_retry(PgAioInProgress *io)
 	pgaio_io_retry_common(io);
 }
 
-void
-pgaio_io_recycle(PgAioInProgress *io)
-{
-	Assert(io->flags & (PGAIOIP_IDLE | PGAIOIP_DONE));
-	Assert(io->user_referenced);
-	Assert(io->owner_id == my_aio_id);
-	Assert(!io->system_referenced);
-	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
 
-	if (io->bb_idx != PGAIO_BB_INVALID)
-	{
-		pgaio_bounce_buffer_release_internal(&aio_ctl->bounce_buffers[io->bb_idx],
-											 /* holding_lock = */ false,
-											 /* release_resowner = */ false);
-		io->bb_idx = PGAIO_BB_INVALID;
-	}
-
-	if (io->flags & PGAIOIP_DONE)
-	{
-		/* request needs to actually be done, including local callbacks */
-		Assert(!(io->flags & PGAIOIP_FOREIGN_DONE));
-		Assert(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED);
-
-		io->generation++;
-		pg_write_barrier();
-
-		io->flags &= ~PGAIOIP_DONE;
-		io->flags |= PGAIOIP_IDLE;
-
-		io->op = PGAIO_OP_INVALID;
-		io->scb = PGAIO_SCB_INVALID;
-	}
-
-	io->flags &= ~(PGAIOIP_SHARED_CALLBACK_CALLED |
-				   PGAIOIP_LOCAL_CALLBACK_CALLED |
-				   PGAIOIP_RETRY |
-				   PGAIOIP_HARD_FAILURE |
-				   PGAIOIP_SOFT_FAILURE);
-	Assert(io->flags == PGAIOIP_IDLE);
-	io->result = 0;
-	io->on_completion_local = NULL;
-}
-
-/*
- * Prepare idle IO to be initialized with an IO operation. After this either
- * pgaio_io_unprepare() has to be called (if the IO actually couldn't be
- * submitted), or the IO has to be staged with pgaio_io_stage().
+/* --------------------------------------------------------------------------------
+ * Printing / Debugging output related routines.
+ * --------------------------------------------------------------------------------
  */
-void
-pgaio_io_prepare(PgAioInProgress *io, PgAioOp op)
-{
-	/* true for now, but not necessarily in the future */
-	Assert(io->flags == PGAIOIP_IDLE);
-	Assert(io->user_referenced);
-	Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
-	Assert(io->op == PGAIO_OP_INVALID);
-	Assert(io->scb == PGAIO_SCB_INVALID);
-
-	if (my_aio->pending_count + 1 >= PGAIO_SUBMIT_BATCH_SIZE)
-	{
-#ifdef PGAIO_VERBOSE
-		ereport(DEBUG3,
-				errmsg("submitting during prep for %zu due to %u inflight",
-					   io - aio_ctl->in_progress_io,
-					   my_aio->pending_count),
-				errhidecontext(1),
-				errhidestmt(1));
-#endif
-		pgaio_submit_pending(false);
-	}
-
-	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
-
-	/* for this module */
-	io->system_referenced = true;
-	io->op = op;
-	Assert(io->owner_id == my_aio_id);
-
-	WRITE_ONCE_F(io->flags) = PGAIOIP_PREP;
-}
-
-void
-pgaio_io_unprepare(PgAioInProgress *io, PgAioOp op)
-{
-	Assert(io->op == op);
-	Assert(io->owner_id == my_aio_id);
-	Assert(io->flags == PGAIOIP_PREP);
-	Assert(io->system_referenced);
-
-	io->op = PGAIO_OP_INVALID;
-	io->system_referenced = false;
-
-	WRITE_ONCE_F(io->flags) = PGAIOIP_IDLE;
-}
-
-void
-pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb)
-{
-	Assert(my_aio->pending_count < PGAIO_SUBMIT_BATCH_SIZE);
-	Assert(io->flags == PGAIOIP_PREP);
-	Assert(io->user_referenced);
-	Assert(io->op != PGAIO_OP_INVALID);
-	Assert(io->scb == PGAIO_SCB_INVALID);
-	Assert(pgaio_shared_callback_op(scb) == io->op);
-
-	io->scb = scb;
-
-	WRITE_ONCE_F(io->flags) = (io->flags & ~PGAIOIP_PREP) | PGAIOIP_IN_PROGRESS | PGAIOIP_PENDING;
-	dlist_push_tail(&my_aio->pending, &io->io_node);
-	my_aio->pending_count++;
-
-#ifdef PGAIO_VERBOSE
-	if (message_level_is_interesting(DEBUG3))
-	{
-		MemoryContext oldcontext = MemoryContextSwitchTo(ErrorContext);
-		StringInfoData s;
-
-		/*
-		 * This code isn't ever allowed to error out, but the debugging
-		 * output is super useful...
-		 */
-		START_CRIT_SECTION();
-
-		initStringInfo(&s);
-
-		pgaio_io_print(io, &s);
-
-		ereport(DEBUG3,
-				errmsg("staged %s",
-					   s.data),
-				errhidestmt(true),
-				errhidecontext(true));
-		pfree(s.data);
-		MemoryContextSwitchTo(oldcontext);
-
-		END_CRIT_SECTION();
-	}
-#endif
-}
-
-void
-pgaio_io_release(PgAioInProgress *io)
-{
-	Assert(io->user_referenced);
-	Assert(io->owner_id == my_aio_id);
-
-	LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
-
-	io->user_referenced = false;
-
-	if (io->flags & (PGAIOIP_IDLE |
-					 PGAIOIP_PREP |
-					 PGAIOIP_PENDING |
-					 PGAIOIP_LOCAL_CALLBACK_CALLED))
-	{
-		Assert(!(io->flags & PGAIOIP_INFLIGHT));
-
-		Assert(my_aio->outstanding_count > 0);
-		dlist_delete_from(&my_aio->outstanding, &io->owner_node);
-		my_aio->outstanding_count--;
-
-#ifdef PGAIO_VERBOSE
-		ereport(DEBUG4, errmsg("releasing plain user reference to %zu",
-							   io - aio_ctl->in_progress_io),
-				errhidecontext(1),
-				errhidestmt(1));
-#endif
-	}
-	else
-	{
-		dlist_delete_from(&my_aio->issued, &io->owner_node);
-		my_aio->issued_count--;
-
-		if (io->system_referenced)
-		{
-#ifdef PGAIO_VERBOSE
-			ereport(DEBUG4, errmsg("putting aio %zu onto issued_abandoned during release",
-								   io - aio_ctl->in_progress_io),
-					errhidecontext(1),
-					errhidestmt(1));
-#endif
-
-			dlist_push_tail(&my_aio->issued_abandoned, &io->owner_node);
-			my_aio->issued_abandoned_count++;
-		}
-		else
-		{
-			Assert(io->flags & (PGAIOIP_DONE | PGAIOIP_SHARED_CALLBACK_CALLED));
-
-#ifdef PGAIO_VERBOSE
-			ereport(DEBUG4, errmsg("not putting aio %zu onto issued_abandoned during release",
-								   io - aio_ctl->in_progress_io),
-					errhidecontext(1),
-					errhidestmt(1));
-#endif
-		}
-	}
-
-	if (!io->system_referenced)
-	{
-		Assert(!(io->flags & PGAIOIP_INFLIGHT));
-		Assert(io->flags & (PGAIOIP_IDLE |
-							PGAIOIP_PREP |
-							PGAIOIP_DONE));
-
-		if (io->flags & PGAIOIP_DONE)
-		{
-			if (io->flags & PGAIOIP_FOREIGN_DONE)
-			{
-				SpinLockAcquire(&my_aio->foreign_completed_lock);
-				Assert(io->flags & PGAIOIP_FOREIGN_DONE);
-				dlist_delete_from(&my_aio->foreign_completed, &io->io_node);
-				my_aio->foreign_completed_count--;
-				SpinLockRelease(&my_aio->foreign_completed_lock);
-			}
-			else if (!(io->flags & PGAIOIP_LOCAL_CALLBACK_CALLED))
-			{
-				dlist_delete_from(&my_aio->local_completed, &io->io_node);
-				my_aio->local_completed_count--;
-				io->on_completion_local = NULL;
-			}
-
-		}
-
-		io->generation++;
-		pg_write_barrier();
-
-		io->flags = PGAIOIP_UNUSED;
-		io->op = PGAIO_OP_INVALID;
-		io->scb = PGAIO_SCB_INVALID;
-		io->owner_id = INVALID_PGPROCNO;
-		io->result = 0;
-		io->system_referenced = true;
-		io->on_completion_local = NULL;
-
-		Assert(io->merge_with_idx == PGAIO_MERGE_INVALID);
-
-		if (io->bb_idx != PGAIO_BB_INVALID)
-		{
-			pgaio_bounce_buffer_release_internal(&aio_ctl->bounce_buffers[io->bb_idx],
-												 /* holding_lock = */ true,
-												 /* release_resowner = */ false);
-			io->bb_idx = PGAIO_BB_INVALID;
-		}
-
-		dlist_push_head(&aio_ctl->unused_ios, &io->owner_node);
-		aio_ctl->used_count--;
-	}
-
-	LWLockRelease(SharedAIOCtlLock);
-}
 
 void
 pgaio_print_queues(void)
@@ -2149,6 +2255,12 @@ pgaio_print_list(dlist_head *head, StringInfo s, size_t offset)
 	}
 }
 
+
+/* --------------------------------------------------------------------------------
+ * Bounce Buffer management.
+ * --------------------------------------------------------------------------------
+ */
+
 PgAioBounceBuffer *
 pgaio_bounce_buffer_get(void)
 {
@@ -2237,83 +2349,4 @@ pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb)
 
 	io->bb_idx = bb - aio_ctl->bounce_buffers;
 	pg_atomic_fetch_add_u32(&bb->refcount, 1);
-}
-
-/*
- * Workhorse routine to wait for all IOs issued by this process to complete.
- * If n >= 0, then only wait for at most n IOs.  If fd is >= 0, then only wait
- * for IOs on the given descriptor.
- */
-static void
-pgaio_wait_for_issued_internal(int n, int fd)
-{
-	dlist_iter iter;
-
-	dlist_foreach(iter, &my_aio->issued)
-	{
-		PgAioInProgress *io = dlist_container(PgAioInProgress, owner_node, iter.cur);
-
-		if (io->flags & PGAIOIP_INFLIGHT &&
-			(fd < 0 || pgaio_io_matches_fd(io, fd)))
-		{
-			PgAioIoRef ref;
-
-			pgaio_io_ref_internal(io, &ref);
-			pgaio_io_print(io, NULL);
-			pgaio_io_wait_ref(&ref, false);
-			if (n > 0 && --n == 0)
-				return;
-		}
-	}
-
-	/* XXX explain dirty read of issued_abandoned */
-	while (!dlist_is_empty(&my_aio->issued_abandoned))
-	{
-		PgAioInProgress *io = NULL;
-		PgAioIoRef ref;
-
-		LWLockAcquire(SharedAIOCtlLock, LW_EXCLUSIVE);
-		dlist_foreach(iter, &my_aio->issued_abandoned)
-		{
-			io = dlist_container(PgAioInProgress, owner_node, iter.cur);
-
-			if (io->flags & PGAIOIP_INFLIGHT &&
-				(fd < 0 || pgaio_io_matches_fd(io, fd)))
-			{
-				pgaio_io_ref_internal(io, &ref);
-				break;
-			}
-			else
-				io = NULL;
-		}
-		LWLockRelease(SharedAIOCtlLock);
-
-		if (!io)
-			break;
-
-		pgaio_io_print(io, NULL);
-		pgaio_io_wait_ref(&ref, false);
-		pgaio_complete_ios(false);
-		pgaio_transfer_foreign_to_local();
-		if (n > 0 && --n == 0)
-			return;
-	}
-}
-
-/*
- * Should be called before closing any fd that might have asynchronous I/O
- * operations.  Since some POSIX AIO implementations cancel IOs (or worse,
- * confuse files) when the fd is concurrently closed, we'll default to waiting
- * for anything in flight on this fd to complete first, except on systems where
- * we're sure that isn't necessary.
- */
-void
-pgaio_closing_fd(int fd)
-{
-#ifdef USE_POSIX_AIO
-#if !defined(__freebsd__)
-	if (io_method == IOMETHOD_POSIX)
-		pgaio_wait_for_issued_internal(-1, fd);
-#endif
-#endif
 }
