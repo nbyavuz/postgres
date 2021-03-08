@@ -331,6 +331,7 @@ sub mkvcbuild
 	$pgregress_ecpg->AddFile('src/test/regress/pg_regress.c');
 	$pgregress_ecpg->AddIncludeDir('src/port');
 	$pgregress_ecpg->AddIncludeDir('src/test/regress');
+	$pgregress_ecpg->AddDefine('DLSUFFIX=".dll"');
 	$pgregress_ecpg->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
 	$pgregress_ecpg->AddLibrary('ws2_32.lib');
 	$pgregress_ecpg->AddDirResourceFile('src/interfaces/ecpg/test');
@@ -346,6 +347,7 @@ sub mkvcbuild
 	$isolation_tester->AddIncludeDir('src/port');
 	$isolation_tester->AddIncludeDir('src/test/regress');
 	$isolation_tester->AddIncludeDir('src/interfaces/libpq');
+	$isolation_tester->AddDefine('DLSUFFIX=".dll"');
 	$isolation_tester->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
 	$isolation_tester->AddLibrary('ws2_32.lib');
 	$isolation_tester->AddDirResourceFile('src/test/isolation');
@@ -357,6 +359,7 @@ sub mkvcbuild
 	$pgregress_isolation->AddFile('src/test/regress/pg_regress.c');
 	$pgregress_isolation->AddIncludeDir('src/port');
 	$pgregress_isolation->AddIncludeDir('src/test/regress');
+	$pgregress_isolation->AddDefine('DLSUFFIX=".dll"');
 	$pgregress_isolation->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
 	$pgregress_isolation->AddLibrary('ws2_32.lib');
 	$pgregress_isolation->AddDirResourceFile('src/test/isolation');
