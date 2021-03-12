@@ -144,7 +144,7 @@ StaticAssertDecl(sizeof(TimestampTz) == sizeof(pg_atomic_uint64),
 
 typedef struct StatsShmemStruct
 {
-	dsa_handle	stats_dsa_handle;	/* handle for stats data area */
+	void   *raw_dsa_area;
 	dshash_table_handle hash_handle;	/* shared dbstat hash */
 	int			refcount;		/* # of processes that is attaching the shared
 								 * stats memory */
@@ -484,6 +484,12 @@ static void pgstat_setup_memcxt(void);
  * ------------------------------------------------------------
  */
 
+static Size
+stats_dsa_init_size(void)
+{
+	return dsa_minimum_size() + 2 * 1024 * 1024;
+}
+
 /*
  * StatsShmemSize
  *		Compute shared memory space needed for activity statistic
@@ -491,7 +497,7 @@ static void pgstat_setup_memcxt(void);
 Size
 StatsShmemSize(void)
 {
-	return sizeof(StatsShmemStruct);
+	return add_size(sizeof(StatsShmemStruct), stats_dsa_init_size());
 }
 
 /*
@@ -501,15 +507,19 @@ void
 StatsShmemInit(void)
 {
 	bool		found;
+	Size		sz;
 
+	sz = StatsShmemSize();
 	StatsShmem = (StatsShmemStruct *)
-		ShmemInitStruct("Stats area", StatsShmemSize(), &found);
+		ShmemInitStruct("Stats area", sz, &found);
 
 	if (!IsUnderPostmaster)
 	{
+		dsa_area *dsa;
+		dshash_table *dsh;
+
 		Assert(!found);
 
-		StatsShmem->stats_dsa_handle = DSM_HANDLE_INVALID;
 		ConditionVariableInit(&StatsShmem->holdoff_cv);
 		pg_atomic_init_u32(&StatsShmem->archiver_changecount, 0);
 		pg_atomic_init_u32(&StatsShmem->bgwriter_changecount, 0);
@@ -518,6 +528,37 @@ StatsShmemInit(void)
 		pg_atomic_init_u64(&StatsShmem->gc_count, 0);
 
 		LWLockInitialize(&StatsShmem->wal_stats_lock, LWTRANCHE_STATS);
+
+		LWLockInitialize(&StatsShmem->slru_stats.lock, LWTRANCHE_STATS);
+		pg_atomic_init_u32(&StatsShmem->slru_stats.changecount, 0);
+
+		/*
+		 * Create a small dsa allocation in plain shared memory. Doing so
+		 * initially makes it easier to manage server startup, and it also is
+		 * a small efficiency win.
+		 */
+		StatsShmem->raw_dsa_area =
+			(char *) StatsShmem + sizeof(StatsShmemStruct);
+		dsa = dsa_create_in_place(StatsShmem->raw_dsa_area,
+								  stats_dsa_init_size(),
+								  LWTRANCHE_STATS, 0);
+		dsa_pin(dsa);
+
+		/*
+		 * Same with the dshash table.
+		 *
+		 * FIXME: we need to guarantee this can be allocated in plain shared
+		 * memory, rather than allocating dsm segments.
+		 */
+		dsh = dshash_create(dsa, &dsh_params, 0);
+		StatsShmem->hash_handle = dshash_get_hash_table_handle(dsh);
+
+		/*
+		 * Postmaster will never access these again, thus free the local
+		 * dsa/dshash references.
+		 */
+		dshash_detach(dsh);
+		dsa_detach(dsa);
 	}
 }
 
@@ -555,6 +596,7 @@ static void
 attach_shared_stats(void)
 {
 	MemoryContext oldcontext;
+	bool first = false;
 
 	/*
 	 * Don't use dsm under postmaster, or when not tracking counts.
@@ -591,6 +633,12 @@ attach_shared_stats(void)
 	}
 	ConditionVariableCancelSleep();
 
+	area = dsa_attach_in_place(StatsShmem->raw_dsa_area, NULL);
+	dsa_pin_mapping(area);
+
+	pgStatSharedHash = dshash_attach(area, &dsh_params,
+									 StatsShmem->hash_handle, 0);
+
 	LWLockAcquire(StatsLock, LW_EXCLUSIVE);
 
 	/*
@@ -603,26 +651,17 @@ attach_shared_stats(void)
 	else
 	{
 		/* We're the first process to attach the shared stats memory */
-		Assert(StatsShmem->stats_dsa_handle == DSM_HANDLE_INVALID);
-
-		/* Initialize shared memory area */
-		area = dsa_create(LWTRANCHE_STATS);
-		pgStatSharedHash = dshash_create(area, &dsh_params, 0);
-
-		StatsShmem->stats_dsa_handle = dsa_get_handle(area);
-		StatsShmem->hash_handle = dshash_get_hash_table_handle(pgStatSharedHash);
-		LWLockInitialize(&StatsShmem->slru_stats.lock, LWTRANCHE_STATS);
-		pg_atomic_init_u32(&StatsShmem->slru_stats.changecount, 0);
 
 		/* Block the next attacher for a while, see the comment above. */
 		StatsShmem->attach_holdoff = true;
 
 		StatsShmem->refcount = 1;
+		first = true;
 	}
 
 	LWLockRelease(StatsLock);
 
-	if (area)
+	if (first)
 	{
 		/*
 		 * We're the first attacher process, read stats file while blocking
@@ -634,18 +673,12 @@ attach_shared_stats(void)
 	}
 	else
 	{
-		/* We're not the first one, attach existing shared area. */
-		area = dsa_attach(StatsShmem->stats_dsa_handle);
+		/* We're not the first one, attach existing shared hash table. */
 		pgStatSharedHash = dshash_attach(area, &dsh_params,
 										 StatsShmem->hash_handle, 0);
 	}
 
-	Assert(StatsShmem->stats_dsa_handle != DSM_HANDLE_INVALID);
-
 	MemoryContextSwitchTo(oldcontext);
-
-	/* don't detach automatically */
-	dsa_pin_mapping(area);
 }
 
 /* ----------
@@ -721,7 +754,6 @@ detach_shared_stats(bool write_file)
 		if (write_file)
 			pgstat_write_statsfile();
 
-		StatsShmem->stats_dsa_handle = DSM_HANDLE_INVALID;
 		/* allow the next attacher, if any */
 		allow_next_attacher();
 	}
@@ -751,9 +783,6 @@ pgstat_reset_all(void)
 	/* standalone server doesn't use shared stats */
 	if (!IsUnderPostmaster)
 		return;
-
-	/* we must have shared stats attached */
-	Assert(StatsShmem->stats_dsa_handle != DSM_HANDLE_INVALID);
 
 	/* Startup must be the only user of shared stats */
 	Assert(StatsShmem->refcount == 1);
@@ -3948,7 +3977,7 @@ pgstat_write_statsfile(void)
 	PgStatHashEntry *ps;
 
 	/* stats is not initialized yet. just return. */
-	if (StatsShmem->stats_dsa_handle == DSM_HANDLE_INVALID)
+	if (!area)
 		return;
 
 	/* this is the last process that is accesing the shared stats */
