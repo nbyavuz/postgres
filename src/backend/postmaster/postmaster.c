@@ -3140,22 +3140,6 @@ reaper(SIGNAL_ARGS)
 			continue;
 		}
 
-		/*
-		 * Was it the statistics collector?  If so, just try to start a new
-		 * one; no need to force reset of the rest of the system.  (If fail,
-		 * we'll try again in future cycles of the main loop.)
-		 */
-		if (pid == PgStatPID)
-		{
-			PgStatPID = 0;
-			if (!EXIT_STATUS_0(exitstatus))
-				LogChildExit(LOG, _("statistics collector process"),
-							 pid, exitstatus);
-			if (pmState == PM_RUN || pmState == PM_HOT_STANDBY)
-				PgStatPID = pgstat_start();
-			continue;
-		}
-
 		/* Was it the system logger?  If so, try to start a new one */
 		if (pid == SysLoggerPID)
 		{

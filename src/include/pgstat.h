@@ -522,7 +522,7 @@ extern void pgstat_reset_single_counter(Oid objectid, PgStat_Single_Reset_Type t
 extern void pgstat_reset_slru_counter(const char *);
 extern void pgstat_reset_replslot_counter(const char *name);
 
-extern void pgstat_report_wal(void);
+extern void pgstat_report_wal(bool force);
 extern void pgstat_report_autovac(Oid dboid);
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 								 PgStat_Counter livetuples, PgStat_Counter deadtuples);

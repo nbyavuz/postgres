@@ -3824,9 +3824,9 @@ pgstat_report_checkpointer(void)
  * ----------
  */
 void
-pgstat_report_wal(void)
+pgstat_report_wal(bool force)
 {
-	flush_walstat(false);
+	flush_walstat(force);
 }
 
 /* ----------

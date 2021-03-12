@@ -499,7 +499,7 @@ CheckpointerMain(void)
 		pgstat_report_checkpointer();
 
 		/* Send off WAL statistics to the activity stats facility. */
-		pgstat_report_wal();
+		pgstat_report_wal(false);
 
 		/*
 		 * If any checkpoint flags have been set, redo the loop to handle the
@@ -574,10 +574,10 @@ HandleCheckpointerInterrupts(void)
 		 * updates the statistics, increment the checkpoint request and send
 		 * the statistics to the stats collector.
 		 */
-		BgWriterStats.m_requested_checkpoints++;
+		CheckPointerStats.requested_checkpoints++;
 		ShutdownXLOG(0, 0);
-		pgstat_send_bgwriter();
-		pgstat_report_wal();
+		pgstat_report_bgwriter();
+		pgstat_report_wal(false);
 
 		/* Normal exit from the checkpointer is here */
 		proc_exit(0);			/* done */
