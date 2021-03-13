@@ -4210,13 +4210,13 @@ done:
 static void
 pgstat_setup_memcxt(void)
 {
-	if (!pgStatLocalContext)
+	if (unlikely(!pgStatLocalContext))
 		pgStatLocalContext =
 			AllocSetContextCreate(TopMemoryContext,
 								  "Backend statistics snapshot",
 								  ALLOCSET_SMALL_SIZES);
 
-	if (!pgStatCacheContext)
+	if (unlikely(!pgStatCacheContext))
 		pgStatCacheContext =
 			AllocSetContextCreate(CacheMemoryContext,
 								  "Activity statistics",
