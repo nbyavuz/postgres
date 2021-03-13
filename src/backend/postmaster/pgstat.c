@@ -199,7 +199,7 @@ walstats_pending(void)
  * Changes of SLRU counters are reported within critical sections so we use
  * static memory in order to avoid memory allocation.
  */
-static PgStat_SLRUStats local_SLRUStats[SLRU_NUM_ELEMENTS];
+static PgStat_SLRUStats pending_SLRUStats[SLRU_NUM_ELEMENTS];
 static bool have_slrustats = false;
 
 /* ----------
@@ -219,29 +219,29 @@ static dsa_area *area = NULL;
  * structure make the shared stats immovable against dshash resizing, allows a
  * backend point to shared stats entries via a native pointer and allows
  * locking at stats-entry level. The per-entry locking reduces lock contention
- * compared to partition lock of dshash. A backend accumulates stats numbers in
- * a stats entry in the local memory space then flushes the numbers to shared
- * stats entries at basically transaction end.
+ * compared to partition lock of dshash. A backend accumulates stats numbers
+ * in a stats entry in local memory then flushes the numbers to shared stats
+ * entries at basically transaction end.
  *
  * Each stat entry type has a fixed member PgStat_HashEntryHeader as the first
  * element.
  *
  * Shared stats are stored as:
  *
- * dshash pgStatSharedHash
- *    -> PgStatHashEntry					(dshash entry)
+ * dshash pgStatShmHash
+ *    -> PgStatShmHashEntry					(dshash entry)
  *      (dsa_pointer)-> PgStat_Stat*Entry	(dsa memory block)
  *
- * Shared stats entries are directly pointed from pgstat_localhash hash:
+ * Shared stats entries are directly pointed from pgstat_shm_lookup_cache hash:
  *
- * pgstat_localhash pgStatEntHash
- *    -> PgStatLocalHashEntry                (equivalent of PgStatHashEntry)
+ * pgstat_shm_lookup_cache pgStatShmLookupCache
+ *    -> PgStatShmLookupCacheEntry           (local hash entry)
  *      (native pointer)-> PgStat_Stat*Entry (dsa memory block)
  *
- * Local stats that are waiting for being flushed to share stats are stored as:
+ * Pending stats that are waiting for being flushed to share stats are stored as:
  *
- * pgstat_localhash pgStatLocalHash
- *    -> PgStatLocalHashEntry			     (local hash entry)
+ * pgstat_pending_hash pgStatPendingHash
+ *    -> PgStatPendingHashEntry			     (local hash entry)
  *      (native pointer)-> PgStat_Stat*Entry/TableStatus (palloc'ed memory)
  */
 
@@ -266,8 +266,8 @@ static const size_t pgstat_sharedentsize[] =
 	sizeof(PgStat_ReplSlot)		/* PGSTAT_TYPE_REPLSLOT */
 };
 
-/* Ditto for local statistics entries */
-static const size_t pgstat_localentsize[] =
+/* Ditto for pending statistics entries */
+static const size_t pgstat_pendingentsize[] =
 {
 	sizeof(PgStat_StatDBEntry), /* PGSTAT_TYPE_DB */
 	sizeof(PgStat_TableStatus), /* PGSTAT_TYPE_TABLE */
@@ -294,34 +294,43 @@ typedef struct PgStatHashKey
 } PgStatHashKey;
 
 /* struct for shared statistics hash entry */
-typedef struct PgStatHashEntry
+typedef struct PgStatShmHashEntry
 {
 	PgStatHashKey key;			/* hash key */
 	dsa_pointer body;			/* pointer to shared stats in
 								 * PgStat_StatEntryHeader */
-} PgStatHashEntry;
+} PgStatShmHashEntry;
 
-/* struct for shared statistics local hash entry. */
-typedef struct PgStatLocalHashEntry
+/* backend local cache entry in front of PgStatShmHash */
+typedef struct PgStatShmLookupCacheEntry
 {
 	PgStatHashKey key;			/* hash key */
 	char		status;			/* for simplehash use */
-	PgStat_StatEntryHeader *body;	/* address pointer to stats body */
+	PgStat_StatEntryHeader *shared;	/* address pointer to stats body */
 	dsa_pointer dsapointer;		/* dsa pointer of body */
-} PgStatLocalHashEntry;
+} PgStatShmLookupCacheEntry;
+
+/* locally pending stats hash table entry */
+typedef struct PgStatPendingEntry
+{
+	PgStatHashKey key;
+	char		status;			/* for simplehash use */
+	PgStat_StatEntryHeader *pending;	/* address pointer to stats body */
+} PgStatPendingEntry;
+
 
 /* parameter for the shared hash */
 static const dshash_parameters dsh_params = {
 	sizeof(PgStatHashKey),
-	sizeof(PgStatHashEntry),
+	sizeof(PgStatShmHashEntry),
 	dshash_memcmp,
 	dshash_memhash,
 	LWTRANCHE_STATS
 };
 
-/* define hashtable for local hashes */
-#define SH_PREFIX pgstat_localhash
-#define SH_ELEMENT_TYPE PgStatLocalHashEntry
+/* define hashtable for caching shared hashtable lookups */
+#define SH_PREFIX pgstat_shm_lookup_cache
+#define SH_ELEMENT_TYPE PgStatShmLookupCacheEntry
 #define SH_KEY_TYPE PgStatHashKey
 #define SH_KEY key
 #define SH_HASH_KEY(tb, key) \
@@ -332,6 +341,21 @@ static const dshash_parameters dsh_params = {
 #define SH_DECLARE
 #include "lib/simplehash.h"
 
+
+/* define hashtable for local pending entries */
+#define SH_PREFIX pgstat_pending
+#define SH_ELEMENT_TYPE PgStatPendingEntry
+#define SH_KEY_TYPE PgStatHashKey
+#define SH_KEY key
+#define SH_HASH_KEY(tb, key) \
+	hash_bytes((unsigned char *)&key, sizeof(PgStatHashKey))
+#define SH_EQUAL(tb, a, b) (memcmp(&a, &b, sizeof(PgStatHashKey)) == 0)
+#define SH_SCOPE static inline
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
+
 /* The shared hash to index activity stats entries. */
 static dshash_table *pgStatSharedHash = NULL;
 
@@ -339,14 +363,14 @@ static dshash_table *pgStatSharedHash = NULL;
  * The local cache to index shared stats entries.
  *
  * This is a local hash to store native pointers to shared hash
- * entries. pgStatEntHashAge is copied from StatsShmem->gc_count at creation
+ * entries. pgStatShmLookupCacheAge is copied from StatsShmem->gc_count at creation
  * and garbage collection.
  */
-static pgstat_localhash_hash * pgStatEntHash = NULL;
-static int	pgStatEntHashAge = 0;	/* cache age of pgStatEntHash */
+static pgstat_shm_lookup_cache_hash * pgStatShmLookupCache = NULL;
+static int	pgStatShmLookupCacheAge = 0;	/* cache age of pgStatShmLookupCache */
 
 /* Local stats numbers are stored here. */
-static pgstat_localhash_hash * pgStatLocalHash = NULL;
+static pgstat_pending_hash * pgStatPendingHash = NULL;
 
 /* entry type for oid hash */
 typedef struct pgstat_oident
@@ -412,7 +436,7 @@ static MemoryContext pgStatLocalContext = NULL;
 /*
  * Make our own memory context to make it easy to track memory usage.
  */
-MemoryContext pgStatCacheContext = NULL;
+static MemoryContext pgStatCacheContext = NULL;
 
 /*
  * Total time charged to functions so far in the current backend.
@@ -448,8 +472,8 @@ static int	n_cached_replslotstats = -1;
  * ----------
  */
 
-static PgStat_StatDBEntry *get_local_dbstat_entry(Oid dbid);
-static PgStat_TableStatus *get_local_tabstat_entry(Oid rel_id, bool isshared);
+static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dbid);
+static PgStat_TableStatus *get_pending_tabstat_entry(Oid rel_id, bool isshared);
 
 static void pgstat_write_statsfile(void);
 
@@ -459,15 +483,15 @@ static PgStat_StatEntryHeader *get_stat_entry(PgStatTypes type, Oid dbid,
 											  Oid objid, bool nowait,
 											  bool create, bool *found);
 
-static bool flush_tabstat(PgStatLocalHashEntry *ent, bool nowait);
-static bool flush_funcstat(PgStatLocalHashEntry *ent, bool nowait);
-static bool flush_dbstat(PgStatLocalHashEntry *ent, bool nowait);
+static bool flush_tabstat(PgStatPendingEntry *ent, bool nowait);
+static bool flush_funcstat(PgStatPendingEntry *ent, bool nowait);
+static bool flush_dbstat(PgStatPendingEntry *ent, bool nowait);
 static bool flush_walstat(bool nowait);
 static bool flush_slrustat(bool nowait);
 static void delete_current_stats_entry(dshash_seq_status *hstat);
-static PgStat_StatEntryHeader *get_local_stat_entry(PgStatTypes type, Oid dbid,
-													Oid objid, bool create,
-													bool *found);
+static PgStat_StatEntryHeader *get_pending_stat_entry(PgStatTypes type, Oid dbid,
+													  Oid objid, bool create,
+													  bool *found);
 
 static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
 static void pgstat_update_connstats(bool disconnect);
@@ -567,32 +591,32 @@ StatsShmemInit(void)
 static void
 cleanup_dropped_stats_entries(void)
 {
-	pgstat_localhash_iterator i;
-	PgStatLocalHashEntry *ent;
+	pgstat_shm_lookup_cache_iterator i;
+	PgStatShmLookupCacheEntry *ent;
 
-	if (pgStatEntHash == NULL)
+	if (pgStatShmLookupCache == NULL)
 		return;
 
-	pgstat_localhash_start_iterate(pgStatEntHash, &i);
-	while ((ent = pgstat_localhash_iterate(pgStatEntHash, &i))
+	pgstat_shm_lookup_cache_start_iterate(pgStatShmLookupCache, &i);
+	while ((ent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i))
 		   != NULL)
 	{
 		/*
 		 * Free the shared memory chunk for the entry if we were the last
 		 * referrer to a dropped entry.
 		 */
-		if (pg_atomic_sub_fetch_u32(&ent->body->refcount, 1) < 1 &&
-			ent->body->dropped)
+		if (pg_atomic_sub_fetch_u32(&ent->shared->refcount, 1) < 1 &&
+			ent->shared->dropped)
 			dsa_free(area, ent->dsapointer);
 	}
 
 	/*
 	 * This function is expected to be called during backend exit. So we don't
-	 * bother destroying pgStatEntHash.
+	 * bother destroying pgStatShmLookupCache.
 	 */
-	pgStatEntHash = NULL;
+	pgStatShmLookupCache = NULL;
 
-	elog(DEBUG1, "deleting pgstatenthash");
+	elog(DEBUG1, "deleting pgStatShmLookupCache");
 }
 
 /*
@@ -676,6 +700,57 @@ fetch_lock_statentry(PgStatTypes type, Oid dboid, Oid objid, bool nowait)
 	return header;
 }
 
+static bool
+pgstat_lookup_cache_needs_gc(void)
+{
+	uint64		currage;
+
+	if (!pgStatShmLookupCache)
+		return false;
+
+	currage = pg_atomic_read_u64(&StatsShmem->gc_count);
+
+	return pgStatShmLookupCacheAge != currage;
+}
+
+static void
+pgstat_lookup_cache_gc(void)
+{
+	pgstat_shm_lookup_cache_iterator i;
+	PgStatShmLookupCacheEntry *lohashent;
+	uint64		currage;
+
+	currage = pg_atomic_read_u64(&StatsShmem->gc_count);
+
+	/*
+	 * Some entries have been dropped. Invalidate cache pointer to
+	 * them.
+	 */
+	pgstat_shm_lookup_cache_start_iterate(pgStatShmLookupCache, &i);
+	while ((lohashent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i)) != NULL)
+	{
+		PgStat_StatEntryHeader *header = lohashent->shared;
+
+		Assert(header->magic == 0xdeadbeef);
+
+		if (header->dropped)
+		{
+			if (pg_atomic_sub_fetch_u32(&header->refcount, 1) < 1)
+			{
+				/*
+				 * We're the last referrer to this entry, drop the
+				 * shared entry.
+				 */
+				dsa_free(area, lohashent->dsapointer);
+			}
+
+			if (!pgstat_shm_lookup_cache_delete(pgStatShmLookupCache, lohashent->key))
+				elog(PANIC, "something has gone wrong");
+		}
+	}
+
+	pgStatShmLookupCacheAge = currage;
+}
 
 /* ----------
  * get_stat_entry() -
@@ -692,8 +767,7 @@ static PgStat_StatEntryHeader *
 get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 			   bool *found)
 {
-	PgStatHashEntry *shhashent;
-	PgStatLocalHashEntry *lohashent;
+	PgStatShmHashEntry *shhashent;
 	PgStat_StatEntryHeader *shheader = NULL;
 	PgStatHashKey key;
 	bool		shfound;
@@ -704,61 +778,33 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 
 	pgstat_setup_memcxt();
 
-	if (pgStatEntHash)
+	/*
+	 * First check the lookup cache hashtable in local memory. If we find a
+	 * match here we can avoid taking locks / contention.
+	 */
+	if (pgStatShmLookupCache)
 	{
-		uint64		currage;
+		PgStatShmLookupCacheEntry *lohashent;
 
 		/*
-		 * pgStatEntHashAge increments quite slowly than the time the
+		 * pgStatShmLookupCacheAge increments quite slowly than the time the
 		 * following loop takes so this is expected to iterate no more than
 		 * twice.
+		 *
+		 * XXX: Why is this a good place to do this?
 		 */
-		while (unlikely
-			   (pgStatEntHashAge !=
-				(currage = pg_atomic_read_u64(&StatsShmem->gc_count))))
-		{
-			pgstat_localhash_iterator i;
+		while (pgstat_lookup_cache_needs_gc())
+			pgstat_lookup_cache_gc();
 
-			/*
-			 * Some entries have been dropped. Invalidate cache pointer to
-			 * them.
-			 */
-			pgstat_localhash_start_iterate(pgStatEntHash, &i);
-			while ((lohashent = pgstat_localhash_iterate(pgStatEntHash, &i))
-				   != NULL)
-			{
-				PgStat_StatEntryHeader *header = lohashent->body;
-
-				Assert(header->magic == 0xdeadbeef);
-
-				if (header->dropped)
-				{
-					if (pg_atomic_sub_fetch_u32(&header->refcount, 1) < 1)
-					{
-						/*
-						 * We're the last referrer to this entry, drop the
-						 * shared entry.
-						 */
-						dsa_free(area, lohashent->dsapointer);
-					}
-
-					if (!pgstat_localhash_delete(pgStatEntHash, lohashent->key))
-						elog(PANIC, "something has gone wrong");
-				}
-			}
-
-			pgStatEntHashAge = currage;
-		}
-
-		lohashent = pgstat_localhash_lookup(pgStatEntHash, key);
+		lohashent = pgstat_shm_lookup_cache_lookup(pgStatShmLookupCache, key);
 
 		if (lohashent)
 		{
-			Assert(lohashent->body->magic == 0xdeadbeef);
+			Assert(lohashent->shared->magic == 0xdeadbeef);
 
 			if (found)
 				*found = true;
-			return lohashent->body;
+			return lohashent->shared;
 		}
 	}
 
@@ -798,28 +844,29 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 
 		/*
 		 * FIXME: Previously this was conditional on
-		 * (pgStatEntHash || pgStatCacheContext)
+		 * (pgStatShmLookupCache || pgStatCacheContext)
 		 * but I don't think that's correct - we'd not hold a refcount. Also,
-		 * why would it be ok if we had pgStatEntHash but not pgStatCacheContext?
+		 * why would it be ok if we had pgStatShmLookupCache but not pgStatCacheContext?
 		 */
 		Assert(pgStatCacheContext);
 		{
 			bool		lofound;
+			PgStatShmLookupCacheEntry *lohashent;
 
-			if (pgStatEntHash == NULL)
+			if (pgStatShmLookupCache == NULL)
 			{
-				pgStatEntHash =
-					pgstat_localhash_create(pgStatCacheContext,
+				pgStatShmLookupCache =
+					pgstat_shm_lookup_cache_create(pgStatCacheContext,
 											PGSTAT_TABLE_HASH_SIZE, NULL);
-				pgStatEntHashAge =
+				pgStatShmLookupCacheAge =
 					pg_atomic_read_u64(&StatsShmem->gc_count);
 			}
 
 			lohashent =
-				pgstat_localhash_insert(pgStatEntHash, key, &lofound);
+				pgstat_shm_lookup_cache_insert(pgStatShmLookupCache, key, &lofound);
 
 			Assert(!lofound);
-			lohashent->body = shheader;
+			lohashent->shared = shheader;
 			lohashent->dsapointer = shhashent->body;
 
 			pg_atomic_add_fetch_u32(&shheader->refcount, 1);
@@ -833,12 +880,12 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 }
 
 /*
- * flush_walstat - flush out a local WAL stats entries
+ * flush_walstat - flush out a locally pending WAL stats entries
  *
  * If nowait is true, this function returns false on lock failure. Otherwise
  * this function always returns true.
  *
- * Returns true if all local WAL stats are successfully flushed out.
+ * Returns true if all pending WAL stats have successfully been flushed out.
  */
 static bool
 flush_walstat(bool nowait)
@@ -893,14 +940,14 @@ flush_walstat(bool nowait)
 }
 
 /*
- * flush_slrustat - flush out a local SLRU stats entries
+ * flush_slrustat - flush out locally pending SLRU stats entries
  *
  * If nowait is true, this function returns false on lock failure. Otherwise
  * this function always returns true. Writer processes are mutually excluded
  * using LWLock, but readers are expected to use change-count protocol to avoid
  * interference with writers.
  *
- * Returns true if all local SLRU stats are successfully flushed out.
+ * Returns true if all pending SLRU stats have successfully been flushed out.
  */
 static bool
 flush_slrustat(bool nowait)
@@ -925,19 +972,19 @@ flush_slrustat(bool nowait)
 	for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
 	{
 		PgStat_SLRUStats *sharedent = &StatsShmem->slru_stats.entry[i];
-		PgStat_SLRUStats *localent = &local_SLRUStats[i];
+		PgStat_SLRUStats *pendingent = &pending_SLRUStats[i];
 
-		sharedent->blocks_zeroed += localent->blocks_zeroed;
-		sharedent->blocks_hit += localent->blocks_hit;
-		sharedent->blocks_read += localent->blocks_read;
-		sharedent->blocks_written += localent->blocks_written;
-		sharedent->blocks_exists += localent->blocks_exists;
-		sharedent->flush += localent->flush;
-		sharedent->truncate += localent->truncate;
+		sharedent->blocks_zeroed += pendingent->blocks_zeroed;
+		sharedent->blocks_hit += pendingent->blocks_hit;
+		sharedent->blocks_read += pendingent->blocks_read;
+		sharedent->blocks_written += pendingent->blocks_written;
+		sharedent->blocks_exists += pendingent->blocks_exists;
+		sharedent->flush += pendingent->flush;
+		sharedent->truncate += pendingent->truncate;
 	}
 
-	/* done, clear the local entry */
-	MemSet(local_SLRUStats, 0,
+	/* done, clear the pending entry */
+	MemSet(pending_SLRUStats, 0,
 		   sizeof(PgStat_SLRUStats) * SLRU_NUM_ELEMENTS);
 
 	pg_atomic_add_fetch_u32(&StatsShmem->slru_stats.changecount, 1);
@@ -960,7 +1007,7 @@ delete_current_stats_entry(dshash_seq_status *hstat)
 {
 	dsa_pointer pdsa;
 	PgStat_StatEntryHeader *header;
-	PgStatHashEntry *ent;
+	PgStatShmHashEntry *ent;
 
 	ent = dshash_get_current(hstat);
 	pdsa = ent->body;
@@ -980,9 +1027,9 @@ delete_current_stats_entry(dshash_seq_status *hstat)
 		header->dropped = true;
 	else
 	{
-		/* What guarantees that no local stats entry exists here? */
-		Assert(!pgStatEntHash ||
-			   !pgstat_localhash_lookup(pgStatEntHash, ent->key));
+		/* What guarantees that no pending stats entry exists here? */
+		Assert(!pgStatShmLookupCache ||
+			   !pgstat_shm_lookup_cache_lookup(pgStatShmLookupCache, ent->key));
 
 		dsa_free(area, pdsa);
 	}
@@ -991,9 +1038,9 @@ delete_current_stats_entry(dshash_seq_status *hstat)
 }
 
 /* ----------
- * get_local_stat_entry() -
+ * get_pending_stat_entry() -
  *
- *  Returns local stats entry for the type, dbid and objid.
+ *  Returns pending stats entry for the type, dbid and objid.
  *  If create is true, new entry is created if not yet.  found must be non-null
  *  in the case.
  *
@@ -1003,18 +1050,19 @@ delete_current_stats_entry(dshash_seq_status *hstat)
  * ----------
  */
 static PgStat_StatEntryHeader *
-get_local_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
+get_pending_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
 					 bool create, bool *found)
 {
 	PgStatHashKey key;
-	PgStatLocalHashEntry *entry;
+	PgStatPendingEntry *entry;
 
-	if (unlikely(pgStatLocalHash == NULL))
+	if (unlikely(pgStatPendingHash == NULL))
 	{
 		pgstat_setup_memcxt();
 
-		pgStatLocalHash = pgstat_localhash_create(pgStatCacheContext,
-												  PGSTAT_TABLE_HASH_SIZE, NULL);
+		pgStatPendingHash = pgstat_pending_create(pgStatCacheContext,
+													   PGSTAT_TABLE_HASH_SIZE,
+													   NULL);
 	}
 
 	/* Find an entry or create a new one. */
@@ -1022,18 +1070,18 @@ get_local_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
 	key.databaseid = dbid;
 	key.objectid = objid;
 	if (create)
-		entry = pgstat_localhash_insert(pgStatLocalHash, key, found);
+		entry = pgstat_pending_insert(pgStatPendingHash, key, found);
 	else
-		entry = pgstat_localhash_lookup(pgStatLocalHash, key);
+		entry = pgstat_pending_lookup(pgStatPendingHash, key);
 
 	if (!create && !entry)
 		return NULL;
 
 	if (create && !*found)
-		entry->body = MemoryContextAllocZero(TopMemoryContext,
-											 pgstat_localentsize[type]);
+		entry->pending = MemoryContextAllocZero(TopMemoryContext,
+												pgstat_pendingentsize[type]);
 
-	return entry->body;
+	return entry->pending;
 }
 
 /* ------------------------------------------------------------
@@ -1082,10 +1130,10 @@ pgstat_report_stat(bool force)
 	 */
 	if (pgStatXactCommit > 0 || pgStatXactRollback > 0 ||
 		pgStatBlockReadTime > 0 || pgStatBlockWriteTime > 0)
-		get_local_dbstat_entry(MyDatabaseId);
+		get_pending_dbstat_entry(MyDatabaseId);
 
 	/* Don't expend a clock check if nothing to do */
-	if (pgStatLocalHash == NULL && have_slrustats && !walstats_pending())
+	if (pgStatPendingHash == NULL && have_slrustats && !walstats_pending())
 		return 0;
 
 	now = GetCurrentTransactionStopTimestamp();
@@ -1119,17 +1167,17 @@ pgstat_report_stat(bool force)
 	/* don't wait for lock acquisition when !force */
 	nowait = !force;
 
-	if (pgStatLocalHash)
+	if (pgStatPendingHash)
 	{
 		int			remains = 0;
-		pgstat_localhash_iterator i;
+		pgstat_pending_iterator i;
 		List	   *dbentlist = NIL;
 		ListCell   *lc;
-		PgStatLocalHashEntry *lent;
+		PgStatPendingEntry *lent;
 
 		/* Step 1: flush out other than database stats */
-		pgstat_localhash_start_iterate(pgStatLocalHash, &i);
-		while ((lent = pgstat_localhash_iterate(pgStatLocalHash, &i)) != NULL)
+		pgstat_pending_start_iterate(pgStatPendingHash, &i);
+		while ((lent = pgstat_pending_iterate(pgStatPendingHash, &i)) != NULL)
 		{
 			bool		remove = false;
 
@@ -1139,7 +1187,7 @@ pgstat_report_stat(bool force)
 
 					/*
 					 * flush_tabstat applies some of stats numbers of flushed
-					 * entries into local database stats. Just remember the
+					 * entries into pending database stats. Just remember the
 					 * database entries for now then flush-out them later.
 					 */
 					dbentlist = lappend(dbentlist, lent);
@@ -1153,7 +1201,7 @@ pgstat_report_stat(bool force)
 						remove = true;
 					break;
 				case PGSTAT_TYPE_REPLSLOT:
-					/* We don't have that kind of local entry */
+					/* We don't have that kind of pending entry */
 					Assert(false);
 			}
 
@@ -1164,23 +1212,23 @@ pgstat_report_stat(bool force)
 			}
 
 			/* Remove the successfully flushed entry */
-			pfree(lent->body);
-			lent->body = NULL;
-			pgstat_localhash_delete(pgStatLocalHash, lent->key);
+			pfree(lent->pending);
+			lent->pending = NULL;
+			pgstat_pending_delete(pgStatPendingHash, lent->key);
 		}
 
 		/* Step 2: flush out database stats */
 		foreach(lc, dbentlist)
 		{
-			PgStatLocalHashEntry *lent = (PgStatLocalHashEntry *) lfirst(lc);
+			PgStatPendingEntry *lent = (PgStatPendingEntry *) lfirst(lc);
 
 			if (flush_dbstat(lent, nowait))
 			{
 				remains--;
 				/* Remove the successfully flushed entry */
-				pfree(lent->body);
-				lent->body = NULL;
-				pgstat_localhash_delete(pgStatLocalHash, lent->key);
+				pfree(lent->pending);
+				lent->pending = NULL;
+				pgstat_pending_delete(pgStatPendingHash, lent->key);
 			}
 		}
 		list_free(dbentlist);
@@ -1188,8 +1236,8 @@ pgstat_report_stat(bool force)
 
 		if (remains <= 0)
 		{
-			pgstat_localhash_destroy(pgStatLocalHash);
-			pgStatLocalHash = NULL;
+			pgstat_pending_destroy(pgStatPendingHash);
+			pgStatPendingHash = NULL;
 		}
 	}
 
@@ -1218,11 +1266,11 @@ pgstat_report_stat(bool force)
 	}
 
 	/*
-	 * Some of the local stats may have not been flushed due to lock
-	 * contention.  If we have such pending local stats here, let the caller
-	 * know the retry interval.
+	 * Some of the pending stats may have not been flushed due to lock
+	 * contention.  If we have such pending stats here, let the caller know
+	 * the retry interval.
 	 */
-	if (pgStatLocalHash != NULL || have_slrustats || walstats_pending())
+	if (pgStatPendingHash != NULL || have_slrustats || walstats_pending())
 	{
 		/* Retain the epoch time */
 		if (pending_since == 0)
@@ -1260,9 +1308,9 @@ pgstat_report_stat(bool force)
 }
 
 /*
- * flush_tabstat - flush out a local table stats entry
+ * flush_tabstat - flush out a pending table stats entry
  *
- * Some of the stats numbers are copied to local database stats entry after
+ * Some of the stats numbers are copied to pending database stats entry after
  * successful flush-out.
  *
  * If nowait is true, this function returns false on lock failure. Otherwise
@@ -1271,16 +1319,16 @@ pgstat_report_stat(bool force)
  * Returns true if the entry is successfully flushed out.
  */
 static bool
-flush_tabstat(PgStatLocalHashEntry *ent, bool nowait)
+flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 {
 	static const PgStat_TableCounts all_zeroes;
 	Oid			dboid;			/* database OID of the table */
-	PgStat_TableStatus *lstats; /* local stats entry  */
+	PgStat_TableStatus *lstats; /* pending stats entry  */
 	PgStat_StatTabEntry *shtabstats;	/* table entry of shared stats */
-	PgStat_StatDBEntry *ldbstats;	/* local database entry */
+	PgStat_StatDBEntry *ldbstats;	/* pending database entry */
 
 	Assert(ent->key.type == PGSTAT_TYPE_TABLE);
-	lstats = (PgStat_TableStatus *) ent->body;
+	lstats = (PgStat_TableStatus *) ent->pending;
 	dboid = ent->key.databaseid;
 
 	/*
@@ -1290,7 +1338,7 @@ flush_tabstat(PgStatLocalHashEntry *ent, bool nowait)
 	if (memcmp(&lstats->t_counts, &all_zeroes,
 			   sizeof(PgStat_TableCounts)) == 0)
 	{
-		/* This local entry is going to be dropped, delink from relcache. */
+		/* This pending entry is going to be dropped, delink from relcache. */
 		pgstat_delinkstats(lstats->relation);
 		return true;
 	}
@@ -1337,7 +1385,7 @@ flush_tabstat(PgStatLocalHashEntry *ent, bool nowait)
 	LWLockRelease(&shtabstats->header.lock);
 
 	/* The entry is successfully flushed so the same to add to database stats */
-	ldbstats = get_local_dbstat_entry(dboid);
+	ldbstats = get_pending_dbstat_entry(dboid);
 	ldbstats->counts.n_tuples_returned += lstats->t_counts.t_tuples_returned;
 	ldbstats->counts.n_tuples_fetched += lstats->t_counts.t_tuples_fetched;
 	ldbstats->counts.n_tuples_inserted += lstats->t_counts.t_tuples_inserted;
@@ -1361,13 +1409,13 @@ flush_tabstat(PgStatLocalHashEntry *ent, bool nowait)
  * Returns true if the entry is successfully flushed out.
  */
 static bool
-flush_funcstat(PgStatLocalHashEntry *ent, bool nowait)
+flush_funcstat(PgStatPendingEntry *ent, bool nowait)
 {
 	PgStat_BackendFunctionEntry *localent;	/* local stats entry */
 	PgStat_StatFuncEntry *shfuncent = NULL; /* shared stats entry */
 
 	Assert(ent->key.type == PGSTAT_TYPE_FUNCTION);
-	localent = (PgStat_BackendFunctionEntry *) ent->body;
+	localent = (PgStat_BackendFunctionEntry *) ent->pending;
 
 	/* localent always has non-zero content */
 
@@ -1402,14 +1450,14 @@ flush_funcstat(PgStatLocalHashEntry *ent, bool nowait)
 	(sh)->counts.item += (lo)->counts.item
 
 static bool
-flush_dbstat(PgStatLocalHashEntry *ent, bool nowait)
+flush_dbstat(PgStatPendingEntry *ent, bool nowait)
 {
-	PgStat_StatDBEntry *localent;
+	PgStat_StatDBEntry *pendingent;
 	PgStat_StatDBEntry *sharedent;
 
 	Assert(ent->key.type == PGSTAT_TYPE_DB);
 
-	localent = (PgStat_StatDBEntry *) &ent->body;
+	pendingent = (PgStat_StatDBEntry *) &ent->pending;
 
 	/* find shared database stats entry corresponding to the local entry */
 	sharedent = (PgStat_StatDBEntry *)
@@ -1419,26 +1467,26 @@ flush_dbstat(PgStatLocalHashEntry *ent, bool nowait)
 	if (!sharedent)
 		return false;			/* failed to acquire lock, skip */
 
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_tuples_returned);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_tuples_fetched);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_tuples_inserted);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_tuples_updated);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_tuples_deleted);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_blocks_fetched);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_blocks_hit);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_returned);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_fetched);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_inserted);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_updated);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_deleted);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_blocks_fetched);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_blocks_hit);
 
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_deadlocks);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_temp_bytes);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_temp_files);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_checksum_failures);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_deadlocks);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_temp_bytes);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_temp_files);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_checksum_failures);
 
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_sessions);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, total_session_time);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, total_active_time);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, total_idle_in_xact_time);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_sessions_abandoned);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_sessions_fatal);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, localent, n_sessions_killed);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_session_time);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_active_time);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_idle_in_xact_time);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_abandoned);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_fatal);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_killed);
 
 	/*
 	 * Accumulate xact commit/rollback and I/O timings to stats entry of the
@@ -1493,7 +1541,7 @@ pgstat_vacuum_stat(void)
 	pgstat_oid_hash *funcids;	/* function ids in the current database */
 	int			nvictims = 0;	/* # of entries of the above */
 	dshash_seq_status dshstat;
-	PgStatHashEntry *ent;
+	PgStatShmHashEntry *ent;
 
 	/* we don't collect stats under standalone mode */
 	if (!IsUnderPostmaster)
@@ -1627,7 +1675,7 @@ void
 pgstat_drop_database(Oid databaseid)
 {
 	dshash_seq_status hstat;
-	PgStatHashEntry *p;
+	PgStatShmHashEntry *p;
 
 	Assert(OidIsValid(databaseid));
 
@@ -1660,7 +1708,7 @@ void
 pgstat_reset_counters(void)
 {
 	dshash_seq_status hstat;
-	PgStatHashEntry *p;
+	PgStatShmHashEntry *p;
 
 	if (!IsUnderPostmaster || !pgStatSharedHash)
 		return;
@@ -2162,7 +2210,7 @@ pgstat_report_recovery_conflict(int reason)
 	if (!area)
 		return;
 
-	dbent = get_local_dbstat_entry(MyDatabaseId);
+	dbent = get_pending_dbstat_entry(MyDatabaseId);
 
 	switch (reason)
 	{
@@ -2207,7 +2255,7 @@ pgstat_report_deadlock(void)
 	if (!area)
 		return;
 
-	dbent = get_local_dbstat_entry(MyDatabaseId);
+	dbent = get_pending_dbstat_entry(MyDatabaseId);
 	dbent->counts.n_deadlocks++;
 }
 
@@ -2226,7 +2274,7 @@ pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount)
 	if (!area)
 		return;
 
-	dbentry = get_local_dbstat_entry(dboid);
+	dbentry = get_pending_dbstat_entry(dboid);
 
 	/* add accumulated count to the parameter */
 	dbentry->counts.n_checksum_failures += failurecount;
@@ -2247,7 +2295,7 @@ pgstat_report_checksum_failure(void)
 	if (!area)
 		return;
 
-	dbent = get_local_dbstat_entry(MyDatabaseId);
+	dbent = get_pending_dbstat_entry(MyDatabaseId);
 	dbent->counts.n_checksum_failures++;
 }
 
@@ -2269,7 +2317,7 @@ pgstat_report_tempfile(size_t filesize)
 	if (filesize == 0)			/* Is there a case where filesize is really 0? */
 		return;
 
-	dbent = get_local_dbstat_entry(MyDatabaseId);
+	dbent = get_pending_dbstat_entry(MyDatabaseId);
 	dbent->counts.n_temp_bytes += filesize; /* needs check overflow */
 	dbent->counts.n_temp_files++;
 }
@@ -2395,7 +2443,7 @@ pgstat_init_function_usage(FunctionCallInfo fcinfo,
 	}
 
 	htabent = (PgStat_BackendFunctionEntry *)
-		get_local_stat_entry(PGSTAT_TYPE_FUNCTION, MyDatabaseId,
+		get_pending_stat_entry(PGSTAT_TYPE_FUNCTION, MyDatabaseId,
 							 fcinfo->flinfo->fn_oid, true, &found);
 
 	fcu->fs = &htabent->f_counts;
@@ -2424,7 +2472,7 @@ find_funcstat_entry(Oid func_id)
 	PgStat_BackendFunctionEntry *ent;
 
 	ent = (PgStat_BackendFunctionEntry *)
-		get_local_stat_entry(PGSTAT_TYPE_FUNCTION, MyDatabaseId,
+		get_pending_stat_entry(PGSTAT_TYPE_FUNCTION, MyDatabaseId,
 							 func_id, false, NULL);
 
 	return ent;
@@ -2524,7 +2572,7 @@ pgstat_initstats(Relation rel)
 		return;
 
 	/* Else find or make the PgStat_TableStatus entry, and update link */
-	rel->pgstat_info = get_local_tabstat_entry(rel_id, rel->rd_rel->relisshared);
+	rel->pgstat_info = get_pending_tabstat_entry(rel_id, rel->rd_rel->relisshared);
 	/* mark this relation as the owner */
 
 	/* don't allow link a stats to multiple relcache entries */
@@ -2566,11 +2614,11 @@ find_tabstat_entry(Oid rel_id)
 	PgStat_TableStatus *ent;
 
 	ent = (PgStat_TableStatus *)
-		get_local_stat_entry(PGSTAT_TYPE_TABLE, MyDatabaseId, rel_id,
+		get_pending_stat_entry(PGSTAT_TYPE_TABLE, MyDatabaseId, rel_id,
 							 false, NULL);
 	if (!ent)
 		ent = (PgStat_TableStatus *)
-			get_local_stat_entry(PGSTAT_TYPE_TABLE, InvalidOid, rel_id,
+			get_pending_stat_entry(PGSTAT_TYPE_TABLE, InvalidOid, rel_id,
 								 false, NULL);
 
 	return ent;
@@ -3048,7 +3096,7 @@ pgstat_twophase_postcommit(TransactionId xid, uint16 info,
 	PgStat_TableStatus *pgstat_info;
 
 	/* Find or create a tabstat entry for the rel */
-	pgstat_info = get_local_tabstat_entry(rec->t_id, rec->t_shared);
+	pgstat_info = get_pending_tabstat_entry(rec->t_id, rec->t_shared);
 
 	/* Same math as in AtEOXact_PgStat, commit case */
 	pgstat_info->t_counts.t_tuples_inserted += rec->tuples_inserted;
@@ -3084,7 +3132,7 @@ pgstat_twophase_postabort(TransactionId xid, uint16 info,
 	PgStat_TableStatus *pgstat_info;
 
 	/* Find or create a tabstat entry for the rel */
-	pgstat_info = get_local_tabstat_entry(rec->t_id, rec->t_shared);
+	pgstat_info = get_pending_tabstat_entry(rec->t_id, rec->t_shared);
 
 	/* Same math as in AtEOXact_PgStat, abort case */
 	if (rec->t_truncated)
@@ -3569,7 +3617,7 @@ pgstat_shutdown_hook(int code, Datum arg)
 		pgStatSharedHash = NULL;
 
 		/* We are going to exit. Don't bother destroying local hashes. */
-		pgStatLocalHash = NULL;
+		pgStatPendingHash = NULL;
 
 		dsa_detach(area);
 		area = NULL;
@@ -3799,7 +3847,7 @@ pgstat_update_connstats(bool disconnect)
 	if (disconnect)
 		session_end_type = pgStatSessionEndCause;
 
-	ldbstats = get_local_dbstat_entry(MyDatabaseId);
+	ldbstats = get_pending_dbstat_entry(MyDatabaseId);
 
 	ldbstats->counts.n_sessions = (last_report == 0 ? 1 : 0);
 	ldbstats->counts.total_session_time += secs * 1000000 + usecs;
@@ -3827,13 +3875,13 @@ pgstat_update_connstats(bool disconnect)
 }
 
 /* ----------
- * get_local_dbstat_entry() -
+ * get_pending_dbstat_entry() -
  *
  *  Find or create a local PgStat_StatDBEntry entry for dbid.  New entry is
  *  created and initialized if not exists.
  */
 static PgStat_StatDBEntry *
-get_local_dbstat_entry(Oid dbid)
+get_pending_dbstat_entry(Oid dbid)
 {
 	PgStat_StatDBEntry *dbentry;
 	bool		found;
@@ -3842,26 +3890,26 @@ get_local_dbstat_entry(Oid dbid)
 	 * Find an entry or create a new one.
 	 */
 	dbentry = (PgStat_StatDBEntry *)
-		get_local_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid,
+		get_pending_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid,
 							 true, &found);
 
 	return dbentry;
 }
 
 /* ----------
- * get_local_tabstat_entry() -
+ * get_pending_tabstat_entry() -
  *  Find or create a PgStat_TableStatus entry for rel. New entry is created and
  *  initialized if not exists.
  * ----------
  */
 static PgStat_TableStatus *
-get_local_tabstat_entry(Oid rel_id, bool isshared)
+get_pending_tabstat_entry(Oid rel_id, bool isshared)
 {
 	PgStat_TableStatus *tabentry;
 	bool		found;
 
 	tabentry = (PgStat_TableStatus *)
-		get_local_stat_entry(PGSTAT_TYPE_TABLE,
+		get_pending_stat_entry(PGSTAT_TYPE_TABLE,
 							 isshared ? InvalidOid : MyDatabaseId,
 							 rel_id, true, &found);
 
@@ -3885,7 +3933,7 @@ pgstat_write_statsfile(void)
 	const char *statfile = PGSTAT_STAT_PERMANENT_FILENAME;
 	int			rc;
 	dshash_seq_status hstat;
-	PgStatHashEntry *ps;
+	PgStatShmHashEntry *ps;
 
 	/* stats is not initialized yet. just return. */
 	if (!area)
@@ -4315,7 +4363,7 @@ slru_entry(int slru_idx)
 
 	Assert((slru_idx >= 0) && (slru_idx < SLRU_NUM_ELEMENTS));
 
-	return &local_SLRUStats[slru_idx];
+	return &pending_SLRUStats[slru_idx];
 }
 
 /*
