@@ -880,6 +880,214 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 }
 
 /*
+ * flush_tabstat - flush out a pending table stats entry
+ *
+ * Some of the stats numbers are copied to pending database stats entry after
+ * successful flush-out.
+ *
+ * If nowait is true, this function returns false on lock failure. Otherwise
+ * this function always returns true.
+ *
+ * Returns true if the entry is successfully flushed out.
+ */
+static bool
+flush_tabstat(PgStatPendingEntry *ent, bool nowait)
+{
+	static const PgStat_TableCounts all_zeroes;
+	Oid			dboid;			/* database OID of the table */
+	PgStat_TableStatus *lstats; /* pending stats entry  */
+	PgStat_StatTabEntry *shtabstats;	/* table entry of shared stats */
+	PgStat_StatDBEntry *ldbstats;	/* pending database entry */
+
+	Assert(ent->key.type == PGSTAT_TYPE_TABLE);
+	lstats = (PgStat_TableStatus *) ent->pending;
+	dboid = ent->key.databaseid;
+
+	/*
+	 * Ignore entries that didn't accumulate any actual counts, such as
+	 * indexes that were opened by the planner but not used.
+	 */
+	if (memcmp(&lstats->t_counts, &all_zeroes,
+			   sizeof(PgStat_TableCounts)) == 0)
+	{
+		/* This pending entry is going to be dropped, delink from relcache. */
+		pgstat_delinkstats(lstats->relation);
+		return true;
+	}
+
+	/* find shared table stats entry corresponding to the local entry */
+	shtabstats = (PgStat_StatTabEntry *)
+		fetch_lock_statentry(PGSTAT_TYPE_TABLE, dboid, ent->key.objectid,
+							 nowait);
+
+	if (shtabstats == NULL)
+		return false;			/* failed to acquire lock, skip */
+
+	/* add the values to the shared entry. */
+	shtabstats->numscans += lstats->t_counts.t_numscans;
+	shtabstats->tuples_returned += lstats->t_counts.t_tuples_returned;
+	shtabstats->tuples_fetched += lstats->t_counts.t_tuples_fetched;
+	shtabstats->tuples_inserted += lstats->t_counts.t_tuples_inserted;
+	shtabstats->tuples_updated += lstats->t_counts.t_tuples_updated;
+	shtabstats->tuples_deleted += lstats->t_counts.t_tuples_deleted;
+	shtabstats->tuples_hot_updated += lstats->t_counts.t_tuples_hot_updated;
+
+	/*
+	 * If table was truncated or vacuum/analyze has ran, first reset the
+	 * live/dead counters.
+	 */
+	if (lstats->t_counts.t_truncated)
+	{
+		shtabstats->n_live_tuples = 0;
+		shtabstats->n_dead_tuples = 0;
+	}
+
+	shtabstats->n_live_tuples += lstats->t_counts.t_delta_live_tuples;
+	shtabstats->n_dead_tuples += lstats->t_counts.t_delta_dead_tuples;
+	shtabstats->changes_since_analyze += lstats->t_counts.t_changed_tuples;
+	shtabstats->inserts_since_vacuum += lstats->t_counts.t_tuples_inserted;
+	shtabstats->blocks_fetched += lstats->t_counts.t_blocks_fetched;
+	shtabstats->blocks_hit += lstats->t_counts.t_blocks_hit;
+
+	/* Clamp n_live_tuples in case of negative delta_live_tuples */
+	shtabstats->n_live_tuples = Max(shtabstats->n_live_tuples, 0);
+	/* Likewise for n_dead_tuples */
+	shtabstats->n_dead_tuples = Max(shtabstats->n_dead_tuples, 0);
+
+	LWLockRelease(&shtabstats->header.lock);
+
+	/* The entry is successfully flushed so the same to add to database stats */
+	ldbstats = get_pending_dbstat_entry(dboid);
+	ldbstats->counts.n_tuples_returned += lstats->t_counts.t_tuples_returned;
+	ldbstats->counts.n_tuples_fetched += lstats->t_counts.t_tuples_fetched;
+	ldbstats->counts.n_tuples_inserted += lstats->t_counts.t_tuples_inserted;
+	ldbstats->counts.n_tuples_updated += lstats->t_counts.t_tuples_updated;
+	ldbstats->counts.n_tuples_deleted += lstats->t_counts.t_tuples_deleted;
+	ldbstats->counts.n_blocks_fetched += lstats->t_counts.t_blocks_fetched;
+	ldbstats->counts.n_blocks_hit += lstats->t_counts.t_blocks_hit;
+
+	/* This local entry is going to be dropped, delink from relcache. */
+	pgstat_delinkstats(lstats->relation);
+
+	return true;
+}
+
+/*
+ * flush_funcstat - flush out a local function stats entry
+ *
+ * If nowait is true, this function returns false on lock failure. Otherwise
+ * this function always returns true.
+ *
+ * Returns true if the entry is successfully flushed out.
+ */
+static bool
+flush_funcstat(PgStatPendingEntry *ent, bool nowait)
+{
+	PgStat_BackendFunctionEntry *localent;	/* local stats entry */
+	PgStat_StatFuncEntry *shfuncent = NULL; /* shared stats entry */
+
+	Assert(ent->key.type == PGSTAT_TYPE_FUNCTION);
+	localent = (PgStat_BackendFunctionEntry *) ent->pending;
+
+	/* localent always has non-zero content */
+
+	/* find shared table stats entry corresponding to the local entry */
+	shfuncent = (PgStat_StatFuncEntry *)
+		fetch_lock_statentry(PGSTAT_TYPE_FUNCTION, MyDatabaseId,
+							 ent->key.objectid, nowait);
+	if (shfuncent == NULL)
+		return false;			/* failed to acquire lock, skip */
+
+	shfuncent->f_numcalls += localent->f_counts.f_numcalls;
+	shfuncent->f_total_time +=
+		INSTR_TIME_GET_MICROSEC(localent->f_counts.f_total_time);
+	shfuncent->f_self_time +=
+		INSTR_TIME_GET_MICROSEC(localent->f_counts.f_self_time);
+
+	LWLockRelease(&shfuncent->header.lock);
+
+	return true;
+}
+
+/*
+ * flush_dbstat - flush out a local database stats entry
+ *
+ * If nowait is true, this function returns false on lock failure. Otherwise
+ * this function always returns true.
+ *
+ * Returns true if the entry is successfully flushed out.
+ */
+#define PGSTAT_ACCUM_DBCOUNT(sh, lo, item)		\
+	(sh)->counts.item += (lo)->counts.item
+
+static bool
+flush_dbstat(PgStatPendingEntry *ent, bool nowait)
+{
+	PgStat_StatDBEntry *pendingent;
+	PgStat_StatDBEntry *sharedent;
+
+	Assert(ent->key.type == PGSTAT_TYPE_DB);
+
+	pendingent = (PgStat_StatDBEntry *) &ent->pending;
+
+	/* find shared database stats entry corresponding to the local entry */
+	sharedent = (PgStat_StatDBEntry *)
+		fetch_lock_statentry(PGSTAT_TYPE_DB, ent->key.databaseid, InvalidOid,
+							 nowait);
+
+	if (!sharedent)
+		return false;			/* failed to acquire lock, skip */
+
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_returned);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_fetched);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_inserted);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_updated);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_deleted);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_blocks_fetched);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_blocks_hit);
+
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_deadlocks);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_temp_bytes);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_temp_files);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_checksum_failures);
+
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_session_time);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_active_time);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_idle_in_xact_time);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_abandoned);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_fatal);
+	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_killed);
+
+	/*
+	 * Accumulate xact commit/rollback and I/O timings to stats entry of the
+	 * current database.
+	 */
+	if (OidIsValid(ent->key.databaseid))
+	{
+		sharedent->counts.n_xact_commit += pgStatXactCommit;
+		sharedent->counts.n_xact_rollback += pgStatXactRollback;
+		sharedent->counts.n_block_read_time += pgStatBlockReadTime;
+		sharedent->counts.n_block_write_time += pgStatBlockWriteTime;
+		pgStatXactCommit = 0;
+		pgStatXactRollback = 0;
+		pgStatBlockReadTime = 0;
+		pgStatBlockWriteTime = 0;
+	}
+	else
+	{
+		sharedent->counts.n_xact_commit = 0;
+		sharedent->counts.n_xact_rollback = 0;
+		sharedent->counts.n_block_read_time = 0;
+		sharedent->counts.n_block_write_time = 0;
+	}
+
+	LWLockRelease(&sharedent->header.lock);
+
+	return true;
+}
+
+/*
  * flush_walstat - flush out a locally pending WAL stats entries
  *
  * If nowait is true, this function returns false on lock failure. Otherwise
@@ -1305,215 +1513,6 @@ pgstat_report_stat(bool force)
 	pending_since = 0;
 
 	return 0;
-}
-
-/*
- * flush_tabstat - flush out a pending table stats entry
- *
- * Some of the stats numbers are copied to pending database stats entry after
- * successful flush-out.
- *
- * If nowait is true, this function returns false on lock failure. Otherwise
- * this function always returns true.
- *
- * Returns true if the entry is successfully flushed out.
- */
-static bool
-flush_tabstat(PgStatPendingEntry *ent, bool nowait)
-{
-	static const PgStat_TableCounts all_zeroes;
-	Oid			dboid;			/* database OID of the table */
-	PgStat_TableStatus *lstats; /* pending stats entry  */
-	PgStat_StatTabEntry *shtabstats;	/* table entry of shared stats */
-	PgStat_StatDBEntry *ldbstats;	/* pending database entry */
-
-	Assert(ent->key.type == PGSTAT_TYPE_TABLE);
-	lstats = (PgStat_TableStatus *) ent->pending;
-	dboid = ent->key.databaseid;
-
-	/*
-	 * Ignore entries that didn't accumulate any actual counts, such as
-	 * indexes that were opened by the planner but not used.
-	 */
-	if (memcmp(&lstats->t_counts, &all_zeroes,
-			   sizeof(PgStat_TableCounts)) == 0)
-	{
-		/* This pending entry is going to be dropped, delink from relcache. */
-		pgstat_delinkstats(lstats->relation);
-		return true;
-	}
-
-	/* find shared table stats entry corresponding to the local entry */
-	shtabstats = (PgStat_StatTabEntry *)
-		fetch_lock_statentry(PGSTAT_TYPE_TABLE, dboid, ent->key.objectid,
-							 nowait);
-
-	if (shtabstats == NULL)
-		return false;			/* failed to acquire lock, skip */
-
-	/* add the values to the shared entry. */
-	shtabstats->numscans += lstats->t_counts.t_numscans;
-	shtabstats->tuples_returned += lstats->t_counts.t_tuples_returned;
-	shtabstats->tuples_fetched += lstats->t_counts.t_tuples_fetched;
-	shtabstats->tuples_inserted += lstats->t_counts.t_tuples_inserted;
-	shtabstats->tuples_updated += lstats->t_counts.t_tuples_updated;
-	shtabstats->tuples_deleted += lstats->t_counts.t_tuples_deleted;
-	shtabstats->tuples_hot_updated += lstats->t_counts.t_tuples_hot_updated;
-
-	/*
-	 * If table was truncated or vacuum/analyze has ran, first reset the
-	 * live/dead counters.
-	 */
-	if (lstats->t_counts.t_truncated)
-	{
-		shtabstats->n_live_tuples = 0;
-		shtabstats->n_dead_tuples = 0;
-	}
-
-	shtabstats->n_live_tuples += lstats->t_counts.t_delta_live_tuples;
-	shtabstats->n_dead_tuples += lstats->t_counts.t_delta_dead_tuples;
-	shtabstats->changes_since_analyze += lstats->t_counts.t_changed_tuples;
-	shtabstats->inserts_since_vacuum += lstats->t_counts.t_tuples_inserted;
-	shtabstats->blocks_fetched += lstats->t_counts.t_blocks_fetched;
-	shtabstats->blocks_hit += lstats->t_counts.t_blocks_hit;
-
-	/* Clamp n_live_tuples in case of negative delta_live_tuples */
-	shtabstats->n_live_tuples = Max(shtabstats->n_live_tuples, 0);
-	/* Likewise for n_dead_tuples */
-	shtabstats->n_dead_tuples = Max(shtabstats->n_dead_tuples, 0);
-
-	LWLockRelease(&shtabstats->header.lock);
-
-	/* The entry is successfully flushed so the same to add to database stats */
-	ldbstats = get_pending_dbstat_entry(dboid);
-	ldbstats->counts.n_tuples_returned += lstats->t_counts.t_tuples_returned;
-	ldbstats->counts.n_tuples_fetched += lstats->t_counts.t_tuples_fetched;
-	ldbstats->counts.n_tuples_inserted += lstats->t_counts.t_tuples_inserted;
-	ldbstats->counts.n_tuples_updated += lstats->t_counts.t_tuples_updated;
-	ldbstats->counts.n_tuples_deleted += lstats->t_counts.t_tuples_deleted;
-	ldbstats->counts.n_blocks_fetched += lstats->t_counts.t_blocks_fetched;
-	ldbstats->counts.n_blocks_hit += lstats->t_counts.t_blocks_hit;
-
-	/* This local entry is going to be dropped, delink from relcache. */
-	pgstat_delinkstats(lstats->relation);
-
-	return true;
-}
-
-/*
- * flush_funcstat - flush out a local function stats entry
- *
- * If nowait is true, this function returns false on lock failure. Otherwise
- * this function always returns true.
- *
- * Returns true if the entry is successfully flushed out.
- */
-static bool
-flush_funcstat(PgStatPendingEntry *ent, bool nowait)
-{
-	PgStat_BackendFunctionEntry *localent;	/* local stats entry */
-	PgStat_StatFuncEntry *shfuncent = NULL; /* shared stats entry */
-
-	Assert(ent->key.type == PGSTAT_TYPE_FUNCTION);
-	localent = (PgStat_BackendFunctionEntry *) ent->pending;
-
-	/* localent always has non-zero content */
-
-	/* find shared table stats entry corresponding to the local entry */
-	shfuncent = (PgStat_StatFuncEntry *)
-		fetch_lock_statentry(PGSTAT_TYPE_FUNCTION, MyDatabaseId,
-							 ent->key.objectid, nowait);
-	if (shfuncent == NULL)
-		return false;			/* failed to acquire lock, skip */
-
-	shfuncent->f_numcalls += localent->f_counts.f_numcalls;
-	shfuncent->f_total_time +=
-		INSTR_TIME_GET_MICROSEC(localent->f_counts.f_total_time);
-	shfuncent->f_self_time +=
-		INSTR_TIME_GET_MICROSEC(localent->f_counts.f_self_time);
-
-	LWLockRelease(&shfuncent->header.lock);
-
-	return true;
-}
-
-
-/*
- * flush_dbstat - flush out a local database stats entry
- *
- * If nowait is true, this function returns false on lock failure. Otherwise
- * this function always returns true.
- *
- * Returns true if the entry is successfully flushed out.
- */
-#define PGSTAT_ACCUM_DBCOUNT(sh, lo, item)		\
-	(sh)->counts.item += (lo)->counts.item
-
-static bool
-flush_dbstat(PgStatPendingEntry *ent, bool nowait)
-{
-	PgStat_StatDBEntry *pendingent;
-	PgStat_StatDBEntry *sharedent;
-
-	Assert(ent->key.type == PGSTAT_TYPE_DB);
-
-	pendingent = (PgStat_StatDBEntry *) &ent->pending;
-
-	/* find shared database stats entry corresponding to the local entry */
-	sharedent = (PgStat_StatDBEntry *)
-		fetch_lock_statentry(PGSTAT_TYPE_DB, ent->key.databaseid, InvalidOid,
-							 nowait);
-
-	if (!sharedent)
-		return false;			/* failed to acquire lock, skip */
-
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_returned);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_fetched);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_inserted);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_updated);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_deleted);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_blocks_fetched);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_blocks_hit);
-
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_deadlocks);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_temp_bytes);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_temp_files);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_checksum_failures);
-
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_session_time);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_active_time);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_idle_in_xact_time);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_abandoned);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_fatal);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_killed);
-
-	/*
-	 * Accumulate xact commit/rollback and I/O timings to stats entry of the
-	 * current database.
-	 */
-	if (OidIsValid(ent->key.databaseid))
-	{
-		sharedent->counts.n_xact_commit += pgStatXactCommit;
-		sharedent->counts.n_xact_rollback += pgStatXactRollback;
-		sharedent->counts.n_block_read_time += pgStatBlockReadTime;
-		sharedent->counts.n_block_write_time += pgStatBlockWriteTime;
-		pgStatXactCommit = 0;
-		pgStatXactRollback = 0;
-		pgStatBlockReadTime = 0;
-		pgStatBlockWriteTime = 0;
-	}
-	else
-	{
-		sharedent->counts.n_xact_commit = 0;
-		sharedent->counts.n_xact_rollback = 0;
-		sharedent->counts.n_block_read_time = 0;
-		sharedent->counts.n_block_write_time = 0;
-	}
-
-	LWLockRelease(&sharedent->header.lock);
-
-	return true;
 }
 
 /* ----------
