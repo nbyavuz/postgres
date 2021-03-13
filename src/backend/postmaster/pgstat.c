@@ -875,8 +875,6 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 
 				if (header->dropped)
 				{
-					pgstat_localhash_delete(pgStatEntHash, key);
-
 					if (pg_atomic_sub_fetch_u32(&header->refcount, 1) < 1)
 					{
 						/*
@@ -885,6 +883,9 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 						 */
 						dsa_free(area, lohashent->dsapointer);
 					}
+
+					if (!pgstat_localhash_delete(pgStatEntHash, lohashent->key))
+						elog(PANIC, "something has gone wrong");
 				}
 			}
 
