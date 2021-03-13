@@ -796,8 +796,13 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 		 */
 		dshash_release_lock(pgStatSharedHash, shhashent);
 
-		/* register to local hash if possible */
-		if (pgStatEntHash || pgStatCacheContext)
+		/*
+		 * FIXME: Previously this was conditional on
+		 * (pgStatEntHash || pgStatCacheContext)
+		 * but I don't think that's correct - we'd not hold a refcount. Also,
+		 * why would it be ok if we had pgStatEntHash but not pgStatCacheContext?
+		 */
+		Assert(pgStatCacheContext);
 		{
 			bool		lofound;
 
@@ -974,7 +979,13 @@ delete_current_stats_entry(dshash_seq_status *hstat)
 	if (pg_atomic_read_u32(&header->refcount) > 0)
 		header->dropped = true;
 	else
+	{
+		/* What guarantees that no local stats entry exists here? */
+		Assert(!pgStatEntHash ||
+			   !pgstat_localhash_lookup(pgStatEntHash, ent->key));
+
 		dsa_free(area, pdsa);
+	}
 
 	return;
 }
