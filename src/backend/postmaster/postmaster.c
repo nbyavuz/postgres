@@ -6333,8 +6333,6 @@ restore_backend_variables(BackendParameters *param, Port *port)
 	if (postmaster_alive_fds[1] >= 0)
 		ReserveExternalFD();
 #endif
-	if (pgStatSock != PGINVALID_SOCKET)
-		ReserveExternalFD();
 }
 
 
