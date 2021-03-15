@@ -7126,9 +7126,12 @@ StartupXLOG(void)
 		}
 
 		/*
-		 * Reset pgstat data, because it may be invalid after recovery.
+		 * Reset pgstat data, because it may be invalid after recovery. It's
+		 * safe to do this here, because postmaster will not yet have started
+		 * any other processes. NB: This basically just skips loading the data
+		 * from disk, see pgstat_restore() call in clean-startup path.
 		 */
-		pgstat_reset_all();
+		pgstat_discard_stats();
 
 		/*
 		 * If there was a backup label file, it's done its job and the info
@@ -7613,6 +7616,10 @@ StartupXLOG(void)
 			!reachedRecoveryTarget)
 			ereport(FATAL,
 					(errmsg("recovery ended before configured recovery target was reached")));
+	}
+	else
+	{
+		pgstat_restore_stats();
 	}
 
 	/*
@@ -8667,6 +8674,13 @@ ShutdownXLOG(int code, Datum arg)
 			RequestXLogSwitch(false);
 
 		CreateCheckPoint(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE);
+
+		/*
+		 * XXX: We should find a better place to deal with this. Probably fine
+		 * to just put it into checkpointer, given that stats don't work in
+		 * single user mode anyway?
+		 */
+		pgstat_write_stats();
 	}
 }
 

@@ -296,6 +296,7 @@ typedef struct PgStat_StatDBCounts
  */
 typedef struct PgStat_StatEntryHeader
 {
+	uint32		magic;				/* just a validity cross-check */
 	LWLock		lock;
 	bool		dropped;			/* This entry is being dropped and should
 									 * be removed when refcount goes to
@@ -505,7 +506,15 @@ extern SessionEndType pgStatSessionEndCause;
 extern Size StatsShmemSize(void);
 extern void StatsShmemInit(void);
 
-extern void pgstat_reset_all(void);
+
+/* ----------
+ * Functions called startup / shutdown
+ * ----------
+ */
+extern void pgstat_restore_stats(void);
+extern void pgstat_discard_stats(void);
+extern void pgstat_write_stats(void);
+
 
 /* ----------
  * Functions called from backends

@@ -146,8 +146,7 @@ typedef struct StatsShmemStruct
 {
 	void   *raw_dsa_area;
 	dshash_table_handle hash_handle;	/* shared dbstat hash */
-	int			refcount;		/* # of processes that is attaching the shared
-								 * stats memory */
+
 	/* Global stats structs */
 	PgStat_Archiver archiver_stats;
 	pg_atomic_uint32 archiver_changecount;
@@ -165,10 +164,6 @@ typedef struct StatsShmemStruct
 	PgStat_Archiver archiver_reset_offset;
 	PgStat_BgWriter bgwriter_reset_offset;
 	PgStat_CheckPointer checkpointer_reset_offset;
-
-	/* file read/write protection */
-	bool		attach_holdoff;
-	ConditionVariable holdoff_cv;
 
 	pg_atomic_uint64 gc_count;	/* # of entries deleted. not protected by
 								 * StatsLock */
@@ -520,7 +515,6 @@ StatsShmemInit(void)
 
 		Assert(!found);
 
-		ConditionVariableInit(&StatsShmem->holdoff_cv);
 		pg_atomic_init_u32(&StatsShmem->archiver_changecount, 0);
 		pg_atomic_init_u32(&StatsShmem->bgwriter_changecount, 0);
 		pg_atomic_init_u32(&StatsShmem->checkpointer_changecount, 0);
@@ -563,125 +557,6 @@ StatsShmemInit(void)
 }
 
 /* ----------
- * allow_next_attacher() -
- *
- *  Let other processes to go ahead attaching the shared stats area.
- * ----------
- */
-static void
-allow_next_attacher(void)
-{
-	bool		triggerd = false;
-
-	LWLockAcquire(StatsLock, LW_EXCLUSIVE);
-	if (StatsShmem->attach_holdoff)
-	{
-		StatsShmem->attach_holdoff = false;
-		triggerd = true;
-	}
-	LWLockRelease(StatsLock);
-
-	if (triggerd)
-		ConditionVariableBroadcast(&StatsShmem->holdoff_cv);
-}
-
-/* ----------
- * attach_shared_stats() -
- *
- *	Attach shared or create stats memory. If we are the first process to use
- *	activity stats system, read the saved statistics file if any.
- * ---------
- */
-static void
-attach_shared_stats(void)
-{
-	MemoryContext oldcontext;
-	bool first = false;
-
-	/*
-	 * Don't use dsm under postmaster, or when not tracking counts.
-	 */
-	if (!pgstat_track_counts || !IsUnderPostmaster)
-		return;
-
-	pgstat_setup_memcxt();
-
-	if (area)
-		return;
-
-	/* stats shared memory persists for the backend lifetime */
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-
-	/*
-	 * The first attacher backend may still reading the stats file, or the
-	 * last detacher may writing it. Wait for the work to finish.
-	 */
-	ConditionVariablePrepareToSleep(&StatsShmem->holdoff_cv);
-	for (;;)
-	{
-		bool		hold_off;
-
-		LWLockAcquire(StatsLock, LW_SHARED);
-		hold_off = StatsShmem->attach_holdoff;
-		LWLockRelease(StatsLock);
-
-		if (!hold_off)
-			break;
-
-		ConditionVariableTimedSleep(&StatsShmem->holdoff_cv, 10,
-									WAIT_EVENT_READING_STATS_FILE);
-	}
-	ConditionVariableCancelSleep();
-
-	area = dsa_attach_in_place(StatsShmem->raw_dsa_area, NULL);
-	dsa_pin_mapping(area);
-
-	pgStatSharedHash = dshash_attach(area, &dsh_params,
-									 StatsShmem->hash_handle, 0);
-
-	LWLockAcquire(StatsLock, LW_EXCLUSIVE);
-
-	/*
-	 * The last process is responsible to write out stats files at exit.
-	 * Maintain refcount so that a process going to exit can find whether it
-	 * is the last one or not.
-	 */
-	if (StatsShmem->refcount > 0)
-		StatsShmem->refcount++;
-	else
-	{
-		/* We're the first process to attach the shared stats memory */
-
-		/* Block the next attacher for a while, see the comment above. */
-		StatsShmem->attach_holdoff = true;
-
-		StatsShmem->refcount = 1;
-		first = true;
-	}
-
-	LWLockRelease(StatsLock);
-
-	if (first)
-	{
-		/*
-		 * We're the first attacher process, read stats file while blocking
-		 * successors.
-		 */
-		Assert(StatsShmem->attach_holdoff);
-		pgstat_read_statsfile();
-		allow_next_attacher();
-	}
-	else
-	{
-		/* We're not the first one, attach existing shared hash table. */
-		pgStatSharedHash = dshash_attach(area, &dsh_params,
-										 StatsShmem->hash_handle, 0);
-	}
-
-	MemoryContextSwitchTo(oldcontext);
-}
-
-/* ----------
  * cleanup_dropped_stats_entries() -
  *              Clean up shared stats entries no longer used.
  *
@@ -716,85 +591,64 @@ cleanup_dropped_stats_entries(void)
 	 * bother destroying pgStatEntHash.
 	 */
 	pgStatEntHash = NULL;
-}
 
-/* ----------
- * detach_shared_stats() -
- *
- *	Detach shared stats. Write out to file if we're the last process and told
- *	to do so.
- * ----------
- */
-static void
-detach_shared_stats(bool write_file)
-{
-	bool		is_last_detacher = 0;
-
-	/* immediately return if useless */
-	if (!area || !IsUnderPostmaster)
-		return;
-
-	/* We shouldn't leave a reference to shared stats. */
-	cleanup_dropped_stats_entries();
-
-	/*
-	 * If we are the last detacher, hold off the next attacher (if possible)
-	 * until we finish writing stats file.
-	 */
-	LWLockAcquire(StatsLock, LW_EXCLUSIVE);
-	if (--StatsShmem->refcount == 0)
-	{
-		StatsShmem->attach_holdoff = true;
-		is_last_detacher = true;
-	}
-	LWLockRelease(StatsLock);
-
-	if (is_last_detacher)
-	{
-		if (write_file)
-			pgstat_write_statsfile();
-
-		/* allow the next attacher, if any */
-		allow_next_attacher();
-	}
-
-	/*
-	 * Detach the area. It is automatically destroyed when the last process
-	 * detached it.
-	 */
-	dsa_detach(area);
-
-	area = NULL;
-	pgStatSharedHash = NULL;
-
-	/* We are going to exit. Don't bother destroying local hashes. */
-	pgStatLocalHash = NULL;
+	elog(DEBUG1, "deleting pgstatenthash");
 }
 
 /*
- * pgstat_reset_all() -
+ * pgstat_restore_stats() - read on-disk stats into memory at server start.
+ */
+void
+pgstat_restore_stats(void)
+{
+	if (IsUnderPostmaster)
+		pgstat_read_statsfile();
+}
+
+/*
+ * pgstat_discard_stats() -
  *
  * Remove the stats file.  This is currently used only if WAL recovery is
  * needed after a crash.
  */
 void
-pgstat_reset_all(void)
+pgstat_discard_stats(void)
 {
-	/* standalone server doesn't use shared stats */
-	if (!IsUnderPostmaster)
-		return;
+	int ret;
 
-	/* Startup must be the only user of shared stats */
-	Assert(StatsShmem->refcount == 1);
+	/* NB: this needs to be done even in single user mode */
 
-	/*
-	 * We could directly remove files and recreate the shared memory area. But
-	 * just discard  then create for simplicity.
-	 */
-	detach_shared_stats(false);
-	attach_shared_stats();
+	ret = unlink(PGSTAT_STAT_PERMANENT_FILENAME);
+	if (ret != 0)
+	{
+		if (errno == ENOENT)
+			elog(DEBUG2,
+				 "didn't need to unlink permanent stats file \"%s\" - didn't exist",
+				 PGSTAT_STAT_PERMANENT_FILENAME);
+		else
+			ereport(LOG,
+					(errcode_for_file_access(),
+					 errmsg("could not unlink permanent statistics file \"%s\": %m",
+							PGSTAT_STAT_PERMANENT_FILENAME)));
+	}
+	else
+	{
+		ereport(DEBUG2,
+				(errcode_for_file_access(),
+				 errmsg("unlinked permanent statistics file \"%s\": %m",
+						PGSTAT_STAT_PERMANENT_FILENAME)));
+	}
 }
 
+/*
+ * pgstat_write_stats() - write in-memory stats onto disk during shutdown.
+ */
+void
+pgstat_write_stats(void)
+{
+	if (IsUnderPostmaster)
+		pgstat_write_statsfile();
+}
 
 /*
  * fetch_lock_statentry - common helper function to fetch and lock a stats
@@ -848,6 +702,8 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 	key.databaseid = dbid;
 	key.objectid = objid;
 
+	pgstat_setup_memcxt();
+
 	if (pgStatEntHash)
 	{
 		uint64		currage;
@@ -873,6 +729,8 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 			{
 				PgStat_StatEntryHeader *header = lohashent->body;
 
+				Assert(header->magic == 0xdeadbeef);
+
 				if (header->dropped)
 				{
 					if (pg_atomic_sub_fetch_u32(&header->refcount, 1) < 1)
@@ -896,6 +754,8 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 
 		if (lohashent)
 		{
+			Assert(lohashent->body->magic == 0xdeadbeef);
+
 			if (found)
 				*found = true;
 			return lohashent->body;
@@ -913,6 +773,7 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 											  pgstat_sharedentsize[type]);
 
 			shheader = dsa_get_address(area, chunk);
+			shheader->magic = 0xdeadbeef;
 			LWLockInitialize(&shheader->lock, LWTRANCHE_STATS);
 			pg_atomic_init_u32(&shheader->refcount, 0);
 
@@ -920,7 +781,11 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 			shhashent->body = chunk;
 		}
 		else
+		{
 			shheader = dsa_get_address(area, shhashent->body);
+			Assert(shheader->magic == 0xdeadbeef);
+
+		}
 
 		/*
 		 * We expose this shared entry now.  You might think that the entry
@@ -1133,9 +998,13 @@ get_local_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
 	PgStatHashKey key;
 	PgStatLocalHashEntry *entry;
 
-	if (pgStatLocalHash == NULL)
+	if (unlikely(pgStatLocalHash == NULL))
+	{
+		pgstat_setup_memcxt();
+
 		pgStatLocalHash = pgstat_localhash_create(pgStatCacheContext,
 												  PGSTAT_TABLE_HASH_SIZE, NULL);
+	}
 
 	/* Find an entry or create a new one. */
 	key.type = type;
@@ -1676,7 +1545,7 @@ pgstat_vacuum_stat(void)
 				continue;
 		}
 
-		/* drop this etnry */
+		/* drop this entry */
 		delete_current_stats_entry(&dshstat);
 		nvictims++;
 	}
@@ -3608,6 +3477,7 @@ pgstat_fetch_replslot(int *nslots_p)
 {
 	if (cached_replslotstats == NULL)
 	{
+		pgstat_setup_memcxt();
 		cached_replslotstats = (PgStat_ReplSlot *)
 			MemoryContextAlloc(pgStatCacheContext,
 							   sizeof(PgStat_ReplSlot) * max_replication_slots);
@@ -3677,7 +3547,22 @@ pgstat_shutdown_hook(int code, Datum arg)
 
 	ReplicationSlotCleanup();
 
-	detach_shared_stats(true);
+	if (IsUnderPostmaster)
+	{
+		Assert(area);
+
+		/* We shouldn't leave a reference to shared stats. */
+		cleanup_dropped_stats_entries();
+
+		dshash_detach(pgStatSharedHash);
+		pgStatSharedHash = NULL;
+
+		/* We are going to exit. Don't bother destroying local hashes. */
+		pgStatLocalHash = NULL;
+
+		dsa_detach(area);
+		area = NULL;
+	}
 }
 
 /* ----------
@@ -3694,6 +3579,24 @@ pgstat_shutdown_hook(int code, Datum arg)
 void
 pgstat_initialize(void)
 {
+	/* XXX: should we handle single user mode differently? */
+
+	if (IsUnderPostmaster)
+	{
+		MemoryContext oldcontext;
+
+		/* stats shared memory persists for the backend lifetime */
+		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+		area = dsa_attach_in_place(StatsShmem->raw_dsa_area, NULL);
+		dsa_pin_mapping(area);
+
+		pgStatSharedHash = dshash_attach(area, &dsh_params,
+										 StatsShmem->hash_handle, 0);
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
 	/*
 	 * Initialize prevWalUsage with pgWalUsage so that pgstat_report_wal() can
 	 * calculate how much pgWalUsage counters are increased by substracting
@@ -3705,10 +3608,6 @@ pgstat_initialize(void)
 
 	/* need to be called before dsm shutdown */
 	before_shmem_exit(pgstat_shutdown_hook, 0);
-
-	/* attach shared database stats area */
-	/* FIXME: moved during rebase */
-	attach_shared_stats();
 }
 
 /* ------------------------------------------------------------
@@ -3981,13 +3880,6 @@ pgstat_write_statsfile(void)
 	if (!area)
 		return;
 
-	/* this is the last process that is accesing the shared stats */
-#ifdef USE_ASSERT_CHECKING
-	LWLockAcquire(StatsLock, LW_SHARED);
-	Assert(StatsShmem->refcount == 0);
-	LWLockRelease(StatsLock);
-#endif
-
 	elog(DEBUG2, "writing stats file \"%s\"", statfile);
 
 	/*
@@ -4137,13 +4029,6 @@ pgstat_read_statsfile(void)
 
 	/* shouldn't be called from postmaster */
 	Assert(IsUnderPostmaster);
-
-	/* this is the only process that is accesing the shared stats */
-#ifdef USE_ASSERT_CHECKING
-	LWLockAcquire(StatsLock, LW_SHARED);
-	Assert(StatsShmem->refcount == 1);
-	LWLockRelease(StatsLock);
-#endif
 
 	elog(DEBUG2, "reading stats file \"%s\"", statfile);
 
