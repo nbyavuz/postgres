@@ -1,0 +1,7 @@
+# Ignore everything, except ci/
+#
+
+# cirrus-ci uses the whole repository as context when building dockerfiles,
+# and the dockerfiles should not reference anything outside of ci/
+*
+!ci/*
