@@ -258,7 +258,7 @@ WalWriterMain(void)
 			left_till_hibernate--;
 
 		/* Send WAL statistics to the stats collector */
-		pgstat_send_wal(false);
+		pgstat_report_wal();
 
 		/*
 		 * Sleep until we are signaled or WalWriterDelay has elapsed.  If we
