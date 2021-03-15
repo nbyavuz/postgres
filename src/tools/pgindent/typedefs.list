@@ -1850,7 +1850,6 @@ PgStat_BackendFunctionEntry
 PgStat_Counter
 PgStat_FunctionCallUsage
 PgStat_FunctionCounts
-PgStat_FunctionEntry
 PgStat_Shared_Reset_Target
 PgStat_Single_Reset_Type
 PgStat_StatFuncEntry

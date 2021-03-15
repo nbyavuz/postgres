@@ -236,18 +236,6 @@ typedef struct PgStat_BackendFunctionEntry
 	PgStat_FunctionCounts f_counts;
 } PgStat_BackendFunctionEntry;
 
-/* ----------
- * PgStat_FunctionEntry			Per-function info in a MsgFuncstat
- * ----------
- */
-typedef struct PgStat_FunctionEntry
-{
-	Oid			f_id;
-	PgStat_Counter f_numcalls;
-	PgStat_Counter f_total_time;	/* times in microseconds */
-	PgStat_Counter f_self_time;
-} PgStat_FunctionEntry;
-
 /* ------------------------------------------------------------
  * Activity statistics data structures on file and shared memory follow
  *
