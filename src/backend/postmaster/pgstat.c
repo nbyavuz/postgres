@@ -581,45 +581,6 @@ StatsShmemInit(void)
 	}
 }
 
-/* ----------
- * cleanup_dropped_stats_entries() -
- *              Clean up shared stats entries no longer used.
- *
- *  Shared stats entries for dropped objects may be left referenced. Clean up
- *  our reference and drop the shared entry if needed.
- * ----------
- */
-static void
-cleanup_dropped_stats_entries(void)
-{
-	pgstat_shm_lookup_cache_iterator i;
-	PgStatShmLookupCacheEntry *ent;
-
-	if (pgStatShmLookupCache == NULL)
-		return;
-
-	pgstat_shm_lookup_cache_start_iterate(pgStatShmLookupCache, &i);
-	while ((ent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i))
-		   != NULL)
-	{
-		/*
-		 * Free the shared memory chunk for the entry if we were the last
-		 * referrer to a dropped entry.
-		 */
-		if (pg_atomic_sub_fetch_u32(&ent->shared->refcount, 1) < 1 &&
-			ent->shared->dropped)
-			dsa_free(area, ent->dsapointer);
-	}
-
-	/*
-	 * This function is expected to be called during backend exit. So we don't
-	 * bother destroying pgStatShmLookupCache.
-	 */
-	pgStatShmLookupCache = NULL;
-
-	elog(DEBUG1, "deleting pgStatShmLookupCache");
-}
-
 /*
  * pgstat_restore_stats() - read on-disk stats into memory at server start.
  */
@@ -673,6 +634,46 @@ pgstat_write_stats(void)
 {
 	if (IsUnderPostmaster)
 		pgstat_write_statsfile();
+}
+
+
+/* ----------
+ * cleanup_dropped_stats_entries() -
+ *              Clean up shared stats entries no longer used.
+ *
+ *  Shared stats entries for dropped objects may be left referenced. Clean up
+ *  our reference and drop the shared entry if needed.
+ * ----------
+ */
+static void
+cleanup_dropped_stats_entries(void)
+{
+	pgstat_shm_lookup_cache_iterator i;
+	PgStatShmLookupCacheEntry *ent;
+
+	if (pgStatShmLookupCache == NULL)
+		return;
+
+	pgstat_shm_lookup_cache_start_iterate(pgStatShmLookupCache, &i);
+	while ((ent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i))
+		   != NULL)
+	{
+		/*
+		 * Free the shared memory chunk for the entry if we were the last
+		 * referrer to a dropped entry.
+		 */
+		if (pg_atomic_sub_fetch_u32(&ent->shared->refcount, 1) < 1 &&
+			ent->shared->dropped)
+			dsa_free(area, ent->dsapointer);
+	}
+
+	/*
+	 * This function is expected to be called during backend exit. So we don't
+	 * bother destroying pgStatShmLookupCache.
+	 */
+	pgStatShmLookupCache = NULL;
+
+	elog(DEBUG1, "deleting pgStatShmLookupCache");
 }
 
 /*
