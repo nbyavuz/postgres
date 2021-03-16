@@ -14,7 +14,6 @@
 #include "datatype/timestamp.h"
 #include "executor/instrument.h"
 #include "port/atomics.h"
-#include "lib/dshash.h"
 #include "postmaster/pgarch.h" /* for MAX_XFN_CHARS */
 #include "storage/lwlock.h"
 #include "utils/backend_status.h" /* for backward compatibility */
@@ -306,13 +305,6 @@ typedef struct PgStat_StatDBEntry
 	TimestampTz stats_timestamp;	/* time of db stats update */
 
 	PgStat_StatDBCounts counts;
-
-	/*
-	 * The followings must be last in the struct, because we don't write them
-	 * out to the stats file.
-	 */
-	dshash_table_handle tables; /* current gen tables hash */
-	dshash_table_handle functions;	/* current gen functions hash */
 } PgStat_StatDBEntry;
 
 /* ----------

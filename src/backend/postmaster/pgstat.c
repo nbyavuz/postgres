@@ -36,6 +36,7 @@
 #include "catalog/pg_database.h"
 #include "catalog/pg_proc.h"
 #include "common/hashfn.h"
+#include "lib/dshash.h"
 #include "libpq/libpq.h"
 #include "miscadmin.h"
 #include "pgstat.h"
