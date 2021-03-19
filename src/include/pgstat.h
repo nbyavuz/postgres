@@ -246,7 +246,25 @@ typedef struct PgStat_BackendFunctionEntry
 #define PGSTAT_FILE_FORMAT_ID	0x01A5BCA1
 
 
-typedef struct PgStat_StatDBCounts
+/* ----------
+ * PgStat_StatEntryHead			common header struct for PgStat_Stat*Entry
+ * ----------
+ */
+typedef struct PgStat_StatEntryHeader
+{
+	uint32		magic;				/* just a validity cross-check */
+	LWLock		lock;
+	bool		dropped;			/* This entry is being dropped and should
+									 * be removed when refcount goes to
+									 * zero. */
+	pg_atomic_uint32  refcount;		/* How many backends are referencing */
+} PgStat_StatEntryHeader;
+
+/* ----------
+ * PgStat_StatDBEntry			The statistics per database
+ * ----------
+ */
+typedef struct PgStat_StatDBEntry
 {
 	PgStat_Counter n_xact_commit;
 	PgStat_Counter n_xact_rollback;
@@ -275,36 +293,11 @@ typedef struct PgStat_StatDBCounts
 	PgStat_Counter n_sessions_abandoned;
 	PgStat_Counter n_sessions_fatal;
 	PgStat_Counter n_sessions_killed;
-} PgStat_StatDBCounts;
 
-/* ----------
- * PgStat_StatEntryHead			common header struct for PgStat_Stat*Entry
- * ----------
- */
-typedef struct PgStat_StatEntryHeader
-{
-	uint32		magic;				/* just a validity cross-check */
-	LWLock		lock;
-	bool		dropped;			/* This entry is being dropped and should
-									 * be removed when refcount goes to
-									 * zero. */
-	pg_atomic_uint32  refcount;		/* How many backends are referencing */
-} PgStat_StatEntryHeader;
-
-/* ----------
- * PgStat_StatDBEntry			The statistics per database
- * ----------
- */
-typedef struct PgStat_StatDBEntry
-{
-	PgStat_StatEntryHeader header;	/* must be the first member,
-									   used only on shared memory  */
 	TimestampTz last_autovac_time;
 	TimestampTz last_checksum_failure;
 	TimestampTz stat_reset_timestamp;
 	TimestampTz stats_timestamp;	/* time of db stats update */
-
-	PgStat_StatDBCounts counts;
 } PgStat_StatDBEntry;
 
 /* ----------

@@ -182,6 +182,13 @@ typedef struct pgstat_oident
  * ----------
  */
 
+typedef struct PgStatShm_StatDBEntry
+{
+	PgStat_StatEntryHeader header;	/* must be the first member,
+									   used only on shared memory  */
+	PgStat_StatDBEntry stats;
+} PgStatShm_StatDBEntry;
+
 /* Record that's written to 2PC state file when pgstat state is persisted */
 typedef struct TwoPhasePgStatRecord
 {
@@ -351,7 +358,7 @@ char      *pgstat_stat_tmpname = NULL;
  */
 static const size_t pgstat_sharedentsize[] =
 {
-	sizeof(PgStat_StatDBEntry), /* PGSTAT_TYPE_DB */
+	sizeof(PgStatShm_StatDBEntry), /* PGSTAT_TYPE_DB */
 	sizeof(PgStat_StatTabEntry),	/* PGSTAT_TYPE_TABLE */
 	sizeof(PgStat_StatFuncEntry),	/* PGSTAT_TYPE_FUNCTION */
 	sizeof(PgStat_ReplSlot)		/* PGSTAT_TYPE_REPLSLOT */
@@ -1137,9 +1144,9 @@ pgstat_reset_counters(void)
 
 		if (p->key.type == PGSTAT_TYPE_DB)
 		{
-			PgStat_StatDBEntry *dbstat = (PgStat_StatDBEntry *) header;
+			PgStatShm_StatDBEntry *dbstat = (PgStatShm_StatDBEntry *) header;
 
-			dbstat->stat_reset_timestamp = GetCurrentTimestamp();
+			dbstat->stats.stat_reset_timestamp = GetCurrentTimestamp();
 		}
 		LWLockRelease(&header->lock);
 	}
@@ -1241,11 +1248,11 @@ void
 pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 {
 	PgStat_StatEntryHeader *header;
-	PgStat_StatDBEntry *dbentry;
+	PgStatShm_StatDBEntry *dbentry;
 	PgStatTypes stattype;
 	TimestampTz ts;
 
-	dbentry = (PgStat_StatDBEntry *)
+	dbentry = (PgStatShm_StatDBEntry *)
 		get_stat_entry(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid, false, false,
 					   NULL);
 	Assert(dbentry);
@@ -1253,7 +1260,7 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 	/* Set the reset timestamp for the whole database */
 	ts = GetCurrentTimestamp();
 	LWLockAcquire(&dbentry->header.lock, LW_EXCLUSIVE);
-	dbentry->stat_reset_timestamp = ts;
+	dbentry->stats.stat_reset_timestamp = ts;
 	LWLockRelease(&dbentry->header.lock);
 
 	/* Remove object if it exists, ignore if not */
@@ -2424,13 +2431,13 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 
 	/* The entry is successfully flushed so the same to add to database stats */
 	ldbstats = get_pending_dbstat_entry(dboid);
-	ldbstats->counts.n_tuples_returned += lstats->t_counts.t_tuples_returned;
-	ldbstats->counts.n_tuples_fetched += lstats->t_counts.t_tuples_fetched;
-	ldbstats->counts.n_tuples_inserted += lstats->t_counts.t_tuples_inserted;
-	ldbstats->counts.n_tuples_updated += lstats->t_counts.t_tuples_updated;
-	ldbstats->counts.n_tuples_deleted += lstats->t_counts.t_tuples_deleted;
-	ldbstats->counts.n_blocks_fetched += lstats->t_counts.t_blocks_fetched;
-	ldbstats->counts.n_blocks_hit += lstats->t_counts.t_blocks_hit;
+	ldbstats->n_tuples_returned += lstats->t_counts.t_tuples_returned;
+	ldbstats->n_tuples_fetched += lstats->t_counts.t_tuples_fetched;
+	ldbstats->n_tuples_inserted += lstats->t_counts.t_tuples_inserted;
+	ldbstats->n_tuples_updated += lstats->t_counts.t_tuples_updated;
+	ldbstats->n_tuples_deleted += lstats->t_counts.t_tuples_deleted;
+	ldbstats->n_blocks_fetched += lstats->t_counts.t_blocks_fetched;
+	ldbstats->n_blocks_hit += lstats->t_counts.t_blocks_hit;
 
 	/* This local entry is going to be dropped, delink from relcache. */
 	pgstat_delinkstats(lstats->relation);
@@ -2484,20 +2491,20 @@ flush_funcstat(PgStatPendingEntry *ent, bool nowait)
  * Returns true if the entry is successfully flushed out.
  */
 #define PGSTAT_ACCUM_DBCOUNT(sh, lo, item)		\
-	(sh)->counts.item += (lo)->counts.item
+	(sh)->stats.item += (lo)->item
 
 static bool
 flush_dbstat(PgStatPendingEntry *ent, bool nowait)
 {
 	PgStat_StatDBEntry *pendingent;
-	PgStat_StatDBEntry *sharedent;
+	PgStatShm_StatDBEntry *sharedent;
 
 	Assert(ent->key.type == PGSTAT_TYPE_DB);
 
 	pendingent = (PgStat_StatDBEntry *) &ent->pending;
 
 	/* find shared database stats entry corresponding to the local entry */
-	sharedent = (PgStat_StatDBEntry *)
+	sharedent = (PgStatShm_StatDBEntry *)
 		fetch_lock_statentry(PGSTAT_TYPE_DB, ent->key.databaseid, InvalidOid,
 							 nowait);
 
@@ -2531,10 +2538,10 @@ flush_dbstat(PgStatPendingEntry *ent, bool nowait)
 	 */
 	if (OidIsValid(ent->key.databaseid))
 	{
-		sharedent->counts.n_xact_commit += pgStatXactCommit;
-		sharedent->counts.n_xact_rollback += pgStatXactRollback;
-		sharedent->counts.n_block_read_time += pgStatBlockReadTime;
-		sharedent->counts.n_block_write_time += pgStatBlockWriteTime;
+		sharedent->stats.n_xact_commit += pgStatXactCommit;
+		sharedent->stats.n_xact_rollback += pgStatXactRollback;
+		sharedent->stats.n_block_read_time += pgStatBlockReadTime;
+		sharedent->stats.n_block_write_time += pgStatBlockWriteTime;
 		pgStatXactCommit = 0;
 		pgStatXactRollback = 0;
 		pgStatBlockReadTime = 0;
@@ -2542,10 +2549,10 @@ flush_dbstat(PgStatPendingEntry *ent, bool nowait)
 	}
 	else
 	{
-		sharedent->counts.n_xact_commit = 0;
-		sharedent->counts.n_xact_rollback = 0;
-		sharedent->counts.n_block_read_time = 0;
-		sharedent->counts.n_block_write_time = 0;
+		sharedent->stats.n_xact_commit = 0;
+		sharedent->stats.n_xact_rollback = 0;
+		sharedent->stats.n_block_read_time = 0;
+		sharedent->stats.n_block_write_time = 0;
 	}
 
 	LWLockRelease(&sharedent->header.lock);
@@ -2700,7 +2707,7 @@ flush_slrustat(bool nowait)
 void
 pgstat_report_autovac(Oid dboid)
 {
-	PgStat_StatDBEntry *dbentry;
+	PgStatShm_StatDBEntry *dbentry;
 	TimestampTz ts;
 
 	/* return if activity stats is not active */
@@ -2712,12 +2719,12 @@ pgstat_report_autovac(Oid dboid)
 	 * consistency. Vacuum doesn't run frequently and is a long-lasting
 	 * operation so it doesn't matter if we get blocked here a little.
 	 */
-	dbentry = (PgStat_StatDBEntry *)
+	dbentry = (PgStatShm_StatDBEntry *)
 		get_stat_entry(PGSTAT_TYPE_DB, dboid, InvalidOid, false, true, NULL);
 
 	ts = GetCurrentTimestamp();;
 	LWLockAcquire(&dbentry->header.lock, LW_EXCLUSIVE);
-	dbentry->last_autovac_time = ts;
+	dbentry->stats.last_autovac_time = ts;
 	LWLockRelease(&dbentry->header.lock);
 }
 
@@ -2895,19 +2902,19 @@ pgstat_report_recovery_conflict(int reason)
 			 */
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_TABLESPACE:
-			dbent->counts.n_conflict_tablespace++;
+			dbent->n_conflict_tablespace++;
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_LOCK:
-			dbent->counts.n_conflict_lock++;
+			dbent->n_conflict_lock++;
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_SNAPSHOT:
-			dbent->counts.n_conflict_snapshot++;
+			dbent->n_conflict_snapshot++;
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_BUFFERPIN:
-			dbent->counts.n_conflict_bufferpin++;
+			dbent->n_conflict_bufferpin++;
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK:
-			dbent->counts.n_conflict_startup_deadlock++;
+			dbent->n_conflict_startup_deadlock++;
 			break;
 	}
 }
@@ -2929,7 +2936,7 @@ pgstat_report_deadlock(void)
 		return;
 
 	dbent = get_pending_dbstat_entry(MyDatabaseId);
-	dbent->counts.n_deadlocks++;
+	dbent->n_deadlocks++;
 }
 
 /* --------
@@ -2950,7 +2957,7 @@ pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount)
 	dbentry = get_pending_dbstat_entry(dboid);
 
 	/* add accumulated count to the parameter */
-	dbentry->counts.n_checksum_failures += failurecount;
+	dbentry->n_checksum_failures += failurecount;
 }
 
 /* --------
@@ -2969,7 +2976,7 @@ pgstat_report_checksum_failure(void)
 		return;
 
 	dbent = get_pending_dbstat_entry(MyDatabaseId);
-	dbent->counts.n_checksum_failures++;
+	dbent->n_checksum_failures++;
 }
 
 /* --------
@@ -2991,8 +2998,8 @@ pgstat_report_tempfile(size_t filesize)
 		return;
 
 	dbent = get_pending_dbstat_entry(MyDatabaseId);
-	dbent->counts.n_temp_bytes += filesize; /* needs check overflow */
-	dbent->counts.n_temp_files++;
+	dbent->n_temp_bytes += filesize; /* needs check overflow */
+	dbent->n_temp_files++;
 }
 
 /* ----------
@@ -3995,11 +4002,11 @@ pgstat_update_connstats(bool disconnect)
 
 	ldbstats = get_pending_dbstat_entry(MyDatabaseId);
 
-	ldbstats->counts.n_sessions = (last_report == 0 ? 1 : 0);
-	ldbstats->counts.total_session_time += secs * 1000000 + usecs;
-	ldbstats->counts.total_active_time += pgStatActiveTime;
+	ldbstats->n_sessions = (last_report == 0 ? 1 : 0);
+	ldbstats->total_session_time += secs * 1000000 + usecs;
+	ldbstats->total_active_time += pgStatActiveTime;
 	pgStatActiveTime = 0;
-	ldbstats->counts.total_idle_in_xact_time += pgStatTransactionIdleTime;
+	ldbstats->total_idle_in_xact_time += pgStatTransactionIdleTime;
 	pgStatTransactionIdleTime = 0;
 
 	switch (session_end_type)
@@ -4009,13 +4016,13 @@ pgstat_update_connstats(bool disconnect)
 			/* we don't collect these */
 			break;
 		case DISCONNECT_CLIENT_EOF:
-			ldbstats->counts.n_sessions_abandoned++;
+			ldbstats->n_sessions_abandoned++;
 			break;
 		case DISCONNECT_FATAL:
-			ldbstats->counts.n_sessions_fatal++;
+			ldbstats->n_sessions_fatal++;
 			break;
 		case DISCONNECT_KILLED:
-			ldbstats->counts.n_sessions_killed++;
+			ldbstats->n_sessions_killed++;
 			break;
 	}
 }
@@ -4150,7 +4157,7 @@ pgstat_count_slru_truncate(int slru_idx)
 PgStat_StatDBEntry *
 pgstat_fetch_stat_dbentry(Oid dbid)
 {
-	PgStat_StatDBEntry *shent;
+	PgStatShm_StatDBEntry *shent;
 
 	/* should be called from backends */
 	Assert(IsUnderPostmaster);
@@ -4162,14 +4169,14 @@ pgstat_fetch_stat_dbentry(Oid dbid)
 	if (cached_dbent_key.databaseid == dbid)
 		return &cached_dbent;
 
-	shent = (PgStat_StatDBEntry *)
+	shent = (PgStatShm_StatDBEntry *)
 		get_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid, true, false, NULL);
 
 	if (!shent)
 		return NULL;
 
 	LWLockAcquire(&shent->header.lock, LW_SHARED);
-	memcpy(&cached_dbent, shent, sizeof(PgStat_StatDBEntry));
+	cached_dbent = shent->stats;
 	LWLockRelease(&shent->header.lock);
 
 	/* remember the key for the cached entry */
