@@ -333,8 +333,6 @@ typedef struct PgStat_SLRUStats
  */
 typedef struct PgStat_StatTabEntry
 {
-	PgStat_StatEntryHeader header;	/* must be the first member,
-									   used only on shared memory  */
 	/* Persistent data follow */
 	TimestampTz vacuum_timestamp;	/* user initiated vacuum */
 	TimestampTz autovac_vacuum_timestamp;	/* autovacuum initiated */

@@ -188,6 +188,14 @@ typedef struct PgStatShm_StatDBEntry
 	PgStat_StatDBEntry stats;
 } PgStatShm_StatDBEntry;
 
+typedef struct PgStatShm_StatTabEntry
+{
+	PgStat_StatEntryHeader header;
+	PgStat_StatTabEntry stats;
+} PgStatShm_StatTabEntry;
+
+
+
 /* Record that's written to 2PC state file when pgstat state is persisted */
 typedef struct TwoPhasePgStatRecord
 {
@@ -358,7 +366,7 @@ char      *pgstat_stat_tmpname = NULL;
 static const size_t pgstat_sharedentsize[] =
 {
 	sizeof(PgStatShm_StatDBEntry), /* PGSTAT_TYPE_DB */
-	sizeof(PgStat_StatTabEntry),	/* PGSTAT_TYPE_TABLE */
+	sizeof(PgStatShm_StatTabEntry),	/* PGSTAT_TYPE_TABLE */
 	sizeof(PgStat_StatFuncEntry),	/* PGSTAT_TYPE_FUNCTION */
 	sizeof(PgStat_ReplSlot)		/* PGSTAT_TYPE_REPLSLOT */
 };
@@ -2368,7 +2376,7 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 	static const PgStat_TableCounts all_zeroes;
 	Oid			dboid;			/* database OID of the table */
 	PgStat_TableStatus *lstats; /* pending stats entry  */
-	PgStat_StatTabEntry *shtabstats;	/* table entry of shared stats */
+	PgStatShm_StatTabEntry *shtabstats;	/* table entry of shared stats */
 	PgStat_StatDBEntry *ldbstats;	/* pending database entry */
 
 	Assert(ent->key.type == PGSTAT_TYPE_TABLE);
@@ -2388,7 +2396,7 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 	}
 
 	/* find shared table stats entry corresponding to the local entry */
-	shtabstats = (PgStat_StatTabEntry *)
+	shtabstats = (PgStatShm_StatTabEntry *)
 		fetch_lock_statentry(PGSTAT_TYPE_TABLE, dboid, ent->key.objectid,
 							 nowait);
 
@@ -2396,13 +2404,13 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 		return false;			/* failed to acquire lock, skip */
 
 	/* add the values to the shared entry. */
-	shtabstats->numscans += lstats->t_counts.t_numscans;
-	shtabstats->tuples_returned += lstats->t_counts.t_tuples_returned;
-	shtabstats->tuples_fetched += lstats->t_counts.t_tuples_fetched;
-	shtabstats->tuples_inserted += lstats->t_counts.t_tuples_inserted;
-	shtabstats->tuples_updated += lstats->t_counts.t_tuples_updated;
-	shtabstats->tuples_deleted += lstats->t_counts.t_tuples_deleted;
-	shtabstats->tuples_hot_updated += lstats->t_counts.t_tuples_hot_updated;
+	shtabstats->stats.numscans += lstats->t_counts.t_numscans;
+	shtabstats->stats.tuples_returned += lstats->t_counts.t_tuples_returned;
+	shtabstats->stats.tuples_fetched += lstats->t_counts.t_tuples_fetched;
+	shtabstats->stats.tuples_inserted += lstats->t_counts.t_tuples_inserted;
+	shtabstats->stats.tuples_updated += lstats->t_counts.t_tuples_updated;
+	shtabstats->stats.tuples_deleted += lstats->t_counts.t_tuples_deleted;
+	shtabstats->stats.tuples_hot_updated += lstats->t_counts.t_tuples_hot_updated;
 
 	/*
 	 * If table was truncated or vacuum/analyze has ran, first reset the
@@ -2410,21 +2418,21 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 	 */
 	if (lstats->t_counts.t_truncated)
 	{
-		shtabstats->n_live_tuples = 0;
-		shtabstats->n_dead_tuples = 0;
+		shtabstats->stats.n_live_tuples = 0;
+		shtabstats->stats.n_dead_tuples = 0;
 	}
 
-	shtabstats->n_live_tuples += lstats->t_counts.t_delta_live_tuples;
-	shtabstats->n_dead_tuples += lstats->t_counts.t_delta_dead_tuples;
-	shtabstats->changes_since_analyze += lstats->t_counts.t_changed_tuples;
-	shtabstats->inserts_since_vacuum += lstats->t_counts.t_tuples_inserted;
-	shtabstats->blocks_fetched += lstats->t_counts.t_blocks_fetched;
-	shtabstats->blocks_hit += lstats->t_counts.t_blocks_hit;
+	shtabstats->stats.n_live_tuples += lstats->t_counts.t_delta_live_tuples;
+	shtabstats->stats.n_dead_tuples += lstats->t_counts.t_delta_dead_tuples;
+	shtabstats->stats.changes_since_analyze += lstats->t_counts.t_changed_tuples;
+	shtabstats->stats.inserts_since_vacuum += lstats->t_counts.t_tuples_inserted;
+	shtabstats->stats.blocks_fetched += lstats->t_counts.t_blocks_fetched;
+	shtabstats->stats.blocks_hit += lstats->t_counts.t_blocks_hit;
 
 	/* Clamp n_live_tuples in case of negative delta_live_tuples */
-	shtabstats->n_live_tuples = Max(shtabstats->n_live_tuples, 0);
+	shtabstats->stats.n_live_tuples = Max(shtabstats->stats.n_live_tuples, 0);
 	/* Likewise for n_dead_tuples */
-	shtabstats->n_dead_tuples = Max(shtabstats->n_dead_tuples, 0);
+	shtabstats->stats.n_dead_tuples = Max(shtabstats->stats.n_dead_tuples, 0);
 
 	LWLockRelease(&shtabstats->header.lock);
 
@@ -2738,7 +2746,7 @@ void
 pgstat_report_vacuum(Oid tableoid, bool shared,
 					 PgStat_Counter livetuples, PgStat_Counter deadtuples)
 {
-	PgStat_StatTabEntry *tabentry;
+	PgStatShm_StatTabEntry *shtabentry;
 	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
 	TimestampTz ts;
 
@@ -2757,12 +2765,12 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	 * delayed vacuum report. Update shared stats entry directly for the above
 	 * reasons.
 	 */
-	tabentry = (PgStat_StatTabEntry *)
+	shtabentry = (PgStatShm_StatTabEntry *)
 		get_stat_entry(PGSTAT_TYPE_TABLE, dboid, tableoid, false, true, NULL);
 
-	LWLockAcquire(&tabentry->header.lock, LW_EXCLUSIVE);
-	tabentry->n_live_tuples = livetuples;
-	tabentry->n_dead_tuples = deadtuples;
+	LWLockAcquire(&shtabentry->header.lock, LW_EXCLUSIVE);
+	shtabentry->stats.n_live_tuples = livetuples;
+	shtabentry->stats.n_dead_tuples = deadtuples;
 
 	/*
 	 * It is quite possible that a non-aggressive VACUUM ended up skipping
@@ -2774,20 +2782,20 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	 * autovacuum.  An anti-wraparound autovacuum will catch any persistent
 	 * stragglers.
 	 */
-	tabentry->inserts_since_vacuum = 0;
+	shtabentry->stats.inserts_since_vacuum = 0;
 
 	if (IsAutoVacuumWorkerProcess())
 	{
-		tabentry->autovac_vacuum_timestamp = ts;
-		tabentry->autovac_vacuum_count++;
+		shtabentry->stats.autovac_vacuum_timestamp = ts;
+		shtabentry->stats.autovac_vacuum_count++;
 	}
 	else
 	{
-		tabentry->vacuum_timestamp = ts;
-		tabentry->vacuum_count++;
+		shtabentry->stats.vacuum_timestamp = ts;
+		shtabentry->stats.vacuum_count++;
 	}
 
-	LWLockRelease(&tabentry->header.lock);
+	LWLockRelease(&shtabentry->header.lock);
 }
 
 /* --------
@@ -2804,7 +2812,7 @@ pgstat_report_analyze(Relation rel,
 					  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 					  bool resetcounter)
 {
-	PgStat_StatTabEntry *tabentry;
+	PgStatShm_StatTabEntry *tabentry;
 	Oid			dboid = (rel->rd_rel->relisshared ? InvalidOid : MyDatabaseId);
 
 	/* return if we are not collecting stats */
@@ -2845,13 +2853,13 @@ pgstat_report_analyze(Relation rel,
 	 * delayed analyze report. Update shared stats entry directly for the
 	 * above reasons.
 	 */
-	tabentry = (PgStat_StatTabEntry *)
+	tabentry = (PgStatShm_StatTabEntry *)
 		get_stat_entry(PGSTAT_TYPE_TABLE, dboid, RelationGetRelid(rel),
 					   false, true, NULL);
 
 	LWLockAcquire(&tabentry->header.lock, LW_EXCLUSIVE);
-	tabentry->n_live_tuples = livetuples;
-	tabentry->n_dead_tuples = deadtuples;
+	tabentry->stats.n_live_tuples = livetuples;
+	tabentry->stats.n_dead_tuples = deadtuples;
 
 	/*
 	 * If commanded, reset changes_since_analyze to zero.  This forgets any
@@ -2859,17 +2867,17 @@ pgstat_report_analyze(Relation rel,
 	 * have no good way to estimate how many of those there were.
 	 */
 	if (resetcounter)
-		tabentry->changes_since_analyze = 0;
+		tabentry->stats.changes_since_analyze = 0;
 
 	if (IsAutoVacuumWorkerProcess())
 	{
-		tabentry->autovac_analyze_timestamp = GetCurrentTimestamp();
-		tabentry->autovac_analyze_count++;
+		tabentry->stats.autovac_analyze_timestamp = GetCurrentTimestamp();
+		tabentry->stats.autovac_analyze_count++;
 	}
 	else
 	{
-		tabentry->analyze_timestamp = GetCurrentTimestamp();
-		tabentry->analyze_count++;
+		tabentry->stats.analyze_timestamp = GetCurrentTimestamp();
+		tabentry->stats.analyze_count++;
 	}
 	LWLockRelease(&tabentry->header.lock);
 }
@@ -4221,7 +4229,7 @@ pgstat_fetch_stat_tabentry(Oid relid)
 PgStat_StatTabEntry *
 pgstat_fetch_stat_tabentry_extended(bool shared, Oid reloid)
 {
-	PgStat_StatTabEntry *shent;
+	PgStatShm_StatTabEntry *shent;
 	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
 
 	/* should be called from backends */
@@ -4235,14 +4243,14 @@ pgstat_fetch_stat_tabentry_extended(bool shared, Oid reloid)
 		cached_tabent_key.objectid == reloid)
 		return &cached_tabent;
 
-	shent = (PgStat_StatTabEntry *)
+	shent = (PgStatShm_StatTabEntry *)
 		get_stat_entry(PGSTAT_TYPE_TABLE, dboid, reloid, true, false, NULL);
 
 	if (!shent)
 		return NULL;
 
 	LWLockAcquire(&shent->header.lock, LW_SHARED);
-	memcpy(&cached_tabent, shent, sizeof(PgStat_StatTabEntry));
+	cached_tabent = shent->stats;
 	LWLockRelease(&shent->header.lock);
 
 	/* remember the key for the cached entry */
