@@ -122,7 +122,6 @@ typedef enum PgStatTypes
 	PGSTAT_TYPE_DB,				/* database-wide statistics */
 	PGSTAT_TYPE_TABLE,			/* per-table statistics */
 	PGSTAT_TYPE_FUNCTION,		/* per-function statistics */
-	PGSTAT_TYPE_REPLSLOT		/* per-replication-slot statistics */
 } PgStatTypes;
 
 
@@ -217,13 +216,6 @@ typedef struct PgStatShm_StatFuncEntry
 	PgStat_StatFuncEntry stats;
 } PgStatShm_StatFuncEntry;
 
-typedef struct PgStatShm_ReplSlotEntry
-{
-	PgStatShm_StatEntryHeader header;
-	PgStat_ReplSlot stats;
-} PgStatShm_ReplSlotEntry;
-
-
 /* Record that's written to 2PC state file when pgstat state is persisted */
 typedef struct TwoPhasePgStatRecord
 {
@@ -305,6 +297,13 @@ typedef struct StatsShmemStruct
 		PgStat_SLRUStats stats[SLRU_NUM_ELEMENTS];
 #define SizeOfSlruStats sizeof(PgStat_SLRUStats[SLRU_NUM_ELEMENTS])
 	} slru;
+
+	struct
+	{
+		LWLock		lock;
+		pg_atomic_uint32 changecount;
+		PgStat_ReplSlot *stats;
+	} replslot;
 
 	pg_atomic_uint64 stats_timestamp;
 
@@ -396,7 +395,6 @@ static const size_t pgstat_sharedentsize[] =
 	sizeof(PgStatShm_StatDBEntry), /* PGSTAT_TYPE_DB */
 	sizeof(PgStatShm_StatTabEntry),	/* PGSTAT_TYPE_TABLE */
 	sizeof(PgStatShm_StatFuncEntry),	/* PGSTAT_TYPE_FUNCTION */
-	sizeof(PgStatShm_ReplSlotEntry)		/* PGSTAT_TYPE_REPLSLOT */
 };
 
 /* Ditto for pending statistics entries */
@@ -405,7 +403,6 @@ static const size_t pgstat_pendingentsize[] =
 	-1, /* PGSTAT_TYPE_DB is never in pending table */
 	sizeof(PgStat_TableStatus), /* PGSTAT_TYPE_TABLE */
 	sizeof(PgStat_BackendFunctionEntry),	/* PGSTAT_TYPE_FUNCTION */
-	-1 /* PGSTAT_TYPE_REPLSLOT is never in pending table */
 };
 
 /* parameter for the shared hash */
@@ -614,10 +611,22 @@ static inline bool walstats_pending(void);
  * ------------------------------------------------------------
  */
 
+/*
+ * The size of the shared memory allocation for stats stored in the shared
+ * stats hash table. This allocation will be done as part of the main shared
+ * memory, rather than dynamic shared memory, allowing it to be initialized in
+ * postmaster.
+ */
 static Size
 stats_dsa_init_size(void)
 {
 	return dsa_minimum_size() + 2 * 1024 * 1024;
+}
+
+static Size
+stats_replslot_size(void)
+{
+	return sizeof(PgStat_ReplSlot) * max_replication_slots;
 }
 
 /*
@@ -627,7 +636,13 @@ stats_dsa_init_size(void)
 Size
 StatsShmemSize(void)
 {
-	return add_size(sizeof(StatsShmemStruct), stats_dsa_init_size());
+	Size		sz;
+
+	sz = MAXALIGN(sizeof(StatsShmemStruct));
+	sz = add_size(sz, MAXALIGN(stats_dsa_init_size()));
+	sz = add_size(sz, MAXALIGN(stats_replslot_size()));
+
+	return sz;
 }
 
 /*
@@ -647,8 +662,12 @@ StatsShmemInit(void)
 	{
 		dsa_area *dsa;
 		dshash_table *dsh;
+		char *p = (char *) StatsShmem;
 
 		Assert(!found);
+
+		/* the allocation of StatsShmem itself */
+		p += MAXALIGN(sizeof(StatsShmemStruct));
 
 		pg_atomic_init_u32(&StatsShmem->archiver_changecount, 0);
 		pg_atomic_init_u32(&StatsShmem->bgwriter_changecount, 0);
@@ -661,13 +680,22 @@ StatsShmemInit(void)
 		LWLockInitialize(&StatsShmem->slru.lock, LWTRANCHE_STATS);
 		pg_atomic_init_u32(&StatsShmem->slru.changecount, 0);
 
+		StatsShmem->replslot.stats = (PgStat_ReplSlot *) p;
+		p += MAXALIGN(stats_replslot_size());
+		LWLockInitialize(&StatsShmem->replslot.lock, LWTRANCHE_STATS);
+		pg_atomic_init_u32(&StatsShmem->replslot.changecount, 0);
+		for (int i = 0; i < max_replication_slots; i++)
+		{
+			StatsShmem->replslot.stats[i].index = -1;
+		}
+
 		/*
 		 * Create a small dsa allocation in plain shared memory. Doing so
 		 * initially makes it easier to manage server startup, and it also is
 		 * a small efficiency win.
 		 */
-		StatsShmem->raw_dsa_area =
-			(char *) StatsShmem + sizeof(StatsShmemStruct);
+		StatsShmem->raw_dsa_area = p;
+		p += MAXALIGN(stats_dsa_init_size());
 		dsa = dsa_create_in_place(StatsShmem->raw_dsa_area,
 								  stats_dsa_init_size(),
 								  LWTRANCHE_STATS, 0);
@@ -688,6 +716,10 @@ StatsShmemInit(void)
 		 */
 		dshash_detach(dsh);
 		dsa_detach(dsa);
+	}
+	else
+	{
+		Assert(found);
 	}
 }
 
@@ -1091,14 +1123,6 @@ pgstat_vacuum_stat(void)
 					continue;
 
 				break;
-
-			case PGSTAT_TYPE_REPLSLOT:
-				/*
-				 * We don't bother vacuumming this kind of entries because the
-				 * number of entries is quite small and entries are likely to
-				 * be reused soon.
-				 */
-				continue;
 		}
 
 		/* drop this entry */
@@ -1387,6 +1411,11 @@ pgstat_reset_replslot_counter(const char *name)
 	if (!IsUnderPostmaster || !pgStatSharedHash)
 		return;
 
+	/*
+	 * AFIXME: pgstats has business no looking into slot.c structures at
+	 * this level of detail.
+	 */
+
 	if (name)
 	{
 		ReplicationSlot *slot;
@@ -1420,25 +1449,18 @@ pgstat_reset_replslot_counter(const char *name)
 	}
 
 	ts = GetCurrentTimestamp();
+	LWLockAcquire(&StatsShmem->replslot.lock, LW_EXCLUSIVE);
 	for (i = startidx; i <= endidx; i++)
 	{
-		PgStatShm_ReplSlotEntry *shent;
+		PgStat_ReplSlot *statent = &StatsShmem->replslot.stats[i];
+		size_t off;
 
-		shent = (PgStatShm_ReplSlotEntry *)
-			get_shared_stat_entry(PGSTAT_TYPE_REPLSLOT,MyDatabaseId, i, false,
-								  false, NULL);
+		off = offsetof(PgStat_ReplSlot, slotname) + sizeof(char[NAMEDATALEN]);
 
-		/* Skip non-existent entries */
-		if (!shent)
-			continue;
-
-		LWLockAcquire(&shent->header.lock, LW_EXCLUSIVE);
-		memset(&shent->stats.spill_txns, 0,
-			   offsetof(PgStat_ReplSlot, stat_reset_timestamp) -
-			   offsetof(PgStat_ReplSlot, spill_txns));
-		shent->stats.stat_reset_timestamp = ts;
-		LWLockRelease(&shent->header.lock);
+		memset(((char *) statent) + off, 0, sizeof(StatsShmem->replslot.stats[i]) - off);
+		statent->stat_reset_timestamp = ts;
 	}
+	LWLockRelease(&StatsShmem->replslot.lock);
 }
 
 
@@ -1591,6 +1613,21 @@ pgstat_write_statsfile(void)
 	dshash_seq_term(&hstat);
 
 	/*
+	 * Write replication slot stats struct
+	 */
+	for (int i = 0; i < max_replication_slots; i++)
+	{
+		PgStat_ReplSlot *statent = &StatsShmem->replslot.stats[i];
+
+		if (statent->index == -1)
+			continue;
+
+		fputc('R', fpout);
+		rc = fwrite(statent, sizeof(*statent), 1, fpout);
+		(void) rc;				/* we'll check for error with ferror */
+	}
+
+	/*
 	 * No more output to be done. Close the temp file and replace the old
 	 * pgstat.stat with it.  The ferror() check replaces testing for error
 	 * after each individual fputc or fwrite above.
@@ -1640,7 +1677,6 @@ pgstat_read_statsfile(void)
 	int32		format_id;
 	bool		found;
 	const char *statfile = PGSTAT_STAT_PERMANENT_FILENAME;
-	char		tag;
 
 	/* shouldn't be called from postmaster */
 	Assert(IsUnderPostmaster);
@@ -1749,50 +1785,75 @@ pgstat_read_statsfile(void)
 	 * We found an existing activity statistics file. Read it and put all the
 	 * hash table entries into place.
 	 */
-	while ((tag = fgetc(fpin)) == 'S')
+	for (;;)
 	{
-		PgStatHashKey key;
-		PgStatShm_StatEntryHeader *p;
-		size_t		len;
-
-		CHECK_FOR_INTERRUPTS();
-
-		if (fread(&key, 1, sizeof(key), fpin) != sizeof(key))
+		switch (fgetc(fpin))
 		{
-			ereport(LOG,
-					(errmsg("corrupted statistics file \"%s\"", statfile)));
-			goto done;
+			case 'S':
+				{
+					PgStatHashKey key;
+					PgStatShm_StatEntryHeader *p;
+					size_t		len;
+
+					CHECK_FOR_INTERRUPTS();
+
+					if (fread(&key, 1, sizeof(key), fpin) != sizeof(key))
+					{
+						ereport(LOG,
+								(errmsg("corrupted statistics file \"%s\"", statfile)));
+						goto done;
+					}
+
+					p = get_shared_stat_entry(key.type, key.databaseid, key.objectid,
+											  false, true, &found);
+
+					/* don't allow duplicate entries */
+					if (found)
+					{
+						ereport(LOG,
+								(errmsg("corrupted statistics file \"%s\"",
+										statfile)));
+						goto done;
+					}
+
+					/* Avoid overwriting header part */
+					len = PGSTAT_SHENT_BODY_LEN(key.type);
+
+					if (fread(PGSTAT_SHENT_BODY(p), 1, len, fpin) != len)
+					{
+						ereport(LOG,
+								(errmsg("corrupted statistics file \"%s\"", statfile)));
+						goto done;
+					}
+
+					break;
+				}
+
+			case 'R':
+				{
+					PgStat_ReplSlot tmp;
+
+					if (fread(&tmp, 1, sizeof(tmp), fpin) != sizeof(tmp))
+					{
+						ereport(LOG,
+								(errmsg("corrupted statistics file \"%s\"", statfile)));
+						goto done;
+					}
+
+					if (tmp.index < max_replication_slots)
+						StatsShmem->replslot.stats[tmp.index] = tmp;
+				}
+				break;
+
+			case 'E':
+				goto done;
+
+			default:
+				ereport(LOG,
+						(errmsg("corrupted statistics file \"%s\"",
+								statfile)));
+				goto done;
 		}
-
-		p = get_shared_stat_entry(key.type, key.databaseid, key.objectid,
-						   false, true, &found);
-
-		/* don't allow duplicate entries */
-		if (found)
-		{
-			ereport(LOG,
-					(errmsg("corrupted statistics file \"%s\"",
-							statfile)));
-			goto done;
-		}
-
-		/* Avoid overwriting header part */
-		len = PGSTAT_SHENT_BODY_LEN(key.type);
-
-		if (fread(PGSTAT_SHENT_BODY(p), 1, len, fpin) != len)
-		{
-			ereport(LOG,
-					(errmsg("corrupted statistics file \"%s\"", statfile)));
-			goto done;
-		}
-	}
-
-	if (tag != 'E')
-	{
-		ereport(LOG,
-				(errmsg("corrupted statistics file \"%s\"",
-						statfile)));
-		goto done;
 	}
 
 done:
@@ -2335,7 +2396,6 @@ flush_object_stats(bool nowait)
 					remove = true;
 				break;
 			case PGSTAT_TYPE_DB:
-			case PGSTAT_TYPE_REPLSLOT:
 				/* We don't have that kind of pending entry */
 				Assert(false);
 		}
@@ -3034,53 +3094,48 @@ pgstat_report_tempfile(size_t filesize)
  * ----------
  */
 void
-pgstat_report_replslot(const char *slotname,
+pgstat_report_replslot(uint32 index,
+					   const char *slotname,
 					   int spilltxns, int spillcount, int spillbytes,
 					   int streamtxns, int streamcount, int streambytes)
 {
-	PgStatShm_ReplSlotEntry *shent;
-	int			i;
-	bool		found;
+	PgStat_ReplSlot *statent;
+
+	Assert(index < max_replication_slots);
+	Assert(slotname[0] != '\0' && strlen(slotname) < NAMEDATALEN);
 
 	if (!area)
 		return;
 
-	for (i = 0; i < max_replication_slots; i++)
-	{
-		if (strcmp(NameStr(ReplicationSlotCtl->replication_slots[i].data.name),
-				   slotname) == 0)
-			break;
+	statent = &StatsShmem->replslot.stats[index];
 
+	LWLockAcquire(&StatsShmem->replslot.lock, LW_EXCLUSIVE);
+
+	/* clear the counters if not used */
+	if (statent->index == -1)
+	{
+		memset(statent, 0, sizeof(*statent));
+		statent->index = index;
+		strlcpy(statent->slotname, slotname, NAMEDATALEN);
+	}
+	else if (strcmp(slotname, statent->slotname) != 0)
+	{
+		/* AFIXME: Is there a valid way this can happen? */
+		elog(ERROR, "stats out of sync");
+	}
+	else
+	{
+		Assert(statent->index == index);
 	}
 
-	/*
-	 * the slot should have been removed. just ignore it.  We create the entry
-	 * for the slot with this name next time.
-	 */
-	if (i == max_replication_slots)
-		return;
+	statent->spill_txns += spilltxns;
+	statent->spill_count += spillcount;
+	statent->spill_bytes += spillbytes;
+	statent->stream_txns += streamtxns;
+	statent->stream_count += streamcount;
+	statent->stream_bytes += streambytes;
 
-	shent = (PgStatShm_ReplSlotEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_REPLSLOT, MyDatabaseId, i, false,
-							  true, &found);
-
-	/* Clear the counters and reset if it is not used */
-	LWLockAcquire(&shent->header.lock, LW_EXCLUSIVE);
-	if (shent->stats.slotname[0] == '\0' || !found)
-	{
-		Assert(!shent->header.dropped);
-		memset(&shent->stats.spill_txns, 0,
-			   sizeof(PgStat_ReplSlot) - offsetof(PgStat_ReplSlot, spill_txns));
-		strlcpy(shent->stats.slotname, slotname, NAMEDATALEN);
-	}
-
-	shent->stats.spill_txns += spilltxns;
-	shent->stats.spill_count += spillcount;
-	shent->stats.spill_bytes += spillbytes;
-	shent->stats.stream_txns += streamtxns;
-	shent->stats.stream_count += streamcount;
-	shent->stats.stream_bytes += streambytes;
-	LWLockRelease(&shent->header.lock);
+	LWLockRelease(&StatsShmem->replslot.lock);
 }
 
 /* ----------
@@ -3090,40 +3145,25 @@ pgstat_report_replslot(const char *slotname,
  * ----------
  */
 void
-pgstat_report_replslot_drop(const char *slotname)
+pgstat_report_replslot_drop(uint32 index, const char *slotname)
 {
-	int			i;
-	PgStatShm_ReplSlotEntry *shent;
+	PgStat_ReplSlot *statent;
 
-	Assert(area);
+	Assert(index < max_replication_slots);
+	Assert(slotname[0] != '\0' && strlen(slotname) < NAMEDATALEN);
+
 	if (!area)
 		return;
 
-	for (i = 0; i < max_replication_slots; i++)
-	{
-		if (strcmp(NameStr(ReplicationSlotCtl->replication_slots[i].data.name),
-				   slotname) == 0)
-			break;
+	statent = &StatsShmem->replslot.stats[index];
 
-	}
-
-	/* XXX: maybe the slot has been removed. just ignore it. */
-	if (i == max_replication_slots)
-		return;
-
-	shent = (PgStatShm_ReplSlotEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_REPLSLOT, MyDatabaseId, i, false,
-							  false, NULL);
-
+	LWLockAcquire(&StatsShmem->replslot.lock, LW_EXCLUSIVE);
 	/*
-	 * Mark this entry as "not used". We don't "drop" this entry because no other process can't be looking this entry
+	 * NB: need to accept that there might not be any stats, e.g. if we threw
+	 * away stats after a crash restart.
 	 */
-	if (shent && shent->stats.slotname[0] != '\0')
-	{
-		LWLockAcquire(&shent->header.lock, LW_EXCLUSIVE);
-		shent->stats.slotname[0] = '\0';
-		LWLockRelease(&shent->header.lock);
-	}
+	statent->index = -1;
+	LWLockRelease(&StatsShmem->replslot.lock);
 }
 
 /* ----------
@@ -4532,22 +4572,19 @@ pgstat_fetch_replslot(int *nslots_p)
 		int			n = 0;
 		int			i;
 
+		LWLockAcquire(&StatsShmem->replslot.lock, LW_EXCLUSIVE);
+
 		for (i = 0; i < max_replication_slots; i++)
 		{
-			PgStatShm_ReplSlotEntry *shent = (PgStatShm_ReplSlotEntry *)
-				get_shared_stat_entry(PGSTAT_TYPE_REPLSLOT, MyDatabaseId, i,
-									  false, false, NULL);
-			if (!shent)
-				continue;
+			PgStat_ReplSlot *statent = &StatsShmem->replslot.stats[i];
 
-			/* Skip if this slot is not used */
-			LWLockAcquire(&shent->header.lock, LW_SHARED);
-			if (shent->stats.slotname[0] != '\0')
+			if (statent->index != -1)
 			{
-				cached_replslotstats[n++] = shent->stats;
+				cached_replslotstats[n++] = *statent;
 			}
-			LWLockRelease(&shent->header.lock);
 		}
+
+		LWLockRelease(&StatsShmem->replslot.lock);
 
 		n_cached_replslotstats = n;
 	}

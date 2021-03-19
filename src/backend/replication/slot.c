@@ -328,7 +328,8 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 	 * ReplicationSlotAllocationLock.
 	 */
 	if (SlotIsLogical(slot))
-		pgstat_report_replslot(NameStr(slot->data.name), 0, 0, 0, 0, 0, 0);
+		pgstat_report_replslot(slot - ReplicationSlotCtl->replication_slots,
+							   NameStr(slot->data.name), 0, 0, 0, 0, 0, 0);
 
 	/*
 	 * Now that the slot has been marked as in_use and active, it's safe to
@@ -706,7 +707,8 @@ ReplicationSlotDropPtr(ReplicationSlot *slot)
 	 * session.
 	 */
 	if (SlotIsLogical(slot))
-		pgstat_report_replslot_drop(NameStr(slot->data.name));
+		pgstat_report_replslot_drop(slot - ReplicationSlotCtl->replication_slots,
+									NameStr(slot->data.name));
 
 	/*
 	 * We release this at the very end, so that nobody starts trying to create

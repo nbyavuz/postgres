@@ -376,6 +376,7 @@ typedef struct PgStat_StatFuncEntry
  */
 typedef struct PgStat_ReplSlot
 {
+	uint32		index;
 	char		slotname[NAMEDATALEN];
 	PgStat_Counter spill_txns;
 	PgStat_Counter spill_count;
@@ -478,9 +479,9 @@ extern void pgstat_report_recovery_conflict(int reason);
 extern void pgstat_report_deadlock(void);
 extern void pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount);
 extern void pgstat_report_checksum_failure(void);
-extern void pgstat_report_replslot(const char *slotname, int spilltxns, int spillcount,
+extern void pgstat_report_replslot(uint32 index, const char *slotname, int spilltxns, int spillcount,
 								   int spillbytes, int streamtxns, int streamcount, int streambytes);
-extern void pgstat_report_replslot_drop(const char *slotname);
+extern void pgstat_report_replslot_drop(uint32 index, const char *slotname);
 
 extern void pgstat_initialize(void);
 
