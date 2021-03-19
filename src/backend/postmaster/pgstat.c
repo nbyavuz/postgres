@@ -402,7 +402,7 @@ static const size_t pgstat_sharedentsize[] =
 /* Ditto for pending statistics entries */
 static const size_t pgstat_pendingentsize[] =
 {
-	sizeof(PgStat_StatDBEntry), /* PGSTAT_TYPE_DB */
+	-1, /* PGSTAT_TYPE_DB is never in pending table */
 	sizeof(PgStat_TableStatus), /* PGSTAT_TYPE_TABLE */
 	sizeof(PgStat_BackendFunctionEntry),	/* PGSTAT_TYPE_FUNCTION */
 	-1 /* PGSTAT_TYPE_REPLSLOT is never in pending table */
@@ -525,6 +525,18 @@ static bool have_slrustats = false;
  */
 static WalUsage prevWalUsage;
 
+/*
+ * As a backend's database doesn't change over time, we don't need to go
+ * through pgStatPendingHash to find our database. That avoids unnecessary
+ * lookups, and makes flushing table stats (which roll over into database
+ * stats) easier.
+ *
+ * The only complication is that we need entries not just for "our" database,
+ * but also for oid '0', which tracks shared table stats.
+ */
+bool havePendingDbStats = false;
+static PgStat_StatDBEntry pendingDBStats;
+static PgStat_StatDBEntry pendingSharedDBStats;
 
 /* ----------
  * Cache state  for pgstatfuncs
@@ -578,7 +590,7 @@ static PgStatShm_StatEntryHeader *get_pending_stat_entry(PgStatTypes type, Oid d
 													  Oid objid, bool create,
 													  bool *found);
 
-static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dbid);
+static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dbid, bool for_update);
 static PgStat_TableStatus *get_pending_tabstat_entry(Oid rel_id, bool isshared);
 
 static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
@@ -589,7 +601,7 @@ static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
 static bool flush_object_stats(bool nowait);
 static bool flush_tabstat(PgStatPendingEntry *ent, bool nowait);
 static bool flush_funcstat(PgStatPendingEntry *ent, bool nowait);
-static bool flush_dbstat(PgStatPendingEntry *ent, bool nowait);
+static bool flush_dbstat(PgStat_StatDBEntry *dbent, Oid dboid, bool nowait);
 static bool flush_walstat(bool nowait);
 static bool flush_slrustat(bool nowait);
 static void pgstat_update_connstats(bool disconnect);
@@ -861,15 +873,9 @@ pgstat_report_stat(bool force)
 	if (area == NULL)
 		return 0;
 
-	/*
-	 * We need a database entry if the following stats exists.
-	 */
-	if (pgStatXactCommit > 0 || pgStatXactRollback > 0 ||
-		pgStatBlockReadTime > 0 || pgStatBlockWriteTime > 0)
-		get_pending_dbstat_entry(MyDatabaseId);
-
 	/* Don't expend a clock check if nothing to do */
-	if (pgStatPendingHash == NULL && !have_slrustats && !walstats_pending())
+	if (havePendingDbStats && pgStatPendingHash == NULL && !have_slrustats
+		&& !walstats_pending())
 		return 0;
 
 	now = GetCurrentTransactionStopTimestamp();
@@ -2108,23 +2114,18 @@ get_pending_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
 /* ----------
  * get_pending_dbstat_entry() -
  *
- *  Find or create a local PgStat_StatDBEntry entry for dbid.  New entry is
- *  created and initialized if not exists.
+ *  Find or create a local PgStat_StatDBEntry entry for dbid.
  */
 static PgStat_StatDBEntry *
-get_pending_dbstat_entry(Oid dbid)
+get_pending_dbstat_entry(Oid dbid, bool for_update)
 {
-	PgStat_StatDBEntry *dbentry;
-	bool		found;
+	if (for_update)
+		havePendingDbStats = true;
 
-	/*
-	 * Find an entry or create a new one.
-	 */
-	dbentry = (PgStat_StatDBEntry *)
-		get_pending_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid,
-							 true, &found);
-
-	return dbentry;
+	if (dbid == InvalidOid)
+		return &pendingSharedDBStats;
+	Assert(dbid == MyDatabaseId);
+	return &pendingDBStats;
 }
 
 /* ----------
@@ -2311,9 +2312,8 @@ flush_object_stats(bool nowait)
 {
 	int			remains = 0;
 	pgstat_pending_iterator i;
-	List	   *dbentlist = NIL;
-	ListCell   *lc;
 	PgStatPendingEntry *lent;
+	bool have_pending = false;
 
 	if (!pgStatPendingHash)
 		return false;
@@ -2326,15 +2326,6 @@ flush_object_stats(bool nowait)
 
 		switch (lent->key.type)
 		{
-			case PGSTAT_TYPE_DB:
-
-				/*
-				 * flush_tabstat applies some of stats numbers of flushed
-				 * entries into pending database stats. Just remember the
-				 * database entries for now then flush-out them later.
-				 */
-				dbentlist = lappend(dbentlist, lent);
-				break;
 			case PGSTAT_TYPE_TABLE:
 				if (flush_tabstat(lent, nowait))
 					remove = true;
@@ -2343,6 +2334,7 @@ flush_object_stats(bool nowait)
 				if (flush_funcstat(lent, nowait))
 					remove = true;
 				break;
+			case PGSTAT_TYPE_DB:
 			case PGSTAT_TYPE_REPLSLOT:
 				/* We don't have that kind of pending entry */
 				Assert(false);
@@ -2351,6 +2343,7 @@ flush_object_stats(bool nowait)
 		if (!remove)
 		{
 			remains++;
+			have_pending = true;
 			continue;
 		}
 
@@ -2360,30 +2353,18 @@ flush_object_stats(bool nowait)
 		pgstat_pending_delete(pgStatPendingHash, lent->key);
 	}
 
-	/* Step 2: flush out database stats */
-	foreach(lc, dbentlist)
-	{
-		PgStatPendingEntry *lent = (PgStatPendingEntry *) lfirst(lc);
-
-		if (flush_dbstat(lent, nowait))
-		{
-			remains--;
-			/* Remove the successfully flushed entry */
-			pfree(lent->pending);
-			lent->pending = NULL;
-			pgstat_pending_delete(pgStatPendingHash, lent->key);
-		}
-	}
-	list_free(dbentlist);
-	dbentlist = NULL;
-
 	if (remains <= 0)
 	{
 		pgstat_pending_destroy(pgStatPendingHash);
 		pgStatPendingHash = NULL;
 	}
 
-	return pgStatPendingHash != NULL;
+	have_pending |= flush_dbstat(&pendingDBStats, MyDatabaseId, nowait);
+	have_pending |= flush_dbstat(&pendingSharedDBStats, InvalidOid, nowait);
+	if (!have_pending)
+		havePendingDbStats = false;
+
+	return have_pending;
 }
 
 /*
@@ -2464,7 +2445,7 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 	LWLockRelease(&shtabstats->header.lock);
 
 	/* The entry is successfully flushed so the same to add to database stats */
-	ldbstats = get_pending_dbstat_entry(dboid);
+	ldbstats = get_pending_dbstat_entry(dboid, true);
 	ldbstats->n_tuples_returned += lstats->t_counts.t_tuples_returned;
 	ldbstats->n_tuples_fetched += lstats->t_counts.t_tuples_fetched;
 	ldbstats->n_tuples_inserted += lstats->t_counts.t_tuples_inserted;
@@ -2522,24 +2503,20 @@ flush_funcstat(PgStatPendingEntry *ent, bool nowait)
  * If nowait is true, this function returns false on lock failure. Otherwise
  * this function always returns true.
  *
- * Returns true if the entry is successfully flushed out.
+ * Returns true if the entry could not be flushed out.
  */
 #define PGSTAT_ACCUM_DBCOUNT(sh, lo, item)		\
 	(sh)->stats.item += (lo)->item
 
 static bool
-flush_dbstat(PgStatPendingEntry *ent, bool nowait)
+flush_dbstat(PgStat_StatDBEntry *pendingent, Oid dboid, bool nowait)
 {
-	PgStat_StatDBEntry *pendingent;
 	PgStatShm_StatDBEntry *sharedent;
-
-	Assert(ent->key.type == PGSTAT_TYPE_DB);
-
-	pendingent = (PgStat_StatDBEntry *) &ent->pending;
 
 	/* find shared database stats entry corresponding to the local entry */
 	sharedent = (PgStatShm_StatDBEntry *)
-		get_lock_shared_stat_entry(PGSTAT_TYPE_DB, ent->key.databaseid,
+		get_lock_shared_stat_entry(PGSTAT_TYPE_DB,
+								   dboid,
 								   InvalidOid, nowait);
 
 	if (!sharedent)
@@ -2570,7 +2547,7 @@ flush_dbstat(PgStatPendingEntry *ent, bool nowait)
 	 * Accumulate xact commit/rollback and I/O timings to stats entry of the
 	 * current database.
 	 */
-	if (OidIsValid(ent->key.databaseid))
+	if (OidIsValid(dboid))
 	{
 		sharedent->stats.n_xact_commit += pgStatXactCommit;
 		sharedent->stats.n_xact_rollback += pgStatXactRollback;
@@ -2590,6 +2567,8 @@ flush_dbstat(PgStatPendingEntry *ent, bool nowait)
 	}
 
 	LWLockRelease(&sharedent->header.lock);
+
+	memset(pendingent, 0, sizeof(*pendingent));
 
 	return true;
 }
@@ -2926,7 +2905,7 @@ pgstat_report_recovery_conflict(int reason)
 	if (!area)
 		return;
 
-	dbent = get_pending_dbstat_entry(MyDatabaseId);
+	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
 
 	switch (reason)
 	{
@@ -2971,7 +2950,7 @@ pgstat_report_deadlock(void)
 	if (!area)
 		return;
 
-	dbent = get_pending_dbstat_entry(MyDatabaseId);
+	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
 	dbent->n_deadlocks++;
 }
 
@@ -2984,16 +2963,26 @@ pgstat_report_deadlock(void)
 void
 pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount)
 {
-	PgStat_StatDBEntry *dbentry;
+	PgStatShm_StatDBEntry *sharedent;
 
 	/* return if we are not active */
 	if (!area)
 		return;
 
-	dbentry = get_pending_dbstat_entry(dboid);
+	/*
+	 * Update the shared stats directly - it's unlikely that we'd get another
+	 * report for the same database with the current users of
+	 * pgstat_report_checksum_failures_in_db(). That also allows us to only
+	 * have pending entries for a the current DB (and one for shared
+	 * relations).
+	 */
+	sharedent = (PgStatShm_StatDBEntry *)
+		get_lock_shared_stat_entry(PGSTAT_TYPE_DB,
+								   dboid,
+								   InvalidOid, false);
+	sharedent->stats.n_checksum_failures += failurecount;
 
-	/* add accumulated count to the parameter */
-	dbentry->n_checksum_failures += failurecount;
+	LWLockRelease(&sharedent->header.lock);
 }
 
 /* --------
@@ -3011,7 +3000,7 @@ pgstat_report_checksum_failure(void)
 	if (!area)
 		return;
 
-	dbent = get_pending_dbstat_entry(MyDatabaseId);
+	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
 	dbent->n_checksum_failures++;
 }
 
@@ -3033,7 +3022,7 @@ pgstat_report_tempfile(size_t filesize)
 	if (filesize == 0)			/* Is there a case where filesize is really 0? */
 		return;
 
-	dbent = get_pending_dbstat_entry(MyDatabaseId);
+	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
 	dbent->n_temp_bytes += filesize; /* needs check overflow */
 	dbent->n_temp_files++;
 }
@@ -4036,7 +4025,7 @@ pgstat_update_connstats(bool disconnect)
 	if (disconnect)
 		session_end_type = pgStatSessionEndCause;
 
-	ldbstats = get_pending_dbstat_entry(MyDatabaseId);
+	ldbstats = get_pending_dbstat_entry(MyDatabaseId, true);
 
 	ldbstats->n_sessions = (last_report == 0 ? 1 : 0);
 	ldbstats->total_session_time += secs * 1000000 + usecs;
