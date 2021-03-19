@@ -194,6 +194,11 @@ typedef struct PgStatShm_StatTabEntry
 	PgStat_StatTabEntry stats;
 } PgStatShm_StatTabEntry;
 
+typedef struct PgStatShm_StatFuncEntry
+{
+	PgStat_StatEntryHeader header;
+	PgStat_StatFuncEntry stats;
+} PgStatShm_StatFuncEntry;
 
 
 /* Record that's written to 2PC state file when pgstat state is persisted */
@@ -367,7 +372,7 @@ static const size_t pgstat_sharedentsize[] =
 {
 	sizeof(PgStatShm_StatDBEntry), /* PGSTAT_TYPE_DB */
 	sizeof(PgStatShm_StatTabEntry),	/* PGSTAT_TYPE_TABLE */
-	sizeof(PgStat_StatFuncEntry),	/* PGSTAT_TYPE_FUNCTION */
+	sizeof(PgStatShm_StatFuncEntry),	/* PGSTAT_TYPE_FUNCTION */
 	sizeof(PgStat_ReplSlot)		/* PGSTAT_TYPE_REPLSLOT */
 };
 
@@ -2464,7 +2469,7 @@ static bool
 flush_funcstat(PgStatPendingEntry *ent, bool nowait)
 {
 	PgStat_BackendFunctionEntry *localent;	/* local stats entry */
-	PgStat_StatFuncEntry *shfuncent = NULL; /* shared stats entry */
+	PgStatShm_StatFuncEntry *shfuncent = NULL; /* shared stats entry */
 
 	Assert(ent->key.type == PGSTAT_TYPE_FUNCTION);
 	localent = (PgStat_BackendFunctionEntry *) ent->pending;
@@ -2472,16 +2477,16 @@ flush_funcstat(PgStatPendingEntry *ent, bool nowait)
 	/* localent always has non-zero content */
 
 	/* find shared table stats entry corresponding to the local entry */
-	shfuncent = (PgStat_StatFuncEntry *)
+	shfuncent = (PgStatShm_StatFuncEntry *)
 		fetch_lock_statentry(PGSTAT_TYPE_FUNCTION, MyDatabaseId,
 							 ent->key.objectid, nowait);
 	if (shfuncent == NULL)
 		return false;			/* failed to acquire lock, skip */
 
-	shfuncent->f_numcalls += localent->f_counts.f_numcalls;
-	shfuncent->f_total_time +=
+	shfuncent->stats.f_numcalls += localent->f_counts.f_numcalls;
+	shfuncent->stats.f_total_time +=
 		INSTR_TIME_GET_MICROSEC(localent->f_counts.f_total_time);
-	shfuncent->f_self_time +=
+	shfuncent->stats.f_self_time +=
 		INSTR_TIME_GET_MICROSEC(localent->f_counts.f_self_time);
 
 	LWLockRelease(&shfuncent->header.lock);
@@ -4274,7 +4279,7 @@ pgstat_fetch_stat_tabentry_extended(bool shared, Oid reloid)
 PgStat_StatFuncEntry *
 pgstat_fetch_stat_funcentry(Oid func_id)
 {
-	PgStat_StatFuncEntry *shent;
+	PgStatShm_StatFuncEntry *shent;
 	Oid			dboid = MyDatabaseId;
 
 	/* should be called from backends */
@@ -4288,7 +4293,7 @@ pgstat_fetch_stat_funcentry(Oid func_id)
 		cached_funcent_key.objectid == func_id)
 		return &cached_funcent;
 
-	shent = (PgStat_StatFuncEntry *)
+	shent = (PgStatShm_StatFuncEntry *)
 		get_stat_entry(PGSTAT_TYPE_FUNCTION, dboid, func_id, true, false,
 					   NULL);
 
@@ -4296,7 +4301,7 @@ pgstat_fetch_stat_funcentry(Oid func_id)
 		return NULL;
 
 	LWLockAcquire(&shent->header.lock, LW_SHARED);
-	memcpy(&cached_funcent, shent, sizeof(PgStat_StatFuncEntry));
+	cached_funcent = shent->stats;
 	LWLockRelease(&shent->header.lock);
 
 	/* remember the key for the cached entry */

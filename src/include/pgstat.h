@@ -370,8 +370,6 @@ typedef struct PgStat_StatTabEntry
  */
 typedef struct PgStat_StatFuncEntry
 {
-	PgStat_StatEntryHeader header;	/* must be the first member,
-									   used only on shared memory  */
 	/* Persistent data follow */
 	PgStat_Counter f_numcalls;
 
