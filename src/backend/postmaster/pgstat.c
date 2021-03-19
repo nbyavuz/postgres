@@ -540,15 +540,11 @@ static PgStatHashKey cached_funcent_key = {0};
 static PgStat_StatFuncEntry cached_funcent;
 
 static PgStat_Archiver cached_archiverstats;
-static bool cached_archiverstats_is_valid = false;
 static PgStat_BgWriter cached_bgwriterstats;
-static bool cached_bgwriterstats_is_valid = false;
 static PgStat_CheckPointer cached_checkpointerstats;
-static bool cached_checkpointerstats_is_valid = false;
 static PgStat_Wal cached_walstats;
 static bool cached_walstats_is_valid = false;
 static PgStat_SLRUStats cached_slrustats[SLRU_NUM_ELEMENTS];
-static bool cached_slrustats_is_valid = false;
 static PgStat_ReplSlot *cached_replslotstats = NULL;
 static int	n_cached_replslotstats = -1;
 
@@ -998,11 +994,7 @@ pgstat_clear_snapshot(void)
 	cached_dbent_key = stathashkey_zero;
 	cached_tabent_key = stathashkey_zero;
 	cached_funcent_key = stathashkey_zero;
-	cached_archiverstats_is_valid = false;
-	cached_bgwriterstats_is_valid = false;
-	cached_checkpointerstats_is_valid = false;
 	cached_walstats_is_valid = false;
-	cached_slrustats_is_valid = false;
 	n_cached_replslotstats = -1;
 
 	/* forward to stats sub-subsystems */
@@ -1236,7 +1228,6 @@ pgstat_reset_shared_counters(const char *target)
 									 sizeof(PgStat_Archiver),
 									 &StatsShmem->archiver_changecount);
 			StatsShmem->archiver_reset_offset.stat_reset_timestamp = now;
-			cached_archiverstats_is_valid = false;
 			break;
 
 		case RESET_BGWRITER:
@@ -1249,8 +1240,6 @@ pgstat_reset_shared_counters(const char *target)
 									 sizeof(PgStat_CheckPointer),
 									 &StatsShmem->checkpointer_changecount);
 			StatsShmem->bgwriter_reset_offset.stat_reset_timestamp = now;
-			cached_bgwriterstats_is_valid = false;
-			cached_checkpointerstats_is_valid = false;
 			break;
 
 		case RESET_WAL:
@@ -1362,8 +1351,6 @@ pgstat_reset_slru_counter(const char *name)
 		pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
 		LWLockRelease(&StatsShmem->slru.lock);
 	}
-
-	cached_slrustats_is_valid = false;
 }
 
 /* ----------
@@ -4387,8 +4374,6 @@ pgstat_fetch_stat_archiver(void)
 
 	cached->stat_reset_timestamp = reset.stat_reset_timestamp;
 
-	cached_archiverstats_is_valid = true;
-
 	return &cached_archiverstats;
 }
 
@@ -4422,8 +4407,6 @@ pgstat_fetch_stat_bgwriter(void)
 	cached->maxwritten_clean -= reset.maxwritten_clean;
 	cached->buf_alloc -= reset.buf_alloc;
 	cached->stat_reset_timestamp = reset.stat_reset_timestamp;
-
-	cached_bgwriterstats_is_valid = true;
 
 	return &cached_bgwriterstats;
 }
@@ -4460,8 +4443,6 @@ pgstat_fetch_stat_checkpointer(void)
 	cached->buf_fsync_backend -= reset.buf_fsync_backend;
 	cached->checkpoint_write_time -= reset.checkpoint_write_time;
 	cached->checkpoint_sync_time -= reset.checkpoint_sync_time;
-
-	cached_checkpointerstats_is_valid = true;
 
 	return &cached_checkpointerstats;
 }
@@ -4516,8 +4497,6 @@ pgstat_fetch_slru(void)
 
 		CHECK_FOR_INTERRUPTS();
 	}
-
-	cached_slrustats_is_valid = true;
 
 	return cached_slrustats;
 }
