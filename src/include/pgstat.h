@@ -565,6 +565,16 @@ extern void pgstat_report_archiver(const char *xlog, bool failed);
 extern void pgstat_report_bgwriter(void);
 extern void pgstat_report_checkpointer(void);
 
+extern void pgstat_count_slru_page_zeroed(int slru_idx);
+extern void pgstat_count_slru_page_hit(int slru_idx);
+extern void pgstat_count_slru_page_read(int slru_idx);
+extern void pgstat_count_slru_page_written(int slru_idx);
+extern void pgstat_count_slru_page_exists(int slru_idx);
+extern void pgstat_count_slru_flush(int slru_idx);
+extern void pgstat_count_slru_truncate(int slru_idx);
+extern const char *pgstat_slru_name(int slru_idx);
+extern int	pgstat_slru_index(const char *name);
+
 /* ----------
  * Support functions for the SQL-callable functions to
  * generate the pgstat* views.
@@ -584,15 +594,5 @@ extern PgStat_Wal *pgstat_fetch_stat_wal(void);
 extern PgStat_SLRUStats *pgstat_fetch_slru(void);
 extern PgStat_ReplSlot *pgstat_fetch_replslot(int *nslots_p);
 
-extern void pgstat_count_slru_page_zeroed(int slru_idx);
-extern void pgstat_count_slru_page_hit(int slru_idx);
-extern void pgstat_count_slru_page_read(int slru_idx);
-extern void pgstat_count_slru_page_written(int slru_idx);
-extern void pgstat_count_slru_page_exists(int slru_idx);
-extern void pgstat_count_slru_flush(int slru_idx);
-extern void pgstat_count_slru_truncate(int slru_idx);
-extern const char *pgstat_slru_name(int slru_idx);
-extern int	pgstat_slru_index(const char *name);
-extern void pgstat_clear_snapshot(void);
 
 #endif							/* PGSTAT_H */
