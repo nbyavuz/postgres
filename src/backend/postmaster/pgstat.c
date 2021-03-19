@@ -4199,11 +4199,12 @@ pgstat_fetch_stat_dbentry(Oid dbid)
 	Assert(IsUnderPostmaster);
 
 	/* the simple cache doesn't work properly for InvalidOid */
-	Assert(dbid != InvalidOid);
-
-	/* Return cached result if it is valid. */
-	if (cached_dbent_key.databaseid == dbid)
-		return &cached_dbent;
+	if (dbid != InvalidOid)
+	{
+		/* Return cached result if it is valid. */
+		if (cached_dbent_key.databaseid == dbid)
+			return &cached_dbent;
+	}
 
 	shent = (PgStatShm_StatDBEntry *)
 		get_shared_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid, true, false,
