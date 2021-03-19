@@ -405,7 +405,7 @@ static const size_t pgstat_pendingentsize[] =
 	sizeof(PgStat_StatDBEntry), /* PGSTAT_TYPE_DB */
 	sizeof(PgStat_TableStatus), /* PGSTAT_TYPE_TABLE */
 	sizeof(PgStat_BackendFunctionEntry),	/* PGSTAT_TYPE_FUNCTION */
-	sizeof(PgStat_ReplSlot)		/* PGSTAT_TYPE_REPLSLOT */
+	-1 /* PGSTAT_TYPE_REPLSLOT is never in pending table */
 };
 
 /* parameter for the shared hash */
@@ -2094,8 +2094,13 @@ get_pending_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
 		return NULL;
 
 	if (create && !*found)
-		entry->pending = MemoryContextAllocZero(TopMemoryContext,
-												pgstat_pendingentsize[type]);
+	{
+		size_t entrysize = pgstat_pendingentsize[type];
+
+		Assert(entrysize != (size_t)-1);
+
+		entry->pending = MemoryContextAllocZero(TopMemoryContext, entrysize);
+	}
 
 	return entry->pending;
 }
