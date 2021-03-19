@@ -132,14 +132,6 @@ static const char *const slru_names[] = {
 
 #define SLRU_NUM_ELEMENTS	lengthof(slru_names)
 
-/* struct for shared SLRU stats */
-typedef struct PgStatSharedSLRUStats
-{
-	PgStat_SLRUStats entry[SLRU_NUM_ELEMENTS];
-	LWLock		lock;
-	pg_atomic_uint32 changecount;
-} PgStatSharedSLRUStats;
-
 StaticAssertDecl(sizeof(TimestampTz) == sizeof(pg_atomic_uint64),
 				 "size of pg_atomic_uint64 doesn't match TimestampTz");
 
@@ -157,8 +149,15 @@ typedef struct StatsShmemStruct
 	pg_atomic_uint32 checkpointer_changecount;
 	PgStat_Wal	wal_stats;
 	LWLock		wal_stats_lock;
-	PgStatSharedSLRUStats slru_stats;
-	pg_atomic_uint32 slru_changecount;
+
+	struct
+	{
+		LWLock		lock;
+		pg_atomic_uint32 changecount;
+		PgStat_SLRUStats stats[SLRU_NUM_ELEMENTS];
+#define SizeOfSlruStats sizeof(PgStat_SLRUStats[SLRU_NUM_ELEMENTS])
+	} slru;
+
 	pg_atomic_uint64 stats_timestamp;
 
 	/* Reset offsets, protected by StatsLock */
@@ -463,7 +462,7 @@ static PgStat_CheckPointer cached_checkpointerstats;
 static bool cached_checkpointerstats_is_valid = false;
 static PgStat_Wal cached_walstats;
 static bool cached_walstats_is_valid = false;
-static PgStat_SLRUStats cached_slrustats;
+static PgStat_SLRUStats cached_slrustats[SLRU_NUM_ELEMENTS];
 static bool cached_slrustats_is_valid = false;
 static PgStat_ReplSlot *cached_replslotstats = NULL;
 static int	n_cached_replslotstats = -1;
@@ -548,8 +547,8 @@ StatsShmemInit(void)
 
 		LWLockInitialize(&StatsShmem->wal_stats_lock, LWTRANCHE_STATS);
 
-		LWLockInitialize(&StatsShmem->slru_stats.lock, LWTRANCHE_STATS);
-		pg_atomic_init_u32(&StatsShmem->slru_stats.changecount, 0);
+		LWLockInitialize(&StatsShmem->slru.lock, LWTRANCHE_STATS);
+		pg_atomic_init_u32(&StatsShmem->slru.changecount, 0);
 
 		/*
 		 * Create a small dsa allocation in plain shared memory. Doing so
@@ -1170,18 +1169,18 @@ flush_slrustat(bool nowait)
 
 	/* lock the shared entry to protect the content, skip if failed */
 	if (!nowait)
-		LWLockAcquire(&StatsShmem->slru_stats.lock, LW_EXCLUSIVE);
-	else if (!LWLockConditionalAcquire(&StatsShmem->slru_stats.lock,
+		LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
+	else if (!LWLockConditionalAcquire(&StatsShmem->slru.lock,
 									   LW_EXCLUSIVE))
 		return false;			/* failed to acquire lock, skip */
 
 	assert_changecount =
-		pg_atomic_fetch_add_u32(&StatsShmem->slru_stats.changecount, 1);
+		pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
 	Assert((assert_changecount & 1) == 0);
 
 	for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
 	{
-		PgStat_SLRUStats *sharedent = &StatsShmem->slru_stats.entry[i];
+		PgStat_SLRUStats *sharedent = &StatsShmem->slru.stats[i];
 		PgStat_SLRUStats *pendingent = &pending_SLRUStats[i];
 
 		sharedent->blocks_zeroed += pendingent->blocks_zeroed;
@@ -1194,11 +1193,10 @@ flush_slrustat(bool nowait)
 	}
 
 	/* done, clear the pending entry */
-	MemSet(pending_SLRUStats, 0,
-		   sizeof(PgStat_SLRUStats) * SLRU_NUM_ELEMENTS);
+	MemSet(pending_SLRUStats, 0, SizeOfSlruStats);
 
-	pg_atomic_add_fetch_u32(&StatsShmem->slru_stats.changecount, 1);
-	LWLockRelease(&StatsShmem->slru_stats.lock);
+	pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
+	LWLockRelease(&StatsShmem->slru.lock);
 
 	have_slrustats = false;
 
@@ -1913,30 +1911,30 @@ pgstat_reset_slru_counter(const char *name)
 	if (name)
 	{
 		i = pgstat_slru_index(name);
-		LWLockAcquire(&StatsShmem->slru_stats.lock, LW_EXCLUSIVE);
+		LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
 		assert_changecount =
-			pg_atomic_fetch_add_u32(&StatsShmem->slru_changecount, 1);
+			pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
 		Assert((assert_changecount & 1) == 0);
-		MemSet(&StatsShmem->slru_stats.entry[i], 0,
+		MemSet(&StatsShmem->slru.stats[i], 0,
 			   sizeof(PgStat_SLRUStats));
-		StatsShmem->slru_stats.entry[i].stat_reset_timestamp = ts;
-		pg_atomic_add_fetch_u32(&StatsShmem->slru_changecount, 1);
-		LWLockRelease(&StatsShmem->slru_stats.lock);
+		StatsShmem->slru.stats[i].stat_reset_timestamp = ts;
+		pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
+		LWLockRelease(&StatsShmem->slru.lock);
 	}
 	else
 	{
-		LWLockAcquire(&StatsShmem->slru_stats.lock, LW_EXCLUSIVE);
+		LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
 		assert_changecount =
-			pg_atomic_fetch_add_u32(&StatsShmem->slru_changecount, 1);
+			pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
 		Assert((assert_changecount & 1) == 0);
 		for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
 		{
-			MemSet(&StatsShmem->slru_stats.entry[i], 0,
+			MemSet(&StatsShmem->slru.stats[i], 0,
 				   sizeof(PgStat_SLRUStats));
-			StatsShmem->slru_stats.entry[i].stat_reset_timestamp = ts;
+			StatsShmem->slru.stats[i].stat_reset_timestamp = ts;
 		}
-		pg_atomic_add_fetch_u32(&StatsShmem->slru_changecount, 1);
-		LWLockRelease(&StatsShmem->slru_stats.lock);
+		pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
+		LWLockRelease(&StatsShmem->slru.lock);
 	}
 
 	cached_slrustats_is_valid = false;
@@ -3500,17 +3498,15 @@ pgstat_fetch_stat_wal(void)
 PgStat_SLRUStats *
 pgstat_fetch_slru(void)
 {
-	size_t		size = sizeof(PgStat_SLRUStats) * SLRU_NUM_ELEMENTS;
-
 	for (;;)
 	{
 		uint32		before_count;
 		uint32		after_count;
 
 		pg_read_barrier();
-		before_count = pg_atomic_read_u32(&StatsShmem->slru_changecount);
-		memcpy(&cached_slrustats, &StatsShmem->slru_stats, size);
-		after_count = pg_atomic_read_u32(&StatsShmem->slru_changecount);
+		before_count = pg_atomic_read_u32(&StatsShmem->slru.changecount);
+		memcpy(&cached_slrustats, &StatsShmem->slru.stats, SizeOfSlruStats);
+		after_count = pg_atomic_read_u32(&StatsShmem->slru.changecount);
 
 		if (before_count == after_count && (before_count & 1) == 0)
 			break;
@@ -3520,7 +3516,7 @@ pgstat_fetch_slru(void)
 
 	cached_slrustats_is_valid = true;
 
-	return &cached_slrustats;
+	return cached_slrustats;
 }
 
 /*
@@ -3995,8 +3991,9 @@ pgstat_write_statsfile(void)
 	/*
 	 * Write SLRU stats struct
 	 */
-	rc = fwrite(&StatsShmem->slru_stats, sizeof(PgStatSharedSLRUStats), 1,
-				fpout);
+	rc = fwrite(&StatsShmem->slru.stats,
+				sizeof(PgStat_SLRUStats[SLRU_NUM_ELEMENTS]),
+				1, fpout);
 	(void) rc;					/* we'll check for error with ferror */
 
 	/*
@@ -4183,8 +4180,7 @@ pgstat_read_statsfile(void)
 	/*
 	 * Read SLRU stats struct
 	 */
-	if (fread(&StatsShmem->slru_stats, 1, sizeof(PgStatSharedSLRUStats),
-			  fpin) != sizeof(PgStatSharedSLRUStats))
+	if (fread(&StatsShmem->slru.stats, 1, SizeOfSlruStats, fpin) != SizeOfSlruStats)
 	{
 		ereport(LOG,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
