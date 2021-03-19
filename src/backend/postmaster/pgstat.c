@@ -78,126 +78,6 @@
 #define PGSTAT_FUNCTION_HASH_SIZE	512
 
 
-/* ----------
- * GUC parameters
- * ----------
- */
-bool		pgstat_track_counts = false;
-int			pgstat_track_functions = TRACK_FUNC_OFF;
-
-/* ----------
- * Built from GUC parameter
- * ----------
- */
-char      *pgstat_stat_directory = NULL;
-
-/* No longer used, but will be removed with GUC */
-char      *pgstat_stat_filename = NULL;
-char      *pgstat_stat_tmpname = NULL;
-
-/*
- * WAL usage counters saved from pgWALUsage at the previous call to
- * pgstat_report_wal(). This is used to calculate how much WAL usage
- * happens between pgstat_report_wal() calls, by substracting
- * the previous counters from the current ones.
- */
-static WalUsage prevWalUsage;
-
-/*
- * List of SLRU names that we keep stats for.  There is no central registry of
- * SLRUs, so we use this fixed list instead.  The "other" entry is used for
- * all SLRUs without an explicit entry (e.g. SLRUs in extensions).
- */
-static const char *const slru_names[] = {
-	"CommitTs",
-	"MultiXactMember",
-	"MultiXactOffset",
-	"Notify",
-	"Serial",
-	"Subtrans",
-	"Xact",
-	"other"						/* has to be last */
-};
-
-#define SLRU_NUM_ELEMENTS	lengthof(slru_names)
-
-StaticAssertDecl(sizeof(TimestampTz) == sizeof(pg_atomic_uint64),
-				 "size of pg_atomic_uint64 doesn't match TimestampTz");
-
-typedef struct StatsShmemStruct
-{
-	void   *raw_dsa_area;
-	dshash_table_handle hash_handle;	/* shared dbstat hash */
-
-	/* Global stats structs */
-	PgStat_Archiver archiver_stats;
-	pg_atomic_uint32 archiver_changecount;
-	PgStat_BgWriter bgwriter_stats;
-	pg_atomic_uint32 bgwriter_changecount;
-	PgStat_CheckPointer checkpointer_stats;
-	pg_atomic_uint32 checkpointer_changecount;
-	PgStat_Wal	wal_stats;
-	LWLock		wal_stats_lock;
-
-	struct
-	{
-		LWLock		lock;
-		pg_atomic_uint32 changecount;
-		PgStat_SLRUStats stats[SLRU_NUM_ELEMENTS];
-#define SizeOfSlruStats sizeof(PgStat_SLRUStats[SLRU_NUM_ELEMENTS])
-	} slru;
-
-	pg_atomic_uint64 stats_timestamp;
-
-	/* Reset offsets, protected by StatsLock */
-	PgStat_Archiver archiver_reset_offset;
-	PgStat_BgWriter bgwriter_reset_offset;
-	PgStat_CheckPointer checkpointer_reset_offset;
-
-	pg_atomic_uint64 gc_count;	/* # of entries deleted. not protected by
-								 * StatsLock */
-} StatsShmemStruct;
-
-/* BgWriter global statistics counters */
-PgStat_BgWriter BgWriterStats = {0};
-
-/* CheckPointer global statistics counters */
-PgStat_CheckPointer CheckPointerStats = {0};
-
-/* WAL global statistics counters */
-PgStat_Wal	WalStats = {0};
-
-/*
- * XXXX: always try to flush WAL stats. We don't want to manipulate another
- * counter during XLogInsert so we don't have an effecient short cut to know
- * whether any counter gets incremented.
- */
-static inline bool
-walstats_pending(void)
-{
-	static const PgStat_Wal all_zeroes;
-
-	return memcmp(&WalStats, &all_zeroes,
-				  offsetof(PgStat_Wal, stat_reset_timestamp)) != 0;
-}
-
-/*
- * SLRU statistics counts waiting to be written to the shared activity
- * statistics.  We assume this variable inits to zeroes.  Entries are
- * one-to-one with slru_names[].
- * Changes of SLRU counters are reported within critical sections so we use
- * static memory in order to avoid memory allocation.
- */
-static PgStat_SLRUStats pending_SLRUStats[SLRU_NUM_ELEMENTS];
-static bool have_slrustats = false;
-
-/* ----------
- * Local data
- * ----------
- */
-/* backend-lifetime storages */
-static StatsShmemStruct *StatsShmem = NULL;
-static dsa_area *area = NULL;
 
 /*
  * Types to define shared statistics structure.
@@ -243,36 +123,6 @@ typedef enum PgStatTypes
 	PGSTAT_TYPE_REPLSLOT		/* per-replication-slot statistics */
 } PgStatTypes;
 
-/*
- * entry body size lookup table of shared statistics entries corresponding to
- * PgStatTypes
- */
-static const size_t pgstat_sharedentsize[] =
-{
-	sizeof(PgStat_StatDBEntry), /* PGSTAT_TYPE_DB */
-	sizeof(PgStat_StatTabEntry),	/* PGSTAT_TYPE_TABLE */
-	sizeof(PgStat_StatFuncEntry),	/* PGSTAT_TYPE_FUNCTION */
-	sizeof(PgStat_ReplSlot)		/* PGSTAT_TYPE_REPLSLOT */
-};
-
-/* Ditto for pending statistics entries */
-static const size_t pgstat_pendingentsize[] =
-{
-	sizeof(PgStat_StatDBEntry), /* PGSTAT_TYPE_DB */
-	sizeof(PgStat_TableStatus), /* PGSTAT_TYPE_TABLE */
-	sizeof(PgStat_BackendFunctionEntry),	/* PGSTAT_TYPE_FUNCTION */
-	sizeof(PgStat_ReplSlot)		/* PGSTAT_TYPE_REPLSLOT */
-};
-
-/*
- * We shoud avoid overwriting header part of a shared entry. Use these macros
- * to know what portion of the struct to be written or read. PSTAT_SHENT_BODY
- * returns a bit smaller address than the actual address of the next member but
- * that doesn't matter.
- */
-#define PGSTAT_SHENT_BODY(e) (((char *)(e)) + sizeof(PgStat_StatEntryHeader))
-#define PGSTAT_SHENT_BODY_LEN(t) \
-	(pgstat_sharedentsize[t] - sizeof(PgStat_StatEntryHeader))
 
 /* struct for shared statistics hash entry key. */
 typedef struct PgStatHashKey
@@ -307,59 +157,16 @@ typedef struct PgStatPendingEntry
 	PgStat_StatEntryHeader *pending;	/* address pointer to stats body */
 } PgStatPendingEntry;
 
-
-/* parameter for the shared hash */
-static const dshash_parameters dsh_params = {
-	sizeof(PgStatHashKey),
-	sizeof(PgStatShmHashEntry),
-	dshash_memcmp,
-	dshash_memhash,
-	LWTRANCHE_STATS
-};
-
-/* define hashtable for caching shared hashtable lookups */
-#define SH_PREFIX pgstat_shm_lookup_cache
-#define SH_ELEMENT_TYPE PgStatShmLookupCacheEntry
-#define SH_KEY_TYPE PgStatHashKey
-#define SH_KEY key
-#define SH_HASH_KEY(tb, key) \
-	hash_bytes((unsigned char *)&key, sizeof(PgStatHashKey))
-#define SH_EQUAL(tb, a, b) (memcmp(&a, &b, sizeof(PgStatHashKey)) == 0)
-#define SH_SCOPE static inline
-#define SH_DEFINE
-#define SH_DECLARE
-#include "lib/simplehash.h"
-
-
-/* define hashtable for local pending entries */
-#define SH_PREFIX pgstat_pending
-#define SH_ELEMENT_TYPE PgStatPendingEntry
-#define SH_KEY_TYPE PgStatHashKey
-#define SH_KEY key
-#define SH_HASH_KEY(tb, key) \
-	hash_bytes((unsigned char *)&key, sizeof(PgStatHashKey))
-#define SH_EQUAL(tb, a, b) (memcmp(&a, &b, sizeof(PgStatHashKey)) == 0)
-#define SH_SCOPE static inline
-#define SH_DEFINE
-#define SH_DECLARE
-#include "lib/simplehash.h"
-
-
-/* The shared hash to index activity stats entries. */
-static dshash_table *pgStatSharedHash = NULL;
-
 /*
- * The local cache to index shared stats entries.
- *
- * This is a local hash to store native pointers to shared hash
- * entries. pgStatShmLookupCacheAge is copied from StatsShmem->gc_count at creation
- * and garbage collection.
+ * We shoud avoid overwriting header part of a shared entry. Use these macros
+ * to know what portion of the struct to be written or read. PSTAT_SHENT_BODY
+ * returns a bit smaller address than the actual address of the next member but
+ * that doesn't matter.
  */
-static pgstat_shm_lookup_cache_hash * pgStatShmLookupCache = NULL;
-static int	pgStatShmLookupCacheAge = 0;	/* cache age of pgStatShmLookupCache */
+#define PGSTAT_SHENT_BODY(e) (((char *)(e)) + sizeof(PgStat_StatEntryHeader))
+#define PGSTAT_SHENT_BODY_LEN(t) \
+	(pgstat_sharedentsize[t] - sizeof(PgStat_StatEntryHeader))
 
-/* Local stats numbers are stored here. */
-static pgstat_pending_hash * pgStatPendingHash = NULL;
 
 /* entry type for oid hash */
 typedef struct pgstat_oident
@@ -368,42 +175,12 @@ typedef struct pgstat_oident
 	char		status;
 } pgstat_oident;
 
-/* Define hashtable for OID hashes. */
-StaticAssertDecl(sizeof(Oid) == 4, "oid is not compatible with uint32");
-#define SH_PREFIX pgstat_oid
-#define SH_ELEMENT_TYPE pgstat_oident
-#define SH_KEY_TYPE Oid
-#define SH_KEY oid
-#define SH_HASH_KEY(tb, key) hash_bytes_uint32(key)
-#define SH_EQUAL(tb, a, b) (a == b)
-#define SH_SCOPE static inline
-#define SH_DEFINE
-#define SH_DECLARE
-#include "lib/simplehash.h"
 
-/*
- * Tuple insertion/deletion counts for an open transaction can't be propagated
- * into PgStat_TableStatus counters until we know if it is going to commit
- * or abort.  Hence, we keep these counts in per-subxact structs that live
- * in TopTransactionContext.  This data structure is designed on the assumption
- * that subxacts won't usually modify very many tables.
+
+/* ----------
+ * Types and definitions for individual statistic types
+ * ----------
  */
-typedef struct PgStat_SubXactStatus
-{
-	int			nest_level;		/* subtransaction nest level */
-	struct PgStat_SubXactStatus *prev;	/* higher-level subxact if any */
-	PgStat_TableXactStatus *first;	/* head of list for this subxact */
-} PgStat_SubXactStatus;
-
-static PgStat_SubXactStatus *pgStatXactStack = NULL;
-
-static int	pgStatXactCommit = 0;
-static int	pgStatXactRollback = 0;
-PgStat_Counter pgStatBlockReadTime = 0;
-PgStat_Counter pgStatBlockWriteTime = 0;
-PgStat_Counter pgStatActiveTime = 0;
-PgStat_Counter pgStatTransactionIdleTime = 0;
-SessionEndType pgStatSessionEndCause = DISCONNECT_NORMAL;
 
 /* Record that's written to 2PC state file when pgstat state is persisted */
 typedef struct TwoPhasePgStatRecord
@@ -419,6 +196,224 @@ typedef struct TwoPhasePgStatRecord
 	bool		t_truncated;	/* was the relation truncated? */
 } TwoPhasePgStatRecord;
 
+
+/*
+ * Tuple insertion/deletion counts for an open transaction can't be propagated
+ * into PgStat_TableStatus counters until we know if it is going to commit
+ * or abort.  Hence, we keep these counts in per-subxact structs that live
+ * in TopTransactionContext.  This data structure is designed on the assumption
+ * that subxacts won't usually modify very many tables.
+ */
+typedef struct PgStat_SubXactStatus
+{
+	int			nest_level;		/* subtransaction nest level */
+	struct PgStat_SubXactStatus *prev;	/* higher-level subxact if any */
+	PgStat_TableXactStatus *first;	/* head of list for this subxact */
+} PgStat_SubXactStatus;
+
+
+/*
+ * List of SLRU names that we keep stats for.  There is no central registry of
+ * SLRUs, so we use this fixed list instead.  The "other" entry is used for
+ * all SLRUs without an explicit entry (e.g. SLRUs in extensions).
+ *
+ * This is only defined here so that SLRU_NUM_ELEMENTS is known for later type
+ * definitions.
+ */
+static const char *const slru_names[] = {
+	"CommitTs",
+	"MultiXactMember",
+	"MultiXactOffset",
+	"Notify",
+	"Serial",
+	"Subtrans",
+	"Xact",
+	"other"						/* has to be last */
+};
+#define SLRU_NUM_ELEMENTS lengthof(slru_names)
+
+
+/* ----------
+ * Shared memory struct for statistics
+ * ----------
+ */
+
+StaticAssertDecl(sizeof(TimestampTz) == sizeof(pg_atomic_uint64),
+				 "size of pg_atomic_uint64 doesn't match TimestampTz");
+
+typedef struct StatsShmemStruct
+{
+	void   *raw_dsa_area;
+	dshash_table_handle hash_handle;	/* shared dbstat hash */
+
+	/* Global stats structs */
+	PgStat_Archiver archiver_stats;
+	pg_atomic_uint32 archiver_changecount;
+	PgStat_BgWriter bgwriter_stats;
+	pg_atomic_uint32 bgwriter_changecount;
+	PgStat_CheckPointer checkpointer_stats;
+	pg_atomic_uint32 checkpointer_changecount;
+	PgStat_Wal	wal_stats;
+	LWLock		wal_stats_lock;
+
+	struct
+	{
+		LWLock		lock;
+		pg_atomic_uint32 changecount;
+		PgStat_SLRUStats stats[SLRU_NUM_ELEMENTS];
+#define SizeOfSlruStats sizeof(PgStat_SLRUStats[SLRU_NUM_ELEMENTS])
+	} slru;
+
+	pg_atomic_uint64 stats_timestamp;
+
+	/* Reset offsets, protected by StatsLock */
+	PgStat_Archiver archiver_reset_offset;
+	PgStat_BgWriter bgwriter_reset_offset;
+	PgStat_CheckPointer checkpointer_reset_offset;
+
+	pg_atomic_uint64 gc_count;	/* # of entries deleted. not protected by
+								 * StatsLock */
+} StatsShmemStruct;
+
+
+/* ----------
+ * Hash Table Types
+ * ----------
+ */
+
+/* for caching shared hashtable lookups */
+#define SH_PREFIX pgstat_shm_lookup_cache
+#define SH_ELEMENT_TYPE PgStatShmLookupCacheEntry
+#define SH_KEY_TYPE PgStatHashKey
+#define SH_KEY key
+#define SH_HASH_KEY(tb, key) \
+	hash_bytes((unsigned char *)&key, sizeof(PgStatHashKey))
+#define SH_EQUAL(tb, a, b) (memcmp(&a, &b, sizeof(PgStatHashKey)) == 0)
+#define SH_SCOPE static inline
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
+/* for local pending entries */
+#define SH_PREFIX pgstat_pending
+#define SH_ELEMENT_TYPE PgStatPendingEntry
+#define SH_KEY_TYPE PgStatHashKey
+#define SH_KEY key
+#define SH_HASH_KEY(tb, key) \
+	hash_bytes((unsigned char *)&key, sizeof(PgStatHashKey))
+#define SH_EQUAL(tb, a, b) (memcmp(&a, &b, sizeof(PgStatHashKey)) == 0)
+#define SH_SCOPE static inline
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
+/* for OID hashes. */
+StaticAssertDecl(sizeof(Oid) == 4, "oid is not compatible with uint32");
+#define SH_PREFIX pgstat_oid
+#define SH_ELEMENT_TYPE pgstat_oident
+#define SH_KEY_TYPE Oid
+#define SH_KEY oid
+#define SH_HASH_KEY(tb, key) hash_bytes_uint32(key)
+#define SH_EQUAL(tb, a, b) (a == b)
+#define SH_SCOPE static inline
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
+
+/* ----------
+ * GUC parameters
+ * ----------
+ */
+bool		pgstat_track_counts = false;
+int			pgstat_track_functions = TRACK_FUNC_OFF;
+
+/* ----------
+ * Built from GUC parameters
+ * ----------
+ */
+char      *pgstat_stat_directory = NULL;
+
+/* No longer used, but will be removed with GUC */
+char      *pgstat_stat_filename = NULL;
+char      *pgstat_stat_tmpname = NULL;
+
+
+
+/* ----------
+ * Constants
+ * ----------
+ */
+
+/*
+ * entry body size lookup table of shared statistics entries corresponding to
+ * PgStatTypes
+ */
+static const size_t pgstat_sharedentsize[] =
+{
+	sizeof(PgStat_StatDBEntry), /* PGSTAT_TYPE_DB */
+	sizeof(PgStat_StatTabEntry),	/* PGSTAT_TYPE_TABLE */
+	sizeof(PgStat_StatFuncEntry),	/* PGSTAT_TYPE_FUNCTION */
+	sizeof(PgStat_ReplSlot)		/* PGSTAT_TYPE_REPLSLOT */
+};
+
+/* Ditto for pending statistics entries */
+static const size_t pgstat_pendingentsize[] =
+{
+	sizeof(PgStat_StatDBEntry), /* PGSTAT_TYPE_DB */
+	sizeof(PgStat_TableStatus), /* PGSTAT_TYPE_TABLE */
+	sizeof(PgStat_BackendFunctionEntry),	/* PGSTAT_TYPE_FUNCTION */
+	sizeof(PgStat_ReplSlot)		/* PGSTAT_TYPE_REPLSLOT */
+};
+
+/* parameter for the shared hash */
+static const dshash_parameters dsh_params = {
+	sizeof(PgStatHashKey),
+	sizeof(PgStatShmHashEntry),
+	dshash_memcmp,
+	dshash_memhash,
+	LWTRANCHE_STATS
+};
+
+
+
+/* ----------
+ * Stats shared memory state
+ * ----------
+ */
+
+/* backend-lifetime storages */
+static StatsShmemStruct *StatsShmem = NULL;
+static dsa_area *area = NULL;
+/* The shared hash to index activity stats entries. */
+static dshash_table *pgStatSharedHash = NULL;
+
+
+
+/* ----------
+ * Local variables for the stats subsystem
+ *
+ * NB: This is only for generic infrastructure, not for specific types of
+ * stats.
+ * ----------
+ */
+
+/*
+ * Locally pending stats that will need to be submitted.
+ */
+static pgstat_pending_hash *pgStatPendingHash = NULL;
+
+/*
+ * Local cache for faster / less contended lookup shared stats entries.
+ *
+ * This is a local hash to store native pointers to shared hash
+ * entries. pgStatShmLookupCacheAge is copied from StatsShmem->gc_count at creation
+ * and garbage collection.
+ */
+static pgstat_shm_lookup_cache_hash *pgStatShmLookupCache = NULL;
+static int	pgStatShmLookupCacheAge = 0;	/* cache age of pgStatShmLookupCache */
+
+
 /* Variables for backend status snapshot */
 static MemoryContext pgStatLocalContext = NULL;
 
@@ -427,6 +422,41 @@ static MemoryContext pgStatLocalContext = NULL;
  */
 static MemoryContext pgStatCacheContext = NULL;
 
+
+static PgStat_SubXactStatus *pgStatXactStack = NULL;
+
+
+
+/* ----------
+ * pending stats state that is directly modified from outside the stats system
+ * ----------
+ */
+
+/* BgWriter global statistics counters */
+PgStat_BgWriter BgWriterStats = {0};
+
+/* CheckPointer global statistics counters */
+PgStat_CheckPointer CheckPointerStats = {0};
+
+/* WAL global statistics counters */
+PgStat_Wal	WalStats = {0};
+
+PgStat_Counter pgStatBlockReadTime = 0;
+PgStat_Counter pgStatBlockWriteTime = 0;
+PgStat_Counter pgStatActiveTime = 0;
+PgStat_Counter pgStatTransactionIdleTime = 0;
+SessionEndType pgStatSessionEndCause = DISCONNECT_NORMAL;
+
+
+
+/* ----------
+ * pending stats only modified in this file
+ * ----------
+ */
+
+static int	pgStatXactCommit = 0;
+static int	pgStatXactRollback = 0;
+
 /*
  * Total time charged to functions so far in the current backend.
  * We use this to help separate "self" and "other" time charges.
@@ -434,7 +464,31 @@ static MemoryContext pgStatCacheContext = NULL;
  */
 static instr_time total_func_time;
 
-/* Simple caching feature for pgstatfuncs */
+
+/*
+ * SLRU statistics counts waiting to be written to the shared activity
+ * statistics.  We assume this variable inits to zeroes.  Entries are
+ * one-to-one with slru_names[].
+ * Changes of SLRU counters are reported within critical sections so we use
+ * static memory in order to avoid memory allocation.
+ */
+static PgStat_SLRUStats pending_SLRUStats[SLRU_NUM_ELEMENTS];
+static bool have_slrustats = false;
+
+/*
+ * WAL usage counters saved from pgWALUsage at the previous call to
+ * pgstat_report_wal(). This is used to calculate how much WAL usage
+ * happens between pgstat_report_wal() calls, by substracting
+ * the previous counters from the current ones.
+ */
+static WalUsage prevWalUsage;
+
+
+/* ----------
+ * Cache state  for pgstatfuncs
+ * ----------
+ */
+
 static PgStatHashKey stathashkey_zero = {0};
 static PgStatHashKey cached_dbent_key = {0};
 static PgStat_StatDBEntry cached_dbent;
@@ -455,6 +509,7 @@ static PgStat_SLRUStats cached_slrustats[SLRU_NUM_ELEMENTS];
 static bool cached_slrustats_is_valid = false;
 static PgStat_ReplSlot *cached_replslotstats = NULL;
 static int	n_cached_replslotstats = -1;
+
 
 /* ----------
  * Local function forward declarations
@@ -486,6 +541,7 @@ static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
 static void pgstat_update_connstats(bool disconnect);
 
 static void pgstat_setup_memcxt(void);
+
 
 /* ------------------------------------------------------------
  * Public functions called from postmaster follow
@@ -1075,6 +1131,20 @@ flush_dbstat(PgStatPendingEntry *ent, bool nowait)
 	LWLockRelease(&sharedent->header.lock);
 
 	return true;
+}
+
+/*
+ * XXXX: always try to flush WAL stats. We don't want to manipulate another
+ * counter during XLogInsert so we don't have an effecient short cut to know
+ * whether any counter gets incremented.
+ */
+static inline bool
+walstats_pending(void)
+{
+	static const PgStat_Wal all_zeroes;
+
+	return memcmp(&WalStats, &all_zeroes,
+				  offsetof(PgStat_Wal, stat_reset_timestamp)) != 0;
 }
 
 /*
