@@ -382,8 +382,6 @@ typedef struct PgStat_StatFuncEntry
  */
 typedef struct PgStat_ReplSlot
 {
-	PgStat_StatEntryHeader header;	/* must be the first member,
-									   used only on shared memory  */
 	char		slotname[NAMEDATALEN];
 	PgStat_Counter spill_txns;
 	PgStat_Counter spill_count;

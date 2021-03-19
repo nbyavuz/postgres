@@ -200,6 +200,12 @@ typedef struct PgStatShm_StatFuncEntry
 	PgStat_StatFuncEntry stats;
 } PgStatShm_StatFuncEntry;
 
+typedef struct PgStatShm_ReplSlotEntry
+{
+	PgStat_StatEntryHeader header;
+	PgStat_ReplSlot stats;
+} PgStatShm_ReplSlotEntry;
+
 
 /* Record that's written to 2PC state file when pgstat state is persisted */
 typedef struct TwoPhasePgStatRecord
@@ -373,7 +379,7 @@ static const size_t pgstat_sharedentsize[] =
 	sizeof(PgStatShm_StatDBEntry), /* PGSTAT_TYPE_DB */
 	sizeof(PgStatShm_StatTabEntry),	/* PGSTAT_TYPE_TABLE */
 	sizeof(PgStatShm_StatFuncEntry),	/* PGSTAT_TYPE_FUNCTION */
-	sizeof(PgStat_ReplSlot)		/* PGSTAT_TYPE_REPLSLOT */
+	sizeof(PgStatShm_ReplSlotEntry)		/* PGSTAT_TYPE_REPLSLOT */
 };
 
 /* Ditto for pending statistics entries */
@@ -1399,9 +1405,9 @@ pgstat_reset_replslot_counter(const char *name)
 	ts = GetCurrentTimestamp();
 	for (i = startidx; i <= endidx; i++)
 	{
-		PgStat_ReplSlot *shent;
+		PgStatShm_ReplSlotEntry *shent;
 
-		shent = (PgStat_ReplSlot *)
+		shent = (PgStatShm_ReplSlotEntry *)
 			get_stat_entry(PGSTAT_TYPE_REPLSLOT,
 						   MyDatabaseId, i, false, false, NULL);
 
@@ -1410,10 +1416,10 @@ pgstat_reset_replslot_counter(const char *name)
 			continue;
 
 		LWLockAcquire(&shent->header.lock, LW_EXCLUSIVE);
-		memset(&shent->spill_txns, 0,
+		memset(&shent->stats.spill_txns, 0,
 			   offsetof(PgStat_ReplSlot, stat_reset_timestamp) -
 			   offsetof(PgStat_ReplSlot, spill_txns));
-		shent->stat_reset_timestamp = ts;
+		shent->stats.stat_reset_timestamp = ts;
 		LWLockRelease(&shent->header.lock);
 	}
 }
@@ -3025,7 +3031,7 @@ pgstat_report_replslot(const char *slotname,
 					   int spilltxns, int spillcount, int spillbytes,
 					   int streamtxns, int streamcount, int streambytes)
 {
-	PgStat_ReplSlot *shent;
+	PgStatShm_ReplSlotEntry *shent;
 	int			i;
 	bool		found;
 
@@ -3047,26 +3053,26 @@ pgstat_report_replslot(const char *slotname,
 	if (i == max_replication_slots)
 		return;
 
-	shent = (PgStat_ReplSlot *)
+	shent = (PgStatShm_ReplSlotEntry *)
 		get_stat_entry(PGSTAT_TYPE_REPLSLOT,
 					   MyDatabaseId, i, false, true, &found);
 
 	/* Clear the counters and reset if it is not used */
 	LWLockAcquire(&shent->header.lock, LW_EXCLUSIVE);
-	if (shent->slotname[0] == '\0' || !found)
+	if (shent->stats.slotname[0] == '\0' || !found)
 	{
 		Assert(!shent->header.dropped);
-		memset(&shent->spill_txns, 0,
+		memset(&shent->stats.spill_txns, 0,
 			   sizeof(PgStat_ReplSlot) - offsetof(PgStat_ReplSlot, spill_txns));
-		strlcpy(shent->slotname, slotname, NAMEDATALEN);
+		strlcpy(shent->stats.slotname, slotname, NAMEDATALEN);
 	}
 
-	shent->spill_txns += spilltxns;
-	shent->spill_count += spillcount;
-	shent->spill_bytes += spillbytes;
-	shent->stream_txns += streamtxns;
-	shent->stream_count += streamcount;
-	shent->stream_bytes += streambytes;
+	shent->stats.spill_txns += spilltxns;
+	shent->stats.spill_count += spillcount;
+	shent->stats.spill_bytes += spillbytes;
+	shent->stats.stream_txns += streamtxns;
+	shent->stats.stream_count += streamcount;
+	shent->stats.stream_bytes += streambytes;
 	LWLockRelease(&shent->header.lock);
 }
 
@@ -3080,7 +3086,7 @@ void
 pgstat_report_replslot_drop(const char *slotname)
 {
 	int			i;
-	PgStat_ReplSlot *shent;
+	PgStatShm_ReplSlotEntry *shent;
 
 	Assert(area);
 	if (!area)
@@ -3098,17 +3104,17 @@ pgstat_report_replslot_drop(const char *slotname)
 	if (i == max_replication_slots)
 		return;
 
-	shent = (PgStat_ReplSlot *)
+	shent = (PgStatShm_ReplSlotEntry *)
 		get_stat_entry(PGSTAT_TYPE_REPLSLOT,
 					   MyDatabaseId, i, false, false, NULL);
 
 	/*
 	 * Mark this entry as "not used". We don't "drop" this entry because no other process can't be looking this entry
 	 */
-	if (shent && shent->slotname[0] != '\0')
+	if (shent && shent->stats.slotname[0] != '\0')
 	{
 		LWLockAcquire(&shent->header.lock, LW_EXCLUSIVE);
-		shent->slotname[0] = '\0';
+		shent->stats.slotname[0] = '\0';
 		LWLockRelease(&shent->header.lock);
 	}
 }
@@ -4526,7 +4532,7 @@ pgstat_fetch_replslot(int *nslots_p)
 
 		for (i = 0; i < max_replication_slots; i++)
 		{
-			PgStat_ReplSlot *shent = (PgStat_ReplSlot *)
+			PgStatShm_ReplSlotEntry *shent = (PgStatShm_ReplSlotEntry *)
 				get_stat_entry(PGSTAT_TYPE_REPLSLOT, MyDatabaseId, i,
 							   false, false, NULL);
 			if (!shent)
@@ -4534,12 +4540,9 @@ pgstat_fetch_replslot(int *nslots_p)
 
 			/* Skip if this slot is not used */
 			LWLockAcquire(&shent->header.lock, LW_SHARED);
-			if (shent->slotname[0] != '\0')
+			if (shent->stats.slotname[0] != '\0')
 			{
-				memcpy(cached_replslotstats[n++].slotname,
-					   shent->slotname,
-					   sizeof(PgStat_ReplSlot) -
-					   offsetof(PgStat_ReplSlot, slotname));
+				cached_replslotstats[n++] = shent->stats;
 			}
 			LWLockRelease(&shent->header.lock);
 		}
