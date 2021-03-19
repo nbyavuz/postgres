@@ -40,6 +40,7 @@
 #include "libpq/libpq.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "port/atomics.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/fork_process.h"
 #include "postmaster/interrupt.h"
@@ -49,6 +50,7 @@
 #include "storage/condition_variable.h"
 #include "storage/ipc.h"
 #include "storage/lmgr.h"
+#include "storage/lwlock.h"
 #include "storage/proc.h"
 #include "storage/procsignal.h"
 #include "utils/guc.h"
@@ -124,6 +126,21 @@ typedef enum PgStatTypes
 } PgStatTypes;
 
 
+/* ----------
+ * PgStatShm_StatEntryHead			common header struct for PgStatShm_Stat*Entry
+ * ----------
+ */
+typedef struct PgStatShm_StatEntryHeader
+{
+	uint32		magic;				/* just a validity cross-check */
+	LWLock		lock;
+	bool		dropped;			/* This entry is being dropped and should
+									 * be removed when refcount goes to
+									 * zero. */
+	pg_atomic_uint32  refcount;		/* How many backends are referencing */
+} PgStatShm_StatEntryHeader;
+
+
 /* struct for shared statistics hash entry key. */
 typedef struct PgStatHashKey
 {
@@ -145,7 +162,7 @@ typedef struct PgStatShmLookupCacheEntry
 {
 	PgStatHashKey key;			/* hash key */
 	char		status;			/* for simplehash use */
-	PgStat_StatEntryHeader *shared;	/* address pointer to stats body */
+	PgStatShm_StatEntryHeader *shared;	/* address pointer to stats body */
 	dsa_pointer dsapointer;		/* dsa pointer of body */
 } PgStatShmLookupCacheEntry;
 
@@ -154,7 +171,7 @@ typedef struct PgStatPendingEntry
 {
 	PgStatHashKey key;
 	char		status;			/* for simplehash use */
-	PgStat_StatEntryHeader *pending;	/* address pointer to stats body */
+	PgStatShm_StatEntryHeader *pending;	/* address pointer to stats body */
 } PgStatPendingEntry;
 
 /*
@@ -163,9 +180,9 @@ typedef struct PgStatPendingEntry
  * returns a bit smaller address than the actual address of the next member but
  * that doesn't matter.
  */
-#define PGSTAT_SHENT_BODY(e) (((char *)(e)) + sizeof(PgStat_StatEntryHeader))
+#define PGSTAT_SHENT_BODY(e) (((char *)(e)) + sizeof(PgStatShm_StatEntryHeader))
 #define PGSTAT_SHENT_BODY_LEN(t) \
-	(pgstat_sharedentsize[t] - sizeof(PgStat_StatEntryHeader))
+	(pgstat_sharedentsize[t] - sizeof(PgStatShm_StatEntryHeader))
 
 
 /* entry type for oid hash */
@@ -184,25 +201,25 @@ typedef struct pgstat_oident
 
 typedef struct PgStatShm_StatDBEntry
 {
-	PgStat_StatEntryHeader header;
+	PgStatShm_StatEntryHeader header;
 	PgStat_StatDBEntry stats;
 } PgStatShm_StatDBEntry;
 
 typedef struct PgStatShm_StatTabEntry
 {
-	PgStat_StatEntryHeader header;
+	PgStatShm_StatEntryHeader header;
 	PgStat_StatTabEntry stats;
 } PgStatShm_StatTabEntry;
 
 typedef struct PgStatShm_StatFuncEntry
 {
-	PgStat_StatEntryHeader header;
+	PgStatShm_StatEntryHeader header;
 	PgStat_StatFuncEntry stats;
 } PgStatShm_StatFuncEntry;
 
 typedef struct PgStatShm_ReplSlotEntry
 {
-	PgStat_StatEntryHeader header;
+	PgStatShm_StatEntryHeader header;
 	PgStat_ReplSlot stats;
 } PgStatShm_ReplSlotEntry;
 
@@ -546,7 +563,7 @@ static void pgstat_write_statsfile(void);
 static void pgstat_read_statsfile(void);
 static void pgstat_shutdown_hook(int code, Datum arg);
 
-static PgStat_StatEntryHeader *get_stat_entry(PgStatTypes type, Oid dbid,
+static PgStatShm_StatEntryHeader *get_stat_entry(PgStatTypes type, Oid dbid,
 											  Oid objid, bool nowait,
 											  bool create, bool *found);
 static bool pgstat_lookup_cache_needs_gc(void);
@@ -555,7 +572,7 @@ static void pgstat_lookup_cache_gc(void);
 static void cleanup_dropped_stats_entries(void);
 
 static void delete_current_stats_entry(dshash_seq_status *hstat);
-static PgStat_StatEntryHeader *get_pending_stat_entry(PgStatTypes type, Oid dbid,
+static PgStatShm_StatEntryHeader *get_pending_stat_entry(PgStatTypes type, Oid dbid,
 													  Oid objid, bool create,
 													  bool *found);
 
@@ -1149,7 +1166,7 @@ pgstat_reset_counters(void)
 	dshash_seq_init(&hstat, pgStatSharedHash, false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
-		PgStat_StatEntryHeader *header;
+		PgStatShm_StatEntryHeader *header;
 
 		if (p->key.databaseid != MyDatabaseId)
 			continue;
@@ -1265,7 +1282,7 @@ pgstat_reset_shared_counters(const char *target)
 void
 pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 {
-	PgStat_StatEntryHeader *header;
+	PgStatShm_StatEntryHeader *header;
 	PgStatShm_StatDBEntry *dbentry;
 	PgStatTypes stattype;
 	TimestampTz ts;
@@ -1543,12 +1560,12 @@ pgstat_write_statsfile(void)
 	dshash_seq_init(&hstat, pgStatSharedHash, false);
 	while ((ps = dshash_seq_next(&hstat)) != NULL)
 	{
-		PgStat_StatEntryHeader *shent;
+		PgStatShm_StatEntryHeader *shent;
 		size_t		len;
 
 		CHECK_FOR_INTERRUPTS();
 
-		shent = (PgStat_StatEntryHeader *) dsa_get_address(area, ps->body);
+		shent = (PgStatShm_StatEntryHeader *) dsa_get_address(area, ps->body);
 
 		/* we may have some "dropped" entries not yet removed, skip them */
 		if (shent->dropped)
@@ -1735,7 +1752,7 @@ pgstat_read_statsfile(void)
 	while ((tag = fgetc(fpin)) == 'S')
 	{
 		PgStatHashKey key;
-		PgStat_StatEntryHeader *p;
+		PgStatShm_StatEntryHeader *p;
 		size_t		len;
 
 		CHECK_FOR_INTERRUPTS();
@@ -1848,12 +1865,12 @@ pgstat_shutdown_hook(int code, Datum arg)
  *  if existing entry is found or false if not.
  *  ----------
  */
-static PgStat_StatEntryHeader *
+static PgStatShm_StatEntryHeader *
 get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 			   bool *found)
 {
 	PgStatShmHashEntry *shhashent;
-	PgStat_StatEntryHeader *shheader = NULL;
+	PgStatShm_StatEntryHeader *shheader = NULL;
 	PgStatHashKey key;
 	bool		shfound;
 
@@ -1968,13 +1985,13 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
  * fetch_lock_statentry - common helper function to fetch and lock a stats
  * entry for flush_tabstat, flush_funcstat and flush_dbstat.
  */
-static PgStat_StatEntryHeader *
+static PgStatShm_StatEntryHeader *
 fetch_lock_statentry(PgStatTypes type, Oid dboid, Oid objid, bool nowait)
 {
-	PgStat_StatEntryHeader *header;
+	PgStatShm_StatEntryHeader *header;
 
 	/* find shared table stats entry corresponding to the local entry */
-	header = (PgStat_StatEntryHeader *)
+	header = (PgStatShm_StatEntryHeader *)
 		get_stat_entry(type, dboid, objid, nowait, true, NULL);
 
 	/* skip if dshash failed to acquire lock */
@@ -2019,7 +2036,7 @@ pgstat_lookup_cache_gc(void)
 	pgstat_shm_lookup_cache_start_iterate(pgStatShmLookupCache, &i);
 	while ((lohashent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i)) != NULL)
 	{
-		PgStat_StatEntryHeader *header = lohashent->shared;
+		PgStatShm_StatEntryHeader *header = lohashent->shared;
 
 		Assert(header->magic == 0xdeadbeef);
 
@@ -2054,7 +2071,7 @@ pgstat_lookup_cache_gc(void)
  *  memory.
  * ----------
  */
-static PgStat_StatEntryHeader *
+static PgStatShm_StatEntryHeader *
 get_pending_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
 					 bool create, bool *found)
 {
@@ -2181,7 +2198,7 @@ static void
 delete_current_stats_entry(dshash_seq_status *hstat)
 {
 	dsa_pointer pdsa;
-	PgStat_StatEntryHeader *header;
+	PgStatShm_StatEntryHeader *header;
 	PgStatShmHashEntry *ent;
 
 	ent = dshash_get_current(hstat);

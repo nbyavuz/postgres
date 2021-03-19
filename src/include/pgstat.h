@@ -13,9 +13,7 @@
 
 #include "datatype/timestamp.h"
 #include "executor/instrument.h"
-#include "port/atomics.h"
 #include "postmaster/pgarch.h" /* for MAX_XFN_CHARS */
-#include "storage/lwlock.h"
 #include "utils/backend_status.h" /* for backward compatibility */
 #include "utils/backend_progress.h" /* for backward compatibility */
 #include "utils/relcache.h"
@@ -241,20 +239,6 @@ typedef struct PgStat_BackendFunctionEntry
 
 #define PGSTAT_FILE_FORMAT_ID	0x01A5BCA1
 
-
-/* ----------
- * PgStat_StatEntryHead			common header struct for PgStat_Stat*Entry
- * ----------
- */
-typedef struct PgStat_StatEntryHeader
-{
-	uint32		magic;				/* just a validity cross-check */
-	LWLock		lock;
-	bool		dropped;			/* This entry is being dropped and should
-									 * be removed when refcount goes to
-									 * zero. */
-	pg_atomic_uint32  refcount;		/* How many backends are referencing */
-} PgStat_StatEntryHeader;
 
 /* ----------
  * PgStat_StatDBEntry			The statistics per database
