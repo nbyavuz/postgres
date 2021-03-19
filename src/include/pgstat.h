@@ -55,6 +55,28 @@ typedef enum SessionEndType
  */
 typedef int64 PgStat_Counter;
 
+/* Possible targets for resetting cluster-wide shared values */
+typedef enum PgStat_Shared_Reset_Target
+{
+	RESET_ARCHIVER,
+	RESET_BGWRITER,
+	RESET_WAL
+} PgStat_Shared_Reset_Target;
+
+/* Possible object types for resetting single counters */
+typedef enum PgStat_Single_Reset_Type
+{
+	RESET_TABLE,
+	RESET_FUNCTION
+} PgStat_Single_Reset_Type;
+
+
+/* ------------------------------------------------------------
+ * Structures kept in backend local memory while accumulating counts
+ * ------------------------------------------------------------
+ */
+
+
 /* ----------
  * PgStat_TableCounts			The actual per-table counts kept by a backend
  *
@@ -95,26 +117,6 @@ typedef struct PgStat_TableCounts
 	PgStat_Counter t_blocks_fetched;
 	PgStat_Counter t_blocks_hit;
 } PgStat_TableCounts;
-
-/* Possible targets for resetting cluster-wide shared values */
-typedef enum PgStat_Shared_Reset_Target
-{
-	RESET_ARCHIVER,
-	RESET_BGWRITER,
-	RESET_WAL
-} PgStat_Shared_Reset_Target;
-
-/* Possible object types for resetting single counters */
-typedef enum PgStat_Single_Reset_Type
-{
-	RESET_TABLE,
-	RESET_FUNCTION
-} PgStat_Single_Reset_Type;
-
-/* ------------------------------------------------------------
- * Structures kept in backend local memory while accumulating counts
- * ------------------------------------------------------------
- */
 
 
 /* ----------
@@ -160,48 +162,6 @@ typedef struct PgStat_TableXactStatus
 	struct PgStat_TableXactStatus *next;	/* next of same subxact */
 } PgStat_TableXactStatus;
 
-/*
- * Archiver statistics kept in the shared stats
- */
-typedef struct PgStat_Archiver
-{
-	PgStat_Counter archived_count;	/* archival successes */
-	char		last_archived_wal[MAX_XFN_CHARS + 1];	/* last WAL file
-														 * archived */
-	TimestampTz last_archived_timestamp;	/* last archival success time */
-	PgStat_Counter failed_count;	/* failed archival attempts */
-	char		last_failed_wal[MAX_XFN_CHARS + 1]; /* WAL file involved in
-													 * last failure */
-	TimestampTz last_failed_timestamp;	/* last archival failure time */
-	TimestampTz stat_reset_timestamp;
-} PgStat_Archiver;
-
-/* ----------
- * PgStat_BgWriter			bgwriter statistics
- * ----------
- */
-typedef struct PgStat_BgWriter
-{
-	PgStat_Counter buf_written_clean;
-	PgStat_Counter maxwritten_clean;
-	PgStat_Counter buf_alloc;
-	TimestampTz	   stat_reset_timestamp;
-} PgStat_BgWriter;
-
-/* ----------
- * PgStat_CheckPointer		checkpointer statistics
- * ----------
- */
-typedef struct PgStat_CheckPointer
-{
-	PgStat_Counter timed_checkpoints;
-	PgStat_Counter requested_checkpoints;
-	PgStat_Counter buf_written_checkpoints;
-	PgStat_Counter buf_written_backend;
-	PgStat_Counter buf_fsync_backend;
-	PgStat_Counter checkpoint_write_time;	/* times in milliseconds */
-	PgStat_Counter checkpoint_sync_time;
-} PgStat_CheckPointer;
 
 /* ----------
  * PgStat_FunctionCounts	The actual per-function counts kept by a backend
@@ -229,6 +189,24 @@ typedef struct PgStat_BackendFunctionEntry
 	PgStat_FunctionCounts f_counts;
 } PgStat_BackendFunctionEntry;
 
+/*
+ * Working state needed to accumulate per-function-call timing statistics.
+ */
+typedef struct PgStat_FunctionCallUsage
+{
+	/* Link to function's hashtable entry (must still be there at exit!) */
+	/* NULL means we are not tracking the current function call */
+	PgStat_FunctionCounts *fs;
+	/* Total time previously charged to function, as of function start */
+	instr_time	save_f_total_time;
+	/* Backend-wide total time as of function start */
+	instr_time	save_total;
+	/* system clock as of function start */
+	instr_time	f_start;
+} PgStat_FunctionCallUsage;
+
+
+
 /* ------------------------------------------------------------
  * Activity statistics data structures on file and shared memory follow
  *
@@ -241,9 +219,66 @@ typedef struct PgStat_BackendFunctionEntry
 
 
 /* ----------
- * PgStat_StatDBEntry			The statistics per database
+ * Definitions of stats where the number of such stats objects is fixed and
+ * thus not addressed via hashtable.
  * ----------
  */
+
+typedef struct PgStat_Wal
+{
+	WalUsage	   wal_usage;
+	PgStat_Counter wal_buffers_full;
+	PgStat_Counter wal_write;
+	PgStat_Counter wal_sync;
+	PgStat_Counter wal_write_time;
+	PgStat_Counter wal_sync_time;
+	TimestampTz stat_reset_timestamp;
+} PgStat_Wal;
+
+typedef struct PgStat_SLRUStats
+{
+	PgStat_Counter blocks_zeroed;
+	PgStat_Counter blocks_hit;
+	PgStat_Counter blocks_read;
+	PgStat_Counter blocks_written;
+	PgStat_Counter blocks_exists;
+	PgStat_Counter flush;
+	PgStat_Counter truncate;
+	TimestampTz stat_reset_timestamp;
+} PgStat_SLRUStats;
+
+typedef struct PgStat_Archiver
+{
+	PgStat_Counter archived_count;	/* archival successes */
+	char		last_archived_wal[MAX_XFN_CHARS + 1];	/* last WAL file
+														 * archived */
+	TimestampTz last_archived_timestamp;	/* last archival success time */
+	PgStat_Counter failed_count;	/* failed archival attempts */
+	char		last_failed_wal[MAX_XFN_CHARS + 1]; /* WAL file involved in
+													 * last failure */
+	TimestampTz last_failed_timestamp;	/* last archival failure time */
+	TimestampTz stat_reset_timestamp;
+} PgStat_Archiver;
+
+typedef struct PgStat_BgWriter
+{
+	PgStat_Counter buf_written_clean;
+	PgStat_Counter maxwritten_clean;
+	PgStat_Counter buf_alloc;
+	TimestampTz	   stat_reset_timestamp;
+} PgStat_BgWriter;
+
+typedef struct PgStat_CheckPointer
+{
+	PgStat_Counter timed_checkpoints;
+	PgStat_Counter requested_checkpoints;
+	PgStat_Counter buf_written_checkpoints;
+	PgStat_Counter buf_written_backend;
+	PgStat_Counter buf_fsync_backend;
+	PgStat_Counter checkpoint_write_time;	/* times in milliseconds */
+	PgStat_Counter checkpoint_sync_time;
+} PgStat_CheckPointer;
+
 typedef struct PgStat_StatDBEntry
 {
 	PgStat_Counter n_xact_commit;
@@ -280,36 +315,12 @@ typedef struct PgStat_StatDBEntry
 	TimestampTz stats_timestamp;	/* time of db stats update */
 } PgStat_StatDBEntry;
 
+
 /* ----------
- * PgStat_Wal   Sent by backends and background processes to
- *				update WAL statistics.
+ * Definition for stats where a variable number of such objects exist. These
+ * are kept in a shared hashtable.
  * ----------
  */
-typedef struct PgStat_Wal
-{
-	WalUsage	   wal_usage;
-	PgStat_Counter wal_buffers_full;
-	PgStat_Counter wal_write;
-	PgStat_Counter wal_sync;
-	PgStat_Counter wal_write_time;
-	PgStat_Counter wal_sync_time;
-	TimestampTz stat_reset_timestamp;
-} PgStat_Wal;
-
-/*
- * SLRU statistics kept in the stats collector
- */
-typedef struct PgStat_SLRUStats
-{
-	PgStat_Counter blocks_zeroed;
-	PgStat_Counter blocks_hit;
-	PgStat_Counter blocks_read;
-	PgStat_Counter blocks_written;
-	PgStat_Counter blocks_exists;
-	PgStat_Counter flush;
-	PgStat_Counter truncate;
-	TimestampTz stat_reset_timestamp;
-} PgStat_SLRUStats;
 
 /* ----------
  * PgStat_StatTabEntry			The statistics per table (or index)
@@ -347,7 +358,6 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter autovac_analyze_count;
 } PgStat_StatTabEntry;
 
-
 /* ----------
  * PgStat_StatFuncEntry			per function stats data
  * ----------
@@ -375,28 +385,6 @@ typedef struct PgStat_ReplSlot
 	PgStat_Counter stream_bytes;
 	TimestampTz stat_reset_timestamp;
 } PgStat_ReplSlot;
-
-/* ----------
- * Shared-memory data structures
- * ----------
- */
-
-
-/*
- * Working state needed to accumulate per-function-call timing statistics.
- */
-typedef struct PgStat_FunctionCallUsage
-{
-	/* Link to function's hashtable entry (must still be there at exit!) */
-	/* NULL means we are not tracking the current function call */
-	PgStat_FunctionCounts *fs;
-	/* Total time previously charged to function, as of function start */
-	instr_time	save_f_total_time;
-	/* Backend-wide total time as of function start */
-	instr_time	save_total;
-	/* system clock as of function start */
-	instr_time	f_start;
-} PgStat_FunctionCallUsage;
 
 
 /* ----------
