@@ -542,6 +542,7 @@ static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
 static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
 											pg_atomic_uint32 *count);
 
+static bool flush_object_stats(bool nowait);
 static bool flush_tabstat(PgStatPendingEntry *ent, bool nowait);
 static bool flush_funcstat(PgStatPendingEntry *ent, bool nowait);
 static bool flush_dbstat(PgStatPendingEntry *ent, bool nowait);
@@ -806,6 +807,7 @@ pgstat_report_stat(bool force)
 	static TimestampTz next_flush = 0;
 	static TimestampTz pending_since = 0;
 	static long retry_interval = 0;
+	bool		partial_flush;
 	TimestampTz now;
 	bool		nowait;
 	int			i;
@@ -857,85 +859,16 @@ pgstat_report_stat(bool force)
 	/* don't wait for lock acquisition when !force */
 	nowait = !force;
 
-	if (pgStatPendingHash)
-	{
-		int			remains = 0;
-		pgstat_pending_iterator i;
-		List	   *dbentlist = NIL;
-		ListCell   *lc;
-		PgStatPendingEntry *lent;
+	partial_flush = false;
 
-		/* Step 1: flush out other than database stats */
-		pgstat_pending_start_iterate(pgStatPendingHash, &i);
-		while ((lent = pgstat_pending_iterate(pgStatPendingHash, &i)) != NULL)
-		{
-			bool		remove = false;
-
-			switch (lent->key.type)
-			{
-				case PGSTAT_TYPE_DB:
-
-					/*
-					 * flush_tabstat applies some of stats numbers of flushed
-					 * entries into pending database stats. Just remember the
-					 * database entries for now then flush-out them later.
-					 */
-					dbentlist = lappend(dbentlist, lent);
-					break;
-				case PGSTAT_TYPE_TABLE:
-					if (flush_tabstat(lent, nowait))
-						remove = true;
-					break;
-				case PGSTAT_TYPE_FUNCTION:
-					if (flush_funcstat(lent, nowait))
-						remove = true;
-					break;
-				case PGSTAT_TYPE_REPLSLOT:
-					/* We don't have that kind of pending entry */
-					Assert(false);
-			}
-
-			if (!remove)
-			{
-				remains++;
-				continue;
-			}
-
-			/* Remove the successfully flushed entry */
-			pfree(lent->pending);
-			lent->pending = NULL;
-			pgstat_pending_delete(pgStatPendingHash, lent->key);
-		}
-
-		/* Step 2: flush out database stats */
-		foreach(lc, dbentlist)
-		{
-			PgStatPendingEntry *lent = (PgStatPendingEntry *) lfirst(lc);
-
-			if (flush_dbstat(lent, nowait))
-			{
-				remains--;
-				/* Remove the successfully flushed entry */
-				pfree(lent->pending);
-				lent->pending = NULL;
-				pgstat_pending_delete(pgStatPendingHash, lent->key);
-			}
-		}
-		list_free(dbentlist);
-		dbentlist = NULL;
-
-		if (remains <= 0)
-		{
-			pgstat_pending_destroy(pgStatPendingHash);
-			pgStatPendingHash = NULL;
-		}
-	}
+	/* flush database / relation / function stats */
+	partial_flush |= flush_object_stats(nowait);
 
 	/* flush wal stats */
-	flush_walstat(nowait);
+	partial_flush |= flush_walstat(nowait);
 
 	/* flush SLRU stats */
-	flush_slrustat(nowait);
+	partial_flush |= flush_slrustat(nowait);
 
 	/*
 	 * Publish the time of the last flush, but we don't notify the change of
@@ -960,7 +893,7 @@ pgstat_report_stat(bool force)
 	 * contention.  If we have such pending stats here, let the caller know
 	 * the retry interval.
 	 */
-	if (pgStatPendingHash != NULL || have_slrustats || walstats_pending())
+	if (partial_flush)
 	{
 		/* Retain the epoch time */
 		if (pending_since == 0)
@@ -2329,6 +2262,90 @@ collect_oids(Oid catalogid, AttrNumber anum_oid)
  */
 
 /*
+ * Flush out pending stats for database objects (databases, relations,
+ * functions).
+ */
+static bool
+flush_object_stats(bool nowait)
+{
+	int			remains = 0;
+	pgstat_pending_iterator i;
+	List	   *dbentlist = NIL;
+	ListCell   *lc;
+	PgStatPendingEntry *lent;
+
+	if (!pgStatPendingHash)
+		return false;
+
+	/* Step 1: flush out other than database stats */
+	pgstat_pending_start_iterate(pgStatPendingHash, &i);
+	while ((lent = pgstat_pending_iterate(pgStatPendingHash, &i)) != NULL)
+	{
+		bool		remove = false;
+
+		switch (lent->key.type)
+		{
+			case PGSTAT_TYPE_DB:
+
+				/*
+				 * flush_tabstat applies some of stats numbers of flushed
+				 * entries into pending database stats. Just remember the
+				 * database entries for now then flush-out them later.
+				 */
+				dbentlist = lappend(dbentlist, lent);
+				break;
+			case PGSTAT_TYPE_TABLE:
+				if (flush_tabstat(lent, nowait))
+					remove = true;
+				break;
+			case PGSTAT_TYPE_FUNCTION:
+				if (flush_funcstat(lent, nowait))
+					remove = true;
+				break;
+			case PGSTAT_TYPE_REPLSLOT:
+				/* We don't have that kind of pending entry */
+				Assert(false);
+		}
+
+		if (!remove)
+		{
+			remains++;
+			continue;
+		}
+
+		/* Remove the successfully flushed entry */
+		pfree(lent->pending);
+		lent->pending = NULL;
+		pgstat_pending_delete(pgStatPendingHash, lent->key);
+	}
+
+	/* Step 2: flush out database stats */
+	foreach(lc, dbentlist)
+	{
+		PgStatPendingEntry *lent = (PgStatPendingEntry *) lfirst(lc);
+
+		if (flush_dbstat(lent, nowait))
+		{
+			remains--;
+			/* Remove the successfully flushed entry */
+			pfree(lent->pending);
+			lent->pending = NULL;
+			pgstat_pending_delete(pgStatPendingHash, lent->key);
+		}
+	}
+	list_free(dbentlist);
+	dbentlist = NULL;
+
+	if (remains <= 0)
+	{
+		pgstat_pending_destroy(pgStatPendingHash);
+		pgStatPendingHash = NULL;
+	}
+
+	return pgStatPendingHash != NULL;
+}
+
+/*
  * flush_tabstat - flush out a pending table stats entry
  *
  * Some of the stats numbers are copied to pending database stats entry after
@@ -2556,7 +2573,7 @@ walstats_pending(void)
  * If nowait is true, this function returns false on lock failure. Otherwise
  * this function always returns true.
  *
- * Returns true if all pending WAL stats have successfully been flushed out.
+ * Returns true if not all pending stats have been flushed out.
  */
 static bool
 flush_walstat(bool nowait)
@@ -2578,14 +2595,14 @@ flush_walstat(bool nowait)
 	 * taking lock for nothing in that case.
 	 */
 	if (!walstats_pending())
-		return true;
+		return false;
 
 	/* lock the shared entry to protect the content, skip if failed */
 	if (!nowait)
 		LWLockAcquire(&StatsShmem->wal_stats_lock, LW_EXCLUSIVE);
 	else if (!LWLockConditionalAcquire(&StatsShmem->wal_stats_lock,
 									   LW_EXCLUSIVE))
-		return false;			/* failed to acquire lock, skip */
+		return true;			/* failed to acquire lock, skip */
 
 	s->wal_usage.wal_records += l->wal_usage.wal_records;
 	s->wal_usage.wal_fpi += l->wal_usage.wal_fpi;
@@ -2607,7 +2624,7 @@ flush_walstat(bool nowait)
 	 */
 	MemSet(&WalStats, 0, sizeof(WalStats));
 
-	return true;
+	return false;
 }
 
 /*
@@ -2618,7 +2635,7 @@ flush_walstat(bool nowait)
  * using LWLock, but readers are expected to use change-count protocol to avoid
  * interference with writers.
  *
- * Returns true if all pending SLRU stats have successfully been flushed out.
+ * Returns true if not all pending stats have been flushed out.
  */
 static bool
 flush_slrustat(bool nowait)
@@ -2627,14 +2644,14 @@ flush_slrustat(bool nowait)
 	int			i;
 
 	if (!have_slrustats)
-		return true;
+		return false;
 
 	/* lock the shared entry to protect the content, skip if failed */
 	if (!nowait)
 		LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
 	else if (!LWLockConditionalAcquire(&StatsShmem->slru.lock,
 									   LW_EXCLUSIVE))
-		return false;			/* failed to acquire lock, skip */
+		return true;			/* failed to acquire lock, skip */
 
 	assert_changecount =
 		pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
@@ -2662,7 +2679,7 @@ flush_slrustat(bool nowait)
 
 	have_slrustats = false;
 
-	return true;
+	return false;
 }
 
 
