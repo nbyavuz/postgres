@@ -559,9 +559,15 @@ static void pgstat_write_statsfile(void);
 static void pgstat_read_statsfile(void);
 static void pgstat_shutdown_hook(int code, Datum arg);
 
-static PgStatShm_StatEntryHeader *get_stat_entry(PgStatTypes type, Oid dbid,
-											  Oid objid, bool nowait,
-											  bool create, bool *found);
+static PgStatShm_StatEntryHeader *get_shared_stat_entry(PgStatTypes type,
+														Oid dbid, Oid objid,
+														bool nowait,
+														bool create,
+														bool *found);
+static PgStatShm_StatEntryHeader *get_lock_shared_stat_entry(PgStatTypes type,
+															 Oid dbid,
+															 Oid objid,
+															 bool nowait);
 static bool pgstat_lookup_cache_needs_gc(void);
 static void pgstat_lookup_cache_gc(void);
 
@@ -1277,8 +1283,8 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 	TimestampTz ts;
 
 	dbentry = (PgStatShm_StatDBEntry *)
-		get_stat_entry(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid, false, false,
-					   NULL);
+		get_shared_stat_entry(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid, false,
+							  false, NULL);
 	Assert(dbentry);
 
 	/* Set the reset timestamp for the whole database */
@@ -1297,7 +1303,8 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 			stattype = PGSTAT_TYPE_FUNCTION;
 	}
 
-	header = get_stat_entry(stattype, MyDatabaseId, objoid, false, false, NULL);
+	header = get_shared_stat_entry(stattype, MyDatabaseId, objoid, false,
+								   false, NULL);
 
 	LWLockAcquire(&header->lock, LW_EXCLUSIVE);
 	memset(PGSTAT_SHENT_BODY(header), 0, PGSTAT_SHENT_BODY_LEN(stattype));
@@ -1412,8 +1419,8 @@ pgstat_reset_replslot_counter(const char *name)
 		PgStatShm_ReplSlotEntry *shent;
 
 		shent = (PgStatShm_ReplSlotEntry *)
-			get_stat_entry(PGSTAT_TYPE_REPLSLOT,
-						   MyDatabaseId, i, false, false, NULL);
+			get_shared_stat_entry(PGSTAT_TYPE_REPLSLOT,MyDatabaseId, i, false,
+								  false, NULL);
 
 		/* Skip non-existent entries */
 		if (!shent)
@@ -1751,7 +1758,7 @@ pgstat_read_statsfile(void)
 			goto done;
 		}
 
-		p = get_stat_entry(key.type, key.databaseid, key.objectid,
+		p = get_shared_stat_entry(key.type, key.databaseid, key.objectid,
 						   false, true, &found);
 
 		/* don't allow duplicate entries */
@@ -1842,7 +1849,7 @@ pgstat_shutdown_hook(int code, Datum arg)
 }
 
 /* ----------
- * get_stat_entry() -
+ * get_shared_stat_entry() -
  *
  *	get shared stats entry for specified type, dbid and objid.
  *  If nowait is true, returns NULL on lock failure.
@@ -1853,8 +1860,8 @@ pgstat_shutdown_hook(int code, Datum arg)
  *  ----------
  */
 static PgStatShm_StatEntryHeader *
-get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
-			   bool *found)
+get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
+					  bool create, bool *found)
 {
 	PgStatShmHashEntry *shhashent;
 	PgStatShm_StatEntryHeader *shheader = NULL;
@@ -1969,17 +1976,17 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 }
 
 /*
- * fetch_lock_statentry - common helper function to fetch and lock a stats
+ * get_lock_shared_stat_entry - common helper function to fetch and lock a stats
  * entry for flush_tabstat, flush_funcstat and flush_dbstat.
  */
 static PgStatShm_StatEntryHeader *
-fetch_lock_statentry(PgStatTypes type, Oid dboid, Oid objid, bool nowait)
+get_lock_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objid, bool nowait)
 {
 	PgStatShm_StatEntryHeader *header;
 
 	/* find shared table stats entry corresponding to the local entry */
 	header = (PgStatShm_StatEntryHeader *)
-		get_stat_entry(type, dboid, objid, nowait, true, NULL);
+		get_shared_stat_entry(type, dboid, objid, nowait, true, NULL);
 
 	/* skip if dshash failed to acquire lock */
 	if (header == NULL)
@@ -2412,8 +2419,8 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 
 	/* find shared table stats entry corresponding to the local entry */
 	shtabstats = (PgStatShm_StatTabEntry *)
-		fetch_lock_statentry(PGSTAT_TYPE_TABLE, dboid, ent->key.objectid,
-							 nowait);
+		get_lock_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, ent->key.objectid,
+								   nowait);
 
 	if (shtabstats == NULL)
 		return false;			/* failed to acquire lock, skip */
@@ -2488,8 +2495,8 @@ flush_funcstat(PgStatPendingEntry *ent, bool nowait)
 
 	/* find shared table stats entry corresponding to the local entry */
 	shfuncent = (PgStatShm_StatFuncEntry *)
-		fetch_lock_statentry(PGSTAT_TYPE_FUNCTION, MyDatabaseId,
-							 ent->key.objectid, nowait);
+		get_lock_shared_stat_entry(PGSTAT_TYPE_FUNCTION, MyDatabaseId,
+								   ent->key.objectid, nowait);
 	if (shfuncent == NULL)
 		return false;			/* failed to acquire lock, skip */
 
@@ -2527,8 +2534,8 @@ flush_dbstat(PgStatPendingEntry *ent, bool nowait)
 
 	/* find shared database stats entry corresponding to the local entry */
 	sharedent = (PgStatShm_StatDBEntry *)
-		fetch_lock_statentry(PGSTAT_TYPE_DB, ent->key.databaseid, InvalidOid,
-							 nowait);
+		get_lock_shared_stat_entry(PGSTAT_TYPE_DB, ent->key.databaseid,
+								   InvalidOid, nowait);
 
 	if (!sharedent)
 		return false;			/* failed to acquire lock, skip */
@@ -2742,7 +2749,8 @@ pgstat_report_autovac(Oid dboid)
 	 * operation so it doesn't matter if we get blocked here a little.
 	 */
 	dbentry = (PgStatShm_StatDBEntry *)
-		get_stat_entry(PGSTAT_TYPE_DB, dboid, InvalidOid, false, true, NULL);
+		get_shared_stat_entry(PGSTAT_TYPE_DB, dboid, InvalidOid, false, true,
+							  NULL);
 
 	ts = GetCurrentTimestamp();;
 	LWLockAcquire(&dbentry->header.lock, LW_EXCLUSIVE);
@@ -2781,7 +2789,8 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	 * reasons.
 	 */
 	shtabentry = (PgStatShm_StatTabEntry *)
-		get_stat_entry(PGSTAT_TYPE_TABLE, dboid, tableoid, false, true, NULL);
+		get_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, tableoid, false, true,
+							  NULL);
 
 	LWLockAcquire(&shtabentry->header.lock, LW_EXCLUSIVE);
 	shtabentry->stats.n_live_tuples = livetuples;
@@ -2869,8 +2878,8 @@ pgstat_report_analyze(Relation rel,
 	 * above reasons.
 	 */
 	tabentry = (PgStatShm_StatTabEntry *)
-		get_stat_entry(PGSTAT_TYPE_TABLE, dboid, RelationGetRelid(rel),
-					   false, true, NULL);
+		get_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, RelationGetRelid(rel),
+							  false, true, NULL);
 
 	LWLockAcquire(&tabentry->header.lock, LW_EXCLUSIVE);
 	tabentry->stats.n_live_tuples = livetuples;
@@ -3058,8 +3067,8 @@ pgstat_report_replslot(const char *slotname,
 		return;
 
 	shent = (PgStatShm_ReplSlotEntry *)
-		get_stat_entry(PGSTAT_TYPE_REPLSLOT,
-					   MyDatabaseId, i, false, true, &found);
+		get_shared_stat_entry(PGSTAT_TYPE_REPLSLOT, MyDatabaseId, i, false,
+							  true, &found);
 
 	/* Clear the counters and reset if it is not used */
 	LWLockAcquire(&shent->header.lock, LW_EXCLUSIVE);
@@ -3109,8 +3118,8 @@ pgstat_report_replslot_drop(const char *slotname)
 		return;
 
 	shent = (PgStatShm_ReplSlotEntry *)
-		get_stat_entry(PGSTAT_TYPE_REPLSLOT,
-					   MyDatabaseId, i, false, false, NULL);
+		get_shared_stat_entry(PGSTAT_TYPE_REPLSLOT, MyDatabaseId, i, false,
+							  false, NULL);
 
 	/*
 	 * Mark this entry as "not used". We don't "drop" this entry because no other process can't be looking this entry
@@ -4192,7 +4201,8 @@ pgstat_fetch_stat_dbentry(Oid dbid)
 		return &cached_dbent;
 
 	shent = (PgStatShm_StatDBEntry *)
-		get_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid, true, false, NULL);
+		get_shared_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid, true, false,
+							  NULL);
 
 	if (!shent)
 		return NULL;
@@ -4259,7 +4269,8 @@ pgstat_fetch_stat_tabentry_extended(bool shared, Oid reloid)
 		return &cached_tabent;
 
 	shent = (PgStatShm_StatTabEntry *)
-		get_stat_entry(PGSTAT_TYPE_TABLE, dboid, reloid, true, false, NULL);
+		get_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, reloid, true, false,
+							  NULL);
 
 	if (!shent)
 		return NULL;
@@ -4304,8 +4315,8 @@ pgstat_fetch_stat_funcentry(Oid func_id)
 		return &cached_funcent;
 
 	shent = (PgStatShm_StatFuncEntry *)
-		get_stat_entry(PGSTAT_TYPE_FUNCTION, dboid, func_id, true, false,
-					   NULL);
+		get_shared_stat_entry(PGSTAT_TYPE_FUNCTION, dboid, func_id, true,
+							  false, NULL);
 
 	if (!shent)
 		return NULL;
@@ -4529,8 +4540,8 @@ pgstat_fetch_replslot(int *nslots_p)
 		for (i = 0; i < max_replication_slots; i++)
 		{
 			PgStatShm_ReplSlotEntry *shent = (PgStatShm_ReplSlotEntry *)
-				get_stat_entry(PGSTAT_TYPE_REPLSLOT, MyDatabaseId, i,
-							   false, false, NULL);
+				get_shared_stat_entry(PGSTAT_TYPE_REPLSLOT, MyDatabaseId, i,
+									  false, false, NULL);
 			if (!shent)
 				continue;
 
