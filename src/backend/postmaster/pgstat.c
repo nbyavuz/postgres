@@ -869,7 +869,7 @@ pgstat_report_stat(bool force)
 		get_pending_dbstat_entry(MyDatabaseId);
 
 	/* Don't expend a clock check if nothing to do */
-	if (pgStatPendingHash == NULL && have_slrustats && !walstats_pending())
+	if (pgStatPendingHash == NULL && !have_slrustats && !walstats_pending())
 		return 0;
 
 	now = GetCurrentTransactionStopTimestamp();
