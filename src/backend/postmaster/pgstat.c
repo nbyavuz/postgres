@@ -184,8 +184,7 @@ typedef struct pgstat_oident
 
 typedef struct PgStatShm_StatDBEntry
 {
-	PgStat_StatEntryHeader header;	/* must be the first member,
-									   used only on shared memory  */
+	PgStat_StatEntryHeader header;
 	PgStat_StatDBEntry stats;
 } PgStatShm_StatDBEntry;
 
