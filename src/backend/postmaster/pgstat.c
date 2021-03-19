@@ -516,31 +516,40 @@ static int	n_cached_replslotstats = -1;
  * ----------
  */
 
-static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dbid);
-static PgStat_TableStatus *get_pending_tabstat_entry(Oid rel_id, bool isshared);
-
+static void pgstat_setup_memcxt(void);
 static void pgstat_write_statsfile(void);
-
 static void pgstat_read_statsfile(void);
+static void pgstat_shutdown_hook(int code, Datum arg);
 
 static PgStat_StatEntryHeader *get_stat_entry(PgStatTypes type, Oid dbid,
 											  Oid objid, bool nowait,
 											  bool create, bool *found);
+static bool pgstat_lookup_cache_needs_gc(void);
+static void pgstat_lookup_cache_gc(void);
+
+static void cleanup_dropped_stats_entries(void);
+
+static void delete_current_stats_entry(dshash_seq_status *hstat);
+static PgStat_StatEntryHeader *get_pending_stat_entry(PgStatTypes type, Oid dbid,
+													  Oid objid, bool create,
+													  bool *found);
+
+static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dbid);
+static PgStat_TableStatus *get_pending_tabstat_entry(Oid rel_id, bool isshared);
+
+static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
+
+static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
+											pg_atomic_uint32 *count);
 
 static bool flush_tabstat(PgStatPendingEntry *ent, bool nowait);
 static bool flush_funcstat(PgStatPendingEntry *ent, bool nowait);
 static bool flush_dbstat(PgStatPendingEntry *ent, bool nowait);
 static bool flush_walstat(bool nowait);
 static bool flush_slrustat(bool nowait);
-static void delete_current_stats_entry(dshash_seq_status *hstat);
-static PgStat_StatEntryHeader *get_pending_stat_entry(PgStatTypes type, Oid dbid,
-													  Oid objid, bool create,
-													  bool *found);
-
-static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
 static void pgstat_update_connstats(bool disconnect);
 
-static void pgstat_setup_memcxt(void);
+static inline bool walstats_pending(void);
 
 
 /* ------------------------------------------------------------
@@ -625,8 +634,17 @@ StatsShmemInit(void)
 	}
 }
 
+
+
+/* ------------------------------------------------------------
+ * Public functions used by backends follow
+ *------------------------------------------------------------
+ */
+
 /*
  * pgstat_restore_stats() - read on-disk stats into memory at server start.
+ *
+ * Should only be called by the startup process.
  */
 void
 pgstat_restore_stats(void)
@@ -640,6 +658,8 @@ pgstat_restore_stats(void)
  *
  * Remove the stats file.  This is currently used only if WAL recovery is
  * needed after a crash.
+ *
+ * Should only be called by the startup process.
  */
 void
 pgstat_discard_stats(void)
@@ -680,122 +700,1183 @@ pgstat_write_stats(void)
 		pgstat_write_statsfile();
 }
 
-
 /* ----------
- * cleanup_dropped_stats_entries() -
- *              Clean up shared stats entries no longer used.
+ * pgstat_initialize() -
  *
- *  Shared stats entries for dropped objects may be left referenced. Clean up
- *  our reference and drop the shared entry if needed.
+ *	Initialize pgstats state, and set up our on-proc-exit hook.
+ *	Called from InitPostgres and AuxiliaryProcessMain. For auxiliary process,
+ *	MyBackendId is invalid. Otherwise, MyBackendId must be set,
+ *	but we must not have started any transaction yet (since the
+ *	exit hook must run after the last transaction exit).
+ *	NOTE: MyDatabaseId isn't set yet; so the shutdown hook has to be careful.
  * ----------
  */
-static void
-cleanup_dropped_stats_entries(void)
+void
+pgstat_initialize(void)
 {
-	pgstat_shm_lookup_cache_iterator i;
-	PgStatShmLookupCacheEntry *ent;
+	/* XXX: should we handle single user mode differently? */
 
-	if (pgStatShmLookupCache == NULL)
-		return;
-
-	pgstat_shm_lookup_cache_start_iterate(pgStatShmLookupCache, &i);
-	while ((ent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i))
-		   != NULL)
+	if (IsUnderPostmaster)
 	{
-		/*
-		 * Free the shared memory chunk for the entry if we were the last
-		 * referrer to a dropped entry.
-		 */
-		if (pg_atomic_sub_fetch_u32(&ent->shared->refcount, 1) < 1 &&
-			ent->shared->dropped)
-			dsa_free(area, ent->dsapointer);
+		MemoryContext oldcontext;
+
+		/* stats shared memory persists for the backend lifetime */
+		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+		area = dsa_attach_in_place(StatsShmem->raw_dsa_area, NULL);
+		dsa_pin_mapping(area);
+
+		pgStatSharedHash = dshash_attach(area, &dsh_params,
+										 StatsShmem->hash_handle, 0);
+
+		MemoryContextSwitchTo(oldcontext);
 	}
 
 	/*
-	 * This function is expected to be called during backend exit. So we don't
-	 * bother destroying pgStatShmLookupCache.
+	 * Initialize prevWalUsage with pgWalUsage so that pgstat_report_wal() can
+	 * calculate how much pgWalUsage counters are increased by substracting
+	 * prevWalUsage from pgWalUsage.
 	 */
-	pgStatShmLookupCache = NULL;
+	prevWalUsage = pgWalUsage;
 
-	elog(DEBUG1, "deleting pgStatShmLookupCache");
+	pgbestat_backend_initialize();
+
+	/* need to be called before dsm shutdown */
+	before_shmem_exit(pgstat_shutdown_hook, 0);
 }
 
-/*
- * fetch_lock_statentry - common helper function to fetch and lock a stats
- * entry for flush_tabstat, flush_funcstat and flush_dbstat.
+/* ----------
+ * pgstat_drop_database() -
+ *
+ *	Remove entry for the database that we just dropped.
+ *
+ *  Some entries might be left alone due to lock failure or some stats are
+ *	flushed after this but we will still clean the dead DB eventually via
+ *	future invocations of pgstat_vacuum_stat().
+ *	----------
  */
-static PgStat_StatEntryHeader *
-fetch_lock_statentry(PgStatTypes type, Oid dboid, Oid objid, bool nowait)
+void
+pgstat_drop_database(Oid databaseid)
 {
-	PgStat_StatEntryHeader *header;
+	dshash_seq_status hstat;
+	PgStatShmHashEntry *p;
 
-	/* find shared table stats entry corresponding to the local entry */
-	header = (PgStat_StatEntryHeader *)
-		get_stat_entry(type, dboid, objid, nowait, true, NULL);
+	Assert(OidIsValid(databaseid));
 
-	/* skip if dshash failed to acquire lock */
-	if (header == NULL)
-		return false;
+	if (!IsUnderPostmaster || !pgStatSharedHash)
+		return;
 
-	/* lock the shared entry to protect the content, skip if failed */
-	if (!nowait)
-		LWLockAcquire(&header->lock, LW_EXCLUSIVE);
-	else if (!LWLockConditionalAcquire(&header->lock, LW_EXCLUSIVE))
-		return false;
+	/* some of the dshash entries are to be removed, take exclusive lock. */
+	dshash_seq_init(&hstat, pgStatSharedHash, true);
+	while ((p = dshash_seq_next(&hstat)) != NULL)
+	{
+		if (p->key.databaseid == MyDatabaseId)
+			delete_current_stats_entry(&hstat);
+	}
+	dshash_seq_term(&hstat);
 
-	return header;
+	/* Let readers run a garbage collection of local hashes */
+	pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
 }
 
-static bool
-pgstat_lookup_cache_needs_gc(void)
+/* ----------
+ * pgstat_report_stat() -
+ *
+ *	Must be called by processes that performs DML: tcop/postgres.c, logical
+ *	receiver processes, SPI worker, etc. to apply the so far collected
+ *	per-table and function usage statistics to the shared statistics hashes.
+ *
+ *	Updates are applied not more frequent than the interval of
+ *	PGSTAT_MIN_INTERVAL milliseconds. They are also postponed on lock
+ *	failure if force is false and there's no pending updates longer than
+ *	PGSTAT_MAX_INTERVAL milliseconds. Postponed updates are retried in
+ *	succeeding calls of this function.
+ *
+ *	Returns the time until the next timing when updates are applied in
+ *	milliseconds if there are no updates held for more than
+ *	PGSTAT_MIN_INTERVAL milliseconds.
+ *
+ *	Note that this is called only out of a transaction, so it is fine to use
+ *	transaction stop time as an approximation of current time.
+ *	----------
+ */
+long
+pgstat_report_stat(bool force)
 {
-	uint64		currage;
+	static TimestampTz next_flush = 0;
+	static TimestampTz pending_since = 0;
+	static long retry_interval = 0;
+	TimestampTz now;
+	bool		nowait;
+	int			i;
+	uint64		oldval;
 
-	if (!pgStatShmLookupCache)
-		return false;
-
-	currage = pg_atomic_read_u64(&StatsShmem->gc_count);
-
-	return pgStatShmLookupCacheAge != currage;
-}
-
-static void
-pgstat_lookup_cache_gc(void)
-{
-	pgstat_shm_lookup_cache_iterator i;
-	PgStatShmLookupCacheEntry *lohashent;
-	uint64		currage;
-
-	currage = pg_atomic_read_u64(&StatsShmem->gc_count);
+	/* Return if not active */
+	if (area == NULL)
+		return 0;
 
 	/*
-	 * Some entries have been dropped. Invalidate cache pointer to
-	 * them.
+	 * We need a database entry if the following stats exists.
 	 */
-	pgstat_shm_lookup_cache_start_iterate(pgStatShmLookupCache, &i);
-	while ((lohashent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i)) != NULL)
+	if (pgStatXactCommit > 0 || pgStatXactRollback > 0 ||
+		pgStatBlockReadTime > 0 || pgStatBlockWriteTime > 0)
+		get_pending_dbstat_entry(MyDatabaseId);
+
+	/* Don't expend a clock check if nothing to do */
+	if (pgStatPendingHash == NULL && have_slrustats && !walstats_pending())
+		return 0;
+
+	now = GetCurrentTransactionStopTimestamp();
+
+	if (!force)
 	{
-		PgStat_StatEntryHeader *header = lohashent->shared;
-
-		Assert(header->magic == 0xdeadbeef);
-
-		if (header->dropped)
+		/*
+		 * Don't flush stats too frequently.  Return the time to the next
+		 * flush.
+		 */
+		if (now < next_flush)
 		{
-			if (pg_atomic_sub_fetch_u32(&header->refcount, 1) < 1)
+			/* Record the epoch time if retrying. */
+			if (pending_since == 0)
+				pending_since = now;
+
+			return (next_flush - now) / 1000;
+		}
+
+		/* But, don't keep pending updates longer than PGSTAT_MAX_INTERVAL. */
+
+		if (pending_since > 0 &&
+			TimestampDifferenceExceeds(pending_since, now, PGSTAT_MAX_INTERVAL))
+			force = true;
+	}
+
+	/* for backends, update connection statistics */
+	if (MyBackendType == B_BACKEND)
+		pgstat_update_connstats(false);
+
+	/* don't wait for lock acquisition when !force */
+	nowait = !force;
+
+	if (pgStatPendingHash)
+	{
+		int			remains = 0;
+		pgstat_pending_iterator i;
+		List	   *dbentlist = NIL;
+		ListCell   *lc;
+		PgStatPendingEntry *lent;
+
+		/* Step 1: flush out other than database stats */
+		pgstat_pending_start_iterate(pgStatPendingHash, &i);
+		while ((lent = pgstat_pending_iterate(pgStatPendingHash, &i)) != NULL)
+		{
+			bool		remove = false;
+
+			switch (lent->key.type)
 			{
-				/*
-				 * We're the last referrer to this entry, drop the
-				 * shared entry.
-				 */
-				dsa_free(area, lohashent->dsapointer);
+				case PGSTAT_TYPE_DB:
+
+					/*
+					 * flush_tabstat applies some of stats numbers of flushed
+					 * entries into pending database stats. Just remember the
+					 * database entries for now then flush-out them later.
+					 */
+					dbentlist = lappend(dbentlist, lent);
+					break;
+				case PGSTAT_TYPE_TABLE:
+					if (flush_tabstat(lent, nowait))
+						remove = true;
+					break;
+				case PGSTAT_TYPE_FUNCTION:
+					if (flush_funcstat(lent, nowait))
+						remove = true;
+					break;
+				case PGSTAT_TYPE_REPLSLOT:
+					/* We don't have that kind of pending entry */
+					Assert(false);
 			}
 
-			if (!pgstat_shm_lookup_cache_delete(pgStatShmLookupCache, lohashent->key))
-				elog(PANIC, "something has gone wrong");
+			if (!remove)
+			{
+				remains++;
+				continue;
+			}
+
+			/* Remove the successfully flushed entry */
+			pfree(lent->pending);
+			lent->pending = NULL;
+			pgstat_pending_delete(pgStatPendingHash, lent->key);
+		}
+
+		/* Step 2: flush out database stats */
+		foreach(lc, dbentlist)
+		{
+			PgStatPendingEntry *lent = (PgStatPendingEntry *) lfirst(lc);
+
+			if (flush_dbstat(lent, nowait))
+			{
+				remains--;
+				/* Remove the successfully flushed entry */
+				pfree(lent->pending);
+				lent->pending = NULL;
+				pgstat_pending_delete(pgStatPendingHash, lent->key);
+			}
+		}
+		list_free(dbentlist);
+		dbentlist = NULL;
+
+		if (remains <= 0)
+		{
+			pgstat_pending_destroy(pgStatPendingHash);
+			pgStatPendingHash = NULL;
 		}
 	}
 
-	pgStatShmLookupCacheAge = currage;
+	/* flush wal stats */
+	flush_walstat(nowait);
+
+	/* flush SLRU stats */
+	flush_slrustat(nowait);
+
+	/*
+	 * Publish the time of the last flush, but we don't notify the change of
+	 * the timestamp itself. Readers will get sufficiently recent timestamp.
+	 * If we failed to update the value, concurrent processes should have
+	 * updated it to sufficiently recent time.
+	 *
+	 * XXX: The loop might be unnecessary for the reason above.
+	 */
+	oldval = pg_atomic_read_u64(&StatsShmem->stats_timestamp);
+
+	for (i = 0; i < 10; i++)
+	{
+		if (oldval >= now ||
+			pg_atomic_compare_exchange_u64(&StatsShmem->stats_timestamp,
+										   &oldval, (uint64) now))
+			break;
+	}
+
+	/*
+	 * Some of the pending stats may have not been flushed due to lock
+	 * contention.  If we have such pending stats here, let the caller know
+	 * the retry interval.
+	 */
+	if (pgStatPendingHash != NULL || have_slrustats || walstats_pending())
+	{
+		/* Retain the epoch time */
+		if (pending_since == 0)
+			pending_since = now;
+
+		/* The interval is doubled at every retry. */
+		if (retry_interval == 0)
+			retry_interval = PGSTAT_RETRY_MIN_INTERVAL * 1000;
+		else
+			retry_interval = retry_interval * 2;
+
+		/*
+		 * Determine the next retry interval so as not to get shorter than the
+		 * previous interval.
+		 */
+		if (!TimestampDifferenceExceeds(pending_since,
+										now + 2 * retry_interval,
+										PGSTAT_MAX_INTERVAL))
+			next_flush = now + retry_interval;
+		else
+		{
+			next_flush = pending_since + PGSTAT_MAX_INTERVAL * 1000;
+			retry_interval = next_flush - now;
+		}
+
+		return retry_interval / 1000;
+	}
+
+	/* Set the next time to update stats */
+	next_flush = now + PGSTAT_MIN_INTERVAL * 1000;
+	retry_interval = 0;
+	pending_since = 0;
+
+	return 0;
+}
+
+/* ----------
+ * pgstat_clear_snapshot() -
+ *
+ *	Discard any data collected in the current transaction.  Any subsequent
+ *	request will cause new snapshots to be read.
+ *
+ *	This is also invoked during transaction commit or abort to discard
+ *	the no-longer-wanted snapshot.
+ * ----------
+ */
+void
+pgstat_clear_snapshot(void)
+{
+	/* Release memory, if any was allocated */
+	if (pgStatLocalContext)
+	{
+		MemoryContextDelete(pgStatLocalContext);
+
+		/* Reset variables */
+		pgStatLocalContext = NULL;
+	}
+
+	/* Invalidate the simple cache keys */
+	cached_dbent_key = stathashkey_zero;
+	cached_tabent_key = stathashkey_zero;
+	cached_funcent_key = stathashkey_zero;
+	cached_archiverstats_is_valid = false;
+	cached_bgwriterstats_is_valid = false;
+	cached_checkpointerstats_is_valid = false;
+	cached_walstats_is_valid = false;
+	cached_slrustats_is_valid = false;
+	n_cached_replslotstats = -1;
+
+	/* forward to stats sub-subsystems */
+	pgbestat_clear_snapshot();
+}
+
+/* ----------
+ * pgstat_vacuum_stat() -
+ *
+ *  Delete shared stat entries that are not in system catalogs.
+ *
+ *  To avoid holding exclusive lock on dshash for a long time, the process is
+ *  performed in three steps.
+ *
+ *   1: Collect existent oids of every kind of object.
+ *   2: Collect victim entries by scanning with shared lock.
+ *   3: Try removing every nominated entry without waiting for lock.
+ *
+ *  As the consequence of the last step, some entries may be left alone due to
+ *  lock failure, but as explained by the comment of pgstat_vacuum_stat, they
+ *  will be deleted by later vacuums.
+ * ----------
+ */
+void
+pgstat_vacuum_stat(void)
+{
+	pgstat_oid_hash *dbids;		/* database ids */
+	pgstat_oid_hash *relids;	/* relation ids in the current database */
+	pgstat_oid_hash *funcids;	/* function ids in the current database */
+	int			nvictims = 0;	/* # of entries of the above */
+	dshash_seq_status dshstat;
+	PgStatShmHashEntry *ent;
+
+	/* we don't collect stats under standalone mode */
+	if (!IsUnderPostmaster)
+		return;
+
+	/* collect oids of existent objects */
+	dbids = collect_oids(DatabaseRelationId, Anum_pg_database_oid);
+	relids = collect_oids(RelationRelationId, Anum_pg_class_oid);
+	funcids = collect_oids(ProcedureRelationId, Anum_pg_proc_oid);
+
+	nvictims = 0;
+
+	/* some of the dshash entries are to be removed, take exclusive lock. */
+	dshash_seq_init(&dshstat, pgStatSharedHash, true);
+	while ((ent = dshash_seq_next(&dshstat)) != NULL)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * Don't drop entries for other than database objects not of the
+		 * current database.
+		 */
+		if (ent->key.type != PGSTAT_TYPE_DB &&
+			ent->key.databaseid != MyDatabaseId)
+			continue;
+
+		switch (ent->key.type)
+		{
+			case PGSTAT_TYPE_DB:
+				/*
+				 * don't remove database entry for shared tables and existent
+				 * tables
+				 */
+				if (ent->key.databaseid == 0 ||
+					pgstat_oid_lookup(dbids, ent->key.databaseid) != NULL)
+					continue;
+
+				break;
+
+			case PGSTAT_TYPE_TABLE:
+				/* don't remove existent relations */
+				if (pgstat_oid_lookup(relids, ent->key.objectid) != NULL)
+					continue;
+
+				break;
+
+			case PGSTAT_TYPE_FUNCTION:
+				/* don't remove existent functions  */
+				if (pgstat_oid_lookup(funcids, ent->key.objectid) != NULL)
+					continue;
+
+				break;
+
+			case PGSTAT_TYPE_REPLSLOT:
+				/*
+				 * We don't bother vacuumming this kind of entries because the
+				 * number of entries is quite small and entries are likely to
+				 * be reused soon.
+				 */
+				continue;
+		}
+
+		/* drop this entry */
+		delete_current_stats_entry(&dshstat);
+		nvictims++;
+	}
+	dshash_seq_term(&dshstat);
+	pgstat_oid_destroy(dbids);
+	pgstat_oid_destroy(relids);
+	pgstat_oid_destroy(funcids);
+
+	if (nvictims > 0)
+		pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
+}
+
+/* ----------
+ * pgstat_copy_index_counters() -
+ *
+ *	Support function for index swapping. Copy a portion of the counters of the
+ *	relation to specified place.
+ * ----------
+ */
+void
+pgstat_copy_index_counters(Oid relid, PgStat_TableStatus *dst)
+{
+	PgStat_StatTabEntry *tabentry;
+
+	/* No point fetching tabentry when dst is NULL */
+	if (!dst)
+		return;
+
+	tabentry = pgstat_fetch_stat_tabentry(relid);
+
+	if (!tabentry)
+		return;
+
+	dst->t_counts.t_numscans = tabentry->numscans;
+	dst->t_counts.t_tuples_returned = tabentry->tuples_returned;
+	dst->t_counts.t_tuples_fetched = tabentry->tuples_fetched;
+	dst->t_counts.t_blocks_fetched = tabentry->blocks_fetched;
+	dst->t_counts.t_blocks_hit = tabentry->blocks_hit;
+}
+
+
+/* ------------------------------------------------------------
+ * Stats reset functions
+ * ------------------------------------------------------------
+ */
+
+/* ----------
+ * pgstat_reset_counters() -
+ *
+ *	Reset counters for our database.
+ *
+ *	Permission checking for this function is managed through the normal
+ *	GRANT system.
+ * ----------
+ */
+void
+pgstat_reset_counters(void)
+{
+	dshash_seq_status hstat;
+	PgStatShmHashEntry *p;
+
+	if (!IsUnderPostmaster || !pgStatSharedHash)
+		return;
+
+	/* dshash entry is not modified, take shared lock */
+	dshash_seq_init(&hstat, pgStatSharedHash, false);
+	while ((p = dshash_seq_next(&hstat)) != NULL)
+	{
+		PgStat_StatEntryHeader *header;
+
+		if (p->key.databaseid != MyDatabaseId)
+			continue;
+
+		header = dsa_get_address(area, p->body);
+
+		LWLockAcquire(&header->lock, LW_EXCLUSIVE);
+		memset(PGSTAT_SHENT_BODY(header), 0,
+			   PGSTAT_SHENT_BODY_LEN(p->key.type));
+
+		if (p->key.type == PGSTAT_TYPE_DB)
+		{
+			PgStat_StatDBEntry *dbstat = (PgStat_StatDBEntry *) header;
+
+			dbstat->stat_reset_timestamp = GetCurrentTimestamp();
+		}
+		LWLockRelease(&header->lock);
+	}
+	dshash_seq_term(&hstat);
+
+	/* Invalidate the simple cache keys */
+	cached_dbent_key = stathashkey_zero;
+	cached_tabent_key = stathashkey_zero;
+	cached_funcent_key = stathashkey_zero;
+}
+
+/* ----------
+ * pgstat_reset_shared_counters() -
+ *
+ *	Reset cluster-wide shared counters.
+ *
+ *	Permission checking for this function is managed through the normal
+ *	GRANT system.
+ *
+ *  We don't scribble on shared stats while resetting to avoid locking on
+ *  shared stats struct. Instead, just record the current counters in another
+ *  shared struct, which is protected by StatsLock. See
+ *  pgstat_fetch_stat_(archiver|bgwriter|checkpointer) for the reader side.
+ * ----------
+ */
+void
+pgstat_reset_shared_counters(const char *target)
+{
+	TimestampTz now = GetCurrentTimestamp();
+	PgStat_Shared_Reset_Target t;
+
+	if (strcmp(target, "archiver") == 0)
+		t = RESET_ARCHIVER;
+	else if (strcmp(target, "bgwriter") == 0)
+		t = RESET_BGWRITER;
+	else if (strcmp(target, "wal") == 0)
+		t = RESET_WAL;
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unrecognized reset target: \"%s\"", target),
+				 errhint("Target must be \"archiver\", \"bgwriter\" or \"wal\".")));
+
+	/* Reset statistics for the cluster. */
+	LWLockAcquire(StatsLock, LW_EXCLUSIVE);
+
+	switch (t)
+	{
+		case RESET_ARCHIVER:
+			pgstat_copy_global_stats(&StatsShmem->archiver_reset_offset,
+									 &StatsShmem->archiver_stats,
+									 sizeof(PgStat_Archiver),
+									 &StatsShmem->archiver_changecount);
+			StatsShmem->archiver_reset_offset.stat_reset_timestamp = now;
+			cached_archiverstats_is_valid = false;
+			break;
+
+		case RESET_BGWRITER:
+			pgstat_copy_global_stats(&StatsShmem->bgwriter_reset_offset,
+									 &StatsShmem->bgwriter_stats,
+									 sizeof(PgStat_BgWriter),
+									 &StatsShmem->bgwriter_changecount);
+			pgstat_copy_global_stats(&StatsShmem->checkpointer_reset_offset,
+									 &StatsShmem->checkpointer_stats,
+									 sizeof(PgStat_CheckPointer),
+									 &StatsShmem->checkpointer_changecount);
+			StatsShmem->bgwriter_reset_offset.stat_reset_timestamp = now;
+			cached_bgwriterstats_is_valid = false;
+			cached_checkpointerstats_is_valid = false;
+			break;
+
+		case RESET_WAL:
+
+			/*
+			 * Differntly from the two above, WAL statistics has many writer
+			 * processes and protected by wal_stats_lock.
+			 */
+			LWLockAcquire(&StatsShmem->wal_stats_lock, LW_EXCLUSIVE);
+			MemSet(&StatsShmem->wal_stats, 0, sizeof(PgStat_Wal));
+			StatsShmem->wal_stats.stat_reset_timestamp = now;
+			LWLockRelease(&StatsShmem->wal_stats_lock);
+			cached_walstats_is_valid = false;
+			break;
+	}
+
+	LWLockRelease(StatsLock);
+}
+
+/* ----------
+ * pgstat_reset_single_counter() -
+ *
+ *	Reset a single counter.
+ *
+ *	Permission checking for this function is managed through the normal
+ *	GRANT system.
+ * ----------
+ */
+void
+pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
+{
+	PgStat_StatEntryHeader *header;
+	PgStat_StatDBEntry *dbentry;
+	PgStatTypes stattype;
+	TimestampTz ts;
+
+	dbentry = (PgStat_StatDBEntry *)
+		get_stat_entry(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid, false, false,
+					   NULL);
+	Assert(dbentry);
+
+	/* Set the reset timestamp for the whole database */
+	ts = GetCurrentTimestamp();
+	LWLockAcquire(&dbentry->header.lock, LW_EXCLUSIVE);
+	dbentry->stat_reset_timestamp = ts;
+	LWLockRelease(&dbentry->header.lock);
+
+	/* Remove object if it exists, ignore if not */
+	switch (type)
+	{
+		case RESET_TABLE:
+			stattype = PGSTAT_TYPE_TABLE;
+			break;
+		case RESET_FUNCTION:
+			stattype = PGSTAT_TYPE_FUNCTION;
+	}
+
+	header = get_stat_entry(stattype, MyDatabaseId, objoid, false, false, NULL);
+
+	LWLockAcquire(&header->lock, LW_EXCLUSIVE);
+	memset(PGSTAT_SHENT_BODY(header), 0, PGSTAT_SHENT_BODY_LEN(stattype));
+	LWLockRelease(&header->lock);
+}
+
+/* ----------
+ * pgstat_reset_slru_counter() -
+ *
+ *	Tell the statistics collector to reset a single SLRU counter, or all
+ *	SLRU counters (when name is null).
+ *
+ *	Permission checking for this function is managed through the normal
+ *	GRANT system.
+ * ----------
+ */
+void
+pgstat_reset_slru_counter(const char *name)
+{
+	int			i;
+	TimestampTz ts = GetCurrentTimestamp();
+	uint32		assert_changecount;
+
+	PG_USED_FOR_ASSERTS_ONLY;
+
+	if (name)
+	{
+		i = pgstat_slru_index(name);
+		LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
+		assert_changecount =
+			pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
+		Assert((assert_changecount & 1) == 0);
+		MemSet(&StatsShmem->slru.stats[i], 0,
+			   sizeof(PgStat_SLRUStats));
+		StatsShmem->slru.stats[i].stat_reset_timestamp = ts;
+		pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
+		LWLockRelease(&StatsShmem->slru.lock);
+	}
+	else
+	{
+		LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
+		assert_changecount =
+			pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
+		Assert((assert_changecount & 1) == 0);
+		for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
+		{
+			MemSet(&StatsShmem->slru.stats[i], 0,
+				   sizeof(PgStat_SLRUStats));
+			StatsShmem->slru.stats[i].stat_reset_timestamp = ts;
+		}
+		pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
+		LWLockRelease(&StatsShmem->slru.lock);
+	}
+
+	cached_slrustats_is_valid = false;
+}
+
+/* ----------
+ * pgstat_reset_replslot_counter() -
+ *
+ *	Tell the statistics collector to reset a single replication slot
+ *	counter, or all replication slots counters (when name is null).
+ *
+ *	Permission checking for this function is managed through the normal
+ *	GRANT system.
+ * ----------
+ */
+void
+pgstat_reset_replslot_counter(const char *name)
+{
+	int			startidx;
+	int			endidx;
+	int			i;
+	TimestampTz ts;
+
+	if (!IsUnderPostmaster || !pgStatSharedHash)
+		return;
+
+	if (name)
+	{
+		ReplicationSlot *slot;
+
+		/* Check if the slot exits with the given name. */
+		LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
+		slot = SearchNamedReplicationSlot(name);
+		LWLockRelease(ReplicationSlotControlLock);
+
+		if (!slot)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("replication slot \"%s\" does not exist",
+							name)));
+
+		/*
+		 * Nothing to do for physical slots as we collect stats only for
+		 * logical slots.
+		 */
+		if (SlotIsPhysical(slot))
+			return;
+
+		/* reset this one entry */
+		startidx = endidx = slot - ReplicationSlotCtl->replication_slots;
+	}
+	else
+	{
+		/* reset all existent entries */
+		startidx = 0;
+		endidx = max_replication_slots - 1;
+	}
+
+	ts = GetCurrentTimestamp();
+	for (i = startidx; i <= endidx; i++)
+	{
+		PgStat_ReplSlot *shent;
+
+		shent = (PgStat_ReplSlot *)
+			get_stat_entry(PGSTAT_TYPE_REPLSLOT,
+						   MyDatabaseId, i, false, false, NULL);
+
+		/* Skip non-existent entries */
+		if (!shent)
+			continue;
+
+		LWLockAcquire(&shent->header.lock, LW_EXCLUSIVE);
+		memset(&shent->spill_txns, 0,
+			   offsetof(PgStat_ReplSlot, stat_reset_timestamp) -
+			   offsetof(PgStat_ReplSlot, spill_txns));
+		shent->stat_reset_timestamp = ts;
+		LWLockRelease(&shent->header.lock);
+	}
+}
+
+
+/* ------------------------------------------------------------
+ * Helper functions
+ *------------------------------------------------------------
+ */
+
+
+/* ----------
+ * pgstat_setup_memcxt() -
+ *
+ *	Create pgStatLocalContext if not already done.
+ * ----------
+ */
+static void
+pgstat_setup_memcxt(void)
+{
+	if (unlikely(!pgStatLocalContext))
+		pgStatLocalContext =
+			AllocSetContextCreate(TopMemoryContext,
+								  "Backend statistics snapshot",
+								  ALLOCSET_SMALL_SIZES);
+
+	if (unlikely(!pgStatCacheContext))
+		pgStatCacheContext =
+			AllocSetContextCreate(CacheMemoryContext,
+								  "Activity statistics",
+								  ALLOCSET_SMALL_SIZES);
+}
+
+
+/* ----------
+ * pgstat_write_statsfile() -
+ *		Write the global statistics file, as well as DB files.
+ *
+ * This function is called in the last process that is accessing the shared
+ * stats so locking is not required.
+ * ----------
+ */
+static void
+pgstat_write_statsfile(void)
+{
+	FILE	   *fpout;
+	int32		format_id;
+	const char *tmpfile = PGSTAT_STAT_PERMANENT_TMPFILE;
+	const char *statfile = PGSTAT_STAT_PERMANENT_FILENAME;
+	int			rc;
+	dshash_seq_status hstat;
+	PgStatShmHashEntry *ps;
+
+	/* stats is not initialized yet. just return. */
+	if (!area)
+		return;
+
+	elog(DEBUG2, "writing stats file \"%s\"", statfile);
+
+	/*
+	 * Open the statistics temp file to write out the current values.
+	 */
+	fpout = AllocateFile(tmpfile, PG_BINARY_W);
+	if (fpout == NULL)
+	{
+		ereport(LOG,
+				(errcode_for_file_access(),
+				 errmsg("could not open temporary statistics file \"%s\": %m",
+						tmpfile)));
+		return;
+	}
+
+	/*
+	 * Set the timestamp of the stats file.
+	 */
+	pg_atomic_write_u64(&StatsShmem->stats_timestamp, GetCurrentTimestamp());
+
+	/*
+	 * Write the file header --- currently just a format ID.
+	 */
+	format_id = PGSTAT_FILE_FORMAT_ID;
+	rc = fwrite(&format_id, sizeof(format_id), 1, fpout);
+	(void) rc;					/* we'll check for error with ferror */
+
+	/*
+	 * Write bgwriter global stats struct
+	 */
+	rc = fwrite(&StatsShmem->bgwriter_stats, sizeof(PgStat_BgWriter), 1, fpout);
+	(void) rc;					/* we'll check for error with ferror */
+
+	/*
+	 * Write checkpointer global stats struct
+	 */
+	rc = fwrite(&StatsShmem->checkpointer_stats, sizeof(PgStat_CheckPointer), 1, fpout);
+	(void) rc;					/* we'll check for error with ferror */
+
+	/*
+	 * Write archiver global stats struct
+	 */
+	rc = fwrite(&StatsShmem->archiver_stats, sizeof(PgStat_Archiver), 1,
+				fpout);
+	(void) rc;					/* we'll check for error with ferror */
+
+	/*
+	 * Write WAL global stats struct
+	 */
+	rc = fwrite(&StatsShmem->wal_stats, sizeof(PgStat_Wal), 1, fpout);
+	(void) rc;					/* we'll check for error with ferror */
+
+	/*
+	 * Write SLRU stats struct
+	 */
+	rc = fwrite(&StatsShmem->slru.stats,
+				sizeof(PgStat_SLRUStats[SLRU_NUM_ELEMENTS]),
+				1, fpout);
+	(void) rc;					/* we'll check for error with ferror */
+
+	/*
+	 * Walk through the stats entry
+	 */
+	dshash_seq_init(&hstat, pgStatSharedHash, false);
+	while ((ps = dshash_seq_next(&hstat)) != NULL)
+	{
+		PgStat_StatEntryHeader *shent;
+		size_t		len;
+
+		CHECK_FOR_INTERRUPTS();
+
+		shent = (PgStat_StatEntryHeader *) dsa_get_address(area, ps->body);
+
+		/* we may have some "dropped" entries not yet removed, skip them */
+		if (shent->dropped)
+			continue;
+
+		/* Make DB's timestamp consistent with the global stats */
+		if (ps->key.type == PGSTAT_TYPE_DB)
+		{
+			PgStat_StatDBEntry *dbentry = (PgStat_StatDBEntry *) shent;
+
+			dbentry->stats_timestamp =
+				(TimestampTz) pg_atomic_read_u64(&StatsShmem->stats_timestamp);
+		}
+
+		fputc('S', fpout);
+		rc = fwrite(&ps->key, sizeof(PgStatHashKey), 1, fpout);
+
+		/* Write except the header part of the etnry */
+		len = PGSTAT_SHENT_BODY_LEN(ps->key.type);
+		rc = fwrite(PGSTAT_SHENT_BODY(shent), len, 1, fpout);
+		(void) rc;				/* we'll check for error with ferror */
+	}
+	dshash_seq_term(&hstat);
+
+	/*
+	 * No more output to be done. Close the temp file and replace the old
+	 * pgstat.stat with it.  The ferror() check replaces testing for error
+	 * after each individual fputc or fwrite above.
+	 */
+	fputc('E', fpout);
+
+	if (ferror(fpout))
+	{
+		ereport(LOG,
+				(errcode_for_file_access(),
+				 errmsg("could not write temporary statistics file \"%s\": %m",
+						tmpfile)));
+		FreeFile(fpout);
+		unlink(tmpfile);
+	}
+	else if (FreeFile(fpout) < 0)
+	{
+		ereport(LOG,
+				(errcode_for_file_access(),
+				 errmsg("could not close temporary statistics file \"%s\": %m",
+						tmpfile)));
+		unlink(tmpfile);
+	}
+	else if (rename(tmpfile, statfile) < 0)
+	{
+		ereport(LOG,
+				(errcode_for_file_access(),
+				 errmsg("could not rename temporary statistics file \"%s\" to \"%s\": %m",
+						tmpfile, statfile)));
+		unlink(tmpfile);
+	}
+}
+
+/* ----------
+ * pgstat_read_statsfile() -
+ *
+ *	Reads in existing activity statistics file into the shared stats hash.
+ *
+ * This function is called in the only process that is accessing the shared
+ * stats so locking is not required.
+ * ----------
+ */
+static void
+pgstat_read_statsfile(void)
+{
+	FILE	   *fpin;
+	int32		format_id;
+	bool		found;
+	const char *statfile = PGSTAT_STAT_PERMANENT_FILENAME;
+	char		tag;
+
+	/* shouldn't be called from postmaster */
+	Assert(IsUnderPostmaster);
+
+	elog(DEBUG2, "reading stats file \"%s\"", statfile);
+
+	/*
+	 * Set the current timestamp (will be kept only in case we can't load an
+	 * existing statsfile).
+	 */
+	StatsShmem->bgwriter_stats.stat_reset_timestamp = GetCurrentTimestamp();
+	StatsShmem->archiver_stats.stat_reset_timestamp =
+		StatsShmem->bgwriter_stats.stat_reset_timestamp;
+	StatsShmem->wal_stats.stat_reset_timestamp =
+		StatsShmem->bgwriter_stats.stat_reset_timestamp;
+
+	/*
+	 * Try to open the stats file. If it doesn't exist, the backends simply
+	 * returns zero for anything and the activity statistics simply starts
+	 * from scratch with empty counters.
+	 *
+	 * ENOENT is a possibility if the activity statistics is not running or
+	 * has not yet written the stats file the first time.  Any other failure
+	 * condition is suspicious.
+	 */
+	if ((fpin = AllocateFile(statfile, PG_BINARY_R)) == NULL)
+	{
+		if (errno != ENOENT)
+			ereport(LOG,
+					(errcode_for_file_access(),
+					 errmsg("could not open statistics file \"%s\": %m",
+							statfile)));
+		return;
+	}
+
+	/*
+	 * Verify it's of the expected format.
+	 */
+	if (fread(&format_id, 1, sizeof(format_id), fpin) != sizeof(format_id) ||
+		format_id != PGSTAT_FILE_FORMAT_ID)
+	{
+		ereport(LOG,
+				(errmsg("corrupted statistics file \"%s\"", statfile)));
+		goto done;
+	}
+
+	/*
+	 * Read bgwiter stats struct
+	 */
+	if (fread(&StatsShmem->bgwriter_stats, 1, sizeof(PgStat_BgWriter), fpin) !=
+		sizeof(PgStat_BgWriter))
+	{
+		ereport(LOG,
+				(errmsg("corrupted statistics file \"%s\"", statfile)));
+		MemSet(&StatsShmem->bgwriter_stats, 0, sizeof(PgStat_BgWriter));
+		goto done;
+	}
+
+	/*
+	 * Read checkpointer stats struct
+	 */
+	if (fread(&StatsShmem->checkpointer_stats, 1, sizeof(PgStat_CheckPointer), fpin) !=
+		sizeof(PgStat_CheckPointer))
+	{
+		ereport(LOG,
+				(errmsg("corrupted statistics file \"%s\"", statfile)));
+		MemSet(&StatsShmem->checkpointer_stats, 0, sizeof(PgStat_CheckPointer));
+		goto done;
+	}
+
+	/*
+	 * Read archiver stats struct
+	 */
+	if (fread(&StatsShmem->archiver_stats, 1, sizeof(PgStat_Archiver),
+			  fpin) != sizeof(PgStat_Archiver))
+	{
+		ereport(LOG,
+				(errmsg("corrupted statistics file \"%s\"", statfile)));
+		MemSet(&StatsShmem->archiver_stats, 0, sizeof(PgStat_Archiver));
+		goto done;
+	}
+
+	/*
+	 * Read WAL stats struct
+	 */
+	if (fread(&StatsShmem->wal_stats, 1, sizeof(PgStat_Wal), fpin)
+		!= sizeof(PgStat_Wal))
+	{
+		ereport(LOG,
+				(errmsg("corrupted statistics file \"%s\"", statfile)));
+		MemSet(&StatsShmem->wal_stats, 0, sizeof(PgStat_Wal));
+		goto done;
+	}
+
+	/*
+	 * Read SLRU stats struct
+	 */
+	if (fread(&StatsShmem->slru.stats, 1, SizeOfSlruStats, fpin) != SizeOfSlruStats)
+	{
+		ereport(LOG,
+				(errmsg("corrupted statistics file \"%s\"", statfile)));
+		goto done;
+	}
+
+	/*
+	 * We found an existing activity statistics file. Read it and put all the
+	 * hash table entries into place.
+	 */
+	while ((tag = fgetc(fpin)) == 'S')
+	{
+		PgStatHashKey key;
+		PgStat_StatEntryHeader *p;
+		size_t		len;
+
+		CHECK_FOR_INTERRUPTS();
+
+		if (fread(&key, 1, sizeof(key), fpin) != sizeof(key))
+		{
+			ereport(LOG,
+					(errmsg("corrupted statistics file \"%s\"", statfile)));
+			goto done;
+		}
+
+		p = get_stat_entry(key.type, key.databaseid, key.objectid,
+						   false, true, &found);
+
+		/* don't allow duplicate entries */
+		if (found)
+		{
+			ereport(LOG,
+					(errmsg("corrupted statistics file \"%s\"",
+							statfile)));
+			goto done;
+		}
+
+		/* Avoid overwriting header part */
+		len = PGSTAT_SHENT_BODY_LEN(key.type);
+
+		if (fread(PGSTAT_SHENT_BODY(p), 1, len, fpin) != len)
+		{
+			ereport(LOG,
+					(errmsg("corrupted statistics file \"%s\"", statfile)));
+			goto done;
+		}
+	}
+
+	if (tag != 'E')
+	{
+		ereport(LOG,
+				(errmsg("corrupted statistics file \"%s\"",
+						statfile)));
+		goto done;
+	}
+
+done:
+	FreeFile(fpin);
+
+	elog(DEBUG2, "removing permanent stats file \"%s\"", statfile);
+	unlink(statfile);
+
+	return;
+}
+
+/*
+ * Shut down a single backend's statistics reporting at process exit.
+ *
+ * Flush any remaining statistics counts out to shared stats.  Without this,
+ * operations triggered during backend exit (such as temp table deletions)
+ * won't be counted.
+ */
+static void
+pgstat_shutdown_hook(int code, Datum arg)
+{
+	/*
+	 * If we got as far as discovering our own database ID, we can report what
+	 * we did to the shared stats.  Otherwise, we'd be sending an invalid
+	 * database ID, so forget it.  (This means that accesses to pg_database
+	 * during failed backend starts might never get counted.)
+	 */
+	if (OidIsValid(MyDatabaseId))
+	{
+		if (MyBackendType == B_BACKEND)
+			pgstat_update_connstats(true);
+		pgstat_report_stat(true);
+	}
+
+	/*
+	 * We need to clean up temporary slots before detaching shared statistics
+	 * so that the statistics for temporary slots are properly removed.
+	 */
+	if (MyReplicationSlot != NULL)
+		ReplicationSlotRelease();
+
+	ReplicationSlotCleanup();
+
+	if (IsUnderPostmaster)
+	{
+		Assert(area);
+
+		/* We shouldn't leave a reference to shared stats. */
+		cleanup_dropped_stats_entries();
+
+		dshash_detach(pgStatSharedHash);
+		pgStatSharedHash = NULL;
+
+		/* We are going to exit. Don't bother destroying local hashes. */
+		pgStatPendingHash = NULL;
+
+		dsa_detach(area);
+		area = NULL;
+	}
 }
 
 /* ----------
@@ -924,6 +2005,328 @@ get_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait, bool create,
 
 	return shheader;
 }
+
+/*
+ * fetch_lock_statentry - common helper function to fetch and lock a stats
+ * entry for flush_tabstat, flush_funcstat and flush_dbstat.
+ */
+static PgStat_StatEntryHeader *
+fetch_lock_statentry(PgStatTypes type, Oid dboid, Oid objid, bool nowait)
+{
+	PgStat_StatEntryHeader *header;
+
+	/* find shared table stats entry corresponding to the local entry */
+	header = (PgStat_StatEntryHeader *)
+		get_stat_entry(type, dboid, objid, nowait, true, NULL);
+
+	/* skip if dshash failed to acquire lock */
+	if (header == NULL)
+		return false;
+
+	/* lock the shared entry to protect the content, skip if failed */
+	if (!nowait)
+		LWLockAcquire(&header->lock, LW_EXCLUSIVE);
+	else if (!LWLockConditionalAcquire(&header->lock, LW_EXCLUSIVE))
+		return false;
+
+	return header;
+}
+
+static bool
+pgstat_lookup_cache_needs_gc(void)
+{
+	uint64		currage;
+
+	if (!pgStatShmLookupCache)
+		return false;
+
+	currage = pg_atomic_read_u64(&StatsShmem->gc_count);
+
+	return pgStatShmLookupCacheAge != currage;
+}
+
+static void
+pgstat_lookup_cache_gc(void)
+{
+	pgstat_shm_lookup_cache_iterator i;
+	PgStatShmLookupCacheEntry *lohashent;
+	uint64		currage;
+
+	currage = pg_atomic_read_u64(&StatsShmem->gc_count);
+
+	/*
+	 * Some entries have been dropped. Invalidate cache pointer to
+	 * them.
+	 */
+	pgstat_shm_lookup_cache_start_iterate(pgStatShmLookupCache, &i);
+	while ((lohashent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i)) != NULL)
+	{
+		PgStat_StatEntryHeader *header = lohashent->shared;
+
+		Assert(header->magic == 0xdeadbeef);
+
+		if (header->dropped)
+		{
+			if (pg_atomic_sub_fetch_u32(&header->refcount, 1) < 1)
+			{
+				/*
+				 * We're the last referrer to this entry, drop the
+				 * shared entry.
+				 */
+				dsa_free(area, lohashent->dsapointer);
+			}
+
+			if (!pgstat_shm_lookup_cache_delete(pgStatShmLookupCache, lohashent->key))
+				elog(PANIC, "something has gone wrong");
+		}
+	}
+
+	pgStatShmLookupCacheAge = currage;
+}
+
+/* ----------
+ * get_pending_stat_entry() -
+ *
+ *  Returns pending stats entry for the type, dbid and objid.
+ *  If create is true, new entry is created if not yet.  found must be non-null
+ *  in the case.
+ *
+ *
+ *  The caller is responsible to initialize the statsbody part of the returned
+ *  memory.
+ * ----------
+ */
+static PgStat_StatEntryHeader *
+get_pending_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
+					 bool create, bool *found)
+{
+	PgStatHashKey key;
+	PgStatPendingEntry *entry;
+
+	if (unlikely(pgStatPendingHash == NULL))
+	{
+		pgstat_setup_memcxt();
+
+		pgStatPendingHash = pgstat_pending_create(pgStatCacheContext,
+													   PGSTAT_TABLE_HASH_SIZE,
+													   NULL);
+	}
+
+	/* Find an entry or create a new one. */
+	key.type = type;
+	key.databaseid = dbid;
+	key.objectid = objid;
+	if (create)
+		entry = pgstat_pending_insert(pgStatPendingHash, key, found);
+	else
+		entry = pgstat_pending_lookup(pgStatPendingHash, key);
+
+	if (!create && !entry)
+		return NULL;
+
+	if (create && !*found)
+		entry->pending = MemoryContextAllocZero(TopMemoryContext,
+												pgstat_pendingentsize[type]);
+
+	return entry->pending;
+}
+
+/* ----------
+ * get_pending_dbstat_entry() -
+ *
+ *  Find or create a local PgStat_StatDBEntry entry for dbid.  New entry is
+ *  created and initialized if not exists.
+ */
+static PgStat_StatDBEntry *
+get_pending_dbstat_entry(Oid dbid)
+{
+	PgStat_StatDBEntry *dbentry;
+	bool		found;
+
+	/*
+	 * Find an entry or create a new one.
+	 */
+	dbentry = (PgStat_StatDBEntry *)
+		get_pending_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid,
+							 true, &found);
+
+	return dbentry;
+}
+
+/* ----------
+ * get_pending_tabstat_entry() -
+ *  Find or create a PgStat_TableStatus entry for rel. New entry is created and
+ *  initialized if not exists.
+ * ----------
+ */
+static PgStat_TableStatus *
+get_pending_tabstat_entry(Oid rel_id, bool isshared)
+{
+	PgStat_TableStatus *tabentry;
+	bool		found;
+
+	tabentry = (PgStat_TableStatus *)
+		get_pending_stat_entry(PGSTAT_TYPE_TABLE,
+							 isshared ? InvalidOid : MyDatabaseId,
+							 rel_id, true, &found);
+
+	return tabentry;
+}
+
+/* ----------
+ * cleanup_dropped_stats_entries() -
+ *              Clean up shared stats entries no longer used.
+ *
+ *  Shared stats entries for dropped objects may be left referenced. Clean up
+ *  our reference and drop the shared entry if needed.
+ * ----------
+ */
+static void
+cleanup_dropped_stats_entries(void)
+{
+	pgstat_shm_lookup_cache_iterator i;
+	PgStatShmLookupCacheEntry *ent;
+
+	if (pgStatShmLookupCache == NULL)
+		return;
+
+	pgstat_shm_lookup_cache_start_iterate(pgStatShmLookupCache, &i);
+	while ((ent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i))
+		   != NULL)
+	{
+		/*
+		 * Free the shared memory chunk for the entry if we were the last
+		 * referrer to a dropped entry.
+		 */
+		if (pg_atomic_sub_fetch_u32(&ent->shared->refcount, 1) < 1 &&
+			ent->shared->dropped)
+			dsa_free(area, ent->dsapointer);
+	}
+
+	/*
+	 * This function is expected to be called during backend exit. So we don't
+	 * bother destroying pgStatShmLookupCache.
+	 */
+	pgStatShmLookupCache = NULL;
+
+	elog(DEBUG1, "deleting pgStatShmLookupCache");
+}
+
+/* ----------
+ * delete_current_stats_entry()
+ *
+ *  Deletes the given shared entry from shared stats hash. The entry must be
+ *  exclusively locked.
+ * ----------
+ */
+static void
+delete_current_stats_entry(dshash_seq_status *hstat)
+{
+	dsa_pointer pdsa;
+	PgStat_StatEntryHeader *header;
+	PgStatShmHashEntry *ent;
+
+	ent = dshash_get_current(hstat);
+	pdsa = ent->body;
+	header = dsa_get_address(area, pdsa);
+
+	/* No one find this entry ever after. */
+	dshash_delete_current(hstat);
+
+	/*
+	 * Let the referrers drop the entry if any.  Refcount won't be decremented
+	 * until "dropped" is set true and StatsShmem->gc_count is incremented
+	 * later. So we can check refcount to set dropped without holding a lock.
+	 * If no one is referring this entry, free it immediately.
+	 */
+
+	if (pg_atomic_read_u32(&header->refcount) > 0)
+		header->dropped = true;
+	else
+	{
+		/* What guarantees that no pending stats entry exists here? */
+		Assert(!pgStatShmLookupCache ||
+			   !pgstat_shm_lookup_cache_lookup(pgStatShmLookupCache, ent->key));
+
+		dsa_free(area, pdsa);
+	}
+
+	return;
+}
+
+/*
+ * pgstat_copy_global_stats - helper function for functions
+ *           pgstat_fetch_stat_*() and pgstat_reset_shared_counters().
+ *
+ * Copies out the specified memory area following change-count protocol.
+ */
+static inline void
+pgstat_copy_global_stats(void *dst, void *src, size_t len,
+						 pg_atomic_uint32 *count)
+{
+	int			before_changecount;
+	int			after_changecount;
+
+	after_changecount = pg_atomic_read_u32(count);
+
+	do
+	{
+		before_changecount = after_changecount;
+		memcpy(dst, src, len);
+		after_changecount = pg_atomic_read_u32(count);
+	} while ((before_changecount & 1) == 1 ||
+			 after_changecount != before_changecount);
+}
+
+/* ----------
+ * collect_oids() -
+ *
+ *	Collect the OIDs of all objects listed in the specified system catalog
+ *	into a temporary hash table.  Caller should pgsstat_oid_destroy the result
+ *	when done with it.  (However, we make the table in CurrentMemoryContext
+ *	so that it will be freed properly in event of an error.)
+ * ----------
+ */
+static pgstat_oid_hash *
+collect_oids(Oid catalogid, AttrNumber anum_oid)
+{
+	pgstat_oid_hash *rethash;
+	Relation	rel;
+	TableScanDesc scan;
+	HeapTuple	tup;
+	Snapshot	snapshot;
+
+	rethash = pgstat_oid_create(CurrentMemoryContext,
+								PGSTAT_TABLE_HASH_SIZE, NULL);
+
+	rel = table_open(catalogid, AccessShareLock);
+	snapshot = RegisterSnapshot(GetLatestSnapshot());
+	scan = table_beginscan(rel, snapshot, 0, NULL);
+	while ((tup = heap_getnext(scan, ForwardScanDirection)) != NULL)
+	{
+		Oid			thisoid;
+		bool		isnull;
+		bool		found;
+
+		thisoid = heap_getattr(tup, anum_oid, RelationGetDescr(rel), &isnull);
+		Assert(!isnull);
+
+		CHECK_FOR_INTERRUPTS();
+
+		pgstat_oid_insert(rethash, thisoid, &found);
+	}
+	table_endscan(scan);
+	UnregisterSnapshot(snapshot);
+	table_close(rel, AccessShareLock);
+
+	return rethash;
+}
+
+
+/* ------------------------------------------------------------
+ * Functions for flushing the different types of pending statistics
+ *------------------------------------------------------------
+ */
 
 /*
  * flush_tabstat - flush out a pending table stats entry
@@ -1262,817 +2665,12 @@ flush_slrustat(bool nowait)
 	return true;
 }
 
-/* ----------
- * delete_current_stats_entry()
- *
- *  Deletes the given shared entry from shared stats hash. The entry must be
- *  exclusively locked.
- * ----------
- */
-static void
-delete_current_stats_entry(dshash_seq_status *hstat)
-{
-	dsa_pointer pdsa;
-	PgStat_StatEntryHeader *header;
-	PgStatShmHashEntry *ent;
-
-	ent = dshash_get_current(hstat);
-	pdsa = ent->body;
-	header = dsa_get_address(area, pdsa);
-
-	/* No one find this entry ever after. */
-	dshash_delete_current(hstat);
-
-	/*
-	 * Let the referrers drop the entry if any.  Refcount won't be decremented
-	 * until "dropped" is set true and StatsShmem->gc_count is incremented
-	 * later. So we can check refcount to set dropped without holding a lock.
-	 * If no one is referring this entry, free it immediately.
-	 */
-
-	if (pg_atomic_read_u32(&header->refcount) > 0)
-		header->dropped = true;
-	else
-	{
-		/* What guarantees that no pending stats entry exists here? */
-		Assert(!pgStatShmLookupCache ||
-			   !pgstat_shm_lookup_cache_lookup(pgStatShmLookupCache, ent->key));
-
-		dsa_free(area, pdsa);
-	}
-
-	return;
-}
-
-/* ----------
- * get_pending_stat_entry() -
- *
- *  Returns pending stats entry for the type, dbid and objid.
- *  If create is true, new entry is created if not yet.  found must be non-null
- *  in the case.
- *
- *
- *  The caller is responsible to initialize the statsbody part of the returned
- *  memory.
- * ----------
- */
-static PgStat_StatEntryHeader *
-get_pending_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
-					 bool create, bool *found)
-{
-	PgStatHashKey key;
-	PgStatPendingEntry *entry;
-
-	if (unlikely(pgStatPendingHash == NULL))
-	{
-		pgstat_setup_memcxt();
-
-		pgStatPendingHash = pgstat_pending_create(pgStatCacheContext,
-													   PGSTAT_TABLE_HASH_SIZE,
-													   NULL);
-	}
-
-	/* Find an entry or create a new one. */
-	key.type = type;
-	key.databaseid = dbid;
-	key.objectid = objid;
-	if (create)
-		entry = pgstat_pending_insert(pgStatPendingHash, key, found);
-	else
-		entry = pgstat_pending_lookup(pgStatPendingHash, key);
-
-	if (!create && !entry)
-		return NULL;
-
-	if (create && !*found)
-		entry->pending = MemoryContextAllocZero(TopMemoryContext,
-												pgstat_pendingentsize[type]);
-
-	return entry->pending;
-}
 
 /* ------------------------------------------------------------
- * Public functions used by backends follow
+ * Functions to add new stats.
  *------------------------------------------------------------
  */
 
-/* ----------
- * pgstat_report_stat() -
- *
- *	Must be called by processes that performs DML: tcop/postgres.c, logical
- *	receiver processes, SPI worker, etc. to apply the so far collected
- *	per-table and function usage statistics to the shared statistics hashes.
- *
- *	Updates are applied not more frequent than the interval of
- *	PGSTAT_MIN_INTERVAL milliseconds. They are also postponed on lock
- *	failure if force is false and there's no pending updates longer than
- *	PGSTAT_MAX_INTERVAL milliseconds. Postponed updates are retried in
- *	succeeding calls of this function.
- *
- *	Returns the time until the next timing when updates are applied in
- *	milliseconds if there are no updates held for more than
- *	PGSTAT_MIN_INTERVAL milliseconds.
- *
- *	Note that this is called only out of a transaction, so it is fine to use
- *	transaction stop time as an approximation of current time.
- *	----------
- */
-long
-pgstat_report_stat(bool force)
-{
-	static TimestampTz next_flush = 0;
-	static TimestampTz pending_since = 0;
-	static long retry_interval = 0;
-	TimestampTz now;
-	bool		nowait;
-	int			i;
-	uint64		oldval;
-
-	/* Return if not active */
-	if (area == NULL)
-		return 0;
-
-	/*
-	 * We need a database entry if the following stats exists.
-	 */
-	if (pgStatXactCommit > 0 || pgStatXactRollback > 0 ||
-		pgStatBlockReadTime > 0 || pgStatBlockWriteTime > 0)
-		get_pending_dbstat_entry(MyDatabaseId);
-
-	/* Don't expend a clock check if nothing to do */
-	if (pgStatPendingHash == NULL && have_slrustats && !walstats_pending())
-		return 0;
-
-	now = GetCurrentTransactionStopTimestamp();
-
-	if (!force)
-	{
-		/*
-		 * Don't flush stats too frequently.  Return the time to the next
-		 * flush.
-		 */
-		if (now < next_flush)
-		{
-			/* Record the epoch time if retrying. */
-			if (pending_since == 0)
-				pending_since = now;
-
-			return (next_flush - now) / 1000;
-		}
-
-		/* But, don't keep pending updates longer than PGSTAT_MAX_INTERVAL. */
-
-		if (pending_since > 0 &&
-			TimestampDifferenceExceeds(pending_since, now, PGSTAT_MAX_INTERVAL))
-			force = true;
-	}
-
-	/* for backends, update connection statistics */
-	if (MyBackendType == B_BACKEND)
-		pgstat_update_connstats(false);
-
-	/* don't wait for lock acquisition when !force */
-	nowait = !force;
-
-	if (pgStatPendingHash)
-	{
-		int			remains = 0;
-		pgstat_pending_iterator i;
-		List	   *dbentlist = NIL;
-		ListCell   *lc;
-		PgStatPendingEntry *lent;
-
-		/* Step 1: flush out other than database stats */
-		pgstat_pending_start_iterate(pgStatPendingHash, &i);
-		while ((lent = pgstat_pending_iterate(pgStatPendingHash, &i)) != NULL)
-		{
-			bool		remove = false;
-
-			switch (lent->key.type)
-			{
-				case PGSTAT_TYPE_DB:
-
-					/*
-					 * flush_tabstat applies some of stats numbers of flushed
-					 * entries into pending database stats. Just remember the
-					 * database entries for now then flush-out them later.
-					 */
-					dbentlist = lappend(dbentlist, lent);
-					break;
-				case PGSTAT_TYPE_TABLE:
-					if (flush_tabstat(lent, nowait))
-						remove = true;
-					break;
-				case PGSTAT_TYPE_FUNCTION:
-					if (flush_funcstat(lent, nowait))
-						remove = true;
-					break;
-				case PGSTAT_TYPE_REPLSLOT:
-					/* We don't have that kind of pending entry */
-					Assert(false);
-			}
-
-			if (!remove)
-			{
-				remains++;
-				continue;
-			}
-
-			/* Remove the successfully flushed entry */
-			pfree(lent->pending);
-			lent->pending = NULL;
-			pgstat_pending_delete(pgStatPendingHash, lent->key);
-		}
-
-		/* Step 2: flush out database stats */
-		foreach(lc, dbentlist)
-		{
-			PgStatPendingEntry *lent = (PgStatPendingEntry *) lfirst(lc);
-
-			if (flush_dbstat(lent, nowait))
-			{
-				remains--;
-				/* Remove the successfully flushed entry */
-				pfree(lent->pending);
-				lent->pending = NULL;
-				pgstat_pending_delete(pgStatPendingHash, lent->key);
-			}
-		}
-		list_free(dbentlist);
-		dbentlist = NULL;
-
-		if (remains <= 0)
-		{
-			pgstat_pending_destroy(pgStatPendingHash);
-			pgStatPendingHash = NULL;
-		}
-	}
-
-	/* flush wal stats */
-	flush_walstat(nowait);
-
-	/* flush SLRU stats */
-	flush_slrustat(nowait);
-
-	/*
-	 * Publish the time of the last flush, but we don't notify the change of
-	 * the timestamp itself. Readers will get sufficiently recent timestamp.
-	 * If we failed to update the value, concurrent processes should have
-	 * updated it to sufficiently recent time.
-	 *
-	 * XXX: The loop might be unnecessary for the reason above.
-	 */
-	oldval = pg_atomic_read_u64(&StatsShmem->stats_timestamp);
-
-	for (i = 0; i < 10; i++)
-	{
-		if (oldval >= now ||
-			pg_atomic_compare_exchange_u64(&StatsShmem->stats_timestamp,
-										   &oldval, (uint64) now))
-			break;
-	}
-
-	/*
-	 * Some of the pending stats may have not been flushed due to lock
-	 * contention.  If we have such pending stats here, let the caller know
-	 * the retry interval.
-	 */
-	if (pgStatPendingHash != NULL || have_slrustats || walstats_pending())
-	{
-		/* Retain the epoch time */
-		if (pending_since == 0)
-			pending_since = now;
-
-		/* The interval is doubled at every retry. */
-		if (retry_interval == 0)
-			retry_interval = PGSTAT_RETRY_MIN_INTERVAL * 1000;
-		else
-			retry_interval = retry_interval * 2;
-
-		/*
-		 * Determine the next retry interval so as not to get shorter than the
-		 * previous interval.
-		 */
-		if (!TimestampDifferenceExceeds(pending_since,
-										now + 2 * retry_interval,
-										PGSTAT_MAX_INTERVAL))
-			next_flush = now + retry_interval;
-		else
-		{
-			next_flush = pending_since + PGSTAT_MAX_INTERVAL * 1000;
-			retry_interval = next_flush - now;
-		}
-
-		return retry_interval / 1000;
-	}
-
-	/* Set the next time to update stats */
-	next_flush = now + PGSTAT_MIN_INTERVAL * 1000;
-	retry_interval = 0;
-	pending_since = 0;
-
-	return 0;
-}
-
-/* ----------
- * pgstat_vacuum_stat() -
- *
- *  Delete shared stat entries that are not in system catalogs.
- *
- *  To avoid holding exclusive lock on dshash for a long time, the process is
- *  performed in three steps.
- *
- *   1: Collect existent oids of every kind of object.
- *   2: Collect victim entries by scanning with shared lock.
- *   3: Try removing every nominated entry without waiting for lock.
- *
- *  As the consequence of the last step, some entries may be left alone due to
- *  lock failure, but as explained by the comment of pgstat_vacuum_stat, they
- *  will be deleted by later vacuums.
- * ----------
- */
-void
-pgstat_vacuum_stat(void)
-{
-	pgstat_oid_hash *dbids;		/* database ids */
-	pgstat_oid_hash *relids;	/* relation ids in the current database */
-	pgstat_oid_hash *funcids;	/* function ids in the current database */
-	int			nvictims = 0;	/* # of entries of the above */
-	dshash_seq_status dshstat;
-	PgStatShmHashEntry *ent;
-
-	/* we don't collect stats under standalone mode */
-	if (!IsUnderPostmaster)
-		return;
-
-	/* collect oids of existent objects */
-	dbids = collect_oids(DatabaseRelationId, Anum_pg_database_oid);
-	relids = collect_oids(RelationRelationId, Anum_pg_class_oid);
-	funcids = collect_oids(ProcedureRelationId, Anum_pg_proc_oid);
-
-	nvictims = 0;
-
-	/* some of the dshash entries are to be removed, take exclusive lock. */
-	dshash_seq_init(&dshstat, pgStatSharedHash, true);
-	while ((ent = dshash_seq_next(&dshstat)) != NULL)
-	{
-		CHECK_FOR_INTERRUPTS();
-
-		/*
-		 * Don't drop entries for other than database objects not of the
-		 * current database.
-		 */
-		if (ent->key.type != PGSTAT_TYPE_DB &&
-			ent->key.databaseid != MyDatabaseId)
-			continue;
-
-		switch (ent->key.type)
-		{
-			case PGSTAT_TYPE_DB:
-				/*
-				 * don't remove database entry for shared tables and existent
-				 * tables
-				 */
-				if (ent->key.databaseid == 0 ||
-					pgstat_oid_lookup(dbids, ent->key.databaseid) != NULL)
-					continue;
-
-				break;
-
-			case PGSTAT_TYPE_TABLE:
-				/* don't remove existent relations */
-				if (pgstat_oid_lookup(relids, ent->key.objectid) != NULL)
-					continue;
-
-				break;
-
-			case PGSTAT_TYPE_FUNCTION:
-				/* don't remove existent functions  */
-				if (pgstat_oid_lookup(funcids, ent->key.objectid) != NULL)
-					continue;
-
-				break;
-
-			case PGSTAT_TYPE_REPLSLOT:
-				/*
-				 * We don't bother vacuumming this kind of entries because the
-				 * number of entries is quite small and entries are likely to
-				 * be reused soon.
-				 */
-				continue;
-		}
-
-		/* drop this entry */
-		delete_current_stats_entry(&dshstat);
-		nvictims++;
-	}
-	dshash_seq_term(&dshstat);
-	pgstat_oid_destroy(dbids);
-	pgstat_oid_destroy(relids);
-	pgstat_oid_destroy(funcids);
-
-	if (nvictims > 0)
-		pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
-}
-
-/* ----------
- * collect_oids() -
- *
- *	Collect the OIDs of all objects listed in the specified system catalog
- *	into a temporary hash table.  Caller should pgsstat_oid_destroy the result
- *	when done with it.  (However, we make the table in CurrentMemoryContext
- *	so that it will be freed properly in event of an error.)
- * ----------
- */
-static pgstat_oid_hash *
-collect_oids(Oid catalogid, AttrNumber anum_oid)
-{
-	pgstat_oid_hash *rethash;
-	Relation	rel;
-	TableScanDesc scan;
-	HeapTuple	tup;
-	Snapshot	snapshot;
-
-	rethash = pgstat_oid_create(CurrentMemoryContext,
-								PGSTAT_TABLE_HASH_SIZE, NULL);
-
-	rel = table_open(catalogid, AccessShareLock);
-	snapshot = RegisterSnapshot(GetLatestSnapshot());
-	scan = table_beginscan(rel, snapshot, 0, NULL);
-	while ((tup = heap_getnext(scan, ForwardScanDirection)) != NULL)
-	{
-		Oid			thisoid;
-		bool		isnull;
-		bool		found;
-
-		thisoid = heap_getattr(tup, anum_oid, RelationGetDescr(rel), &isnull);
-		Assert(!isnull);
-
-		CHECK_FOR_INTERRUPTS();
-
-		pgstat_oid_insert(rethash, thisoid, &found);
-	}
-	table_endscan(scan);
-	UnregisterSnapshot(snapshot);
-	table_close(rel, AccessShareLock);
-
-	return rethash;
-}
-
-/* ----------
- * pgstat_drop_database() -
- *
- *	Remove entry for the database that we just dropped.
- *
- *  Some entries might be left alone due to lock failure or some stats are
- *	flushed after this but we will still clean the dead DB eventually via
- *	future invocations of pgstat_vacuum_stat().
- *	----------
- */
-void
-pgstat_drop_database(Oid databaseid)
-{
-	dshash_seq_status hstat;
-	PgStatShmHashEntry *p;
-
-	Assert(OidIsValid(databaseid));
-
-	if (!IsUnderPostmaster || !pgStatSharedHash)
-		return;
-
-	/* some of the dshash entries are to be removed, take exclusive lock. */
-	dshash_seq_init(&hstat, pgStatSharedHash, true);
-	while ((p = dshash_seq_next(&hstat)) != NULL)
-	{
-		if (p->key.databaseid == MyDatabaseId)
-			delete_current_stats_entry(&hstat);
-	}
-	dshash_seq_term(&hstat);
-
-	/* Let readers run a garbage collection of local hashes */
-	pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
-}
-
-/* ----------
- * pgstat_reset_counters() -
- *
- *	Reset counters for our database.
- *
- *	Permission checking for this function is managed through the normal
- *	GRANT system.
- * ----------
- */
-void
-pgstat_reset_counters(void)
-{
-	dshash_seq_status hstat;
-	PgStatShmHashEntry *p;
-
-	if (!IsUnderPostmaster || !pgStatSharedHash)
-		return;
-
-	/* dshash entry is not modified, take shared lock */
-	dshash_seq_init(&hstat, pgStatSharedHash, false);
-	while ((p = dshash_seq_next(&hstat)) != NULL)
-	{
-		PgStat_StatEntryHeader *header;
-
-		if (p->key.databaseid != MyDatabaseId)
-			continue;
-
-		header = dsa_get_address(area, p->body);
-
-		LWLockAcquire(&header->lock, LW_EXCLUSIVE);
-		memset(PGSTAT_SHENT_BODY(header), 0,
-			   PGSTAT_SHENT_BODY_LEN(p->key.type));
-
-		if (p->key.type == PGSTAT_TYPE_DB)
-		{
-			PgStat_StatDBEntry *dbstat = (PgStat_StatDBEntry *) header;
-
-			dbstat->stat_reset_timestamp = GetCurrentTimestamp();
-		}
-		LWLockRelease(&header->lock);
-	}
-	dshash_seq_term(&hstat);
-
-	/* Invalidate the simple cache keys */
-	cached_dbent_key = stathashkey_zero;
-	cached_tabent_key = stathashkey_zero;
-	cached_funcent_key = stathashkey_zero;
-}
-
-/*
- * pgstat_copy_global_stats - helper function for functions
- *           pgstat_fetch_stat_*() and pgstat_reset_shared_counters().
- *
- * Copies out the specified memory area following change-count protocol.
- */
-static inline void
-pgstat_copy_global_stats(void *dst, void *src, size_t len,
-						 pg_atomic_uint32 *count)
-{
-	int			before_changecount;
-	int			after_changecount;
-
-	after_changecount = pg_atomic_read_u32(count);
-
-	do
-	{
-		before_changecount = after_changecount;
-		memcpy(dst, src, len);
-		after_changecount = pg_atomic_read_u32(count);
-	} while ((before_changecount & 1) == 1 ||
-			 after_changecount != before_changecount);
-}
-
-/* ----------
- * pgstat_reset_shared_counters() -
- *
- *	Reset cluster-wide shared counters.
- *
- *	Permission checking for this function is managed through the normal
- *	GRANT system.
- *
- *  We don't scribble on shared stats while resetting to avoid locking on
- *  shared stats struct. Instead, just record the current counters in another
- *  shared struct, which is protected by StatsLock. See
- *  pgstat_fetch_stat_(archiver|bgwriter|checkpointer) for the reader side.
- * ----------
- */
-void
-pgstat_reset_shared_counters(const char *target)
-{
-	TimestampTz now = GetCurrentTimestamp();
-	PgStat_Shared_Reset_Target t;
-
-	if (strcmp(target, "archiver") == 0)
-		t = RESET_ARCHIVER;
-	else if (strcmp(target, "bgwriter") == 0)
-		t = RESET_BGWRITER;
-	else if (strcmp(target, "wal") == 0)
-		t = RESET_WAL;
-	else
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("unrecognized reset target: \"%s\"", target),
-				 errhint("Target must be \"archiver\", \"bgwriter\" or \"wal\".")));
-
-	/* Reset statistics for the cluster. */
-	LWLockAcquire(StatsLock, LW_EXCLUSIVE);
-
-	switch (t)
-	{
-		case RESET_ARCHIVER:
-			pgstat_copy_global_stats(&StatsShmem->archiver_reset_offset,
-									 &StatsShmem->archiver_stats,
-									 sizeof(PgStat_Archiver),
-									 &StatsShmem->archiver_changecount);
-			StatsShmem->archiver_reset_offset.stat_reset_timestamp = now;
-			cached_archiverstats_is_valid = false;
-			break;
-
-		case RESET_BGWRITER:
-			pgstat_copy_global_stats(&StatsShmem->bgwriter_reset_offset,
-									 &StatsShmem->bgwriter_stats,
-									 sizeof(PgStat_BgWriter),
-									 &StatsShmem->bgwriter_changecount);
-			pgstat_copy_global_stats(&StatsShmem->checkpointer_reset_offset,
-									 &StatsShmem->checkpointer_stats,
-									 sizeof(PgStat_CheckPointer),
-									 &StatsShmem->checkpointer_changecount);
-			StatsShmem->bgwriter_reset_offset.stat_reset_timestamp = now;
-			cached_bgwriterstats_is_valid = false;
-			cached_checkpointerstats_is_valid = false;
-			break;
-
-		case RESET_WAL:
-
-			/*
-			 * Differntly from the two above, WAL statistics has many writer
-			 * processes and protected by wal_stats_lock.
-			 */
-			LWLockAcquire(&StatsShmem->wal_stats_lock, LW_EXCLUSIVE);
-			MemSet(&StatsShmem->wal_stats, 0, sizeof(PgStat_Wal));
-			StatsShmem->wal_stats.stat_reset_timestamp = now;
-			LWLockRelease(&StatsShmem->wal_stats_lock);
-			cached_walstats_is_valid = false;
-			break;
-	}
-
-	LWLockRelease(StatsLock);
-}
-
-/* ----------
- * pgstat_reset_single_counter() -
- *
- *	Reset a single counter.
- *
- *	Permission checking for this function is managed through the normal
- *	GRANT system.
- * ----------
- */
-void
-pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
-{
-	PgStat_StatEntryHeader *header;
-	PgStat_StatDBEntry *dbentry;
-	PgStatTypes stattype;
-	TimestampTz ts;
-
-	dbentry = (PgStat_StatDBEntry *)
-		get_stat_entry(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid, false, false,
-					   NULL);
-	Assert(dbentry);
-
-	/* Set the reset timestamp for the whole database */
-	ts = GetCurrentTimestamp();
-	LWLockAcquire(&dbentry->header.lock, LW_EXCLUSIVE);
-	dbentry->stat_reset_timestamp = ts;
-	LWLockRelease(&dbentry->header.lock);
-
-	/* Remove object if it exists, ignore if not */
-	switch (type)
-	{
-		case RESET_TABLE:
-			stattype = PGSTAT_TYPE_TABLE;
-			break;
-		case RESET_FUNCTION:
-			stattype = PGSTAT_TYPE_FUNCTION;
-	}
-
-	header = get_stat_entry(stattype, MyDatabaseId, objoid, false, false, NULL);
-
-	LWLockAcquire(&header->lock, LW_EXCLUSIVE);
-	memset(PGSTAT_SHENT_BODY(header), 0, PGSTAT_SHENT_BODY_LEN(stattype));
-	LWLockRelease(&header->lock);
-}
-
-/* ----------
- * pgstat_reset_slru_counter() -
- *
- *	Tell the statistics collector to reset a single SLRU counter, or all
- *	SLRU counters (when name is null).
- *
- *	Permission checking for this function is managed through the normal
- *	GRANT system.
- * ----------
- */
-void
-pgstat_reset_slru_counter(const char *name)
-{
-	int			i;
-	TimestampTz ts = GetCurrentTimestamp();
-	uint32		assert_changecount;
-
-	PG_USED_FOR_ASSERTS_ONLY;
-
-	if (name)
-	{
-		i = pgstat_slru_index(name);
-		LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
-		assert_changecount =
-			pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
-		Assert((assert_changecount & 1) == 0);
-		MemSet(&StatsShmem->slru.stats[i], 0,
-			   sizeof(PgStat_SLRUStats));
-		StatsShmem->slru.stats[i].stat_reset_timestamp = ts;
-		pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
-		LWLockRelease(&StatsShmem->slru.lock);
-	}
-	else
-	{
-		LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
-		assert_changecount =
-			pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
-		Assert((assert_changecount & 1) == 0);
-		for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
-		{
-			MemSet(&StatsShmem->slru.stats[i], 0,
-				   sizeof(PgStat_SLRUStats));
-			StatsShmem->slru.stats[i].stat_reset_timestamp = ts;
-		}
-		pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
-		LWLockRelease(&StatsShmem->slru.lock);
-	}
-
-	cached_slrustats_is_valid = false;
-}
-
-/* ----------
- * pgstat_reset_replslot_counter() -
- *
- *	Tell the statistics collector to reset a single replication slot
- *	counter, or all replication slots counters (when name is null).
- *
- *	Permission checking for this function is managed through the normal
- *	GRANT system.
- * ----------
- */
-void
-pgstat_reset_replslot_counter(const char *name)
-{
-	int			startidx;
-	int			endidx;
-	int			i;
-	TimestampTz ts;
-
-	if (!IsUnderPostmaster || !pgStatSharedHash)
-		return;
-
-	if (name)
-	{
-		ReplicationSlot *slot;
-
-		/* Check if the slot exits with the given name. */
-		LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
-		slot = SearchNamedReplicationSlot(name);
-		LWLockRelease(ReplicationSlotControlLock);
-
-		if (!slot)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("replication slot \"%s\" does not exist",
-							name)));
-
-		/*
-		 * Nothing to do for physical slots as we collect stats only for
-		 * logical slots.
-		 */
-		if (SlotIsPhysical(slot))
-			return;
-
-		/* reset this one entry */
-		startidx = endidx = slot - ReplicationSlotCtl->replication_slots;
-	}
-	else
-	{
-		/* reset all existent entries */
-		startidx = 0;
-		endidx = max_replication_slots - 1;
-	}
-
-	ts = GetCurrentTimestamp();
-	for (i = startidx; i <= endidx; i++)
-	{
-		PgStat_ReplSlot *shent;
-
-		shent = (PgStat_ReplSlot *)
-			get_stat_entry(PGSTAT_TYPE_REPLSLOT,
-						   MyDatabaseId, i, false, false, NULL);
-
-		/* Skip non-existent entries */
-		if (!shent)
-			continue;
-
-		LWLockAcquire(&shent->header.lock, LW_EXCLUSIVE);
-		memset(&shent->spill_txns, 0,
-			   offsetof(PgStat_ReplSlot, stat_reset_timestamp) -
-			   offsetof(PgStat_ReplSlot, spill_txns));
-		shent->stat_reset_timestamp = ts;
-		LWLockRelease(&shent->header.lock);
-	}
-}
 
 /* ----------
  * pgstat_report_autovac() -
@@ -3206,6 +3804,322 @@ pgstat_twophase_postabort(TransactionId xid, uint16 info,
 		rec->tuples_inserted + rec->tuples_updated;
 }
 
+/* ----------
+ * pgstat_report_archiver() -
+ *
+ *		Report archiver statistics
+ * ----------
+ */
+void
+pgstat_report_archiver(const char *xlog, bool failed)
+{
+	TimestampTz now = GetCurrentTimestamp();
+	uint32		before_count PG_USED_FOR_ASSERTS_ONLY;
+	uint32		after_count PG_USED_FOR_ASSERTS_ONLY;
+
+
+	START_CRIT_SECTION();
+	before_count =
+		pg_atomic_fetch_add_u32(&StatsShmem->archiver_changecount, 1);
+	Assert((before_count & 1) == 0);
+
+	if (failed)
+	{
+		++StatsShmem->archiver_stats.failed_count;
+		memcpy(&StatsShmem->archiver_stats.last_failed_wal, xlog,
+			   sizeof(StatsShmem->archiver_stats.last_failed_wal));
+		StatsShmem->archiver_stats.last_failed_timestamp = now;
+	}
+	else
+	{
+		++StatsShmem->archiver_stats.archived_count;
+		memcpy(&StatsShmem->archiver_stats.last_archived_wal, xlog,
+			   sizeof(StatsShmem->archiver_stats.last_archived_wal));
+		StatsShmem->archiver_stats.last_archived_timestamp = now;
+	}
+
+	after_count =
+		pg_atomic_fetch_add_u32(&StatsShmem->archiver_changecount, 1);
+	Assert(after_count == before_count + 1);
+	END_CRIT_SECTION();
+}
+
+/* ----------
+ * pgstat_report_bgwriter() -
+ *
+ *		Report bgwriter statistics
+ * ----------
+ */
+void
+pgstat_report_bgwriter(void)
+{
+	static const PgStat_BgWriter all_zeroes;
+	PgStat_BgWriter *s = &StatsShmem->bgwriter_stats;
+	PgStat_BgWriter *l = &BgWriterStats;
+	uint32		before_count PG_USED_FOR_ASSERTS_ONLY;
+	uint32		after_count PG_USED_FOR_ASSERTS_ONLY;
+
+	/*
+	 * This function can be called even if nothing at all has happened. In
+	 * this case, avoid taking lock for a completely empty stats.
+	 */
+	if (memcmp(&BgWriterStats, &all_zeroes, sizeof(PgStat_BgWriter)) == 0)
+		return;
+
+	START_CRIT_SECTION();
+	before_count =
+		pg_atomic_fetch_add_u32(&StatsShmem->bgwriter_changecount, 1);
+	Assert((before_count & 1) == 0);
+
+	s->buf_written_clean += l->buf_written_clean;
+	s->maxwritten_clean += l->maxwritten_clean;
+	s->buf_alloc += l->buf_alloc;
+
+	after_count =
+		pg_atomic_fetch_add_u32(&StatsShmem->bgwriter_changecount, 1);
+	Assert(after_count == before_count + 1);
+	END_CRIT_SECTION();
+
+	/*
+	 * Clear out the statistics buffer, so it can be re-used.
+	 */
+	MemSet(&BgWriterStats, 0, sizeof(BgWriterStats));
+}
+
+/* ----------
+ * pgstat_report_checkpointer() -
+ *
+ *		Report checkpointer statistics
+ * ----------
+ */
+void
+pgstat_report_checkpointer(void)
+{
+	/* We assume this initializes to zeroes */
+	static const PgStat_CheckPointer all_zeroes;
+	PgStat_CheckPointer *s = &StatsShmem->checkpointer_stats;
+	PgStat_CheckPointer *l = &CheckPointerStats;
+	uint32		before_count PG_USED_FOR_ASSERTS_ONLY;
+	uint32		after_count PG_USED_FOR_ASSERTS_ONLY;
+
+	/*
+	 * This function can be called even if nothing at all has happened. In
+	 * this case, avoid taking lock for a completely empty stats.
+	 */
+	if (memcmp(&CheckPointerStats, &all_zeroes,
+			   sizeof(PgStat_CheckPointer)) == 0)
+		return;
+
+	START_CRIT_SECTION();
+	before_count =
+		pg_atomic_fetch_add_u32(&StatsShmem->checkpointer_changecount, 1);
+	Assert((before_count & 1) == 0);
+
+	s->timed_checkpoints += l->timed_checkpoints;
+	s->requested_checkpoints += l->requested_checkpoints;
+	s->checkpoint_write_time += l->checkpoint_write_time;
+	s->checkpoint_sync_time += l->checkpoint_sync_time;
+	s->buf_written_checkpoints += l->buf_written_checkpoints;
+	s->buf_written_backend += l->buf_written_backend;
+	s->buf_fsync_backend += l->buf_fsync_backend;
+
+	after_count =
+		pg_atomic_fetch_add_u32(&StatsShmem->checkpointer_changecount, 1);
+	Assert(after_count == before_count + 1);
+	END_CRIT_SECTION();
+
+	/*
+	 * Clear out the statistics buffer, so it can be re-used.
+	 */
+	MemSet(&CheckPointerStats, 0, sizeof(CheckPointerStats));
+}
+
+/* ----------
+ * pgstat_report_wal() -
+ *
+ *		Report WAL statistics
+ * ----------
+ */
+void
+pgstat_report_wal(bool force)
+{
+	flush_walstat(force);
+}
+
+/* ----------
+ * pgstat_update_connstat() -
+ *
+ *		Update local connection stats
+ * ----------
+ */
+static void
+pgstat_update_connstats(bool disconnect)
+{
+	static TimestampTz last_report = 0;
+	static SessionEndType session_end_type = DISCONNECT_NOT_YET;
+	TimestampTz now;
+	long		secs;
+	int			usecs;
+	PgStat_StatDBEntry *ldbstats;	/* local database entry */
+
+	Assert(MyBackendType == B_BACKEND);
+
+	if (session_end_type != DISCONNECT_NOT_YET)
+		return;
+
+	now = GetCurrentTimestamp();
+	if (last_report == 0)
+		last_report = MyStartTimestamp;
+	TimestampDifference(last_report, now, &secs, &usecs);
+	last_report = now;
+
+	if (disconnect)
+		session_end_type = pgStatSessionEndCause;
+
+	ldbstats = get_pending_dbstat_entry(MyDatabaseId);
+
+	ldbstats->counts.n_sessions = (last_report == 0 ? 1 : 0);
+	ldbstats->counts.total_session_time += secs * 1000000 + usecs;
+	ldbstats->counts.total_active_time += pgStatActiveTime;
+	pgStatActiveTime = 0;
+	ldbstats->counts.total_idle_in_xact_time += pgStatTransactionIdleTime;
+	pgStatTransactionIdleTime = 0;
+
+	switch (session_end_type)
+	{
+		case DISCONNECT_NOT_YET:
+		case DISCONNECT_NORMAL:
+			/* we don't collect these */
+			break;
+		case DISCONNECT_CLIENT_EOF:
+			ldbstats->counts.n_sessions_abandoned++;
+			break;
+		case DISCONNECT_FATAL:
+			ldbstats->counts.n_sessions_fatal++;
+			break;
+		case DISCONNECT_KILLED:
+			ldbstats->counts.n_sessions_killed++;
+			break;
+	}
+}
+
+
+/*
+ * pgstat_slru_index
+ *
+ * Determine index of entry for a SLRU with a given name. If there's no exact
+ * match, returns index of the last "other" entry used for SLRUs defined in
+ * external projects.
+ */
+int
+pgstat_slru_index(const char *name)
+{
+	int			i;
+
+	for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
+	{
+		if (strcmp(slru_names[i], name) == 0)
+			return i;
+	}
+
+	/* return index of the last entry (which is the "other" one) */
+	return (SLRU_NUM_ELEMENTS - 1);
+}
+
+/*
+ * pgstat_slru_name
+ *
+ * Returns SLRU name for an index. The index may be above SLRU_NUM_ELEMENTS,
+ * in which case this returns NULL. This allows writing code that does not
+ * know the number of entries in advance.
+ */
+const char *
+pgstat_slru_name(int slru_idx)
+{
+	if (slru_idx < 0 || slru_idx >= SLRU_NUM_ELEMENTS)
+		return NULL;
+
+	return slru_names[slru_idx];
+}
+
+/*
+ * slru_entry
+ *
+ * Returns pointer to entry with counters for given SLRU (based on the name
+ * stored in SlruCtl as lwlock tranche name).
+ */
+static PgStat_SLRUStats *
+slru_entry(int slru_idx)
+{
+	/*
+	 * The postmaster should never register any SLRU statistics counts; if it
+	 * did, the counts would be duplicated into child processes via fork().
+	 */
+	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
+
+	Assert((slru_idx >= 0) && (slru_idx < SLRU_NUM_ELEMENTS));
+
+	return &pending_SLRUStats[slru_idx];
+}
+
+/*
+ * SLRU statistics count accumulation functions --- called from slru.c
+ */
+
+void
+pgstat_count_slru_page_zeroed(int slru_idx)
+{
+	slru_entry(slru_idx)->blocks_zeroed += 1;
+	have_slrustats = true;
+}
+
+void
+pgstat_count_slru_page_hit(int slru_idx)
+{
+	slru_entry(slru_idx)->blocks_hit += 1;
+	have_slrustats = true;
+}
+
+void
+pgstat_count_slru_page_exists(int slru_idx)
+{
+	slru_entry(slru_idx)->blocks_exists += 1;
+	have_slrustats = true;
+}
+
+void
+pgstat_count_slru_page_read(int slru_idx)
+{
+	slru_entry(slru_idx)->blocks_read += 1;
+	have_slrustats = true;
+}
+
+void
+pgstat_count_slru_page_written(int slru_idx)
+{
+	slru_entry(slru_idx)->blocks_written += 1;
+	have_slrustats = true;
+}
+
+void
+pgstat_count_slru_flush(int slru_idx)
+{
+	slru_entry(slru_idx)->flush += 1;
+	have_slrustats = true;
+}
+
+void
+pgstat_count_slru_truncate(int slru_idx)
+{
+	slru_entry(slru_idx)->truncate += 1;
+	have_slrustats = true;
+}
+
+
+/* ------------------------------------------------------------
+ * Fetching of stats
+ *------------------------------------------------------------
+ */
 
 /* ----------
  * pgstat_fetch_stat_dbentry() -
@@ -3313,35 +4227,6 @@ pgstat_fetch_stat_tabentry_extended(bool shared, Oid reloid)
 	cached_tabent_key.objectid = reloid;
 
 	return &cached_tabent;
-}
-
-
-/* ----------
- * pgstat_copy_index_counters() -
- *
- *	Support function for index swapping. Copy a portion of the counters of the
- *	relation to specified place.
- * ----------
- */
-void
-pgstat_copy_index_counters(Oid relid, PgStat_TableStatus *dst)
-{
-	PgStat_StatTabEntry *tabentry;
-
-	/* No point fetching tabentry when dst is NULL */
-	if (!dst)
-		return;
-
-	tabentry = pgstat_fetch_stat_tabentry(relid);
-
-	if (!tabentry)
-		return;
-
-	dst->t_counts.t_numscans = tabentry->numscans;
-	dst->t_counts.t_tuples_returned = tabentry->tuples_returned;
-	dst->t_counts.t_tuples_fetched = tabentry->tuples_fetched;
-	dst->t_counts.t_blocks_fetched = tabentry->blocks_fetched;
-	dst->t_counts.t_blocks_hit = tabentry->blocks_hit;
 }
 
 
@@ -3628,849 +4513,4 @@ pgstat_fetch_replslot(int *nslots_p)
 
 	*nslots_p = n_cached_replslotstats;
 	return cached_replslotstats;
-}
-
-/*
- * Shut down a single backend's statistics reporting at process exit.
- *
- * Flush any remaining statistics counts out to shared stats.  Without this,
- * operations triggered during backend exit (such as temp table deletions)
- * won't be counted.
- */
-static void
-pgstat_shutdown_hook(int code, Datum arg)
-{
-	/*
-	 * If we got as far as discovering our own database ID, we can report what
-	 * we did to the shared stats.  Otherwise, we'd be sending an invalid
-	 * database ID, so forget it.  (This means that accesses to pg_database
-	 * during failed backend starts might never get counted.)
-	 */
-	if (OidIsValid(MyDatabaseId))
-	{
-		if (MyBackendType == B_BACKEND)
-			pgstat_update_connstats(true);
-		pgstat_report_stat(true);
-	}
-
-	/*
-	 * We need to clean up temporary slots before detaching shared statistics
-	 * so that the statistics for temporary slots are properly removed.
-	 */
-	if (MyReplicationSlot != NULL)
-		ReplicationSlotRelease();
-
-	ReplicationSlotCleanup();
-
-	if (IsUnderPostmaster)
-	{
-		Assert(area);
-
-		/* We shouldn't leave a reference to shared stats. */
-		cleanup_dropped_stats_entries();
-
-		dshash_detach(pgStatSharedHash);
-		pgStatSharedHash = NULL;
-
-		/* We are going to exit. Don't bother destroying local hashes. */
-		pgStatPendingHash = NULL;
-
-		dsa_detach(area);
-		area = NULL;
-	}
-}
-
-/* ----------
- * pgstat_initialize() -
- *
- *	Initialize pgstats state, and set up our on-proc-exit hook.
- *	Called from InitPostgres and AuxiliaryProcessMain. For auxiliary process,
- *	MyBackendId is invalid. Otherwise, MyBackendId must be set,
- *	but we must not have started any transaction yet (since the
- *	exit hook must run after the last transaction exit).
- *	NOTE: MyDatabaseId isn't set yet; so the shutdown hook has to be careful.
- * ----------
- */
-void
-pgstat_initialize(void)
-{
-	/* XXX: should we handle single user mode differently? */
-
-	if (IsUnderPostmaster)
-	{
-		MemoryContext oldcontext;
-
-		/* stats shared memory persists for the backend lifetime */
-		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-
-		area = dsa_attach_in_place(StatsShmem->raw_dsa_area, NULL);
-		dsa_pin_mapping(area);
-
-		pgStatSharedHash = dshash_attach(area, &dsh_params,
-										 StatsShmem->hash_handle, 0);
-
-		MemoryContextSwitchTo(oldcontext);
-	}
-
-	/*
-	 * Initialize prevWalUsage with pgWalUsage so that pgstat_report_wal() can
-	 * calculate how much pgWalUsage counters are increased by substracting
-	 * prevWalUsage from pgWalUsage.
-	 */
-	prevWalUsage = pgWalUsage;
-
-	pgbestat_backend_initialize();
-
-	/* need to be called before dsm shutdown */
-	before_shmem_exit(pgstat_shutdown_hook, 0);
-}
-
-/* ------------------------------------------------------------
- * Local support functions follow
- * ------------------------------------------------------------
- */
-
-
-/* ----------
- * pgstat_report_archiver() -
- *
- *		Report archiver statistics
- * ----------
- */
-void
-pgstat_report_archiver(const char *xlog, bool failed)
-{
-	TimestampTz now = GetCurrentTimestamp();
-	uint32		before_count PG_USED_FOR_ASSERTS_ONLY;
-	uint32		after_count PG_USED_FOR_ASSERTS_ONLY;
-
-
-	START_CRIT_SECTION();
-	before_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->archiver_changecount, 1);
-	Assert((before_count & 1) == 0);
-
-	if (failed)
-	{
-		++StatsShmem->archiver_stats.failed_count;
-		memcpy(&StatsShmem->archiver_stats.last_failed_wal, xlog,
-			   sizeof(StatsShmem->archiver_stats.last_failed_wal));
-		StatsShmem->archiver_stats.last_failed_timestamp = now;
-	}
-	else
-	{
-		++StatsShmem->archiver_stats.archived_count;
-		memcpy(&StatsShmem->archiver_stats.last_archived_wal, xlog,
-			   sizeof(StatsShmem->archiver_stats.last_archived_wal));
-		StatsShmem->archiver_stats.last_archived_timestamp = now;
-	}
-
-	after_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->archiver_changecount, 1);
-	Assert(after_count == before_count + 1);
-	END_CRIT_SECTION();
-}
-
-/* ----------
- * pgstat_report_bgwriter() -
- *
- *		Report bgwriter statistics
- * ----------
- */
-void
-pgstat_report_bgwriter(void)
-{
-	static const PgStat_BgWriter all_zeroes;
-	PgStat_BgWriter *s = &StatsShmem->bgwriter_stats;
-	PgStat_BgWriter *l = &BgWriterStats;
-	uint32		before_count PG_USED_FOR_ASSERTS_ONLY;
-	uint32		after_count PG_USED_FOR_ASSERTS_ONLY;
-
-	/*
-	 * This function can be called even if nothing at all has happened. In
-	 * this case, avoid taking lock for a completely empty stats.
-	 */
-	if (memcmp(&BgWriterStats, &all_zeroes, sizeof(PgStat_BgWriter)) == 0)
-		return;
-
-	START_CRIT_SECTION();
-	before_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->bgwriter_changecount, 1);
-	Assert((before_count & 1) == 0);
-
-	s->buf_written_clean += l->buf_written_clean;
-	s->maxwritten_clean += l->maxwritten_clean;
-	s->buf_alloc += l->buf_alloc;
-
-	after_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->bgwriter_changecount, 1);
-	Assert(after_count == before_count + 1);
-	END_CRIT_SECTION();
-
-	/*
-	 * Clear out the statistics buffer, so it can be re-used.
-	 */
-	MemSet(&BgWriterStats, 0, sizeof(BgWriterStats));
-}
-
-/* ----------
- * pgstat_report_checkpointer() -
- *
- *		Report checkpointer statistics
- * ----------
- */
-void
-pgstat_report_checkpointer(void)
-{
-	/* We assume this initializes to zeroes */
-	static const PgStat_CheckPointer all_zeroes;
-	PgStat_CheckPointer *s = &StatsShmem->checkpointer_stats;
-	PgStat_CheckPointer *l = &CheckPointerStats;
-	uint32		before_count PG_USED_FOR_ASSERTS_ONLY;
-	uint32		after_count PG_USED_FOR_ASSERTS_ONLY;
-
-	/*
-	 * This function can be called even if nothing at all has happened. In
-	 * this case, avoid taking lock for a completely empty stats.
-	 */
-	if (memcmp(&CheckPointerStats, &all_zeroes,
-			   sizeof(PgStat_CheckPointer)) == 0)
-		return;
-
-	START_CRIT_SECTION();
-	before_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->checkpointer_changecount, 1);
-	Assert((before_count & 1) == 0);
-
-	s->timed_checkpoints += l->timed_checkpoints;
-	s->requested_checkpoints += l->requested_checkpoints;
-	s->checkpoint_write_time += l->checkpoint_write_time;
-	s->checkpoint_sync_time += l->checkpoint_sync_time;
-	s->buf_written_checkpoints += l->buf_written_checkpoints;
-	s->buf_written_backend += l->buf_written_backend;
-	s->buf_fsync_backend += l->buf_fsync_backend;
-
-	after_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->checkpointer_changecount, 1);
-	Assert(after_count == before_count + 1);
-	END_CRIT_SECTION();
-
-	/*
-	 * Clear out the statistics buffer, so it can be re-used.
-	 */
-	MemSet(&CheckPointerStats, 0, sizeof(CheckPointerStats));
-}
-
-/* ----------
- * pgstat_report_wal() -
- *
- *		Report WAL statistics
- * ----------
- */
-void
-pgstat_report_wal(bool force)
-{
-	flush_walstat(force);
-}
-
-/* ----------
- * pgstat_update_connstat() -
- *
- *		Update local connection stats
- * ----------
- */
-static void
-pgstat_update_connstats(bool disconnect)
-{
-	static TimestampTz last_report = 0;
-	static SessionEndType session_end_type = DISCONNECT_NOT_YET;
-	TimestampTz now;
-	long		secs;
-	int			usecs;
-	PgStat_StatDBEntry *ldbstats;	/* local database entry */
-
-	Assert(MyBackendType == B_BACKEND);
-
-	if (session_end_type != DISCONNECT_NOT_YET)
-		return;
-
-	now = GetCurrentTimestamp();
-	if (last_report == 0)
-		last_report = MyStartTimestamp;
-	TimestampDifference(last_report, now, &secs, &usecs);
-	last_report = now;
-
-	if (disconnect)
-		session_end_type = pgStatSessionEndCause;
-
-	ldbstats = get_pending_dbstat_entry(MyDatabaseId);
-
-	ldbstats->counts.n_sessions = (last_report == 0 ? 1 : 0);
-	ldbstats->counts.total_session_time += secs * 1000000 + usecs;
-	ldbstats->counts.total_active_time += pgStatActiveTime;
-	pgStatActiveTime = 0;
-	ldbstats->counts.total_idle_in_xact_time += pgStatTransactionIdleTime;
-	pgStatTransactionIdleTime = 0;
-
-	switch (session_end_type)
-	{
-		case DISCONNECT_NOT_YET:
-		case DISCONNECT_NORMAL:
-			/* we don't collect these */
-			break;
-		case DISCONNECT_CLIENT_EOF:
-			ldbstats->counts.n_sessions_abandoned++;
-			break;
-		case DISCONNECT_FATAL:
-			ldbstats->counts.n_sessions_fatal++;
-			break;
-		case DISCONNECT_KILLED:
-			ldbstats->counts.n_sessions_killed++;
-			break;
-	}
-}
-
-/* ----------
- * get_pending_dbstat_entry() -
- *
- *  Find or create a local PgStat_StatDBEntry entry for dbid.  New entry is
- *  created and initialized if not exists.
- */
-static PgStat_StatDBEntry *
-get_pending_dbstat_entry(Oid dbid)
-{
-	PgStat_StatDBEntry *dbentry;
-	bool		found;
-
-	/*
-	 * Find an entry or create a new one.
-	 */
-	dbentry = (PgStat_StatDBEntry *)
-		get_pending_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid,
-							 true, &found);
-
-	return dbentry;
-}
-
-/* ----------
- * get_pending_tabstat_entry() -
- *  Find or create a PgStat_TableStatus entry for rel. New entry is created and
- *  initialized if not exists.
- * ----------
- */
-static PgStat_TableStatus *
-get_pending_tabstat_entry(Oid rel_id, bool isshared)
-{
-	PgStat_TableStatus *tabentry;
-	bool		found;
-
-	tabentry = (PgStat_TableStatus *)
-		get_pending_stat_entry(PGSTAT_TYPE_TABLE,
-							 isshared ? InvalidOid : MyDatabaseId,
-							 rel_id, true, &found);
-
-	return tabentry;
-}
-
-/* ----------
- * pgstat_write_statsfile() -
- *		Write the global statistics file, as well as DB files.
- *
- * This function is called in the last process that is accessing the shared
- * stats so locking is not required.
- * ----------
- */
-static void
-pgstat_write_statsfile(void)
-{
-	FILE	   *fpout;
-	int32		format_id;
-	const char *tmpfile = PGSTAT_STAT_PERMANENT_TMPFILE;
-	const char *statfile = PGSTAT_STAT_PERMANENT_FILENAME;
-	int			rc;
-	dshash_seq_status hstat;
-	PgStatShmHashEntry *ps;
-
-	/* stats is not initialized yet. just return. */
-	if (!area)
-		return;
-
-	elog(DEBUG2, "writing stats file \"%s\"", statfile);
-
-	/*
-	 * Open the statistics temp file to write out the current values.
-	 */
-	fpout = AllocateFile(tmpfile, PG_BINARY_W);
-	if (fpout == NULL)
-	{
-		ereport(LOG,
-				(errcode_for_file_access(),
-				 errmsg("could not open temporary statistics file \"%s\": %m",
-						tmpfile)));
-		return;
-	}
-
-	/*
-	 * Set the timestamp of the stats file.
-	 */
-	pg_atomic_write_u64(&StatsShmem->stats_timestamp, GetCurrentTimestamp());
-
-	/*
-	 * Write the file header --- currently just a format ID.
-	 */
-	format_id = PGSTAT_FILE_FORMAT_ID;
-	rc = fwrite(&format_id, sizeof(format_id), 1, fpout);
-	(void) rc;					/* we'll check for error with ferror */
-
-	/*
-	 * Write bgwriter global stats struct
-	 */
-	rc = fwrite(&StatsShmem->bgwriter_stats, sizeof(PgStat_BgWriter), 1, fpout);
-	(void) rc;					/* we'll check for error with ferror */
-
-	/*
-	 * Write checkpointer global stats struct
-	 */
-	rc = fwrite(&StatsShmem->checkpointer_stats, sizeof(PgStat_CheckPointer), 1, fpout);
-	(void) rc;					/* we'll check for error with ferror */
-
-	/*
-	 * Write archiver global stats struct
-	 */
-	rc = fwrite(&StatsShmem->archiver_stats, sizeof(PgStat_Archiver), 1,
-				fpout);
-	(void) rc;					/* we'll check for error with ferror */
-
-	/*
-	 * Write WAL global stats struct
-	 */
-	rc = fwrite(&StatsShmem->wal_stats, sizeof(PgStat_Wal), 1, fpout);
-	(void) rc;					/* we'll check for error with ferror */
-
-	/*
-	 * Write SLRU stats struct
-	 */
-	rc = fwrite(&StatsShmem->slru.stats,
-				sizeof(PgStat_SLRUStats[SLRU_NUM_ELEMENTS]),
-				1, fpout);
-	(void) rc;					/* we'll check for error with ferror */
-
-	/*
-	 * Walk through the stats entry
-	 */
-	dshash_seq_init(&hstat, pgStatSharedHash, false);
-	while ((ps = dshash_seq_next(&hstat)) != NULL)
-	{
-		PgStat_StatEntryHeader *shent;
-		size_t		len;
-
-		CHECK_FOR_INTERRUPTS();
-
-		shent = (PgStat_StatEntryHeader *) dsa_get_address(area, ps->body);
-
-		/* we may have some "dropped" entries not yet removed, skip them */
-		if (shent->dropped)
-			continue;
-
-		/* Make DB's timestamp consistent with the global stats */
-		if (ps->key.type == PGSTAT_TYPE_DB)
-		{
-			PgStat_StatDBEntry *dbentry = (PgStat_StatDBEntry *) shent;
-
-			dbentry->stats_timestamp =
-				(TimestampTz) pg_atomic_read_u64(&StatsShmem->stats_timestamp);
-		}
-
-		fputc('S', fpout);
-		rc = fwrite(&ps->key, sizeof(PgStatHashKey), 1, fpout);
-
-		/* Write except the header part of the etnry */
-		len = PGSTAT_SHENT_BODY_LEN(ps->key.type);
-		rc = fwrite(PGSTAT_SHENT_BODY(shent), len, 1, fpout);
-		(void) rc;				/* we'll check for error with ferror */
-	}
-	dshash_seq_term(&hstat);
-
-	/*
-	 * No more output to be done. Close the temp file and replace the old
-	 * pgstat.stat with it.  The ferror() check replaces testing for error
-	 * after each individual fputc or fwrite above.
-	 */
-	fputc('E', fpout);
-
-	if (ferror(fpout))
-	{
-		ereport(LOG,
-				(errcode_for_file_access(),
-				 errmsg("could not write temporary statistics file \"%s\": %m",
-						tmpfile)));
-		FreeFile(fpout);
-		unlink(tmpfile);
-	}
-	else if (FreeFile(fpout) < 0)
-	{
-		ereport(LOG,
-				(errcode_for_file_access(),
-				 errmsg("could not close temporary statistics file \"%s\": %m",
-						tmpfile)));
-		unlink(tmpfile);
-	}
-	else if (rename(tmpfile, statfile) < 0)
-	{
-		ereport(LOG,
-				(errcode_for_file_access(),
-				 errmsg("could not rename temporary statistics file \"%s\" to \"%s\": %m",
-						tmpfile, statfile)));
-		unlink(tmpfile);
-	}
-}
-
-/* ----------
- * pgstat_read_statsfile() -
- *
- *	Reads in existing activity statistics file into the shared stats hash.
- *
- * This function is called in the only process that is accessing the shared
- * stats so locking is not required.
- * ----------
- */
-static void
-pgstat_read_statsfile(void)
-{
-	FILE	   *fpin;
-	int32		format_id;
-	bool		found;
-	const char *statfile = PGSTAT_STAT_PERMANENT_FILENAME;
-	char		tag;
-
-	/* shouldn't be called from postmaster */
-	Assert(IsUnderPostmaster);
-
-	elog(DEBUG2, "reading stats file \"%s\"", statfile);
-
-	/*
-	 * Set the current timestamp (will be kept only in case we can't load an
-	 * existing statsfile).
-	 */
-	StatsShmem->bgwriter_stats.stat_reset_timestamp = GetCurrentTimestamp();
-	StatsShmem->archiver_stats.stat_reset_timestamp =
-		StatsShmem->bgwriter_stats.stat_reset_timestamp;
-	StatsShmem->wal_stats.stat_reset_timestamp =
-		StatsShmem->bgwriter_stats.stat_reset_timestamp;
-
-	/*
-	 * Try to open the stats file. If it doesn't exist, the backends simply
-	 * returns zero for anything and the activity statistics simply starts
-	 * from scratch with empty counters.
-	 *
-	 * ENOENT is a possibility if the activity statistics is not running or
-	 * has not yet written the stats file the first time.  Any other failure
-	 * condition is suspicious.
-	 */
-	if ((fpin = AllocateFile(statfile, PG_BINARY_R)) == NULL)
-	{
-		if (errno != ENOENT)
-			ereport(LOG,
-					(errcode_for_file_access(),
-					 errmsg("could not open statistics file \"%s\": %m",
-							statfile)));
-		return;
-	}
-
-	/*
-	 * Verify it's of the expected format.
-	 */
-	if (fread(&format_id, 1, sizeof(format_id), fpin) != sizeof(format_id) ||
-		format_id != PGSTAT_FILE_FORMAT_ID)
-	{
-		ereport(LOG,
-				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		goto done;
-	}
-
-	/*
-	 * Read bgwiter stats struct
-	 */
-	if (fread(&StatsShmem->bgwriter_stats, 1, sizeof(PgStat_BgWriter), fpin) !=
-		sizeof(PgStat_BgWriter))
-	{
-		ereport(LOG,
-				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->bgwriter_stats, 0, sizeof(PgStat_BgWriter));
-		goto done;
-	}
-
-	/*
-	 * Read checkpointer stats struct
-	 */
-	if (fread(&StatsShmem->checkpointer_stats, 1, sizeof(PgStat_CheckPointer), fpin) !=
-		sizeof(PgStat_CheckPointer))
-	{
-		ereport(LOG,
-				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->checkpointer_stats, 0, sizeof(PgStat_CheckPointer));
-		goto done;
-	}
-
-	/*
-	 * Read archiver stats struct
-	 */
-	if (fread(&StatsShmem->archiver_stats, 1, sizeof(PgStat_Archiver),
-			  fpin) != sizeof(PgStat_Archiver))
-	{
-		ereport(LOG,
-				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->archiver_stats, 0, sizeof(PgStat_Archiver));
-		goto done;
-	}
-
-	/*
-	 * Read WAL stats struct
-	 */
-	if (fread(&StatsShmem->wal_stats, 1, sizeof(PgStat_Wal), fpin)
-		!= sizeof(PgStat_Wal))
-	{
-		ereport(LOG,
-				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->wal_stats, 0, sizeof(PgStat_Wal));
-		goto done;
-	}
-
-	/*
-	 * Read SLRU stats struct
-	 */
-	if (fread(&StatsShmem->slru.stats, 1, SizeOfSlruStats, fpin) != SizeOfSlruStats)
-	{
-		ereport(LOG,
-				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		goto done;
-	}
-
-	/*
-	 * We found an existing activity statistics file. Read it and put all the
-	 * hash table entries into place.
-	 */
-	while ((tag = fgetc(fpin)) == 'S')
-	{
-		PgStatHashKey key;
-		PgStat_StatEntryHeader *p;
-		size_t		len;
-
-		CHECK_FOR_INTERRUPTS();
-
-		if (fread(&key, 1, sizeof(key), fpin) != sizeof(key))
-		{
-			ereport(LOG,
-					(errmsg("corrupted statistics file \"%s\"", statfile)));
-			goto done;
-		}
-
-		p = get_stat_entry(key.type, key.databaseid, key.objectid,
-						   false, true, &found);
-
-		/* don't allow duplicate entries */
-		if (found)
-		{
-			ereport(LOG,
-					(errmsg("corrupted statistics file \"%s\"",
-							statfile)));
-			goto done;
-		}
-
-		/* Avoid overwriting header part */
-		len = PGSTAT_SHENT_BODY_LEN(key.type);
-
-		if (fread(PGSTAT_SHENT_BODY(p), 1, len, fpin) != len)
-		{
-			ereport(LOG,
-					(errmsg("corrupted statistics file \"%s\"", statfile)));
-			goto done;
-		}
-	}
-
-	if (tag != 'E')
-	{
-		ereport(LOG,
-				(errmsg("corrupted statistics file \"%s\"",
-						statfile)));
-		goto done;
-	}
-
-done:
-	FreeFile(fpin);
-
-	elog(DEBUG2, "removing permanent stats file \"%s\"", statfile);
-	unlink(statfile);
-
-	return;
-}
-
-/* ----------
- * pgstat_setup_memcxt() -
- *
- *	Create pgStatLocalContext if not already done.
- * ----------
- */
-static void
-pgstat_setup_memcxt(void)
-{
-	if (unlikely(!pgStatLocalContext))
-		pgStatLocalContext =
-			AllocSetContextCreate(TopMemoryContext,
-								  "Backend statistics snapshot",
-								  ALLOCSET_SMALL_SIZES);
-
-	if (unlikely(!pgStatCacheContext))
-		pgStatCacheContext =
-			AllocSetContextCreate(CacheMemoryContext,
-								  "Activity statistics",
-								  ALLOCSET_SMALL_SIZES);
-}
-
-/* ----------
- * pgstat_clear_snapshot() -
- *
- *	Discard any data collected in the current transaction.  Any subsequent
- *	request will cause new snapshots to be read.
- *
- *	This is also invoked during transaction commit or abort to discard
- *	the no-longer-wanted snapshot.
- * ----------
- */
-void
-pgstat_clear_snapshot(void)
-{
-	/* Release memory, if any was allocated */
-	if (pgStatLocalContext)
-	{
-		MemoryContextDelete(pgStatLocalContext);
-
-		/* Reset variables */
-		pgStatLocalContext = NULL;
-	}
-
-	/* Invalidate the simple cache keys */
-	cached_dbent_key = stathashkey_zero;
-	cached_tabent_key = stathashkey_zero;
-	cached_funcent_key = stathashkey_zero;
-	cached_archiverstats_is_valid = false;
-	cached_bgwriterstats_is_valid = false;
-	cached_checkpointerstats_is_valid = false;
-	cached_walstats_is_valid = false;
-	cached_slrustats_is_valid = false;
-	n_cached_replslotstats = -1;
-
-	/* forward to stats sub-subsystems */
-	pgbestat_clear_snapshot();
-}
-
-/*
- * pgstat_slru_index
- *
- * Determine index of entry for a SLRU with a given name. If there's no exact
- * match, returns index of the last "other" entry used for SLRUs defined in
- * external projects.
- */
-int
-pgstat_slru_index(const char *name)
-{
-	int			i;
-
-	for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
-	{
-		if (strcmp(slru_names[i], name) == 0)
-			return i;
-	}
-
-	/* return index of the last entry (which is the "other" one) */
-	return (SLRU_NUM_ELEMENTS - 1);
-}
-
-/*
- * pgstat_slru_name
- *
- * Returns SLRU name for an index. The index may be above SLRU_NUM_ELEMENTS,
- * in which case this returns NULL. This allows writing code that does not
- * know the number of entries in advance.
- */
-const char *
-pgstat_slru_name(int slru_idx)
-{
-	if (slru_idx < 0 || slru_idx >= SLRU_NUM_ELEMENTS)
-		return NULL;
-
-	return slru_names[slru_idx];
-}
-
-/*
- * slru_entry
- *
- * Returns pointer to entry with counters for given SLRU (based on the name
- * stored in SlruCtl as lwlock tranche name).
- */
-static PgStat_SLRUStats *
-slru_entry(int slru_idx)
-{
-	/*
-	 * The postmaster should never register any SLRU statistics counts; if it
-	 * did, the counts would be duplicated into child processes via fork().
-	 */
-	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
-
-	Assert((slru_idx >= 0) && (slru_idx < SLRU_NUM_ELEMENTS));
-
-	return &pending_SLRUStats[slru_idx];
-}
-
-/*
- * SLRU statistics count accumulation functions --- called from slru.c
- */
-
-void
-pgstat_count_slru_page_zeroed(int slru_idx)
-{
-	slru_entry(slru_idx)->blocks_zeroed += 1;
-	have_slrustats = true;
-}
-
-void
-pgstat_count_slru_page_hit(int slru_idx)
-{
-	slru_entry(slru_idx)->blocks_hit += 1;
-	have_slrustats = true;
-}
-
-void
-pgstat_count_slru_page_exists(int slru_idx)
-{
-	slru_entry(slru_idx)->blocks_exists += 1;
-	have_slrustats = true;
-}
-
-void
-pgstat_count_slru_page_read(int slru_idx)
-{
-	slru_entry(slru_idx)->blocks_read += 1;
-	have_slrustats = true;
-}
-
-void
-pgstat_count_slru_page_written(int slru_idx)
-{
-	slru_entry(slru_idx)->blocks_written += 1;
-	have_slrustats = true;
-}
-
-void
-pgstat_count_slru_flush(int slru_idx)
-{
-	slru_entry(slru_idx)->flush += 1;
-	have_slrustats = true;
-}
-
-void
-pgstat_count_slru_truncate(int slru_idx)
-{
-	slru_entry(slru_idx)->truncate += 1;
-	have_slrustats = true;
 }
