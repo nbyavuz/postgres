@@ -137,10 +137,6 @@ typedef enum PgStat_Single_Reset_Type
 typedef struct PgStat_TableStatus
 {
 	struct PgStat_TableXactStatus *trans;	/* lowest subxact's counts */
-	TimestampTz vacuum_timestamp;	/* user initiated vacuum */
-	TimestampTz autovac_vacuum_timestamp;	/* autovacuum initiated */
-	TimestampTz analyze_timestamp;	/* user initiated */
-	TimestampTz autovac_analyze_timestamp;	/* autovacuum initiated */
 	PgStat_TableCounts t_counts;	/* event counts to be sent */
 	Relation	relation;			/* rel that is using this entry */
 } PgStat_TableStatus;
