@@ -613,7 +613,7 @@ static void pgstat_lookup_cache_gc(void);
 
 static void cleanup_dropped_stats_entries(void);
 
-static void delete_current_stats_entry(dshash_seq_status *hstat);
+static bool delete_current_stats_entry(dshash_seq_status *hstat);
 static PgStatShm_StatEntryHeader *get_pending_stat_entry(PgStatTypes type, Oid dbid,
 													  Oid objid, bool create,
 													  bool *found);
@@ -888,6 +888,7 @@ pgstat_drop_database(Oid databaseid)
 {
 	dshash_seq_status hstat;
 	PgStatShmHashEntry *p;
+	uint64		not_freed_count = 0;
 
 	Assert(OidIsValid(databaseid));
 
@@ -899,12 +900,23 @@ pgstat_drop_database(Oid databaseid)
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
 		if (p->key.databaseid == MyDatabaseId)
-			delete_current_stats_entry(&hstat);
+		{
+			/*
+			 * Even statistics for a dropped database might currently be
+			 * accessed (consider e.g. database stats for pg_stat_database).
+			 */
+			if (!delete_current_stats_entry(&hstat))
+				not_freed_count++;
+		}
 	}
 	dshash_seq_term(&hstat);
 
-	/* Let readers run a garbage collection of local hashes */
-	pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
+	/*
+	 * If some of the stats data could not be freed, signal the reference
+	 * holders to run garbage collection of their cached pgStatShmLookupCache.
+	 */
+	if (not_freed_count > 0)
+		pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
 }
 
 /* ----------
@@ -1107,7 +1119,7 @@ pgstat_vacuum_stat(void)
 	pgstat_oid_hash *dbids;		/* database ids */
 	pgstat_oid_hash *relids;	/* relation ids in the current database */
 	pgstat_oid_hash *funcids;	/* function ids in the current database */
-	int			nvictims = 0;	/* # of entries of the above */
+	uint64		not_freed_count = 0;
 	dshash_seq_status dshstat;
 	PgStatShmHashEntry *ent;
 
@@ -1119,8 +1131,6 @@ pgstat_vacuum_stat(void)
 	dbids = collect_oids(DatabaseRelationId, Anum_pg_database_oid);
 	relids = collect_oids(RelationRelationId, Anum_pg_class_oid);
 	funcids = collect_oids(ProcedureRelationId, Anum_pg_proc_oid);
-
-	nvictims = 0;
 
 	/* some of the dshash entries are to be removed, take exclusive lock. */
 	dshash_seq_init(&dshstat, pgStatSharedHash, true);
@@ -1165,15 +1175,19 @@ pgstat_vacuum_stat(void)
 		}
 
 		/* drop this entry */
-		delete_current_stats_entry(&dshstat);
-		nvictims++;
+		if (!delete_current_stats_entry(&dshstat))
+			not_freed_count++;
 	}
 	dshash_seq_term(&dshstat);
 	pgstat_oid_destroy(dbids);
 	pgstat_oid_destroy(relids);
 	pgstat_oid_destroy(funcids);
 
-	if (nvictims > 0)
+	/*
+	 * If some of the stats data could not be freed, signal the reference
+	 * holders to run garbage collection of their cached pgStatShmLookupCache.
+	 */
+	if (not_freed_count > 0)
 		pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
 }
 
@@ -2312,15 +2326,19 @@ cleanup_dropped_stats_entries(void)
  *
  *  Deletes the given shared entry from shared stats hash. The entry must be
  *  exclusively locked.
+ *
+ *  Returns whether the stats themselves could be freed or not (due to
+ *  non-zero refcount).
  * ----------
  */
-static void
+static bool
 delete_current_stats_entry(dshash_seq_status *hstat)
 {
 	PgStatShmHashEntry *ent;
 	PgStatHashKey key;
 	dsa_pointer pdsa;
 	PgStatShm_StatEntryHeader *header;
+	bool		did_free;
 
 	ent = dshash_get_current(hstat);
 	key = ent->key;
@@ -2367,9 +2385,14 @@ delete_current_stats_entry(dshash_seq_status *hstat)
 	if (pg_atomic_fetch_sub_u32(&header->refcount, 1) == 1)
 	{
 		dsa_free(area, pdsa);
+		did_free = true;
+	}
+	else
+	{
+		did_free = false;
 	}
 
-	return;
+	return did_free;
 }
 
 /*
