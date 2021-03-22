@@ -1931,9 +1931,10 @@ static PgStatShm_StatEntryHeader *
 get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 					  bool create, bool *found)
 {
+	PgStatHashKey key;
 	PgStatShmHashEntry *shhashent;
 	PgStatShm_StatEntryHeader *shheader = NULL;
-	PgStatHashKey key;
+	PgStatShmLookupCacheEntry *lohashent;
 	bool		shfound;
 
 	key.type = type;
@@ -1945,10 +1946,23 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 	/*
 	 * First check the lookup cache hashtable in local memory. If we find a
 	 * match here we can avoid taking locks / contention.
+	 *
+	 * We immediately insert a cache entry, because it avoids 1) multiple
+	 * hashtable lookups in case of a cache miss 2) having to deal with
+	 * out-of-memory errors after incrementing
+	 * PgStatShm_StatEntryHeader->refcount.
 	 */
-	if (pgStatShmLookupCache)
+	if (!pgStatShmLookupCache)
 	{
-		PgStatShmLookupCacheEntry *lohashent;
+		pgStatShmLookupCache =
+			pgstat_shm_lookup_cache_create(pgStatCacheContext,
+										   PGSTAT_TABLE_HASH_SIZE, NULL);
+		pgStatShmLookupCacheAge =
+			pg_atomic_read_u64(&StatsShmem->gc_count);
+	}
+
+	{
+		bool cache_found;
 
 		/*
 		 * pgStatShmLookupCacheAge increments quite slowly than the time the
@@ -1960,17 +1974,25 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 		while (pgstat_lookup_cache_needs_gc())
 			pgstat_lookup_cache_gc();
 
-		lohashent = pgstat_shm_lookup_cache_lookup(pgStatShmLookupCache, key);
+		lohashent = pgstat_shm_lookup_cache_insert(pgStatShmLookupCache, key, &cache_found);
 
-		if (lohashent)
+		if (!cache_found)
+		{
+			lohashent->shared = NULL;
+			lohashent->dsapointer = InvalidDsaPointer;
+		}
+		else if (lohashent->shared)
 		{
 			Assert(lohashent->shared->magic == 0xdeadbeef);
+			Assert(DsaPointerIsValid(lohashent->dsapointer));
 
 			if (found)
 				*found = true;
 			return lohashent->shared;
 		}
 	}
+
+	Assert(lohashent != NULL);
 
 	shhashent = dshash_find_extended(pgStatSharedHash, &key,
 									 create, nowait, create, &shfound);
@@ -1979,13 +2001,13 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 		if (create && !shfound)
 		{
 			/* Create new stats entry. */
-			dsa_pointer chunk = dsa_allocate0(area,
-											  pgstat_sharedentsize[type]);
+			dsa_pointer chunk;
 
+			chunk = dsa_allocate0(area, pgstat_sharedentsize[type]);
 			shheader = dsa_get_address(area, chunk);
 			shheader->magic = 0xdeadbeef;
 			LWLockInitialize(&shheader->lock, LWTRANCHE_STATS);
-			pg_atomic_init_u32(&shheader->refcount, 0);
+			pg_atomic_init_u32(&shheader->refcount, 1);
 
 			/* Link the new entry from the hash entry. */
 			shhashent->body = chunk;
@@ -1995,47 +2017,26 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 			shheader = dsa_get_address(area, shhashent->body);
 			Assert(shheader->magic == 0xdeadbeef);
 
-		}
-
-		/*
-		 * We expose this shared entry now.  You might think that the entry
-		 * can be removed by a concurrent backend, but since we are creating
-		 * an stats entry, the object actually exists and used in the upper
-		 * layer. Such an object cannot be dropped until the first vacuum
-		 * after the current transaction ends.
-		 */
-		dshash_release_lock(pgStatSharedHash, shhashent);
-
-		/*
-		 * FIXME: Previously this was conditional on
-		 * (pgStatShmLookupCache || pgStatCacheContext)
-		 * but I don't think that's correct - we'd not hold a refcount. Also,
-		 * why would it be ok if we had pgStatShmLookupCache but not pgStatCacheContext?
-		 */
-		Assert(pgStatCacheContext);
-		{
-			bool		lofound;
-			PgStatShmLookupCacheEntry *lohashent;
-
-			if (pgStatShmLookupCache == NULL)
-			{
-				pgStatShmLookupCache =
-					pgstat_shm_lookup_cache_create(pgStatCacheContext,
-											PGSTAT_TABLE_HASH_SIZE, NULL);
-				pgStatShmLookupCacheAge =
-					pg_atomic_read_u64(&StatsShmem->gc_count);
-			}
-
-			lohashent =
-				pgstat_shm_lookup_cache_insert(pgStatShmLookupCache, key, &lofound);
-
-			Assert(!lofound);
-			lohashent->shared = shheader;
-			lohashent->dsapointer = shhashent->body;
-
 			pg_atomic_add_fetch_u32(&shheader->refcount, 1);
 		}
+
+		/*
+		 * We can expose this shared entry now. The refcount has either been
+		 * increased by 1, or initialized to 1, preventing the entry from
+		 * being concurrently freed.
+		 */
+
+		dshash_release_lock(pgStatSharedHash, shhashent);
+
+		Assert(!DsaPointerIsValid(lohashent->dsapointer));
+		lohashent->shared = shheader;
+		lohashent->dsapointer = shhashent->body;
 	}
+
+	/*
+	 * XXX: In case of a non-existing shared entry, should we delete the
+	 * lookup again? Probably not worth it, it is likely to soon be created.
+	 */
 
 	if (found)
 		*found = shfound;
@@ -2100,22 +2101,23 @@ pgstat_lookup_cache_gc(void)
 	{
 		PgStatShm_StatEntryHeader *header = lohashent->shared;
 
-		Assert(header->magic == 0xdeadbeef);
+		Assert(!header || header->magic == 0xdeadbeef);
 
-		if (header->dropped)
+		if (header && !header->dropped)
+			continue;
+
+		if (header && pg_atomic_sub_fetch_u32(&header->refcount, 1) < 1)
 		{
-			if (pg_atomic_sub_fetch_u32(&header->refcount, 1) < 1)
-			{
-				/*
-				 * We're the last referrer to this entry, drop the
-				 * shared entry.
-				 */
-				dsa_free(area, lohashent->dsapointer);
-			}
-
-			if (!pgstat_shm_lookup_cache_delete(pgStatShmLookupCache, lohashent->key))
-				elog(PANIC, "something has gone wrong");
+			/*
+			 * We're the last referrer to this entry, drop the
+			 * shared entry.
+			 */
+			dsa_free(area, lohashent->dsapointer);
+			lohashent->shared = NULL;
 		}
+
+		if (!pgstat_shm_lookup_cache_delete(pgStatShmLookupCache, lohashent->key))
+			elog(PANIC, "something has gone wrong");
 	}
 
 	pgStatShmLookupCacheAge = currage;
@@ -2231,13 +2233,23 @@ cleanup_dropped_stats_entries(void)
 	while ((ent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i))
 		   != NULL)
 	{
+		if (!ent->shared)
+			continue;
+
+		Assert(ent->shared->magic == 0xdeadbeef);
+		Assert(DsaPointerIsValid(ent->dsapointer));
+
 		/*
 		 * Free the shared memory chunk for the entry if we were the last
 		 * referrer to a dropped entry.
 		 */
 		if (pg_atomic_sub_fetch_u32(&ent->shared->refcount, 1) < 1 &&
 			ent->shared->dropped)
+		{
 			dsa_free(area, ent->dsapointer);
+			ent->dsapointer = InvalidDsaPointer;
+			ent->shared = NULL;
+		}
 	}
 
 	/*
