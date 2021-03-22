@@ -296,7 +296,19 @@ StaticAssertDecl(sizeof(TimestampTz) == sizeof(pg_atomic_uint64),
 typedef struct StatsShmemStruct
 {
 	void   *raw_dsa_area;
+
+	/*
+	 * Stats for objects for which a variable number exists are kept in this
+	 * shared hash table. See comment above PgStatTypes for details.
+	 */
 	dshash_table_handle hash_handle;	/* shared dbstat hash */
+
+	/*
+	 * Whenever the for a dropped stats entry could not be freed (because
+	 * backends still have references), this is incremented, causing backends
+	 * to run pgstat_lookup_cache_gc(), allowing that memory to be reclaimed.
+	 */
+	pg_atomic_uint64 gc_count;
 
 	/* Global stats structs */
 	struct
@@ -341,10 +353,8 @@ typedef struct StatsShmemStruct
 		PgStat_Wal	stats;
 	} wal;
 
+	/* protected by StatsLock */
 	pg_atomic_uint64 stats_timestamp;
-
-	pg_atomic_uint64 gc_count;	/* # of entries deleted. not protected by
-								 * StatsLock */
 } StatsShmemStruct;
 
 
