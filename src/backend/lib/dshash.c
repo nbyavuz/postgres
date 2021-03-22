@@ -737,7 +737,9 @@ dshash_delete_current(dshash_seq_status *status)
 {
 	dshash_table	   *hash_table	= status->hash_table;
 	dshash_table_item  *item		= status->curitem;
-	size_t				partition	= PARTITION_FOR_HASH(item->hash);
+	size_t				partition PG_USED_FOR_ASSERTS_ONLY;
+
+	partition = PARTITION_FOR_HASH(item->hash);
 
 	Assert(status->exclusive);
 	Assert(hash_table->control->magic == DSHASH_MAGIC);
