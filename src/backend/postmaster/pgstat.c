@@ -170,7 +170,7 @@ typedef struct PgStatPendingEntry
 {
 	PgStatHashKey key;
 	char		status;			/* for simplehash use */
-	PgStatShm_StatEntryHeader *pending;	/* address pointer to stats body */
+	void	   *pending;			/* the pending data itself */
 } PgStatPendingEntry;
 
 /*
