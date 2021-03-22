@@ -1407,6 +1407,24 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 	LWLockRelease(&header->lock);
 }
 
+static void
+pgstat_reset_slru_counter_internal(int index, TimestampTz ts)
+{
+	uint32		assert_changecount PG_USED_FOR_ASSERTS_ONLY;
+
+	LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
+
+	assert_changecount =
+		pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
+	Assert((assert_changecount & 1) == 0);
+
+	MemSet(&StatsShmem->slru.stats[index], 0, sizeof(PgStat_SLRUStats));
+	StatsShmem->slru.stats[index].stat_reset_timestamp = ts;
+
+	pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
+	LWLockRelease(&StatsShmem->slru.lock);
+}
+
 /* ----------
  * pgstat_reset_slru_counter() -
  *
@@ -1422,35 +1440,16 @@ pgstat_reset_slru_counter(const char *name)
 {
 	int			i;
 	TimestampTz ts = GetCurrentTimestamp();
-	uint32		assert_changecount PG_USED_FOR_ASSERTS_ONLY;
 
 	if (name)
 	{
 		i = pgstat_slru_index(name);
-		LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
-		assert_changecount =
-			pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
-		Assert((assert_changecount & 1) == 0);
-		MemSet(&StatsShmem->slru.stats[i], 0,
-			   sizeof(PgStat_SLRUStats));
-		StatsShmem->slru.stats[i].stat_reset_timestamp = ts;
-		pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
-		LWLockRelease(&StatsShmem->slru.lock);
+		pgstat_reset_slru_counter_internal(i, ts);
 	}
 	else
 	{
-		LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
-		assert_changecount =
-			pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
-		Assert((assert_changecount & 1) == 0);
 		for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
-		{
-			MemSet(&StatsShmem->slru.stats[i], 0,
-				   sizeof(PgStat_SLRUStats));
-			StatsShmem->slru.stats[i].stat_reset_timestamp = ts;
-		}
-		pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
-		LWLockRelease(&StatsShmem->slru.lock);
+			pgstat_reset_slru_counter_internal(i, ts);
 	}
 }
 
