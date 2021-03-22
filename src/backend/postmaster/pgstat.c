@@ -621,7 +621,7 @@ static PgStatShm_StatEntryHeader *get_lock_shared_stat_entry(PgStatTypes type,
 static bool pgstat_lookup_cache_needs_gc(void);
 static void pgstat_lookup_cache_gc(void);
 
-static void cleanup_dropped_stats_entries(void);
+static void pgstat_release_stats_references(void);
 
 static bool delete_current_stats_entry(dshash_seq_status *hstat);
 static PgStatShm_StatEntryHeader *get_pending_stat_entry(PgStatTypes type, Oid dbid,
@@ -1969,7 +1969,7 @@ pgstat_shutdown_hook(int code, Datum arg)
 		Assert(area);
 
 		/* We shouldn't leave a reference to shared stats. */
-		cleanup_dropped_stats_entries();
+		pgstat_release_stats_references();
 
 		dshash_detach(pgStatSharedHash);
 		pgStatSharedHash = NULL;
@@ -2282,16 +2282,14 @@ get_pending_tabstat_entry(Oid rel_id, bool isshared)
 	return tabentry;
 }
 
-/* ----------
- * cleanup_dropped_stats_entries() -
- *              Clean up shared stats entries no longer used.
+/*
+ * Release all local references to shared stats entries.
  *
- *  Shared stats entries for dropped objects may be left referenced. Clean up
- *  our reference and drop the shared entry if needed.
- * ----------
+ * When a process exits it cannot do so while still holding references onto
+ * stats entries, otherwise the memory will never be freed.
  */
 static void
-cleanup_dropped_stats_entries(void)
+pgstat_release_stats_references(void)
 {
 	pgstat_shm_lookup_cache_iterator i;
 	PgStatShmLookupCacheEntry *ent;
