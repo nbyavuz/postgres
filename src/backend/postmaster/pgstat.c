@@ -903,8 +903,10 @@ pgstat_drop_database(Oid databaseid)
 
 	Assert(OidIsValid(databaseid));
 
-	if (!IsUnderPostmaster || !pgStatSharedHash)
+	if (!IsUnderPostmaster)
 		return;
+
+	Assert(pgStatSharedHash != NULL);
 
 	/* some of the dshash entries are to be removed, take exclusive lock. */
 	dshash_seq_init(&hstat, pgStatSharedHash, true);
@@ -963,8 +965,7 @@ pgstat_report_stat(bool force)
 	int			i;
 	uint64		oldval;
 
-	/* Return if not active */
-	if (area == NULL)
+	if (!IsUnderPostmaster)
 		return 0;
 
 	/* Don't expend a clock check if nothing to do */
@@ -1571,9 +1572,7 @@ pgstat_write_statsfile(void)
 	dshash_seq_status hstat;
 	PgStatShmHashEntry *ps;
 
-	/* stats is not initialized yet. just return. */
-	if (!area)
-		return;
+	Assert(area);
 
 	elog(DEBUG2, "writing stats file \"%s\"", statfile);
 
@@ -2941,8 +2940,12 @@ pgstat_report_autovac(Oid dboid)
 	PgStatShm_StatDBEntry *dbentry;
 	TimestampTz ts;
 
-	/* return if activity stats is not active */
-	if (!area)
+	/* can't get here in single user mode */
+	Assert(area != NULL);
+	Assert(IsUnderPostmaster);
+
+	/* FIXME: this didn't use to exist? Why? */
+	if (!pgstat_track_counts)
 		return;
 
 	/*
@@ -2975,8 +2978,7 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
 	TimestampTz ts;
 
-	/* return if we are not collecting stats */
-	if (!area)
+	if (!IsUnderPostmaster || !pgstat_track_counts)
 		return;
 
 	/* Store the data in the table's hash table entry. */
@@ -3041,8 +3043,7 @@ pgstat_report_analyze(Relation rel,
 	PgStatShm_StatTabEntry *tabentry;
 	Oid			dboid = (rel->rd_rel->relisshared ? InvalidOid : MyDatabaseId);
 
-	/* return if we are not collecting stats */
-	if (!area)
+	if (!IsUnderPostmaster || !pgstat_track_counts)
 		return;
 
 	/*
@@ -3119,8 +3120,8 @@ pgstat_report_recovery_conflict(int reason)
 {
 	PgStat_StatDBEntry *dbent;
 
-	/* return if we are not collecting stats */
-	if (!area)
+	Assert(IsUnderPostmaster);
+	if (!pgstat_track_counts)
 		return;
 
 	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
@@ -3164,8 +3165,7 @@ pgstat_report_deadlock(void)
 {
 	PgStat_StatDBEntry *dbent;
 
-	/* return if we are not collecting stats */
-	if (!area)
+	if (!IsUnderPostmaster || !pgstat_track_counts)
 		return;
 
 	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
@@ -3183,8 +3183,7 @@ pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount)
 {
 	PgStatShm_StatDBEntry *sharedent;
 
-	/* return if we are not active */
-	if (!area)
+	if (!IsUnderPostmaster || !pgstat_track_counts)
 		return;
 
 	/*
@@ -3214,8 +3213,7 @@ pgstat_report_checksum_failure(void)
 {
 	PgStat_StatDBEntry *dbent;
 
-	/* return if we are not collecting stats */
-	if (!area)
+	if (!IsUnderPostmaster || !pgstat_track_counts)
 		return;
 
 	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
@@ -3233,8 +3231,7 @@ pgstat_report_tempfile(size_t filesize)
 {
 	PgStat_StatDBEntry *dbent;
 
-	/* return if we are not collecting stats */
-	if (!area)
+	if (!IsUnderPostmaster || !pgstat_track_counts)
 		return;
 
 	if (filesize == 0)			/* Is there a case where filesize is really 0? */
@@ -3262,7 +3259,8 @@ pgstat_report_replslot(uint32 index,
 	Assert(index < max_replication_slots);
 	Assert(slotname[0] != '\0' && strlen(slotname) < NAMEDATALEN);
 
-	if (!area)
+	Assert(IsUnderPostmaster);
+	if (!pgstat_track_counts)
 		return;
 
 	statent = &StatsShmem->replslot.stats[index];
@@ -3310,7 +3308,7 @@ pgstat_report_replslot_drop(uint32 index, const char *slotname)
 	Assert(index < max_replication_slots);
 	Assert(slotname[0] != '\0' && strlen(slotname) < NAMEDATALEN);
 
-	if (!area)
+	if (!IsUnderPostmaster || !pgstat_track_counts)
 		return;
 
 	statent = &StatsShmem->replslot.stats[index];
@@ -3459,8 +3457,7 @@ pgstat_initstats(Relation rel)
 		return;
 	}
 
-	/* return if we are not collecting stats */
-	if (!area)
+	if (!IsUnderPostmaster || !pgstat_track_counts)
 	{
 		/* We're not counting at all */
 		rel->pgstat_info = NULL;
