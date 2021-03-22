@@ -4503,7 +4503,7 @@ PgStat_Archiver *
 pgstat_fetch_stat_archiver(void)
 {
 	PgStat_Archiver reset;
-	PgStat_Archiver *reset_shared = &StatsShmem->archiver.reset_offset;
+	PgStat_Archiver *reset_offset = &StatsShmem->archiver.reset_offset;
 	PgStat_Archiver *shared = &StatsShmem->archiver.stats;
 	PgStat_Archiver *cached = &cached_archiverstats;
 
@@ -4511,7 +4511,7 @@ pgstat_fetch_stat_archiver(void)
 							 &StatsShmem->archiver.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
-	memcpy(&reset, reset_shared, sizeof(PgStat_Archiver));
+	memcpy(&reset, reset_offset, sizeof(PgStat_Archiver));
 	LWLockRelease(StatsLock);
 
 	/* compensate by reset offsets */
@@ -4548,7 +4548,7 @@ PgStat_BgWriter *
 pgstat_fetch_stat_bgwriter(void)
 {
 	PgStat_BgWriter reset;
-	PgStat_BgWriter *reset_shared = &StatsShmem->bgwriter.reset_offset;
+	PgStat_BgWriter *reset_offset = &StatsShmem->bgwriter.reset_offset;
 	PgStat_BgWriter *shared = &StatsShmem->bgwriter.stats;
 	PgStat_BgWriter *cached = &cached_bgwriterstats;
 
@@ -4556,7 +4556,7 @@ pgstat_fetch_stat_bgwriter(void)
 							 &StatsShmem->bgwriter.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
-	memcpy(&reset, reset_shared, sizeof(PgStat_BgWriter));
+	memcpy(&reset, reset_offset, sizeof(PgStat_BgWriter));
 	LWLockRelease(StatsLock);
 
 	/* compensate by reset offsets */
@@ -4581,7 +4581,7 @@ PgStat_CheckPointer *
 pgstat_fetch_stat_checkpointer(void)
 {
 	PgStat_CheckPointer reset;
-	PgStat_CheckPointer *reset_shared = &StatsShmem->checkpointer.reset_offset;
+	PgStat_CheckPointer *reset_offset = &StatsShmem->checkpointer.reset_offset;
 	PgStat_CheckPointer *shared = &StatsShmem->checkpointer.stats;
 	PgStat_CheckPointer *cached = &cached_checkpointerstats;
 
@@ -4589,7 +4589,7 @@ pgstat_fetch_stat_checkpointer(void)
 							 &StatsShmem->checkpointer.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
-	memcpy(&reset, reset_shared, sizeof(PgStat_CheckPointer));
+	memcpy(&reset, reset_offset, sizeof(PgStat_CheckPointer));
 	LWLockRelease(StatsLock);
 
 	/* compensate by reset offsets */
