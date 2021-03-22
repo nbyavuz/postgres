@@ -298,7 +298,7 @@ pgstat_bestart(void)
 	PgBackendGSSStatus lgssstatus;
 #endif
 
-	/* pgstats state must be initialized from pgstat_initialize() */
+	/* pgstats state must be initialized from pgbestat_backend_initialize() */
 	Assert(vbeentry != NULL);
 
 	/*

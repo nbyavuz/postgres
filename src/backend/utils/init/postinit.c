@@ -682,6 +682,10 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	if (!bootstrap)
 		pgstat_initialize();
 
+	/* Initialize status reporting */
+	if (!bootstrap)
+		pgbestat_backend_initialize();
+
 	/*
 	 * Load relcache entries for the shared system catalogs.  This must create
 	 * at least entries for pg_database and catalogs used for authentication.

@@ -878,8 +878,6 @@ pgstat_initialize(void)
 	 */
 	prevWalUsage = pgWalUsage;
 
-	pgbestat_backend_initialize();
-
 	/* need to be called before dsm shutdown */
 	before_shmem_exit(pgstat_shutdown_hook, 0);
 }
