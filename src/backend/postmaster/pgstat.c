@@ -310,39 +310,44 @@ typedef struct StatsShmemStruct
 	 */
 	pg_atomic_uint64 gc_count;
 
-	/* Global stats structs */
+	/*
+	 * Global stats structs.
+	 *
+	 * For the various "changecount" members check the definition of struct
+	 * PgBackendStatus for some explanation.
+	 */
 	struct
 	{
 		PgStat_Archiver stats;
-		pg_atomic_uint32 changecount;
+		uint32 changecount;
 		PgStat_Archiver reset_offset;	/* protected by StatsLock */
 	} archiver;
 
 	struct
 	{
 		PgStat_BgWriter stats;
-		pg_atomic_uint32 changecount;
+		uint32 changecount;
 		PgStat_BgWriter reset_offset;	/* protected by StatsLock */
 	} bgwriter;
 
 	struct
 	{
 		PgStat_CheckPointer stats;
-		pg_atomic_uint32 changecount;
+		uint32 changecount;
 		PgStat_CheckPointer reset_offset;	/* protected by StatsLock */
 	} checkpointer;
 
 	struct
 	{
 		LWLock		lock;
-		pg_atomic_uint32 changecount;
+		uint32 changecount;
 		PgStat_ReplSlot *stats;
 	} replslot;
 
 	struct
 	{
 		LWLock		lock;
-		pg_atomic_uint32 changecount;
+		uint32 changecount;
 		PgStat_SLRUStats stats[SLRU_NUM_ELEMENTS];
 #define SizeOfSlruStats sizeof(PgStat_SLRUStats[SLRU_NUM_ELEMENTS])
 	} slru;
@@ -634,7 +639,7 @@ static PgStat_TableStatus *get_pending_tabstat_entry(Oid rel_id, bool isshared);
 static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
 
 static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
-											pg_atomic_uint32 *count);
+											uint32 *changecount);
 
 static bool flush_object_stats(bool nowait);
 static bool flush_tabstat(PgStatPendingEntry *ent, bool nowait);
@@ -645,6 +650,12 @@ static bool flush_slrustat(bool nowait);
 static void pgstat_update_connstats(bool disconnect);
 
 static inline bool walstats_pending(void);
+
+
+static inline void changecount_before_write(uint32 *cc);
+static inline void changecount_after_write(uint32 *cc);
+static inline uint32 changecount_before_read(uint32 *cc);
+static inline bool changecount_after_read(uint32 *cc, uint32 cc_before);
 
 
 /* ------------------------------------------------------------
@@ -746,23 +757,15 @@ StatsShmemInit(void)
 		 * Initialize global statistics.
 		 */
 
-		pg_atomic_init_u32(&StatsShmem->archiver.changecount, 0);
-
-		pg_atomic_init_u32(&StatsShmem->bgwriter.changecount, 0);
-
-		pg_atomic_init_u32(&StatsShmem->checkpointer.changecount, 0);
-
 		StatsShmem->replslot.stats = (PgStat_ReplSlot *) p;
 		p += MAXALIGN(stats_replslot_size());
 		LWLockInitialize(&StatsShmem->replslot.lock, LWTRANCHE_STATS);
-		pg_atomic_init_u32(&StatsShmem->replslot.changecount, 0);
 		for (int i = 0; i < max_replication_slots; i++)
 		{
 			StatsShmem->replslot.stats[i].index = -1;
 		}
 
 		LWLockInitialize(&StatsShmem->slru.lock, LWTRANCHE_STATS);
-		pg_atomic_init_u32(&StatsShmem->slru.changecount, 0);
 
 		LWLockInitialize(&StatsShmem->wal.lock, LWTRANCHE_STATS);
 	}
@@ -1410,18 +1413,15 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 static void
 pgstat_reset_slru_counter_internal(int index, TimestampTz ts)
 {
-	uint32		assert_changecount PG_USED_FOR_ASSERTS_ONLY;
-
 	LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
 
-	assert_changecount =
-		pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
-	Assert((assert_changecount & 1) == 0);
+	changecount_before_write(&StatsShmem->slru.changecount);
 
 	MemSet(&StatsShmem->slru.stats[index], 0, sizeof(PgStat_SLRUStats));
 	StatsShmem->slru.stats[index].stat_reset_timestamp = ts;
 
-	pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
+	changecount_after_write(&StatsShmem->slru.changecount);
+
 	LWLockRelease(&StatsShmem->slru.lock);
 }
 
@@ -2408,20 +2408,17 @@ pgstat_drop_stats_entry(dshash_seq_status *hstat)
  */
 static inline void
 pgstat_copy_global_stats(void *dst, void *src, size_t len,
-						 pg_atomic_uint32 *count)
+						 uint32 *cc)
 {
-	int			before_changecount;
-	int			after_changecount;
-
-	after_changecount = pg_atomic_read_u32(count);
+	uint32 cc_before;
 
 	do
 	{
-		before_changecount = after_changecount;
+		cc_before = changecount_before_read(cc);
+
 		memcpy(dst, src, len);
-		after_changecount = pg_atomic_read_u32(count);
-	} while ((before_changecount & 1) == 1 ||
-			 after_changecount != before_changecount);
+	}
+	while (!changecount_after_read(cc, cc_before));
 }
 
 /* ----------
@@ -2466,6 +2463,66 @@ collect_oids(Oid catalogid, AttrNumber anum_oid)
 	table_close(rel, AccessShareLock);
 
 	return rethash;
+}
+
+
+/*
+ * Helpers for changecount manipulation. See comments around struct
+ * PgBackendStatus for details.
+ */
+
+static inline void
+changecount_before_write(uint32 *cc)
+{
+	Assert((*cc & 1) == 0);
+
+	START_CRIT_SECTION();
+	(*cc)++;
+	pg_write_barrier();
+}
+
+static inline void
+changecount_after_write(uint32 *cc)
+{
+	Assert((*cc & 1) == 1);
+
+	pg_write_barrier();
+
+	(*cc)++;
+
+	END_CRIT_SECTION();
+}
+
+static inline uint32
+changecount_before_read(uint32 *cc)
+{
+	uint32 before_cc = *cc;
+
+	CHECK_FOR_INTERRUPTS();
+
+	pg_read_barrier();
+
+	return before_cc;
+}
+
+/*
+ * Returns true if the read succeeded, false if it needs to be repeated.
+ */
+static inline bool
+changecount_after_read(uint32 *cc, uint32 before_cc)
+{
+	uint32 after_cc;
+
+	pg_read_barrier();
+
+	after_cc = *cc;
+
+	/* was a write in progress when we started? */
+	if (before_cc & 1)
+		return false;
+
+	/* did writes start and complete while we read? */
+	return before_cc == after_cc;
 }
 
 
@@ -2830,7 +2887,6 @@ flush_walstat(bool nowait)
 static bool
 flush_slrustat(bool nowait)
 {
-	uint32		assert_changecount PG_USED_FOR_ASSERTS_ONLY;
 	int			i;
 
 	if (!have_slrustats)
@@ -2843,9 +2899,8 @@ flush_slrustat(bool nowait)
 									   LW_EXCLUSIVE))
 		return true;			/* failed to acquire lock, skip */
 
-	assert_changecount =
-		pg_atomic_fetch_add_u32(&StatsShmem->slru.changecount, 1);
-	Assert((assert_changecount & 1) == 0);
+
+	changecount_before_write(&StatsShmem->slru.changecount);
 
 	for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
 	{
@@ -2864,7 +2919,8 @@ flush_slrustat(bool nowait)
 	/* done, clear the pending entry */
 	MemSet(pending_SLRUStats, 0, SizeOfSlruStats);
 
-	pg_atomic_add_fetch_u32(&StatsShmem->slru.changecount, 1);
+	changecount_after_write(&StatsShmem->slru.changecount);
+
 	LWLockRelease(&StatsShmem->slru.lock);
 
 	have_slrustats = false;
@@ -4013,14 +4069,8 @@ void
 pgstat_report_archiver(const char *xlog, bool failed)
 {
 	TimestampTz now = GetCurrentTimestamp();
-	uint32		before_count PG_USED_FOR_ASSERTS_ONLY;
-	uint32		after_count PG_USED_FOR_ASSERTS_ONLY;
 
-
-	START_CRIT_SECTION();
-	before_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->archiver.changecount, 1);
-	Assert((before_count & 1) == 0);
+	changecount_before_write(&StatsShmem->archiver.changecount);
 
 	if (failed)
 	{
@@ -4037,10 +4087,7 @@ pgstat_report_archiver(const char *xlog, bool failed)
 		StatsShmem->archiver.stats.last_archived_timestamp = now;
 	}
 
-	after_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->archiver.changecount, 1);
-	Assert(after_count == before_count + 1);
-	END_CRIT_SECTION();
+	changecount_after_write(&StatsShmem->archiver.changecount);
 }
 
 /* ----------
@@ -4055,8 +4102,6 @@ pgstat_report_bgwriter(void)
 	static const PgStat_BgWriter all_zeroes;
 	PgStat_BgWriter *s = &StatsShmem->bgwriter.stats;
 	PgStat_BgWriter *l = &BgWriterStats;
-	uint32		before_count PG_USED_FOR_ASSERTS_ONLY;
-	uint32		after_count PG_USED_FOR_ASSERTS_ONLY;
 
 	/*
 	 * This function can be called even if nothing at all has happened. In
@@ -4065,19 +4110,13 @@ pgstat_report_bgwriter(void)
 	if (memcmp(&BgWriterStats, &all_zeroes, sizeof(PgStat_BgWriter)) == 0)
 		return;
 
-	START_CRIT_SECTION();
-	before_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->bgwriter.changecount, 1);
-	Assert((before_count & 1) == 0);
+	changecount_before_write(&StatsShmem->bgwriter.changecount);
 
 	s->buf_written_clean += l->buf_written_clean;
 	s->maxwritten_clean += l->maxwritten_clean;
 	s->buf_alloc += l->buf_alloc;
 
-	after_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->bgwriter.changecount, 1);
-	Assert(after_count == before_count + 1);
-	END_CRIT_SECTION();
+	changecount_after_write(&StatsShmem->bgwriter.changecount);
 
 	/*
 	 * Clear out the statistics buffer, so it can be re-used.
@@ -4098,8 +4137,6 @@ pgstat_report_checkpointer(void)
 	static const PgStat_CheckPointer all_zeroes;
 	PgStat_CheckPointer *s = &StatsShmem->checkpointer.stats;
 	PgStat_CheckPointer *l = &CheckPointerStats;
-	uint32		before_count PG_USED_FOR_ASSERTS_ONLY;
-	uint32		after_count PG_USED_FOR_ASSERTS_ONLY;
 
 	/*
 	 * This function can be called even if nothing at all has happened. In
@@ -4109,10 +4146,7 @@ pgstat_report_checkpointer(void)
 			   sizeof(PgStat_CheckPointer)) == 0)
 		return;
 
-	START_CRIT_SECTION();
-	before_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->checkpointer.changecount, 1);
-	Assert((before_count & 1) == 0);
+	changecount_before_write(&StatsShmem->checkpointer.changecount);
 
 	s->timed_checkpoints += l->timed_checkpoints;
 	s->requested_checkpoints += l->requested_checkpoints;
@@ -4122,10 +4156,7 @@ pgstat_report_checkpointer(void)
 	s->buf_written_backend += l->buf_written_backend;
 	s->buf_fsync_backend += l->buf_fsync_backend;
 
-	after_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->checkpointer.changecount, 1);
-	Assert(after_count == before_count + 1);
-	END_CRIT_SECTION();
+	changecount_after_write(&StatsShmem->checkpointer.changecount);
 
 	/*
 	 * Clear out the statistics buffer, so it can be re-used.
@@ -4638,21 +4669,15 @@ pgstat_fetch_stat_wal(void)
 PgStat_SLRUStats *
 pgstat_fetch_slru(void)
 {
-	for (;;)
+	uint32 cc_before;
+
+	do
 	{
-		uint32		before_count;
-		uint32		after_count;
+		cc_before = changecount_before_read(&StatsShmem->slru.changecount);
 
-		pg_read_barrier();
-		before_count = pg_atomic_read_u32(&StatsShmem->slru.changecount);
 		memcpy(&cached_slrustats, &StatsShmem->slru.stats, SizeOfSlruStats);
-		after_count = pg_atomic_read_u32(&StatsShmem->slru.changecount);
-
-		if (before_count == after_count && (before_count & 1) == 0)
-			break;
-
-		CHECK_FOR_INTERRUPTS();
 	}
+	while (!changecount_after_read(&StatsShmem->slru.changecount, cc_before));
 
 	return cached_slrustats;
 }
