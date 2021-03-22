@@ -853,8 +853,10 @@ pgstat_write_stats(void)
 void
 pgstat_initialize(void)
 {
-	/* XXX: should we handle single user mode differently? */
+	/* should only get initialized once */
+	Assert(area == NULL);
 
+	/* XXX: should we handle single user mode differently? */
 	if (IsUnderPostmaster)
 	{
 		MemoryContext oldcontext;

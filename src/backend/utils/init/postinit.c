@@ -678,8 +678,14 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	/* Initialize portal manager */
 	EnablePortalManager();
 
-	/* Initialize stats collection --- must happen before first xact */
-	if (!bootstrap)
+	/*
+	 * Initialize stats collection --- must happen before first xact.
+	 *
+	 * Autovacuum already has done so, as it needs to report stats without
+	 * risk of InitPostgres() failing. See pgstat_report_autovac() call in
+	 * autovacuum.c.
+	 */
+	if (!bootstrap && !IsAutoVacuumWorkerProcess())
 		pgstat_initialize();
 
 	/* Initialize status reporting */
