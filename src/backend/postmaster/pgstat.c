@@ -367,7 +367,7 @@ StaticAssertDecl(sizeof(Oid) == 4, "oid is not compatible with uint32");
 #define SH_ELEMENT_TYPE pgstat_oident
 #define SH_KEY_TYPE Oid
 #define SH_KEY oid
-#define SH_HASH_KEY(tb, key) hash_bytes_uint32(key)
+#define SH_HASH_KEY(tb, key) murmurhash32(key)
 #define SH_EQUAL(tb, a, b) (a == b)
 #define SH_SCOPE static inline
 #define SH_DEFINE
