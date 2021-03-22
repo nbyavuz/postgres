@@ -133,10 +133,28 @@ typedef struct PgStatShm_StatEntryHeader
 {
 	uint32		magic;				/* just a validity cross-check */
 	LWLock		lock;
-	bool		dropped;			/* This entry is being dropped and should
-									 * be removed when refcount goes to
-									 * zero. */
-	pg_atomic_uint32  refcount;		/* How many backends are referencing */
+
+	/*
+	 * Refcount managing lifetime of the entry itself (as opposed to the
+	 * dshash entry pointing to it). The stats lifetime has to be separate
+	 * from the hash table entry lifetime because we allow backends to point
+	 * to a stats entry without holding a hash table lock (and some other
+	 * reasons).
+	 *
+	 * As long as the entry is not dropped 1 is added to the refcount
+	 * representing that it should not be dropped. In addition each backend
+	 * that has a reference to the entry needs to increment the refcount as
+	 * long as it does.
+	 *
+	 * When the refcount reaches 0 the entry needs to be freed.
+	 */
+	pg_atomic_uint32  refcount;
+
+	/*
+	 * If dropped is set, backends need to release their references so that
+	 * the memory for the entry can be freed.
+	 */
+	bool		dropped;
 } PgStatShm_StatEntryHeader;
 
 
@@ -1615,6 +1633,9 @@ pgstat_write_statsfile(void)
 		if (shent->dropped)
 			continue;
 
+		/* if not dropped the valid-entry refcount should exist */
+		Assert(pg_atomic_read_u32(&shent->refcount) > 0);
+
 		/* Make DB's timestamp consistent with the global stats */
 		if (ps->key.type == PGSTAT_TYPE_DB)
 		{
@@ -2028,7 +2049,9 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 			shheader = dsa_get_address(area, chunk);
 			shheader->magic = 0xdeadbeef;
 			LWLockInitialize(&shheader->lock, LWTRANCHE_STATS);
-			pg_atomic_init_u32(&shheader->refcount, 1);
+
+			/* 1 for a valid entry, 1 for the reference of this backend */
+			pg_atomic_init_u32(&shheader->refcount, 1 + 1);
 
 			/* Link the new entry from the hash entry. */
 			shhashent->body = chunk;
@@ -2036,7 +2059,9 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 		else
 		{
 			shheader = dsa_get_address(area, shhashent->body);
+
 			Assert(shheader->magic == 0xdeadbeef);
+			Assert(pg_atomic_read_u32(&shheader->refcount) > 0);
 
 			pg_atomic_add_fetch_u32(&shheader->refcount, 1);
 		}
@@ -2127,7 +2152,7 @@ pgstat_lookup_cache_gc(void)
 		if (header && !header->dropped)
 			continue;
 
-		if (header && pg_atomic_sub_fetch_u32(&header->refcount, 1) < 1)
+		if (header && pg_atomic_fetch_sub_u32(&header->refcount, 1) == 1)
 		{
 			/*
 			 * We're the last referrer to this entry, drop the
@@ -2264,9 +2289,9 @@ cleanup_dropped_stats_entries(void)
 		 * Free the shared memory chunk for the entry if we were the last
 		 * referrer to a dropped entry.
 		 */
-		if (pg_atomic_sub_fetch_u32(&ent->shared->refcount, 1) < 1 &&
-			ent->shared->dropped)
+		if (pg_atomic_fetch_sub_u32(&ent->shared->refcount, 1) == 1)
 		{
+			Assert(ent->shared->dropped);  /* cannot reach 0 otherwise */
 			dsa_free(area, ent->dsapointer);
 			ent->dsapointer = InvalidDsaPointer;
 			ent->shared = NULL;
@@ -2302,6 +2327,9 @@ delete_current_stats_entry(dshash_seq_status *hstat)
 	pdsa = ent->body;
 	header = dsa_get_address(area, pdsa);
 
+	/* a stats entry should only ever be dropped once */
+	Assert(!header->dropped);
+
 	/*
 	 * No one find this entry ever after. After this the PgStatShmHashEntry
 	 * cannot be accessed anymore, but the data it pointed to via ->body still
@@ -2309,6 +2337,12 @@ delete_current_stats_entry(dshash_seq_status *hstat)
 	 */
 	dshash_delete_current(hstat);
 	ent = NULL;
+
+	/*
+	 * Signal that the entry is dropped - this will eventually cause other
+	 * backends to release their references.
+	 */
+	header->dropped = true;
 
 	/*
 	 * This backend might very well be the only backend holding a
@@ -2320,19 +2354,17 @@ delete_current_stats_entry(dshash_seq_status *hstat)
 		if (pgstat_shm_lookup_cache_delete(pgStatShmLookupCache, key))
 		{
 			pg_atomic_fetch_sub_u32(&header->refcount, 1);
+			/* still should have the valid-entry reference */
+			Assert(pg_atomic_read_u32(&header->refcount) > 0);
 		}
 	}
 
 	/*
-	 * Let the referrers drop the entry if any.  Refcount won't be decremented
-	 * until "dropped" is set true and StatsShmem->gc_count is incremented
-	 * later. So we can check refcount to set dropped without holding a lock.
-	 * If no one is referring this entry, free it immediately.
+	 * Now that the entry isn't needed anymore, remove the refcount
+	 * representing a valid entry. If that causes the refcount to reach 0 no
+	 * other backend can have a reference, so we can free.
 	 */
-
-	if (pg_atomic_read_u32(&header->refcount) > 0)
-		header->dropped = true;
-	else
+	if (pg_atomic_fetch_sub_u32(&header->refcount, 1) == 1)
 	{
 		dsa_free(area, pdsa);
 	}
