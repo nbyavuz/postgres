@@ -1101,7 +1101,7 @@ pgstat_vacuum_stat(void)
 		{
 			case PGSTAT_TYPE_DB:
 				/*
-				 * don't remove database entry for shared tables and existent
+				 * don't remove database entry for shared tables and existing
 				 * tables
 				 */
 				if (ent->key.databaseid == 0 ||
@@ -1111,14 +1111,14 @@ pgstat_vacuum_stat(void)
 				break;
 
 			case PGSTAT_TYPE_TABLE:
-				/* don't remove existent relations */
+				/* don't remove existing relations */
 				if (pgstat_oid_lookup(relids, ent->key.objectid) != NULL)
 					continue;
 
 				break;
 
 			case PGSTAT_TYPE_FUNCTION:
-				/* don't remove existent functions  */
+				/* don't remove existing functions  */
 				if (pgstat_oid_lookup(funcids, ent->key.objectid) != NULL)
 					continue;
 
@@ -1331,6 +1331,9 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 			break;
 		case RESET_FUNCTION:
 			stattype = PGSTAT_TYPE_FUNCTION;
+			break;
+		default:
+			return;
 	}
 
 	header = get_shared_stat_entry(stattype, MyDatabaseId, objoid, false,
