@@ -2292,16 +2292,36 @@ cleanup_dropped_stats_entries(void)
 static void
 delete_current_stats_entry(dshash_seq_status *hstat)
 {
+	PgStatShmHashEntry *ent;
+	PgStatHashKey key;
 	dsa_pointer pdsa;
 	PgStatShm_StatEntryHeader *header;
-	PgStatShmHashEntry *ent;
 
 	ent = dshash_get_current(hstat);
+	key = ent->key;
 	pdsa = ent->body;
 	header = dsa_get_address(area, pdsa);
 
-	/* No one find this entry ever after. */
+	/*
+	 * No one find this entry ever after. After this the PgStatShmHashEntry
+	 * cannot be accessed anymore, but the data it pointed to via ->body still
+	 * is valid.
+	 */
 	dshash_delete_current(hstat);
+	ent = NULL;
+
+	/*
+	 * This backend might very well be the only backend holding a
+	 * reference. Ensure that we're not preventing it from being cleaned up
+	 * till later.
+	 */
+	if (pgStatShmLookupCache)
+	{
+		if (pgstat_shm_lookup_cache_delete(pgStatShmLookupCache, key))
+		{
+			pg_atomic_fetch_sub_u32(&header->refcount, 1);
+		}
+	}
 
 	/*
 	 * Let the referrers drop the entry if any.  Refcount won't be decremented
@@ -2314,10 +2334,6 @@ delete_current_stats_entry(dshash_seq_status *hstat)
 		header->dropped = true;
 	else
 	{
-		/* What guarantees that no pending stats entry exists here? */
-		Assert(!pgStatShmLookupCache ||
-			   !pgstat_shm_lookup_cache_lookup(pgStatShmLookupCache, ent->key));
-
 		dsa_free(area, pdsa);
 	}
 
