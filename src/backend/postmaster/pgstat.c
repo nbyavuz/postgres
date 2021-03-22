@@ -347,7 +347,6 @@ typedef struct StatsShmemStruct
 	struct
 	{
 		LWLock		lock;
-		uint32 changecount;
 		PgStat_SLRUStats stats[SLRU_NUM_ELEMENTS];
 #define SizeOfSlruStats sizeof(PgStat_SLRUStats[SLRU_NUM_ELEMENTS])
 	} slru;
@@ -1415,12 +1414,8 @@ pgstat_reset_slru_counter_internal(int index, TimestampTz ts)
 {
 	LWLockAcquire(&StatsShmem->slru.lock, LW_EXCLUSIVE);
 
-	changecount_before_write(&StatsShmem->slru.changecount);
-
 	MemSet(&StatsShmem->slru.stats[index], 0, sizeof(PgStat_SLRUStats));
 	StatsShmem->slru.stats[index].stat_reset_timestamp = ts;
-
-	changecount_after_write(&StatsShmem->slru.changecount);
 
 	LWLockRelease(&StatsShmem->slru.lock);
 }
@@ -2900,8 +2895,6 @@ flush_slrustat(bool nowait)
 		return true;			/* failed to acquire lock, skip */
 
 
-	changecount_before_write(&StatsShmem->slru.changecount);
-
 	for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
 	{
 		PgStat_SLRUStats *sharedent = &StatsShmem->slru.stats[i];
@@ -2918,8 +2911,6 @@ flush_slrustat(bool nowait)
 
 	/* done, clear the pending entry */
 	MemSet(pending_SLRUStats, 0, SizeOfSlruStats);
-
-	changecount_after_write(&StatsShmem->slru.changecount);
 
 	LWLockRelease(&StatsShmem->slru.lock);
 
@@ -4669,15 +4660,11 @@ pgstat_fetch_stat_wal(void)
 PgStat_SLRUStats *
 pgstat_fetch_slru(void)
 {
-	uint32 cc_before;
+	LWLockAcquire(&StatsShmem->slru.lock, LW_SHARED);
 
-	do
-	{
-		cc_before = changecount_before_read(&StatsShmem->slru.changecount);
+	memcpy(&cached_slrustats, &StatsShmem->slru.stats, SizeOfSlruStats);
 
-		memcpy(&cached_slrustats, &StatsShmem->slru.stats, SizeOfSlruStats);
-	}
-	while (!changecount_after_read(&StatsShmem->slru.changecount, cc_before));
+	LWLockRelease(&StatsShmem->slru.lock);
 
 	return cached_slrustats;
 }
