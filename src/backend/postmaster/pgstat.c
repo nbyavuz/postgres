@@ -340,7 +340,6 @@ typedef struct StatsShmemStruct
 	struct
 	{
 		LWLock		lock;
-		uint32 changecount;
 		PgStat_ReplSlot *stats;
 	} replslot;
 
