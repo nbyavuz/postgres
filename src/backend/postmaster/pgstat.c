@@ -623,7 +623,7 @@ static void pgstat_lookup_cache_gc(void);
 
 static void pgstat_release_stats_references(void);
 
-static bool delete_current_stats_entry(dshash_seq_status *hstat);
+static bool pgstat_drop_stats_entry(dshash_seq_status *hstat);
 static PgStatShm_StatEntryHeader *get_pending_stat_entry(PgStatTypes type, Oid dbid,
 													  Oid objid, bool create,
 													  bool *found);
@@ -915,7 +915,7 @@ pgstat_drop_database(Oid databaseid)
 			 * Even statistics for a dropped database might currently be
 			 * accessed (consider e.g. database stats for pg_stat_database).
 			 */
-			if (!delete_current_stats_entry(&hstat))
+			if (!pgstat_drop_stats_entry(&hstat))
 				not_freed_count++;
 		}
 	}
@@ -1185,7 +1185,7 @@ pgstat_vacuum_stat(void)
 		}
 
 		/* drop this entry */
-		if (!delete_current_stats_entry(&dshstat))
+		if (!pgstat_drop_stats_entry(&dshstat))
 			not_freed_count++;
 	}
 	dshash_seq_term(&dshstat);
@@ -2329,18 +2329,16 @@ pgstat_release_stats_references(void)
 	elog(DEBUG1, "deleting pgStatShmLookupCache");
 }
 
-/* ----------
- * delete_current_stats_entry()
+/*
+ * Drop a shared stats entry. The entry must be exclusively locked.
  *
- *  Deletes the given shared entry from shared stats hash. The entry must be
- *  exclusively locked.
+ * The hash table entry is always deleted from the shared hash table, but the
+ * stats pointed to are only deleted if there are no references.
  *
- *  Returns whether the stats themselves could be freed or not (due to
- *  non-zero refcount).
- * ----------
+ * Returns whether the stats data could be freed or not.
  */
 static bool
-delete_current_stats_entry(dshash_seq_status *hstat)
+pgstat_drop_stats_entry(dshash_seq_status *hstat)
 {
 	PgStatShmHashEntry *ent;
 	PgStatHashKey key;
