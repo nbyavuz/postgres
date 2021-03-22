@@ -281,14 +281,33 @@ typedef struct StatsShmemStruct
 	dshash_table_handle hash_handle;	/* shared dbstat hash */
 
 	/* Global stats structs */
-	PgStat_Archiver archiver_stats;
-	pg_atomic_uint32 archiver_changecount;
-	PgStat_BgWriter bgwriter_stats;
-	pg_atomic_uint32 bgwriter_changecount;
-	PgStat_CheckPointer checkpointer_stats;
-	pg_atomic_uint32 checkpointer_changecount;
-	PgStat_Wal	wal_stats;
-	LWLock		wal_stats_lock;
+	struct
+	{
+		PgStat_Archiver stats;
+		pg_atomic_uint32 changecount;
+		PgStat_Archiver reset_offset;	/* protected by StatsLock */
+	} archiver;
+
+	struct
+	{
+		PgStat_BgWriter stats;
+		pg_atomic_uint32 changecount;
+		PgStat_BgWriter reset_offset;	/* protected by StatsLock */
+	} bgwriter;
+
+	struct
+	{
+		PgStat_CheckPointer stats;
+		pg_atomic_uint32 changecount;
+		PgStat_CheckPointer reset_offset;	/* protected by StatsLock */
+	} checkpointer;
+
+	struct
+	{
+		LWLock		lock;
+		pg_atomic_uint32 changecount;
+		PgStat_ReplSlot *stats;
+	} replslot;
 
 	struct
 	{
@@ -301,16 +320,10 @@ typedef struct StatsShmemStruct
 	struct
 	{
 		LWLock		lock;
-		pg_atomic_uint32 changecount;
-		PgStat_ReplSlot *stats;
-	} replslot;
+		PgStat_Wal	stats;
+	} wal;
 
 	pg_atomic_uint64 stats_timestamp;
-
-	/* Reset offsets, protected by StatsLock */
-	PgStat_Archiver archiver_reset_offset;
-	PgStat_BgWriter bgwriter_reset_offset;
-	PgStat_CheckPointer checkpointer_reset_offset;
 
 	pg_atomic_uint64 gc_count;	/* # of entries deleted. not protected by
 								 * StatsLock */
@@ -669,26 +682,6 @@ StatsShmemInit(void)
 		/* the allocation of StatsShmem itself */
 		p += MAXALIGN(sizeof(StatsShmemStruct));
 
-		pg_atomic_init_u32(&StatsShmem->archiver_changecount, 0);
-		pg_atomic_init_u32(&StatsShmem->bgwriter_changecount, 0);
-		pg_atomic_init_u32(&StatsShmem->checkpointer_changecount, 0);
-
-		pg_atomic_init_u64(&StatsShmem->gc_count, 0);
-
-		LWLockInitialize(&StatsShmem->wal_stats_lock, LWTRANCHE_STATS);
-
-		LWLockInitialize(&StatsShmem->slru.lock, LWTRANCHE_STATS);
-		pg_atomic_init_u32(&StatsShmem->slru.changecount, 0);
-
-		StatsShmem->replslot.stats = (PgStat_ReplSlot *) p;
-		p += MAXALIGN(stats_replslot_size());
-		LWLockInitialize(&StatsShmem->replslot.lock, LWTRANCHE_STATS);
-		pg_atomic_init_u32(&StatsShmem->replslot.changecount, 0);
-		for (int i = 0; i < max_replication_slots; i++)
-		{
-			StatsShmem->replslot.stats[i].index = -1;
-		}
-
 		/*
 		 * Create a small dsa allocation in plain shared memory. Doing so
 		 * initially makes it easier to manage server startup, and it also is
@@ -710,12 +703,40 @@ StatsShmemInit(void)
 		dsh = dshash_create(dsa, &dsh_params, 0);
 		StatsShmem->hash_handle = dshash_get_hash_table_handle(dsh);
 
+
 		/*
 		 * Postmaster will never access these again, thus free the local
 		 * dsa/dshash references.
 		 */
 		dshash_detach(dsh);
 		dsa_detach(dsa);
+
+		pg_atomic_init_u64(&StatsShmem->gc_count, 0);
+
+
+		/*
+		 * Initialize global statistics.
+		 */
+
+		pg_atomic_init_u32(&StatsShmem->archiver.changecount, 0);
+
+		pg_atomic_init_u32(&StatsShmem->bgwriter.changecount, 0);
+
+		pg_atomic_init_u32(&StatsShmem->checkpointer.changecount, 0);
+
+		StatsShmem->replslot.stats = (PgStat_ReplSlot *) p;
+		p += MAXALIGN(stats_replslot_size());
+		LWLockInitialize(&StatsShmem->replslot.lock, LWTRANCHE_STATS);
+		pg_atomic_init_u32(&StatsShmem->replslot.changecount, 0);
+		for (int i = 0; i < max_replication_slots; i++)
+		{
+			StatsShmem->replslot.stats[i].index = -1;
+		}
+
+		LWLockInitialize(&StatsShmem->slru.lock, LWTRANCHE_STATS);
+		pg_atomic_init_u32(&StatsShmem->slru.changecount, 0);
+
+		LWLockInitialize(&StatsShmem->wal.lock, LWTRANCHE_STATS);
 	}
 	else
 	{
@@ -1259,23 +1280,23 @@ pgstat_reset_shared_counters(const char *target)
 	switch (t)
 	{
 		case RESET_ARCHIVER:
-			pgstat_copy_global_stats(&StatsShmem->archiver_reset_offset,
-									 &StatsShmem->archiver_stats,
+			pgstat_copy_global_stats(&StatsShmem->archiver.reset_offset,
+									 &StatsShmem->archiver.stats,
 									 sizeof(PgStat_Archiver),
-									 &StatsShmem->archiver_changecount);
-			StatsShmem->archiver_reset_offset.stat_reset_timestamp = now;
+									 &StatsShmem->archiver.changecount);
+			StatsShmem->archiver.reset_offset.stat_reset_timestamp = now;
 			break;
 
 		case RESET_BGWRITER:
-			pgstat_copy_global_stats(&StatsShmem->bgwriter_reset_offset,
-									 &StatsShmem->bgwriter_stats,
+			pgstat_copy_global_stats(&StatsShmem->bgwriter.reset_offset,
+									 &StatsShmem->bgwriter.stats,
 									 sizeof(PgStat_BgWriter),
-									 &StatsShmem->bgwriter_changecount);
-			pgstat_copy_global_stats(&StatsShmem->checkpointer_reset_offset,
-									 &StatsShmem->checkpointer_stats,
+									 &StatsShmem->bgwriter.changecount);
+			pgstat_copy_global_stats(&StatsShmem->checkpointer.reset_offset,
+									 &StatsShmem->checkpointer.stats,
 									 sizeof(PgStat_CheckPointer),
-									 &StatsShmem->checkpointer_changecount);
-			StatsShmem->bgwriter_reset_offset.stat_reset_timestamp = now;
+									 &StatsShmem->checkpointer.changecount);
+			StatsShmem->bgwriter.reset_offset.stat_reset_timestamp = now;
 			break;
 
 		case RESET_WAL:
@@ -1284,10 +1305,10 @@ pgstat_reset_shared_counters(const char *target)
 			 * Differntly from the two above, WAL statistics has many writer
 			 * processes and protected by wal_stats_lock.
 			 */
-			LWLockAcquire(&StatsShmem->wal_stats_lock, LW_EXCLUSIVE);
-			MemSet(&StatsShmem->wal_stats, 0, sizeof(PgStat_Wal));
-			StatsShmem->wal_stats.stat_reset_timestamp = now;
-			LWLockRelease(&StatsShmem->wal_stats_lock);
+			LWLockAcquire(&StatsShmem->wal.lock, LW_EXCLUSIVE);
+			MemSet(&StatsShmem->wal.stats, 0, sizeof(PgStat_Wal));
+			StatsShmem->wal.stats.stat_reset_timestamp = now;
+			LWLockRelease(&StatsShmem->wal.lock);
 			cached_walstats_is_valid = false;
 			break;
 	}
@@ -1547,26 +1568,26 @@ pgstat_write_statsfile(void)
 	/*
 	 * Write bgwriter global stats struct
 	 */
-	rc = fwrite(&StatsShmem->bgwriter_stats, sizeof(PgStat_BgWriter), 1, fpout);
+	rc = fwrite(&StatsShmem->bgwriter.stats, sizeof(PgStat_BgWriter), 1, fpout);
 	(void) rc;					/* we'll check for error with ferror */
 
 	/*
 	 * Write checkpointer global stats struct
 	 */
-	rc = fwrite(&StatsShmem->checkpointer_stats, sizeof(PgStat_CheckPointer), 1, fpout);
+	rc = fwrite(&StatsShmem->checkpointer.stats, sizeof(PgStat_CheckPointer), 1, fpout);
 	(void) rc;					/* we'll check for error with ferror */
 
 	/*
 	 * Write archiver global stats struct
 	 */
-	rc = fwrite(&StatsShmem->archiver_stats, sizeof(PgStat_Archiver), 1,
+	rc = fwrite(&StatsShmem->archiver.stats, sizeof(PgStat_Archiver), 1,
 				fpout);
 	(void) rc;					/* we'll check for error with ferror */
 
 	/*
 	 * Write WAL global stats struct
 	 */
-	rc = fwrite(&StatsShmem->wal_stats, sizeof(PgStat_Wal), 1, fpout);
+	rc = fwrite(&StatsShmem->wal.stats, sizeof(PgStat_Wal), 1, fpout);
 	(void) rc;					/* we'll check for error with ferror */
 
 	/*
@@ -1688,11 +1709,11 @@ pgstat_read_statsfile(void)
 	 * Set the current timestamp (will be kept only in case we can't load an
 	 * existing statsfile).
 	 */
-	StatsShmem->bgwriter_stats.stat_reset_timestamp = GetCurrentTimestamp();
-	StatsShmem->archiver_stats.stat_reset_timestamp =
-		StatsShmem->bgwriter_stats.stat_reset_timestamp;
-	StatsShmem->wal_stats.stat_reset_timestamp =
-		StatsShmem->bgwriter_stats.stat_reset_timestamp;
+	StatsShmem->bgwriter.stats.stat_reset_timestamp = GetCurrentTimestamp();
+	StatsShmem->archiver.stats.stat_reset_timestamp =
+		StatsShmem->bgwriter.stats.stat_reset_timestamp;
+	StatsShmem->wal.stats.stat_reset_timestamp =
+		StatsShmem->bgwriter.stats.stat_reset_timestamp;
 
 	/*
 	 * Try to open the stats file. If it doesn't exist, the backends simply
@@ -1727,48 +1748,48 @@ pgstat_read_statsfile(void)
 	/*
 	 * Read bgwiter stats struct
 	 */
-	if (fread(&StatsShmem->bgwriter_stats, 1, sizeof(PgStat_BgWriter), fpin) !=
+	if (fread(&StatsShmem->bgwriter.stats, 1, sizeof(PgStat_BgWriter), fpin) !=
 		sizeof(PgStat_BgWriter))
 	{
 		ereport(LOG,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->bgwriter_stats, 0, sizeof(PgStat_BgWriter));
+		MemSet(&StatsShmem->bgwriter.stats, 0, sizeof(PgStat_BgWriter));
 		goto done;
 	}
 
 	/*
 	 * Read checkpointer stats struct
 	 */
-	if (fread(&StatsShmem->checkpointer_stats, 1, sizeof(PgStat_CheckPointer), fpin) !=
+	if (fread(&StatsShmem->checkpointer.stats, 1, sizeof(PgStat_CheckPointer), fpin) !=
 		sizeof(PgStat_CheckPointer))
 	{
 		ereport(LOG,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->checkpointer_stats, 0, sizeof(PgStat_CheckPointer));
+		MemSet(&StatsShmem->checkpointer.stats, 0, sizeof(PgStat_CheckPointer));
 		goto done;
 	}
 
 	/*
 	 * Read archiver stats struct
 	 */
-	if (fread(&StatsShmem->archiver_stats, 1, sizeof(PgStat_Archiver),
+	if (fread(&StatsShmem->archiver.stats, 1, sizeof(PgStat_Archiver),
 			  fpin) != sizeof(PgStat_Archiver))
 	{
 		ereport(LOG,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->archiver_stats, 0, sizeof(PgStat_Archiver));
+		MemSet(&StatsShmem->archiver.stats, 0, sizeof(PgStat_Archiver));
 		goto done;
 	}
 
 	/*
 	 * Read WAL stats struct
 	 */
-	if (fread(&StatsShmem->wal_stats, 1, sizeof(PgStat_Wal), fpin)
+	if (fread(&StatsShmem->wal.stats, 1, sizeof(PgStat_Wal), fpin)
 		!= sizeof(PgStat_Wal))
 	{
 		ereport(LOG,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->wal_stats, 0, sizeof(PgStat_Wal));
+		MemSet(&StatsShmem->wal.stats, 0, sizeof(PgStat_Wal));
 		goto done;
 	}
 
@@ -2671,7 +2692,7 @@ walstats_pending(void)
 static bool
 flush_walstat(bool nowait)
 {
-	PgStat_Wal *s = &StatsShmem->wal_stats;
+	PgStat_Wal *s = &StatsShmem->wal.stats;
 	PgStat_Wal *l = &WalStats;
 	WalUsage	all_zeroes PG_USED_FOR_ASSERTS_ONLY = {0};
 
@@ -2692,8 +2713,8 @@ flush_walstat(bool nowait)
 
 	/* lock the shared entry to protect the content, skip if failed */
 	if (!nowait)
-		LWLockAcquire(&StatsShmem->wal_stats_lock, LW_EXCLUSIVE);
-	else if (!LWLockConditionalAcquire(&StatsShmem->wal_stats_lock,
+		LWLockAcquire(&StatsShmem->wal.lock, LW_EXCLUSIVE);
+	else if (!LWLockConditionalAcquire(&StatsShmem->wal.lock,
 									   LW_EXCLUSIVE))
 		return true;			/* failed to acquire lock, skip */
 
@@ -2705,7 +2726,7 @@ flush_walstat(bool nowait)
 	s->wal_write_time += l->wal_write_time;
 	s->wal_sync += l->wal_sync;
 	s->wal_sync_time += l->wal_sync_time;
-	LWLockRelease(&StatsShmem->wal_stats_lock);
+	LWLockRelease(&StatsShmem->wal.lock);
 
 	/*
 	 * Save the current counters for the subsequent calculation of WAL usage.
@@ -3922,26 +3943,26 @@ pgstat_report_archiver(const char *xlog, bool failed)
 
 	START_CRIT_SECTION();
 	before_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->archiver_changecount, 1);
+		pg_atomic_fetch_add_u32(&StatsShmem->archiver.changecount, 1);
 	Assert((before_count & 1) == 0);
 
 	if (failed)
 	{
-		++StatsShmem->archiver_stats.failed_count;
-		memcpy(&StatsShmem->archiver_stats.last_failed_wal, xlog,
-			   sizeof(StatsShmem->archiver_stats.last_failed_wal));
-		StatsShmem->archiver_stats.last_failed_timestamp = now;
+		++StatsShmem->archiver.stats.failed_count;
+		memcpy(&StatsShmem->archiver.stats.last_failed_wal, xlog,
+			   sizeof(StatsShmem->archiver.stats.last_failed_wal));
+		StatsShmem->archiver.stats.last_failed_timestamp = now;
 	}
 	else
 	{
-		++StatsShmem->archiver_stats.archived_count;
-		memcpy(&StatsShmem->archiver_stats.last_archived_wal, xlog,
-			   sizeof(StatsShmem->archiver_stats.last_archived_wal));
-		StatsShmem->archiver_stats.last_archived_timestamp = now;
+		++StatsShmem->archiver.stats.archived_count;
+		memcpy(&StatsShmem->archiver.stats.last_archived_wal, xlog,
+			   sizeof(StatsShmem->archiver.stats.last_archived_wal));
+		StatsShmem->archiver.stats.last_archived_timestamp = now;
 	}
 
 	after_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->archiver_changecount, 1);
+		pg_atomic_fetch_add_u32(&StatsShmem->archiver.changecount, 1);
 	Assert(after_count == before_count + 1);
 	END_CRIT_SECTION();
 }
@@ -3956,7 +3977,7 @@ void
 pgstat_report_bgwriter(void)
 {
 	static const PgStat_BgWriter all_zeroes;
-	PgStat_BgWriter *s = &StatsShmem->bgwriter_stats;
+	PgStat_BgWriter *s = &StatsShmem->bgwriter.stats;
 	PgStat_BgWriter *l = &BgWriterStats;
 	uint32		before_count PG_USED_FOR_ASSERTS_ONLY;
 	uint32		after_count PG_USED_FOR_ASSERTS_ONLY;
@@ -3970,7 +3991,7 @@ pgstat_report_bgwriter(void)
 
 	START_CRIT_SECTION();
 	before_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->bgwriter_changecount, 1);
+		pg_atomic_fetch_add_u32(&StatsShmem->bgwriter.changecount, 1);
 	Assert((before_count & 1) == 0);
 
 	s->buf_written_clean += l->buf_written_clean;
@@ -3978,7 +3999,7 @@ pgstat_report_bgwriter(void)
 	s->buf_alloc += l->buf_alloc;
 
 	after_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->bgwriter_changecount, 1);
+		pg_atomic_fetch_add_u32(&StatsShmem->bgwriter.changecount, 1);
 	Assert(after_count == before_count + 1);
 	END_CRIT_SECTION();
 
@@ -3999,7 +4020,7 @@ pgstat_report_checkpointer(void)
 {
 	/* We assume this initializes to zeroes */
 	static const PgStat_CheckPointer all_zeroes;
-	PgStat_CheckPointer *s = &StatsShmem->checkpointer_stats;
+	PgStat_CheckPointer *s = &StatsShmem->checkpointer.stats;
 	PgStat_CheckPointer *l = &CheckPointerStats;
 	uint32		before_count PG_USED_FOR_ASSERTS_ONLY;
 	uint32		after_count PG_USED_FOR_ASSERTS_ONLY;
@@ -4014,7 +4035,7 @@ pgstat_report_checkpointer(void)
 
 	START_CRIT_SECTION();
 	before_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->checkpointer_changecount, 1);
+		pg_atomic_fetch_add_u32(&StatsShmem->checkpointer.changecount, 1);
 	Assert((before_count & 1) == 0);
 
 	s->timed_checkpoints += l->timed_checkpoints;
@@ -4026,7 +4047,7 @@ pgstat_report_checkpointer(void)
 	s->buf_fsync_backend += l->buf_fsync_backend;
 
 	after_count =
-		pg_atomic_fetch_add_u32(&StatsShmem->checkpointer_changecount, 1);
+		pg_atomic_fetch_add_u32(&StatsShmem->checkpointer.changecount, 1);
 	Assert(after_count == before_count + 1);
 	END_CRIT_SECTION();
 
@@ -4405,12 +4426,12 @@ PgStat_Archiver *
 pgstat_fetch_stat_archiver(void)
 {
 	PgStat_Archiver reset;
-	PgStat_Archiver *reset_shared = &StatsShmem->archiver_reset_offset;
-	PgStat_Archiver *shared = &StatsShmem->archiver_stats;
+	PgStat_Archiver *reset_shared = &StatsShmem->archiver.reset_offset;
+	PgStat_Archiver *shared = &StatsShmem->archiver.stats;
 	PgStat_Archiver *cached = &cached_archiverstats;
 
 	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_Archiver),
-							 &StatsShmem->archiver_changecount);
+							 &StatsShmem->archiver.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
 	memcpy(&reset, reset_shared, sizeof(PgStat_Archiver));
@@ -4450,12 +4471,12 @@ PgStat_BgWriter *
 pgstat_fetch_stat_bgwriter(void)
 {
 	PgStat_BgWriter reset;
-	PgStat_BgWriter *reset_shared = &StatsShmem->bgwriter_reset_offset;
-	PgStat_BgWriter *shared = &StatsShmem->bgwriter_stats;
+	PgStat_BgWriter *reset_shared = &StatsShmem->bgwriter.reset_offset;
+	PgStat_BgWriter *shared = &StatsShmem->bgwriter.stats;
 	PgStat_BgWriter *cached = &cached_bgwriterstats;
 
 	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_BgWriter),
-							 &StatsShmem->bgwriter_changecount);
+							 &StatsShmem->bgwriter.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
 	memcpy(&reset, reset_shared, sizeof(PgStat_BgWriter));
@@ -4483,12 +4504,12 @@ PgStat_CheckPointer *
 pgstat_fetch_stat_checkpointer(void)
 {
 	PgStat_CheckPointer reset;
-	PgStat_CheckPointer *reset_shared = &StatsShmem->checkpointer_reset_offset;
-	PgStat_CheckPointer *shared = &StatsShmem->checkpointer_stats;
+	PgStat_CheckPointer *reset_shared = &StatsShmem->checkpointer.reset_offset;
+	PgStat_CheckPointer *shared = &StatsShmem->checkpointer.stats;
 	PgStat_CheckPointer *cached = &cached_checkpointerstats;
 
 	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_CheckPointer),
-							 &StatsShmem->checkpointer_changecount);
+							 &StatsShmem->checkpointer.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
 	memcpy(&reset, reset_shared, sizeof(PgStat_CheckPointer));
@@ -4521,7 +4542,7 @@ pgstat_fetch_stat_wal(void)
 	if (!cached_walstats_is_valid)
 	{
 		LWLockAcquire(StatsLock, LW_SHARED);
-		memcpy(&cached_walstats, &StatsShmem->wal_stats, sizeof(PgStat_Wal));
+		memcpy(&cached_walstats, &StatsShmem->wal.stats, sizeof(PgStat_Wal));
 		LWLockRelease(StatsLock);
 	}
 
