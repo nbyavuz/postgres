@@ -1359,9 +1359,7 @@ pgstat_reset_slru_counter(const char *name)
 {
 	int			i;
 	TimestampTz ts = GetCurrentTimestamp();
-	uint32		assert_changecount;
-
-	PG_USED_FOR_ASSERTS_ONLY;
+	uint32		assert_changecount PG_USED_FOR_ASSERTS_ONLY;
 
 	if (name)
 	{
@@ -2663,7 +2661,7 @@ flush_walstat(bool nowait)
 {
 	PgStat_Wal *s = &StatsShmem->wal_stats;
 	PgStat_Wal *l = &WalStats;
-	WalUsage	all_zeroes = {0} PG_USED_FOR_ASSERTS_ONLY;
+	WalUsage	all_zeroes PG_USED_FOR_ASSERTS_ONLY = {0};
 
 	/*
 	 * We don't update the WAL usage portion of the local WalStats elsewhere.
@@ -3770,7 +3768,7 @@ AtPrepare_PgStat(void)
 		Assert(xact_state->prev == NULL);
 		for (trans = xact_state->first; trans != NULL; trans = trans->next)
 		{
-			PgStat_TableStatus *tabstat;
+			PgStat_TableStatus *tabstat PG_USED_FOR_ASSERTS_ONLY;
 			TwoPhasePgStatRecord record;
 
 			Assert(trans->nest_level == 1);
