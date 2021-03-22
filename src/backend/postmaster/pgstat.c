@@ -968,7 +968,9 @@ pgstat_report_stat(bool force)
 		return 0;
 
 	/* Don't expend a clock check if nothing to do */
-	if (havePendingDbStats && pgStatPendingHash == NULL && !have_slrustats
+	if (!havePendingDbStats &&
+		pgStatPendingHash == NULL &&
+		!have_slrustats
 		&& !walstats_pending())
 		return 0;
 
