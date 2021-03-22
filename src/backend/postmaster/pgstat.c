@@ -467,7 +467,7 @@ static const dshash_parameters dsh_params = {
 
 /* backend-lifetime storages */
 static StatsShmemStruct *StatsShmem = NULL;
-static dsa_area *area = NULL;
+static dsa_area *StatsDSA = NULL;
 /* The shared hash to index activity stats entries. */
 static dshash_table *pgStatSharedHash = NULL;
 
@@ -854,7 +854,7 @@ void
 pgstat_initialize(void)
 {
 	/* should only get initialized once */
-	Assert(area == NULL);
+	Assert(StatsDSA == NULL);
 
 	/* XXX: should we handle single user mode differently? */
 	if (IsUnderPostmaster)
@@ -864,10 +864,10 @@ pgstat_initialize(void)
 		/* stats shared memory persists for the backend lifetime */
 		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
-		area = dsa_attach_in_place(StatsShmem->raw_dsa_area, NULL);
-		dsa_pin_mapping(area);
+		StatsDSA = dsa_attach_in_place(StatsShmem->raw_dsa_area, NULL);
+		dsa_pin_mapping(StatsDSA);
 
-		pgStatSharedHash = dshash_attach(area, &dsh_params,
+		pgStatSharedHash = dshash_attach(StatsDSA, &dsh_params,
 										 StatsShmem->hash_handle, 0);
 
 		MemoryContextSwitchTo(oldcontext);
@@ -1266,7 +1266,7 @@ pgstat_reset_counters(void)
 		if (p->key.databaseid != MyDatabaseId)
 			continue;
 
-		header = dsa_get_address(area, p->body);
+		header = dsa_get_address(StatsDSA, p->body);
 
 		LWLockAcquire(&header->lock, LW_EXCLUSIVE);
 		memset(PGSTAT_SHENT_BODY(header), 0,
@@ -1572,7 +1572,7 @@ pgstat_write_statsfile(void)
 	dshash_seq_status hstat;
 	PgStatShmHashEntry *ps;
 
-	Assert(area);
+	Assert(StatsDSA);
 
 	elog(DEBUG2, "writing stats file \"%s\"", statfile);
 
@@ -1645,7 +1645,7 @@ pgstat_write_statsfile(void)
 
 		CHECK_FOR_INTERRUPTS();
 
-		shent = (PgStatShm_StatEntryHeader *) dsa_get_address(area, ps->body);
+		shent = (PgStatShm_StatEntryHeader *) dsa_get_address(StatsDSA, ps->body);
 
 		/* we may have some "dropped" entries not yet removed, skip them */
 		if (shent->dropped)
@@ -1960,7 +1960,7 @@ pgstat_shutdown_hook(int code, Datum arg)
 
 	if (IsUnderPostmaster)
 	{
-		Assert(area);
+		Assert(StatsDSA);
 
 		/* We shouldn't leave a reference to shared stats. */
 		pgstat_release_stats_references();
@@ -1971,8 +1971,8 @@ pgstat_shutdown_hook(int code, Datum arg)
 		/* We are going to exit. Don't bother destroying local hashes. */
 		pgStatPendingHash = NULL;
 
-		dsa_detach(area);
-		area = NULL;
+		dsa_detach(StatsDSA);
+		StatsDSA = NULL;
 	}
 }
 
@@ -2063,8 +2063,8 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 			/* Create new stats entry. */
 			dsa_pointer chunk;
 
-			chunk = dsa_allocate0(area, pgstat_sharedentsize[type]);
-			shheader = dsa_get_address(area, chunk);
+			chunk = dsa_allocate0(StatsDSA, pgstat_sharedentsize[type]);
+			shheader = dsa_get_address(StatsDSA, chunk);
 			shheader->magic = 0xdeadbeef;
 			LWLockInitialize(&shheader->lock, LWTRANCHE_STATS);
 
@@ -2076,7 +2076,7 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 		}
 		else
 		{
-			shheader = dsa_get_address(area, shhashent->body);
+			shheader = dsa_get_address(StatsDSA, shhashent->body);
 
 			Assert(shheader->magic == 0xdeadbeef);
 			Assert(pg_atomic_read_u32(&shheader->refcount) > 0);
@@ -2176,7 +2176,7 @@ pgstat_lookup_cache_gc(void)
 			 * We're the last referrer to this entry, drop the
 			 * shared entry.
 			 */
-			dsa_free(area, lohashent->dsapointer);
+			dsa_free(StatsDSA, lohashent->dsapointer);
 			lohashent->shared = NULL;
 		}
 
@@ -2308,7 +2308,7 @@ pgstat_release_stats_references(void)
 		if (pg_atomic_fetch_sub_u32(&ent->shared->refcount, 1) == 1)
 		{
 			Assert(ent->shared->dropped);  /* cannot reach 0 otherwise */
-			dsa_free(area, ent->dsapointer);
+			dsa_free(StatsDSA, ent->dsapointer);
 			ent->dsapointer = InvalidDsaPointer;
 			ent->shared = NULL;
 		}
@@ -2343,7 +2343,7 @@ pgstat_drop_stats_entry(dshash_seq_status *hstat)
 	ent = dshash_get_current(hstat);
 	key = ent->key;
 	pdsa = ent->body;
-	header = dsa_get_address(area, pdsa);
+	header = dsa_get_address(StatsDSA, pdsa);
 
 	/* a stats entry should only ever be dropped once */
 	Assert(!header->dropped);
@@ -2384,7 +2384,7 @@ pgstat_drop_stats_entry(dshash_seq_status *hstat)
 	 */
 	if (pg_atomic_fetch_sub_u32(&header->refcount, 1) == 1)
 	{
-		dsa_free(area, pdsa);
+		dsa_free(StatsDSA, pdsa);
 		did_free = true;
 	}
 	else
@@ -2941,7 +2941,7 @@ pgstat_report_autovac(Oid dboid)
 	TimestampTz ts;
 
 	/* can't get here in single user mode */
-	Assert(area != NULL);
+	Assert(StatsDSA != NULL);
 	Assert(IsUnderPostmaster);
 
 	/* FIXME: this didn't use to exist? Why? */
