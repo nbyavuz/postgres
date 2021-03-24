@@ -1801,7 +1801,7 @@ pg_stat_get_wal(PG_FUNCTION_ARGS)
 	Datum		values[PG_STAT_GET_WAL_COLS];
 	bool		nulls[PG_STAT_GET_WAL_COLS];
 	char		buf[256];
-	PgStat_Wal *wal_stats;
+	PgStat_WalStats *wal_stats;
 
 	/* Initialise values and NULL flags arrays */
 	MemSet(values, 0, sizeof(values));
@@ -2214,7 +2214,7 @@ pg_stat_get_archiver(PG_FUNCTION_ARGS)
 	TupleDesc	tupdesc;
 	Datum		values[7];
 	bool		nulls[7];
-	PgStat_Archiver *archiver_stats;
+	PgStat_ArchiverStats *archiver_stats;
 
 	/* Initialise values and NULL flags arrays */
 	MemSet(values, 0, sizeof(values));
@@ -2284,7 +2284,7 @@ pg_stat_get_replication_slots(PG_FUNCTION_ARGS)
 	Tuplestorestate *tupstore;
 	MemoryContext per_query_ctx;
 	MemoryContext oldcontext;
-	PgStat_ReplSlot *slotstats;
+	PgStat_ReplSlotStats *slotstats;
 	int			nstats;
 	int			i;
 
@@ -2317,7 +2317,7 @@ pg_stat_get_replication_slots(PG_FUNCTION_ARGS)
 	{
 		Datum		values[PG_STAT_GET_REPLICATION_SLOT_COLS];
 		bool		nulls[PG_STAT_GET_REPLICATION_SLOT_COLS];
-		PgStat_ReplSlot *s = &(slotstats[i]);
+		PgStat_ReplSlotStats *s = &(slotstats[i]);
 
 		MemSet(values, 0, sizeof(values));
 		MemSet(nulls, 0, sizeof(nulls));

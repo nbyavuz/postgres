@@ -318,29 +318,29 @@ typedef struct StatsShmemStruct
 	 */
 	struct
 	{
-		PgStat_Archiver stats;
+		PgStat_ArchiverStats stats;
 		uint32 changecount;
-		PgStat_Archiver reset_offset;	/* protected by StatsLock */
+		PgStat_ArchiverStats reset_offset;	/* protected by StatsLock */
 	} archiver;
 
 	struct
 	{
-		PgStat_BgWriter stats;
+		PgStat_BgWriterStats stats;
 		uint32 changecount;
-		PgStat_BgWriter reset_offset;	/* protected by StatsLock */
+		PgStat_BgWriterStats reset_offset;	/* protected by StatsLock */
 	} bgwriter;
 
 	struct
 	{
-		PgStat_CheckPointer stats;
+		PgStat_CheckPointerStats stats;
 		uint32 changecount;
-		PgStat_CheckPointer reset_offset;	/* protected by StatsLock */
+		PgStat_CheckPointerStats reset_offset;	/* protected by StatsLock */
 	} checkpointer;
 
 	struct
 	{
 		LWLock		lock;
-		PgStat_ReplSlot *stats;
+		PgStat_ReplSlotStats *stats;
 	} replslot;
 
 	struct
@@ -353,7 +353,7 @@ typedef struct StatsShmemStruct
 	struct
 	{
 		LWLock		lock;
-		PgStat_Wal	stats;
+		PgStat_WalStats stats;
 	} wal;
 
 	/* protected by StatsLock */
@@ -516,13 +516,13 @@ static PgStat_SubXactStatus *pgStatXactStack = NULL;
  */
 
 /* BgWriter global statistics counters */
-PgStat_BgWriter BgWriterStats = {0};
+PgStat_BgWriterStats BgWriterStats = {0};
 
 /* CheckPointer global statistics counters */
-PgStat_CheckPointer CheckPointerStats = {0};
+PgStat_CheckPointerStats CheckPointerStats = {0};
 
 /* WAL global statistics counters */
-PgStat_Wal	WalStats = {0};
+PgStat_WalStats	WalStats = {0};
 
 PgStat_Counter pgStatBlockReadTime = 0;
 PgStat_Counter pgStatBlockWriteTime = 0;
@@ -592,13 +592,13 @@ static PgStat_StatTabEntry cached_tabent;
 static PgStatHashKey cached_funcent_key = {0};
 static PgStat_StatFuncEntry cached_funcent;
 
-static PgStat_Archiver cached_archiverstats;
-static PgStat_BgWriter cached_bgwriterstats;
-static PgStat_CheckPointer cached_checkpointerstats;
-static PgStat_Wal cached_walstats;
+static PgStat_ArchiverStats cached_archiverstats;
+static PgStat_BgWriterStats cached_bgwriterstats;
+static PgStat_CheckPointerStats cached_checkpointerstats;
+static PgStat_WalStats cached_walstats;
 static bool cached_walstats_is_valid = false;
 static PgStat_SLRUStats cached_slrustats[SLRU_NUM_ELEMENTS];
-static PgStat_ReplSlot *cached_replslotstats = NULL;
+static PgStat_ReplSlotStats *cached_replslotstats = NULL;
 static int	n_cached_replslotstats = -1;
 
 
@@ -676,7 +676,7 @@ stats_dsa_init_size(void)
 static Size
 stats_replslot_size(void)
 {
-	return sizeof(PgStat_ReplSlot) * max_replication_slots;
+	return sizeof(PgStat_ReplSlotStats) * max_replication_slots;
 }
 
 /*
@@ -755,7 +755,7 @@ StatsShmemInit(void)
 		 * Initialize global statistics.
 		 */
 
-		StatsShmem->replslot.stats = (PgStat_ReplSlot *) p;
+		StatsShmem->replslot.stats = (PgStat_ReplSlotStats *) p;
 		p += MAXALIGN(stats_replslot_size());
 		LWLockInitialize(&StatsShmem->replslot.lock, LWTRANCHE_STATS);
 		for (int i = 0; i < max_replication_slots; i++)
@@ -1328,7 +1328,7 @@ pgstat_reset_shared_counters(const char *target)
 		case RESET_ARCHIVER:
 			pgstat_copy_global_stats(&StatsShmem->archiver.reset_offset,
 									 &StatsShmem->archiver.stats,
-									 sizeof(PgStat_Archiver),
+									 sizeof(PgStat_ArchiverStats),
 									 &StatsShmem->archiver.changecount);
 			StatsShmem->archiver.reset_offset.stat_reset_timestamp = now;
 			break;
@@ -1336,11 +1336,11 @@ pgstat_reset_shared_counters(const char *target)
 		case RESET_BGWRITER:
 			pgstat_copy_global_stats(&StatsShmem->bgwriter.reset_offset,
 									 &StatsShmem->bgwriter.stats,
-									 sizeof(PgStat_BgWriter),
+									 sizeof(PgStat_BgWriterStats),
 									 &StatsShmem->bgwriter.changecount);
 			pgstat_copy_global_stats(&StatsShmem->checkpointer.reset_offset,
 									 &StatsShmem->checkpointer.stats,
-									 sizeof(PgStat_CheckPointer),
+									 sizeof(PgStat_CheckPointerStats),
 									 &StatsShmem->checkpointer.changecount);
 			StatsShmem->bgwriter.reset_offset.stat_reset_timestamp = now;
 			break;
@@ -1352,7 +1352,7 @@ pgstat_reset_shared_counters(const char *target)
 			 * processes and protected by wal_stats_lock.
 			 */
 			LWLockAcquire(&StatsShmem->wal.lock, LW_EXCLUSIVE);
-			MemSet(&StatsShmem->wal.stats, 0, sizeof(PgStat_Wal));
+			MemSet(&StatsShmem->wal.stats, 0, sizeof(PgStat_WalStats));
 			StatsShmem->wal.stats.stat_reset_timestamp = now;
 			LWLockRelease(&StatsShmem->wal.lock);
 			cached_walstats_is_valid = false;
@@ -1512,10 +1512,10 @@ pgstat_reset_replslot_counter(const char *name)
 	LWLockAcquire(&StatsShmem->replslot.lock, LW_EXCLUSIVE);
 	for (i = startidx; i <= endidx; i++)
 	{
-		PgStat_ReplSlot *statent = &StatsShmem->replslot.stats[i];
+		PgStat_ReplSlotStats *statent = &StatsShmem->replslot.stats[i];
 		size_t off;
 
-		off = offsetof(PgStat_ReplSlot, slotname) + sizeof(char[NAMEDATALEN]);
+		off = offsetof(PgStat_ReplSlotStats, slotname) + sizeof(char[NAMEDATALEN]);
 
 		memset(((char *) statent) + off, 0, sizeof(StatsShmem->replslot.stats[i]) - off);
 		statent->stat_reset_timestamp = ts;
@@ -1604,26 +1604,26 @@ pgstat_write_statsfile(void)
 	/*
 	 * Write bgwriter global stats struct
 	 */
-	rc = fwrite(&StatsShmem->bgwriter.stats, sizeof(PgStat_BgWriter), 1, fpout);
+	rc = fwrite(&StatsShmem->bgwriter.stats, sizeof(PgStat_BgWriterStats), 1, fpout);
 	(void) rc;					/* we'll check for error with ferror */
 
 	/*
 	 * Write checkpointer global stats struct
 	 */
-	rc = fwrite(&StatsShmem->checkpointer.stats, sizeof(PgStat_CheckPointer), 1, fpout);
+	rc = fwrite(&StatsShmem->checkpointer.stats, sizeof(PgStat_CheckPointerStats), 1, fpout);
 	(void) rc;					/* we'll check for error with ferror */
 
 	/*
 	 * Write archiver global stats struct
 	 */
-	rc = fwrite(&StatsShmem->archiver.stats, sizeof(PgStat_Archiver), 1,
+	rc = fwrite(&StatsShmem->archiver.stats, sizeof(PgStat_ArchiverStats), 1,
 				fpout);
 	(void) rc;					/* we'll check for error with ferror */
 
 	/*
 	 * Write WAL global stats struct
 	 */
-	rc = fwrite(&StatsShmem->wal.stats, sizeof(PgStat_Wal), 1, fpout);
+	rc = fwrite(&StatsShmem->wal.stats, sizeof(PgStat_WalStats), 1, fpout);
 	(void) rc;					/* we'll check for error with ferror */
 
 	/*
@@ -1678,7 +1678,7 @@ pgstat_write_statsfile(void)
 	 */
 	for (int i = 0; i < max_replication_slots; i++)
 	{
-		PgStat_ReplSlot *statent = &StatsShmem->replslot.stats[i];
+		PgStat_ReplSlotStats *statent = &StatsShmem->replslot.stats[i];
 
 		if (statent->index == -1)
 			continue;
@@ -1787,48 +1787,48 @@ pgstat_read_statsfile(void)
 	/*
 	 * Read bgwiter stats struct
 	 */
-	if (fread(&StatsShmem->bgwriter.stats, 1, sizeof(PgStat_BgWriter), fpin) !=
-		sizeof(PgStat_BgWriter))
+	if (fread(&StatsShmem->bgwriter.stats, 1, sizeof(PgStat_BgWriterStats), fpin) !=
+		sizeof(PgStat_BgWriterStats))
 	{
 		ereport(LOG,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->bgwriter.stats, 0, sizeof(PgStat_BgWriter));
+		MemSet(&StatsShmem->bgwriter.stats, 0, sizeof(PgStat_BgWriterStats));
 		goto done;
 	}
 
 	/*
 	 * Read checkpointer stats struct
 	 */
-	if (fread(&StatsShmem->checkpointer.stats, 1, sizeof(PgStat_CheckPointer), fpin) !=
-		sizeof(PgStat_CheckPointer))
+	if (fread(&StatsShmem->checkpointer.stats, 1, sizeof(PgStat_CheckPointerStats), fpin) !=
+		sizeof(PgStat_CheckPointerStats))
 	{
 		ereport(LOG,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->checkpointer.stats, 0, sizeof(PgStat_CheckPointer));
+		MemSet(&StatsShmem->checkpointer.stats, 0, sizeof(PgStat_CheckPointerStats));
 		goto done;
 	}
 
 	/*
 	 * Read archiver stats struct
 	 */
-	if (fread(&StatsShmem->archiver.stats, 1, sizeof(PgStat_Archiver),
-			  fpin) != sizeof(PgStat_Archiver))
+	if (fread(&StatsShmem->archiver.stats, 1, sizeof(PgStat_ArchiverStats),
+			  fpin) != sizeof(PgStat_ArchiverStats))
 	{
 		ereport(LOG,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->archiver.stats, 0, sizeof(PgStat_Archiver));
+		MemSet(&StatsShmem->archiver.stats, 0, sizeof(PgStat_ArchiverStats));
 		goto done;
 	}
 
 	/*
 	 * Read WAL stats struct
 	 */
-	if (fread(&StatsShmem->wal.stats, 1, sizeof(PgStat_Wal), fpin)
-		!= sizeof(PgStat_Wal))
+	if (fread(&StatsShmem->wal.stats, 1, sizeof(PgStat_WalStats), fpin)
+		!= sizeof(PgStat_WalStats))
 	{
 		ereport(LOG,
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
-		MemSet(&StatsShmem->wal.stats, 0, sizeof(PgStat_Wal));
+		MemSet(&StatsShmem->wal.stats, 0, sizeof(PgStat_WalStats));
 		goto done;
 	}
 
@@ -1892,7 +1892,7 @@ pgstat_read_statsfile(void)
 
 			case 'R':
 				{
-					PgStat_ReplSlot tmp;
+					PgStat_ReplSlotStats tmp;
 
 					if (fread(&tmp, 1, sizeof(tmp), fpin) != sizeof(tmp))
 					{
@@ -2803,10 +2803,10 @@ flush_dbstat(PgStat_StatDBEntry *pendingent, Oid dboid, bool nowait)
 static inline bool
 walstats_pending(void)
 {
-	static const PgStat_Wal all_zeroes;
+	static const PgStat_WalStats all_zeroes;
 
 	return memcmp(&WalStats, &all_zeroes,
-				  offsetof(PgStat_Wal, stat_reset_timestamp)) != 0;
+				  offsetof(PgStat_WalStats, stat_reset_timestamp)) != 0;
 }
 
 /*
@@ -2820,8 +2820,8 @@ walstats_pending(void)
 static bool
 flush_walstat(bool nowait)
 {
-	PgStat_Wal *s = &StatsShmem->wal.stats;
-	PgStat_Wal *l = &WalStats;
+	PgStat_WalStats *s = &StatsShmem->wal.stats;
+	PgStat_WalStats *l = &WalStats;
 	WalUsage	all_zeroes PG_USED_FOR_ASSERTS_ONLY = {0};
 
 	/*
@@ -3254,7 +3254,7 @@ pgstat_report_replslot(uint32 index,
 					   int spilltxns, int spillcount, int spillbytes,
 					   int streamtxns, int streamcount, int streambytes)
 {
-	PgStat_ReplSlot *statent;
+	PgStat_ReplSlotStats *statent;
 
 	Assert(index < max_replication_slots);
 	Assert(slotname[0] != '\0' && strlen(slotname) < NAMEDATALEN);
@@ -3303,7 +3303,7 @@ pgstat_report_replslot(uint32 index,
 void
 pgstat_report_replslot_drop(uint32 index, const char *slotname)
 {
-	PgStat_ReplSlot *statent;
+	PgStat_ReplSlotStats *statent;
 
 	Assert(index < max_replication_slots);
 	Assert(slotname[0] != '\0' && strlen(slotname) < NAMEDATALEN);
@@ -3360,11 +3360,10 @@ pgstat_init_function_usage(FunctionCallInfo fcinfo,
 }
 
 /* ----------
- * find_funcstat_entry() -
+ * find_funcstat_entry - find any existing PgStat_BackendFunctionEntry entry
+ *		for specified function
  *
- *  find any existing PgStat_BackendFunctionEntry entry for specified function
- *
- *  If no entry, return NULL, not creating a new one.
+ * If no entry, return NULL, don't create a new one
  * ----------
  */
 PgStat_BackendFunctionEntry *
@@ -3379,17 +3378,14 @@ find_funcstat_entry(Oid func_id)
 	return ent;
 }
 
-/* ----------
- * pgstat_end_function_usage() -
+/*
+ * Calculate function call usage and update stat counters.
+ * Called by the executor after invoking a function.
  *
- *  Calculate function call usage and update stat counters.
- *  Called by the executor after invoking a function.
- *
- *  In the case of a set-returning function that runs in value-per-call mode,
- *  we will see multiple pgstat_init_function_usage/pgstat_end_function_usage
- *  calls for what the user considers a single call of the function.  The
- *  finalize flag should be TRUE on the last call.
- * ----------
+ * In the case of a set-returning function that runs in value-per-call mode,
+ * we will see multiple pgstat_init_function_usage/pgstat_end_function_usage
+ * calls for what the user considers a single call of the function.  The
+ * finalize flag should be TRUE on the last call.
  */
 void
 pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu, bool finalize)
@@ -4112,15 +4108,15 @@ pgstat_report_archiver(const char *xlog, bool failed)
 void
 pgstat_report_bgwriter(void)
 {
-	static const PgStat_BgWriter all_zeroes;
-	PgStat_BgWriter *s = &StatsShmem->bgwriter.stats;
-	PgStat_BgWriter *l = &BgWriterStats;
+	static const PgStat_BgWriterStats all_zeroes;
+	PgStat_BgWriterStats *s = &StatsShmem->bgwriter.stats;
+	PgStat_BgWriterStats *l = &BgWriterStats;
 
 	/*
 	 * This function can be called even if nothing at all has happened. In
 	 * this case, avoid taking lock for a completely empty stats.
 	 */
-	if (memcmp(&BgWriterStats, &all_zeroes, sizeof(PgStat_BgWriter)) == 0)
+	if (memcmp(&BgWriterStats, &all_zeroes, sizeof(PgStat_BgWriterStats)) == 0)
 		return;
 
 	changecount_before_write(&StatsShmem->bgwriter.changecount);
@@ -4147,16 +4143,16 @@ void
 pgstat_report_checkpointer(void)
 {
 	/* We assume this initializes to zeroes */
-	static const PgStat_CheckPointer all_zeroes;
-	PgStat_CheckPointer *s = &StatsShmem->checkpointer.stats;
-	PgStat_CheckPointer *l = &CheckPointerStats;
+	static const PgStat_CheckPointerStats all_zeroes;
+	PgStat_CheckPointerStats *s = &StatsShmem->checkpointer.stats;
+	PgStat_CheckPointerStats *l = &CheckPointerStats;
 
 	/*
 	 * This function can be called even if nothing at all has happened. In
 	 * this case, avoid taking lock for a completely empty stats.
 	 */
 	if (memcmp(&CheckPointerStats, &all_zeroes,
-			   sizeof(PgStat_CheckPointer)) == 0)
+			   sizeof(PgStat_CheckPointerStats)) == 0)
 		return;
 
 	changecount_before_write(&StatsShmem->checkpointer.changecount);
@@ -4542,19 +4538,19 @@ pgstat_get_stat_timestamp(void)
  *  call.
  * ---------
  */
-PgStat_Archiver *
+PgStat_ArchiverStats *
 pgstat_fetch_stat_archiver(void)
 {
-	PgStat_Archiver reset;
-	PgStat_Archiver *reset_offset = &StatsShmem->archiver.reset_offset;
-	PgStat_Archiver *shared = &StatsShmem->archiver.stats;
-	PgStat_Archiver *cached = &cached_archiverstats;
+	PgStat_ArchiverStats reset;
+	PgStat_ArchiverStats *reset_offset = &StatsShmem->archiver.reset_offset;
+	PgStat_ArchiverStats *shared = &StatsShmem->archiver.stats;
+	PgStat_ArchiverStats *cached = &cached_archiverstats;
 
-	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_Archiver),
+	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_ArchiverStats),
 							 &StatsShmem->archiver.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
-	memcpy(&reset, reset_offset, sizeof(PgStat_Archiver));
+	memcpy(&reset, reset_offset, sizeof(PgStat_ArchiverStats));
 	LWLockRelease(StatsLock);
 
 	/* compensate by reset offsets */
@@ -4587,19 +4583,19 @@ pgstat_fetch_stat_archiver(void)
  *  call.
  * ---------
  */
-PgStat_BgWriter *
+PgStat_BgWriterStats *
 pgstat_fetch_stat_bgwriter(void)
 {
-	PgStat_BgWriter reset;
-	PgStat_BgWriter *reset_offset = &StatsShmem->bgwriter.reset_offset;
-	PgStat_BgWriter *shared = &StatsShmem->bgwriter.stats;
-	PgStat_BgWriter *cached = &cached_bgwriterstats;
+	PgStat_BgWriterStats reset;
+	PgStat_BgWriterStats *reset_offset = &StatsShmem->bgwriter.reset_offset;
+	PgStat_BgWriterStats *shared = &StatsShmem->bgwriter.stats;
+	PgStat_BgWriterStats *cached = &cached_bgwriterstats;
 
-	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_BgWriter),
+	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_BgWriterStats),
 							 &StatsShmem->bgwriter.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
-	memcpy(&reset, reset_offset, sizeof(PgStat_BgWriter));
+	memcpy(&reset, reset_offset, sizeof(PgStat_BgWriterStats));
 	LWLockRelease(StatsLock);
 
 	/* compensate by reset offsets */
@@ -4620,19 +4616,19 @@ pgstat_fetch_stat_bgwriter(void)
  *  call.
  * ---------
  */
-PgStat_CheckPointer *
+PgStat_CheckPointerStats *
 pgstat_fetch_stat_checkpointer(void)
 {
-	PgStat_CheckPointer reset;
-	PgStat_CheckPointer *reset_offset = &StatsShmem->checkpointer.reset_offset;
-	PgStat_CheckPointer *shared = &StatsShmem->checkpointer.stats;
-	PgStat_CheckPointer *cached = &cached_checkpointerstats;
+	PgStat_CheckPointerStats reset;
+	PgStat_CheckPointerStats *reset_offset = &StatsShmem->checkpointer.reset_offset;
+	PgStat_CheckPointerStats *shared = &StatsShmem->checkpointer.stats;
+	PgStat_CheckPointerStats *cached = &cached_checkpointerstats;
 
-	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_CheckPointer),
+	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_CheckPointerStats),
 							 &StatsShmem->checkpointer.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
-	memcpy(&reset, reset_offset, sizeof(PgStat_CheckPointer));
+	memcpy(&reset, reset_offset, sizeof(PgStat_CheckPointerStats));
 	LWLockRelease(StatsLock);
 
 	/* compensate by reset offsets */
@@ -4656,13 +4652,13 @@ pgstat_fetch_stat_checkpointer(void)
  *  call.
  * ---------
  */
-PgStat_Wal *
+PgStat_WalStats *
 pgstat_fetch_stat_wal(void)
 {
 	if (!cached_walstats_is_valid)
 	{
 		LWLockAcquire(StatsLock, LW_SHARED);
-		memcpy(&cached_walstats, &StatsShmem->wal.stats, sizeof(PgStat_Wal));
+		memcpy(&cached_walstats, &StatsShmem->wal.stats, sizeof(PgStat_WalStats));
 		LWLockRelease(StatsLock);
 	}
 
@@ -4700,15 +4696,15 @@ pgstat_fetch_slru(void)
  *	number of entries in nslots_p.
  * ---------
  */
-PgStat_ReplSlot *
+PgStat_ReplSlotStats *
 pgstat_fetch_replslot(int *nslots_p)
 {
 	if (cached_replslotstats == NULL)
 	{
 		pgstat_setup_memcxt();
-		cached_replslotstats = (PgStat_ReplSlot *)
+		cached_replslotstats = (PgStat_ReplSlotStats *)
 			MemoryContextAlloc(pgStatCacheContext,
-							   sizeof(PgStat_ReplSlot) * max_replication_slots);
+							   sizeof(PgStat_ReplSlotStats) * max_replication_slots);
 	}
 
 	if (n_cached_replslotstats < 0)
@@ -4720,7 +4716,7 @@ pgstat_fetch_replslot(int *nslots_p)
 
 		for (i = 0; i < max_replication_slots; i++)
 		{
-			PgStat_ReplSlot *statent = &StatsShmem->replslot.stats[i];
+			PgStat_ReplSlotStats *statent = &StatsShmem->replslot.stats[i];
 
 			if (statent->index != -1)
 			{

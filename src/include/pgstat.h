@@ -81,7 +81,7 @@ typedef enum PgStat_Single_Reset_Type
  * PgStat_TableCounts			The actual per-table counts kept by a backend
  *
  * This struct should contain only actual event counters, because we memcmp
- * it against zeroes to detect whether there are any counts to write.
+ * it against zeroes to detect whether there are any stats updates to apply.
  * It is a component of PgStat_TableStatus (within-backend state).
  *
  * Note: for a table, tuples_returned is the number of tuples successfully
@@ -170,7 +170,7 @@ typedef struct PgStat_TableXactStatus
  * it against zeroes to detect whether there are any counts to write.
  *
  * Note that the time counters are in instr_time format here.  We convert to
- * microseconds in PgStat_Counter format when writing to shared statsitics.
+ * microseconds in PgStat_Counter format when updating the shared statistics.
  * ----------
  */
 typedef struct PgStat_FunctionCounts
@@ -219,65 +219,10 @@ typedef struct PgStat_FunctionCallUsage
 
 
 /* ----------
- * Definitions of stats where the number of such stats objects is fixed and
- * thus not addressed via hashtable.
+ * Definition for stats where a variable number of such objects exist. These
+ * are kept in a shared hashtable.
  * ----------
  */
-
-typedef struct PgStat_Wal
-{
-	WalUsage	   wal_usage;
-	PgStat_Counter wal_buffers_full;
-	PgStat_Counter wal_write;
-	PgStat_Counter wal_sync;
-	PgStat_Counter wal_write_time;
-	PgStat_Counter wal_sync_time;
-	TimestampTz stat_reset_timestamp;
-} PgStat_Wal;
-
-typedef struct PgStat_SLRUStats
-{
-	PgStat_Counter blocks_zeroed;
-	PgStat_Counter blocks_hit;
-	PgStat_Counter blocks_read;
-	PgStat_Counter blocks_written;
-	PgStat_Counter blocks_exists;
-	PgStat_Counter flush;
-	PgStat_Counter truncate;
-	TimestampTz stat_reset_timestamp;
-} PgStat_SLRUStats;
-
-typedef struct PgStat_Archiver
-{
-	PgStat_Counter archived_count;	/* archival successes */
-	char		last_archived_wal[MAX_XFN_CHARS + 1];	/* last WAL file
-														 * archived */
-	TimestampTz last_archived_timestamp;	/* last archival success time */
-	PgStat_Counter failed_count;	/* failed archival attempts */
-	char		last_failed_wal[MAX_XFN_CHARS + 1]; /* WAL file involved in
-													 * last failure */
-	TimestampTz last_failed_timestamp;	/* last archival failure time */
-	TimestampTz stat_reset_timestamp;
-} PgStat_Archiver;
-
-typedef struct PgStat_BgWriter
-{
-	PgStat_Counter buf_written_clean;
-	PgStat_Counter maxwritten_clean;
-	PgStat_Counter buf_alloc;
-	TimestampTz	   stat_reset_timestamp;
-} PgStat_BgWriter;
-
-typedef struct PgStat_CheckPointer
-{
-	PgStat_Counter timed_checkpoints;
-	PgStat_Counter requested_checkpoints;
-	PgStat_Counter buf_written_checkpoints;
-	PgStat_Counter buf_written_backend;
-	PgStat_Counter buf_fsync_backend;
-	PgStat_Counter checkpoint_write_time;	/* times in milliseconds */
-	PgStat_Counter checkpoint_sync_time;
-} PgStat_CheckPointer;
 
 typedef struct PgStat_StatDBEntry
 {
@@ -290,6 +235,7 @@ typedef struct PgStat_StatDBEntry
 	PgStat_Counter n_tuples_inserted;
 	PgStat_Counter n_tuples_updated;
 	PgStat_Counter n_tuples_deleted;
+	TimestampTz last_autovac_time;
 	PgStat_Counter n_conflict_tablespace;
 	PgStat_Counter n_conflict_lock;
 	PgStat_Counter n_conflict_snapshot;
@@ -299,6 +245,7 @@ typedef struct PgStat_StatDBEntry
 	PgStat_Counter n_temp_bytes;
 	PgStat_Counter n_deadlocks;
 	PgStat_Counter n_checksum_failures;
+	TimestampTz last_checksum_failure;
 	PgStat_Counter n_block_read_time;	/* times in microseconds */
 	PgStat_Counter n_block_write_time;
 	PgStat_Counter n_sessions;
@@ -309,18 +256,10 @@ typedef struct PgStat_StatDBEntry
 	PgStat_Counter n_sessions_fatal;
 	PgStat_Counter n_sessions_killed;
 
-	TimestampTz last_autovac_time;
-	TimestampTz last_checksum_failure;
 	TimestampTz stat_reset_timestamp;
 	TimestampTz stats_timestamp;	/* time of db stats update */
 } PgStat_StatDBEntry;
 
-
-/* ----------
- * Definition for stats where a variable number of such objects exist. These
- * are kept in a shared hashtable.
- * ----------
- */
 
 /* ----------
  * PgStat_StatTabEntry			The statistics per table (or index)
@@ -328,12 +267,6 @@ typedef struct PgStat_StatDBEntry
  */
 typedef struct PgStat_StatTabEntry
 {
-	/* Persistent data follow */
-	TimestampTz vacuum_timestamp;	/* user initiated vacuum */
-	TimestampTz autovac_vacuum_timestamp;	/* autovacuum initiated */
-	TimestampTz analyze_timestamp;	/* user initiated */
-	TimestampTz autovac_analyze_timestamp;	/* autovacuum initiated */
-
 	PgStat_Counter numscans;
 
 	PgStat_Counter tuples_returned;
@@ -352,9 +285,13 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
 
+	TimestampTz vacuum_timestamp;	/* user initiated vacuum */
 	PgStat_Counter vacuum_count;
+	TimestampTz autovac_vacuum_timestamp;	/* autovacuum initiated */
 	PgStat_Counter autovac_vacuum_count;
+	TimestampTz analyze_timestamp;	/* user initiated */
 	PgStat_Counter analyze_count;
+	TimestampTz autovac_analyze_timestamp;	/* autovacuum initiated */
 	PgStat_Counter autovac_analyze_count;
 } PgStat_StatTabEntry;
 
@@ -364,17 +301,79 @@ typedef struct PgStat_StatTabEntry
  */
 typedef struct PgStat_StatFuncEntry
 {
-	/* Persistent data follow */
 	PgStat_Counter f_numcalls;
 
 	PgStat_Counter f_total_time;	/* times in microseconds */
 	PgStat_Counter f_self_time;
 } PgStat_StatFuncEntry;
 
+
+/* ----------
+ * Definitions of stats where the number of such stats objects is fixed and
+ * thus need not be addressed via hashtable.
+ * ----------
+ */
+
+typedef struct PgStat_ArchiverStats
+{
+	PgStat_Counter archived_count;	/* archival successes */
+	char		last_archived_wal[MAX_XFN_CHARS + 1];	/* last WAL file
+														 * archived */
+	TimestampTz last_archived_timestamp;	/* last archival success time */
+	PgStat_Counter failed_count;	/* failed archival attempts */
+	char		last_failed_wal[MAX_XFN_CHARS + 1]; /* WAL file involved in
+													 * last failure */
+	TimestampTz last_failed_timestamp;	/* last archival failure time */
+	TimestampTz stat_reset_timestamp;
+} PgStat_ArchiverStats;
+
+typedef struct PgStat_CheckPointer
+{
+	PgStat_Counter timed_checkpoints;
+	PgStat_Counter requested_checkpoints;
+	PgStat_Counter checkpoint_write_time;	/* times in milliseconds */
+	PgStat_Counter checkpoint_sync_time;
+	PgStat_Counter buf_written_checkpoints;
+	PgStat_Counter buf_written_backend;
+	PgStat_Counter buf_fsync_backend;
+} PgStat_CheckPointerStats;
+
+typedef struct PgStat_BgWriter
+{
+	PgStat_Counter buf_written_clean;
+	PgStat_Counter maxwritten_clean;
+	PgStat_Counter buf_alloc;
+	TimestampTz	   stat_reset_timestamp;
+} PgStat_BgWriterStats;
+
+
+typedef struct PgStat_WalStats
+{
+	WalUsage	   wal_usage;
+	PgStat_Counter wal_buffers_full;
+	PgStat_Counter wal_write;
+	PgStat_Counter wal_sync;
+	PgStat_Counter wal_write_time;
+	PgStat_Counter wal_sync_time;
+	TimestampTz stat_reset_timestamp;
+} PgStat_WalStats;
+
+typedef struct PgStat_SLRUStats
+{
+	PgStat_Counter blocks_zeroed;
+	PgStat_Counter blocks_hit;
+	PgStat_Counter blocks_read;
+	PgStat_Counter blocks_written;
+	PgStat_Counter blocks_exists;
+	PgStat_Counter flush;
+	PgStat_Counter truncate;
+	TimestampTz stat_reset_timestamp;
+} PgStat_SLRUStats;
+
 /*
  * Replication slot statistics kept in the stats collector
  */
-typedef struct PgStat_ReplSlot
+typedef struct PgStat_ReplSlotStats
 {
 	uint32		index;
 	char		slotname[NAMEDATALEN];
@@ -385,7 +384,7 @@ typedef struct PgStat_ReplSlot
 	PgStat_Counter stream_count;
 	PgStat_Counter stream_bytes;
 	TimestampTz stat_reset_timestamp;
-} PgStat_ReplSlot;
+} PgStat_ReplSlotStats;
 
 
 /* ----------
@@ -403,18 +402,18 @@ extern char *pgstat_stat_filename;
 /*
  * BgWriter statistics counters are updated directly by bgwriter and bufmgr
  */
-extern PgStat_BgWriter BgWriterStats;
+extern PgStat_BgWriterStats BgWriterStats;
 
 /*
  * CheckPointer statistics counters are updated directly by checkpointer and
  * bufmgr
  */
-extern PgStat_CheckPointer CheckPointerStats;
+extern PgStat_CheckPointerStats CheckPointerStats;
 
 /*
  * WAL statistics counter is updated by backends and background processes
  */
-extern PgStat_Wal WalStats;
+extern PgStat_WalStats WalStats;
 
 /*
  * Updated by pgstat_count_buffer_*_time macros
@@ -588,12 +587,12 @@ extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry_extended(bool shared,
 extern void pgstat_copy_index_counters(Oid relid, PgStat_TableStatus *dst);
 extern PgStat_StatFuncEntry *pgstat_fetch_stat_funcentry(Oid funcid);
 extern TimestampTz pgstat_get_stat_timestamp(void);
-extern PgStat_Archiver *pgstat_fetch_stat_archiver(void);
-extern PgStat_BgWriter *pgstat_fetch_stat_bgwriter(void);
-extern PgStat_CheckPointer *pgstat_fetch_stat_checkpointer(void);
-extern PgStat_Wal *pgstat_fetch_stat_wal(void);
+extern PgStat_ArchiverStats *pgstat_fetch_stat_archiver(void);
+extern PgStat_BgWriterStats *pgstat_fetch_stat_bgwriter(void);
+extern PgStat_CheckPointerStats *pgstat_fetch_stat_checkpointer(void);
+extern PgStat_WalStats *pgstat_fetch_stat_wal(void);
 extern PgStat_SLRUStats *pgstat_fetch_slru(void);
-extern PgStat_ReplSlot *pgstat_fetch_replslot(int *nslots_p);
+extern PgStat_ReplSlotStats *pgstat_fetch_replslot(int *nslots_p);
 
 
 #endif							/* PGSTAT_H */
