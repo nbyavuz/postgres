@@ -1868,12 +1868,8 @@ index_concurrently_swap(Oid newIndexId, Oid oldIndexId, const char *oldName)
 	CommandCounterIncrement();
 	index_update_collation_versions(newIndexId, InvalidOid);
 
-	/*
-	 * Copy over statistics from old to new index
-	 * The data will be flushed by the next pgstat_report_stat()
-	 * call.
-	 */
-	pgstat_copy_index_counters(oldIndexId, newClassRel->pgstat_info);
+	/* copy over statistics from old to new index */
+	pgstat_copy_relation_stats(newClassRel, oldClassRel);
 
 	/* Copy data of pg_statistic from the old index to the new one */
 	CopyStatistics(oldIndexId, newIndexId);

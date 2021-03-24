@@ -1205,32 +1205,29 @@ pgstat_vacuum_stat(void)
 		pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
 }
 
-/* ----------
- * pgstat_copy_index_counters() -
- *
- *	Support function for index swapping. Copy a portion of the counters of the
- *	relation to specified place.
- * ----------
+/*
+ * Copy stats between relations. This is used for things like REINDEX
+ * CONCURRENTLY.
  */
 void
-pgstat_copy_index_counters(Oid relid, PgStat_TableStatus *dst)
+pgstat_copy_relation_stats(Relation dst, Relation src)
 {
-	PgStat_StatTabEntry *tabentry;
+	PgStat_StatTabEntry *srcstats;
+	PgStatShm_StatTabEntry *dstshstats;
 
-	/* No point fetching tabentry when dst is NULL */
-	if (!dst)
+	srcstats = pgstat_fetch_stat_tabentry_extended(src->rd_rel->relisshared,
+												   RelationGetRelid(src));
+	if (!srcstats)
 		return;
 
-	tabentry = pgstat_fetch_stat_tabentry(relid);
+	dstshstats = (PgStatShm_StatTabEntry *)
+		get_lock_shared_stat_entry(PGSTAT_TYPE_TABLE,
+								   dst->rd_rel->relisshared ? InvalidOid : MyDatabaseId,
+								   RelationGetRelid(dst),
+								   false);
+	dstshstats->stats = *srcstats;
 
-	if (!tabentry)
-		return;
-
-	dst->t_counts.t_numscans = tabentry->numscans;
-	dst->t_counts.t_tuples_returned = tabentry->tuples_returned;
-	dst->t_counts.t_tuples_fetched = tabentry->tuples_fetched;
-	dst->t_counts.t_blocks_fetched = tabentry->blocks_fetched;
-	dst->t_counts.t_blocks_hit = tabentry->blocks_hit;
+	LWLockRelease(&dstshstats->header.lock);
 }
 
 

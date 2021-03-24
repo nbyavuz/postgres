@@ -584,7 +584,7 @@ extern PgStat_StatDBEntry *pgstat_fetch_stat_dbentry(Oid dbid);
 extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry(Oid relid);
 extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry_extended(bool shared,
 																Oid relid);
-extern void pgstat_copy_index_counters(Oid relid, PgStat_TableStatus *dst);
+extern void pgstat_copy_relation_stats(Relation dstrel, Relation srcrel);
 extern PgStat_StatFuncEntry *pgstat_fetch_stat_funcentry(Oid funcid);
 extern TimestampTz pgstat_get_stat_timestamp(void);
 extern PgStat_ArchiverStats *pgstat_fetch_stat_archiver(void);
