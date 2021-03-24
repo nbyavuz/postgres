@@ -257,7 +257,6 @@ typedef struct PgStat_StatDBEntry
 	PgStat_Counter n_sessions_killed;
 
 	TimestampTz stat_reset_timestamp;
-	TimestampTz stats_timestamp;	/* time of db stats update */
 } PgStat_StatDBEntry;
 
 

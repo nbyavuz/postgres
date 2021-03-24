@@ -1651,15 +1651,6 @@ pgstat_write_statsfile(void)
 		/* if not dropped the valid-entry refcount should exist */
 		Assert(pg_atomic_read_u32(&shent->refcount) > 0);
 
-		/* Make DB's timestamp consistent with the global stats */
-		if (ps->key.type == PGSTAT_TYPE_DB)
-		{
-			PgStat_StatDBEntry *dbentry = (PgStat_StatDBEntry *) shent;
-
-			dbentry->stats_timestamp =
-				(TimestampTz) pg_atomic_read_u64(&StatsShmem->stats_timestamp);
-		}
-
 		fputc('S', fpout);
 		rc = fwrite(&ps->key, sizeof(PgStatHashKey), 1, fpout);
 
