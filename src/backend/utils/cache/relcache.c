@@ -2370,7 +2370,6 @@ RelationDestroyRelation(Relation relation, bool remember_tupdesc)
 	/* break mutual link with stats entry */
 	pgstat_delinkstats(relation);
 
-	if (relation->rd_rel)
 	/*
 	 * Free all the subsidiary data structures of the relcache entry, then the
 	 * entry itself.
