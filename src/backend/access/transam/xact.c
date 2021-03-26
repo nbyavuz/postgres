@@ -1232,7 +1232,9 @@ RecordTransactionCommit(void)
 	RelFileNode *rels;
 	int			nchildren;
 	TransactionId *children;
+	PgStat_DroppedStatsItem *dropped_stats = NULL;
 	int			nmsgs = 0;
+	int			ndroppedstats = 0;
 	SharedInvalidationMessage *invalMessages = NULL;
 	bool		RelcacheInitFileInval = false;
 	bool		wrote_xlog;
@@ -1250,6 +1252,7 @@ RecordTransactionCommit(void)
 	/* Get data needed for commit record */
 	nrels = smgrGetPendingDeletes(true, &rels);
 	nchildren = xactGetCommittedChildren(&children);
+	ndroppedstats = pgstat_pending_stats_drops(&dropped_stats);
 	if (XLogStandbyInfoActive())
 		nmsgs = xactGetCommittedInvalidationMessages(&invalMessages,
 													 &RelcacheInitFileInval);
@@ -1264,10 +1267,12 @@ RecordTransactionCommit(void)
 		/*
 		 * We expect that every RelationDropStorage is followed by a catalog
 		 * update, and hence XID assignment, so we shouldn't get here with any
-		 * pending deletes.  Use a real test not just an Assert to check this,
-		 * since it's a bit fragile.
+		 * pending deletes. Same is true for dropping stats.
+		 *
+		 * Use a real test not just an Assert to check this, since it's a bit
+		 * fragile.
 		 */
-		if (nrels != 0)
+		if (nrels != 0 || ndroppedstats != 0)
 			elog(ERROR, "cannot commit a transaction that deleted files but has no xid");
 
 		/* Can't have child XIDs either; AssignTransactionId enforces this */
@@ -1341,6 +1346,7 @@ RecordTransactionCommit(void)
 
 		XactLogCommitRecord(xactStopTimestamp,
 							nchildren, children, nrels, rels,
+							ndroppedstats, dropped_stats,
 							nmsgs, invalMessages,
 							RelcacheInitFileInval,
 							MyXactFlags,
@@ -5497,6 +5503,7 @@ XLogRecPtr
 XactLogCommitRecord(TimestampTz commit_time,
 					int nsubxacts, TransactionId *subxacts,
 					int nrels, RelFileNode *rels,
+					int ndroppedstats, PgStat_DroppedStatsItem *dropped_stats,
 					int nmsgs, SharedInvalidationMessage *msgs,
 					bool relcacheInval,
 					int xactflags, TransactionId twophase_xid,
@@ -5507,6 +5514,7 @@ XactLogCommitRecord(TimestampTz commit_time,
 	xl_xact_dbinfo xl_dbinfo;
 	xl_xact_subxacts xl_subxacts;
 	xl_xact_relfilenodes xl_relfilenodes;
+	xl_xact_dropped_stats xl_dropped_stats;
 	xl_xact_invals xl_invals;
 	xl_xact_twophase xl_twophase;
 	xl_xact_origin xl_origin;
@@ -5564,6 +5572,12 @@ XactLogCommitRecord(TimestampTz commit_time,
 		info |= XLR_SPECIAL_REL_UPDATE;
 	}
 
+	if (ndroppedstats > 0)
+	{
+		xl_xinfo.xinfo |= XACT_XINFO_HAS_DROPPED_STATS;
+		xl_dropped_stats.ndropped = ndroppedstats;
+	}
+
 	if (nmsgs > 0)
 	{
 		xl_xinfo.xinfo |= XACT_XINFO_HAS_INVALS;
@@ -5618,6 +5632,14 @@ XactLogCommitRecord(TimestampTz commit_time,
 						 MinSizeOfXactRelfilenodes);
 		XLogRegisterData((char *) rels,
 						 nrels * sizeof(RelFileNode));
+	}
+
+	if (xl_xinfo.xinfo & XACT_XINFO_HAS_DROPPED_STATS)
+	{
+		XLogRegisterData((char *) (&xl_dropped_stats),
+						 MinSizeOfXactDroppedStats);
+		XLogRegisterData((char *) dropped_stats,
+						 ndroppedstats * sizeof(PgStat_DroppedStatsItem));
 	}
 
 	if (xl_xinfo.xinfo & XACT_XINFO_HAS_INVALS)
@@ -5889,6 +5911,13 @@ xact_redo_commit(xl_xact_parsed_commit *parsed,
 
 		/* Make sure files supposed to be dropped are dropped */
 		DropRelationFiles(parsed->xnodes, parsed->nrels, true);
+	}
+
+	if (parsed->ndroppedstats > 0)
+	{
+		XLogFlush(lsn);
+
+		pgstat_perform_drops(parsed->ndroppedstats, parsed->dropped_stats, true);
 	}
 
 	/*

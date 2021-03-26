@@ -83,6 +83,17 @@ ParseCommitRecord(uint8 info, xl_xact_commit *xlrec, xl_xact_parsed_commit *pars
 		data += xl_relfilenodes->nrels * sizeof(RelFileNode);
 	}
 
+	if (parsed->xinfo & XACT_XINFO_HAS_DROPPED_STATS)
+	{
+		xl_xact_dropped_stats *xl_drops = (xl_xact_dropped_stats *) data;
+
+		parsed->ndroppedstats = xl_drops->ndropped;
+		parsed->dropped_stats = xl_drops->dropped_stats;
+
+		data += MinSizeOfXactRelfilenodes;
+		data += xl_drops->ndropped * sizeof(PgStat_DroppedStatsItem);
+	}
+
 	if (parsed->xinfo & XACT_XINFO_HAS_INVALS)
 	{
 		xl_xact_invals *xl_invals = (xl_xact_invals *) data;
@@ -280,6 +291,26 @@ xact_desc_subxacts(StringInfo buf, int nsubxacts, TransactionId *subxacts)
 }
 
 static void
+xact_desc_dropped_stats(StringInfo buf, int ndropped,
+						PgStat_DroppedStatsItem *dropped_stats)
+{
+	int			i;
+
+	if (ndropped > 0)
+	{
+		appendStringInfo(buf, "; dropped stats:");
+		for (i = 0; i < ndropped; i++)
+		{
+			appendStringInfo(buf, " %u/%u/%u",
+							 dropped_stats[i].type,
+							 dropped_stats[i].dboid,
+							 dropped_stats[i].objid);
+		}
+	}
+}
+
+
+static void
 xact_desc_commit(StringInfo buf, uint8 info, xl_xact_commit *xlrec, RepOriginId origin_id)
 {
 	xl_xact_parsed_commit parsed;
@@ -294,6 +325,7 @@ xact_desc_commit(StringInfo buf, uint8 info, xl_xact_commit *xlrec, RepOriginId 
 
 	xact_desc_relations(buf, "rels", parsed.nrels, parsed.xnodes);
 	xact_desc_subxacts(buf, parsed.nsubxacts, parsed.subxacts);
+	xact_desc_dropped_stats(buf, parsed.ndroppedstats, parsed.dropped_stats);
 
 	standby_desc_invalidations(buf, parsed.nmsgs, parsed.msgs, parsed.dbId,
 							   parsed.tsId,

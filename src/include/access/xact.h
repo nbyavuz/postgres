@@ -172,6 +172,7 @@ typedef void (*SubXactCallback) (SubXactEvent event, SubTransactionId mySubid,
 #define XACT_XINFO_HAS_ORIGIN			(1U << 5)
 #define XACT_XINFO_HAS_AE_LOCKS			(1U << 6)
 #define XACT_XINFO_HAS_GID				(1U << 7)
+#define XACT_XINFO_HAS_DROPPED_STATS	(1U << 8)
 
 /*
  * Also stored in xinfo, these indicating a variety of additional actions that
@@ -222,7 +223,7 @@ typedef struct xl_xact_assignment
 typedef struct xl_xact_xinfo
 {
 	/*
-	 * Even though we right now only require 1 byte of space in xinfo we use
+	 * Even though we right now only require two bytes of space in xinfo we use
 	 * four so following records don't have to care about alignment. Commit
 	 * records can be large, so copying large portions isn't attractive.
 	 */
@@ -248,6 +249,20 @@ typedef struct xl_xact_relfilenodes
 	RelFileNode xnodes[FLEXIBLE_ARRAY_MEMBER];
 } xl_xact_relfilenodes;
 #define MinSizeOfXactRelfilenodes offsetof(xl_xact_relfilenodes, xnodes)
+
+typedef struct PgStat_DroppedStatsItem
+{
+	Oid type;
+	Oid dboid;
+	Oid objid;
+} PgStat_DroppedStatsItem;
+
+typedef struct xl_xact_dropped_stats
+{
+	int		ndropped;
+	struct PgStat_DroppedStatsItem dropped_stats[FLEXIBLE_ARRAY_MEMBER];
+} xl_xact_dropped_stats;
+#define MinSizeOfXactDroppedStats offsetof(xl_xact_dropped_stats, dropped_stats)
 
 typedef struct xl_xact_invals
 {
@@ -275,6 +290,7 @@ typedef struct xl_xact_commit
 	/* xl_xact_dbinfo follows if XINFO_HAS_DBINFO */
 	/* xl_xact_subxacts follows if XINFO_HAS_SUBXACT */
 	/* xl_xact_relfilenodes follows if XINFO_HAS_RELFILENODES */
+	/* xl_xact_dropped_stats follows if XINFO_HAS_DROPPED_STATS */
 	/* xl_xact_invals follows if XINFO_HAS_INVALS */
 	/* xl_xact_twophase follows if XINFO_HAS_TWOPHASE */
 	/* twophase_gid follows if XINFO_HAS_GID. As a null-terminated string. */
@@ -333,6 +349,9 @@ typedef struct xl_xact_parsed_commit
 
 	int			nrels;
 	RelFileNode *xnodes;
+
+	int			ndroppedstats;
+	PgStat_DroppedStatsItem *dropped_stats;
 
 	int			nmsgs;
 	SharedInvalidationMessage *msgs;
@@ -441,6 +460,7 @@ extern int	xactGetCommittedChildren(TransactionId **ptr);
 extern XLogRecPtr XactLogCommitRecord(TimestampTz commit_time,
 									  int nsubxacts, TransactionId *subxacts,
 									  int nrels, RelFileNode *rels,
+									  int nstats, PgStat_DroppedStatsItem *dropped_stats,
 									  int nmsgs, SharedInvalidationMessage *msgs,
 									  bool relcacheInval,
 									  int xactflags,

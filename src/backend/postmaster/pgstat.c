@@ -240,14 +240,20 @@ typedef struct TwoPhasePgStatRecord
 	PgStat_Counter tuples_inserted; /* tuples inserted in xact */
 	PgStat_Counter tuples_updated;	/* tuples updated in xact */
 	PgStat_Counter tuples_deleted;	/* tuples deleted in xact */
-	PgStat_Counter inserted_pre_trunc;	/* tuples inserted prior to truncate */
-	PgStat_Counter updated_pre_trunc;	/* tuples updated prior to truncate */
-	PgStat_Counter deleted_pre_trunc;	/* tuples deleted prior to truncate */
+	/* tuples i/u/d prior to truncate/drop */
+	PgStat_Counter inserted_pre_truncdrop;
+	PgStat_Counter updated_pre_truncdrop;
+	PgStat_Counter deleted_pre_truncdrop;
 	Oid			t_id;			/* table's OID */
 	bool		t_shared;		/* is it a shared catalog? */
-	bool		t_truncated;	/* was the relation truncated? */
+	bool		t_truncdropped;	/* was the relation truncated/dropped? */
 } TwoPhasePgStatRecord;
 
+typedef struct PgStat_PendingDroppedStatsItem
+{
+	PgStat_DroppedStatsItem item;
+	dlist_node	node;
+} PgStat_PendingDroppedStatsItem;
 
 /*
  * Tuple insertion/deletion counts for an open transaction can't be propagated
@@ -255,10 +261,16 @@ typedef struct TwoPhasePgStatRecord
  * or abort.  Hence, we keep these counts in per-subxact structs that live
  * in TopTransactionContext.  This data structure is designed on the assumption
  * that subxacts won't usually modify very many tables.
+ *
+ * FIXME: Update comment.
  */
 typedef struct PgStat_SubXactStatus
 {
 	int			nest_level;		/* subtransaction nest level */
+
+	dlist_head	pending_drops;
+	int			pending_drops_count;
+
 	struct PgStat_SubXactStatus *prev;	/* higher-level subxact if any */
 	PgStat_TableXactStatus *first;	/* head of list for this subxact */
 } PgStat_SubXactStatus;
@@ -612,6 +624,9 @@ static void pgstat_write_statsfile(void);
 static void pgstat_read_statsfile(void);
 static void pgstat_shutdown_hook(int code, Datum arg);
 
+static PgStat_SubXactStatus *get_tabstat_stack_level(int nest_level);
+
+
 static PgStatShm_StatEntryHeader *get_shared_stat_entry(PgStatTypes type,
 														Oid dbid, Oid objid,
 														bool nowait,
@@ -877,6 +892,186 @@ pgstat_initialize(void)
 
 	/* need to be called before dsm shutdown */
 	before_shmem_exit(pgstat_shutdown_hook, 0);
+}
+
+static void
+pgstat_truncdrop_save_counters(PgStat_TableXactStatus *trans, bool is_drop);
+
+void
+pgstat_drop_relation(Relation rel)
+{
+	int			nest_level = GetCurrentTransactionNestLevel();
+	PgStat_SubXactStatus *xact_state;
+	PgStat_PendingDroppedStatsItem *drop = (PgStat_PendingDroppedStatsItem *)
+		MemoryContextAlloc(TopMemoryContext, sizeof(PgStat_PendingDroppedStatsItem));
+	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
+
+	xact_state = get_tabstat_stack_level(nest_level);
+
+	drop->item.type = PGSTAT_TYPE_TABLE;
+	if (rel->rd_rel->relisshared)
+		drop->item.dboid = InvalidOid;
+	else
+		drop->item.dboid = MyDatabaseId;
+	drop->item.objid = RelationGetRelid(rel);
+
+	dlist_push_tail(&xact_state->pending_drops, &drop->node);
+	xact_state->pending_drops_count++;
+
+	if (pgstat_info &&
+		pgstat_info->trans != NULL &&
+		pgstat_info->trans->nest_level == nest_level)
+	{
+		pgstat_truncdrop_save_counters(pgstat_info->trans, true);
+		pgstat_info->trans->tuples_inserted = 0;
+		pgstat_info->trans->tuples_updated = 0;
+		pgstat_info->trans->tuples_deleted = 0;
+	}
+}
+
+int
+pgstat_pending_stats_drops(PgStat_DroppedStatsItem **items)
+{
+	PgStat_SubXactStatus *xact_state = pgStatXactStack;
+	int nitems = 0;
+	dlist_iter iter;
+
+	if (xact_state == NULL)
+		return 0;
+
+	Assert(xact_state->nest_level == 1);
+	Assert(xact_state->prev == NULL);
+
+	*items = palloc(xact_state->pending_drops_count
+					* sizeof(PgStat_PendingDroppedStatsItem));
+
+	dlist_foreach(iter, &xact_state->pending_drops)
+	{
+		PgStat_PendingDroppedStatsItem *pending =
+			dlist_container(PgStat_PendingDroppedStatsItem, node, iter.cur);
+
+		Assert(nitems < xact_state->pending_drops_count);
+		(*items)[nitems++] = pending->item;
+	}
+
+	Assert(nitems == xact_state->pending_drops_count);
+
+	return nitems;
+}
+
+static void
+pgstat_perform_drop(PgStat_DroppedStatsItem *drop)
+{
+	PgStatPendingEntry *pending_entry;
+	PgStatShmHashEntry *shent;
+	PgStatHashKey key;
+
+	key.type = drop->type;
+	key.databaseid = drop->dboid;
+	key.objectid = drop->objid;
+
+	if (pgStatPendingHash)
+	{
+		pending_entry = pgstat_pending_lookup(pgStatPendingHash, key);
+		if (pending_entry)
+			delete_pending_stats_entry(pending_entry);
+	}
+
+	if (pgStatShmLookupCache)
+	{
+		PgStatShmLookupCacheEntry *lohashent;
+
+		lohashent = pgstat_shm_lookup_cache_lookup(pgStatShmLookupCache, key);
+
+		if (lohashent)
+		{
+			PgStatShm_StatEntryHeader *header = lohashent->shared;
+
+			if (header)
+			{
+				Assert(!header->dropped);
+
+				pg_atomic_fetch_sub_u32(&header->refcount, 1);
+				/* still should have the valid-entry reference */
+				Assert(pg_atomic_read_u32(&header->refcount) > 0);
+			}
+
+			if (!pgstat_shm_lookup_cache_delete(pgStatShmLookupCache, key))
+				elog(ERROR, "huh?");
+		}
+	}
+
+	shent = dshash_find(pgStatSharedHash, &key, true);
+	if (shent)
+	{
+		PgStatShm_StatEntryHeader *header;
+		dsa_pointer pdsa;
+
+		Assert(shent->body != InvalidDsaPointer);
+		pdsa = shent->body;
+		header = dsa_get_address(StatsDSA, pdsa);
+
+		/*
+		 * Signal that the entry is dropped - this will eventually cause other
+		 * backends to release their references.
+		 */
+		if (header->dropped)
+			elog(ERROR, "can only drop a relation once");
+		header->dropped = true;
+
+		dshash_delete_entry(pgStatSharedHash, shent);
+
+		if (pg_atomic_fetch_sub_u32(&header->refcount, 1) == 1)
+		{
+			dsa_free(StatsDSA, pdsa);
+		}
+	}
+
+}
+
+void
+pgstat_perform_drops(int ndrops, struct PgStat_DroppedStatsItem *items, bool is_redo)
+{
+	if (ndrops == 0)
+		return;
+
+	for (int i = 0; i < ndrops; i++)
+		pgstat_perform_drop(&items[i]);
+	pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
+}
+
+static void
+pgstat_perform_stats_drops(PgStat_SubXactStatus *xact_state, bool isCommit)
+{
+	dlist_mutable_iter iter;
+
+	if (xact_state->pending_drops_count == 0)
+	{
+		Assert(dlist_is_empty(&xact_state->pending_drops));
+		return;
+	}
+
+	dlist_foreach_modify(iter, &xact_state->pending_drops)
+	{
+		PgStat_PendingDroppedStatsItem *pending =
+			dlist_container(PgStat_PendingDroppedStatsItem, node, iter.cur);
+
+		elog(DEBUG2, "dropping stats %u/%u/%u",
+			 pending->item.type,
+			 pending->item.dboid,
+			 pending->item.objid);
+
+		if (isCommit)
+		{
+			pgstat_perform_drop(&pending->item);
+		}
+
+		dlist_delete(&pending->node);
+		xact_state->pending_drops_count--;
+		pfree(pending);
+	}
+
+	pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
 }
 
 /* ----------
@@ -2648,7 +2843,7 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 	 * If table was truncated or vacuum/analyze has ran, first reset the
 	 * live/dead counters.
 	 */
-	if (lstats->t_counts.t_truncated)
+	if (lstats->t_counts.t_truncdropped)
 	{
 		shtabstats->stats.n_live_tuples = 0;
 		shtabstats->stats.n_dead_tuples = 0;
@@ -3532,6 +3727,8 @@ get_tabstat_stack_level(int nest_level)
 		xact_state = (PgStat_SubXactStatus *)
 			MemoryContextAlloc(TopTransactionContext,
 							   sizeof(PgStat_SubXactStatus));
+		dlist_init(&xact_state->pending_drops);
+		xact_state->pending_drops_count = 0;
 		xact_state->nest_level = nest_level;
 		xact_state->prev = pgStatXactStack;
 		xact_state->first = NULL;
@@ -3635,36 +3832,38 @@ pgstat_count_heap_delete(Relation rel)
 }
 
 /*
- * pgstat_truncate_save_counters
+ * pgstat_truncdrop_save_counters
  *
- * Whenever a table is truncated, we save its i/u/d counters so that they can
- * be cleared, and if the (sub)xact that executed the truncate later aborts,
- * the counters can be restored to the saved (pre-truncate) values.  Note we do
- * this on the first truncate in any particular subxact level only.
+ * Whenever a table is truncated/dropped, we save its i/u/d counters so that they
+ * can be cleared, and if the (sub)xact that executed the truncate/drop later
+ * aborts, the counters can be restored to the saved (pre-truncate) values.
+ *
+ * Note that for truncate we do this on the first truncate in any particular
+ * subxact level only.
  */
 static void
-pgstat_truncate_save_counters(PgStat_TableXactStatus *trans)
+pgstat_truncdrop_save_counters(PgStat_TableXactStatus *trans, bool is_drop)
 {
-	if (!trans->truncated)
+	if (!trans->truncdropped || is_drop)
 	{
-		trans->inserted_pre_trunc = trans->tuples_inserted;
-		trans->updated_pre_trunc = trans->tuples_updated;
-		trans->deleted_pre_trunc = trans->tuples_deleted;
-		trans->truncated = true;
+		trans->inserted_pre_truncdrop = trans->tuples_inserted;
+		trans->updated_pre_truncdrop = trans->tuples_updated;
+		trans->deleted_pre_truncdrop = trans->tuples_deleted;
+		trans->truncdropped = true;
 	}
 }
 
 /*
- * pgstat_truncate_restore_counters - restore counters when a truncate aborts
+ * pgstat_truncdrop_restore_counters - restore counters when a truncate aborts
  */
 static void
-pgstat_truncate_restore_counters(PgStat_TableXactStatus *trans)
+pgstat_truncdrop_restore_counters(PgStat_TableXactStatus *trans)
 {
-	if (trans->truncated)
+	if (trans->truncdropped)
 	{
-		trans->tuples_inserted = trans->inserted_pre_trunc;
-		trans->tuples_updated = trans->updated_pre_trunc;
-		trans->tuples_deleted = trans->deleted_pre_trunc;
+		trans->tuples_inserted = trans->inserted_pre_truncdrop;
+		trans->tuples_updated = trans->updated_pre_truncdrop;
+		trans->tuples_deleted = trans->deleted_pre_truncdrop;
 	}
 }
 
@@ -3685,7 +3884,7 @@ pgstat_count_truncate(Relation rel)
 			pgstat_info->trans->nest_level != nest_level)
 			add_tabstat_xact_level(pgstat_info, nest_level);
 
-		pgstat_truncate_save_counters(pgstat_info->trans);
+		pgstat_truncdrop_save_counters(pgstat_info->trans, false);
 		pgstat_info->trans->tuples_inserted = 0;
 		pgstat_info->trans->tuples_updated = 0;
 		pgstat_info->trans->tuples_deleted = 0;
@@ -3730,17 +3929,20 @@ pgstat_eoxact_relations(PgStat_SubXactStatus *xact_state, bool isCommit)
 		Assert(trans->upper == NULL);
 		tabstat = trans->parent;
 		Assert(tabstat->trans == trans);
-		/* restore pre-truncate stats (if any) in case of aborted xact */
+		/* restore pre-truncate/drop stats (if any) in case of aborted xact */
 		if (!isCommit)
-			pgstat_truncate_restore_counters(trans);
+		{
+			pgstat_truncdrop_restore_counters(trans);
+		}
+
 		/* count attempted actions regardless of commit/abort */
 		tabstat->t_counts.t_tuples_inserted += trans->tuples_inserted;
 		tabstat->t_counts.t_tuples_updated += trans->tuples_updated;
 		tabstat->t_counts.t_tuples_deleted += trans->tuples_deleted;
 		if (isCommit)
 		{
-			tabstat->t_counts.t_truncated = trans->truncated;
-			if (trans->truncated)
+			tabstat->t_counts.t_truncdropped = trans->truncdropped;
+			if (trans->truncdropped)
 			{
 				/* forget live/dead stats seen by backend thus far */
 				tabstat->t_counts.t_delta_live_tuples = 0;
@@ -3801,6 +4003,8 @@ AtEOXact_PgStat(bool isCommit, bool parallel)
 
 		/* relations */
 		pgstat_eoxact_relations(xact_state, isCommit);
+
+		pgstat_perform_stats_drops(xact_state, isCommit);
 	}
 	pgStatXactStack = NULL;
 
@@ -3815,6 +4019,39 @@ AtEOXact_PgStat(bool isCommit, bool parallel)
  * Transfer transactional insert/update counts into the next higher
  * subtransaction state.
  */
+static void
+pgstat_eosubxact_drops(PgStat_SubXactStatus *xact_state, bool isCommit, int nestDepth)
+{
+	PgStat_SubXactStatus *parent_xact_state;
+	dlist_mutable_iter iter;
+
+	if (xact_state->pending_drops_count == 0)
+		return;
+
+	parent_xact_state = get_tabstat_stack_level(nestDepth - 1);
+
+	dlist_foreach_modify(iter, &xact_state->pending_drops)
+	{
+		PgStat_PendingDroppedStatsItem *pending =
+			dlist_container(PgStat_PendingDroppedStatsItem, node, iter.cur);
+
+		dlist_delete(&pending->node);
+		xact_state->pending_drops_count--;
+
+		if (isCommit)
+		{
+			dlist_push_tail(&parent_xact_state->pending_drops, &pending->node);
+			parent_xact_state->pending_drops_count++;
+		}
+		else
+		{
+			pfree(pending);
+		}
+	}
+
+	Assert(xact_state->pending_drops_count == 0);
+}
+
 static void
 pgstat_eosubxact_relations(PgStat_SubXactStatus *xact_state, bool isCommit, int nestDepth)
 {
@@ -3834,10 +4071,10 @@ pgstat_eosubxact_relations(PgStat_SubXactStatus *xact_state, bool isCommit, int 
 		{
 			if (trans->upper && trans->upper->nest_level == nestDepth - 1)
 			{
-				if (trans->truncated)
+				if (trans->truncdropped)
 				{
-					/* propagate the truncate status one level up */
-					pgstat_truncate_save_counters(trans->upper);
+					/* propagate the truncate/drop status one level up */
+					pgstat_truncdrop_save_counters(trans->upper, false);
 					/* replace upper xact stats with ours */
 					trans->upper->tuples_inserted = trans->tuples_inserted;
 					trans->upper->tuples_updated = trans->tuples_updated;
@@ -3877,8 +4114,8 @@ pgstat_eosubxact_relations(PgStat_SubXactStatus *xact_state, bool isCommit, int 
 			 * subtransaction
 			 */
 
-			/* first restore values obliterated by truncate */
-			pgstat_truncate_restore_counters(trans);
+			/* first restore values obliterated by truncate/drop */
+			pgstat_truncdrop_restore_counters(trans);
 			/* count attempted actions regardless of commit/abort */
 			tabstat->t_counts.t_tuples_inserted += trans->tuples_inserted;
 			tabstat->t_counts.t_tuples_updated += trans->tuples_updated;
@@ -3910,6 +4147,8 @@ AtEOSubXact_PgStat(bool isCommit, int nestDepth)
 	{
 		/* delink xact_state from stack immediately to simplify reuse case */
 		pgStatXactStack = xact_state->prev;
+
+		pgstat_eosubxact_drops(xact_state, isCommit, nestDepth);
 
 		/* relations */
 		pgstat_eosubxact_relations(xact_state, isCommit, nestDepth);
@@ -3951,10 +4190,10 @@ AtPrepare_PgStat(void)
 			record.tuples_inserted = trans->tuples_inserted;
 			record.tuples_updated = trans->tuples_updated;
 			record.tuples_deleted = trans->tuples_deleted;
-			record.inserted_pre_trunc = trans->inserted_pre_trunc;
-			record.updated_pre_trunc = trans->updated_pre_trunc;
-			record.deleted_pre_trunc = trans->deleted_pre_trunc;
-			record.t_truncated = trans->truncated;
+			record.inserted_pre_truncdrop = trans->inserted_pre_truncdrop;
+			record.updated_pre_truncdrop = trans->updated_pre_truncdrop;
+			record.deleted_pre_truncdrop = trans->deleted_pre_truncdrop;
+			record.t_truncdropped = trans->truncdropped;
 
 			RegisterTwoPhaseRecord(TWOPHASE_RM_PGSTAT_ID, 0,
 								   &record, sizeof(TwoPhasePgStatRecord));
@@ -4020,8 +4259,8 @@ pgstat_twophase_postcommit(TransactionId xid, uint16 info,
 	pgstat_info->t_counts.t_tuples_inserted += rec->tuples_inserted;
 	pgstat_info->t_counts.t_tuples_updated += rec->tuples_updated;
 	pgstat_info->t_counts.t_tuples_deleted += rec->tuples_deleted;
-	pgstat_info->t_counts.t_truncated = rec->t_truncated;
-	if (rec->t_truncated)
+	pgstat_info->t_counts.t_truncdropped = rec->t_truncdropped;
+	if (rec->t_truncdropped)
 	{
 		/* forget live/dead stats seen by backend thus far */
 		pgstat_info->t_counts.t_delta_live_tuples = 0;
@@ -4053,11 +4292,11 @@ pgstat_twophase_postabort(TransactionId xid, uint16 info,
 	pgstat_info = get_pending_tabstat_entry(rec->t_id, rec->t_shared);
 
 	/* Same math as in AtEOXact_PgStat, abort case */
-	if (rec->t_truncated)
+	if (rec->t_truncdropped)
 	{
-		rec->tuples_inserted = rec->inserted_pre_trunc;
-		rec->tuples_updated = rec->updated_pre_trunc;
-		rec->tuples_deleted = rec->deleted_pre_trunc;
+		rec->tuples_inserted = rec->inserted_pre_truncdrop;
+		rec->tuples_updated = rec->updated_pre_truncdrop;
+		rec->tuples_deleted = rec->deleted_pre_truncdrop;
 	}
 	pgstat_info->t_counts.t_tuples_inserted += rec->tuples_inserted;
 	pgstat_info->t_counts.t_tuples_updated += rec->tuples_updated;

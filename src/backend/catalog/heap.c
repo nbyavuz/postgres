@@ -74,6 +74,7 @@
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "partitioning/partdesc.h"
+#include "pgstat.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "storage/smgr.h"
@@ -2000,6 +2001,11 @@ heap_drop_with_catalog(Oid relid)
 	 */
 	if (RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
 		RelationDropStorage(rel);
+
+	/*
+	 * FIXME:
+	 */
+	pgstat_drop_relation(rel);
 
 	/*
 	 * Close relcache entry, but *keep* AccessExclusiveLock on the relation

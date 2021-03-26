@@ -143,6 +143,22 @@ SET enable_bitmapscan TO off;
 SELECT count(*) FROM tenk2 WHERE unique1 = 1;
 RESET enable_bitmapscan;
 
+-- Check that stats for tables are dropped without needing to wait for
+-- vacuum. For that we need to access stats by oid after the DROP
+-- TABLE. Save it.
+CREATE TABLE drop_stats_test();
+INSERT INTO drop_stats_test DEFAULT VALUES;
+SELECT 'drop_stats_test'::regclass::oid AS drop_stats_test_oid \gset
+
+CREATE TABLE drop_stats_test_xact();
+INSERT INTO drop_stats_test_xact DEFAULT VALUES;
+SELECT 'drop_stats_test_xact'::regclass::oid AS drop_stats_test_xact_oid \gset
+
+CREATE TABLE drop_stats_test_subxact();
+INSERT INTO drop_stats_test_subxact DEFAULT VALUES;
+SELECT 'drop_stats_test_subxact'::regclass::oid AS drop_stats_test_subxact_oid \gset
+
+
 -- We can't just call wait_for_stats() at this point, because we only
 -- transmit stats when the session goes idle, and we probably didn't
 -- transmit the last couple of counts yet thanks to the rate-limiting logic
@@ -174,6 +190,75 @@ SELECT st.heap_blks_read + st.heap_blks_hit >= pr.heap_blks + cl.relpages,
 SELECT pr.snap_ts < pg_stat_get_snapshot_timestamp() as snapshot_newer
 FROM prevstats AS pr;
 
+
+-- check stats are dropped (happens synchronously)
+SELECT pg_stat_get_live_tuples(:drop_stats_test_oid);
+DROP TABLE drop_stats_test;
+SELECT pg_stat_get_live_tuples(:drop_stats_test_oid);
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_oid);
+
+-- check that rollback protects against having stats dropped
+-- and that local modifcations don't pose a problem
+SELECT pg_stat_get_live_tuples(:drop_stats_test_xact_oid);
+SELECT pg_stat_get_tuples_inserted(:drop_stats_test_xact_oid);
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_xact_oid);
+BEGIN;
+INSERT INTO drop_stats_test_xact DEFAULT VALUES;
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_xact_oid);
+DROP TABLE drop_stats_test_xact;
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_xact_oid);
+ROLLBACK;
+SELECT pg_stat_get_live_tuples(:drop_stats_test_xact_oid);
+SELECT pg_stat_get_tuples_inserted(:drop_stats_test_xact_oid);
+
+-- transactional drop (Cannot use pg_stat_get_xact again, timing
+-- dependent whether already flushed)
+SELECT pg_stat_get_live_tuples(:drop_stats_test_xact_oid);
+SELECT pg_stat_get_tuples_inserted(:drop_stats_test_xact_oid);
+BEGIN;
+INSERT INTO drop_stats_test_xact DEFAULT VALUES;
+DROP TABLE drop_stats_test_xact;
+COMMIT;
+SELECT pg_stat_get_live_tuples(:drop_stats_test_xact_oid);
+SELECT pg_stat_get_tuples_inserted(:drop_stats_test_xact_oid);
+
+-- savepoint rollback (2 levels)
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+BEGIN;
+INSERT INTO drop_stats_test_subxact DEFAULT VALUES;
+SAVEPOINT sp1;
+INSERT INTO drop_stats_test_subxact DEFAULT VALUES;
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_subxact_oid);
+SAVEPOINT sp2;
+DROP TABLE drop_stats_test_subxact;
+ROLLBACK TO SAVEPOINT sp2;
+SELECT pg_stat_get_xact_tuples_inserted(:drop_stats_test_subxact_oid);
+COMMIT;
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+
+-- savepoint rolback (1 level)
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+BEGIN;
+SAVEPOINT sp1;
+DROP TABLE drop_stats_test_subxact;
+SAVEPOINT sp2;
+ROLLBACK TO SAVEPOINT sp1;
+COMMIT;
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+
+-- and now actually drop
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+BEGIN;
+SAVEPOINT sp1;
+DROP TABLE drop_stats_test_subxact;
+SAVEPOINT sp2;
+RELEASE SAVEPOINT sp1;
+COMMIT;
+SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
+
+
 DROP TABLE trunc_stats_test, trunc_stats_test1, trunc_stats_test2, trunc_stats_test3, trunc_stats_test4;
 DROP TABLE prevstats;
+
+\dt *stats_test*
 -- End of Stats Test
