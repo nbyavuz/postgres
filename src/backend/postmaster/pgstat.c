@@ -2708,7 +2708,7 @@ flush_dbstat(PgStat_StatDBEntry *pendingent, Oid dboid, bool nowait)
 								   InvalidOid, nowait);
 
 	if (!sharedent)
-		return false;			/* failed to acquire lock, skip */
+		return true;			/* failed to acquire lock, skip */
 
 	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_returned);
 	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_fetched);
@@ -2758,7 +2758,7 @@ flush_dbstat(PgStat_StatDBEntry *pendingent, Oid dboid, bool nowait)
 
 	memset(pendingent, 0, sizeof(*pendingent));
 
-	return true;
+	return false;
 }
 
 /*
