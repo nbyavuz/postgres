@@ -1688,7 +1688,6 @@ AutoVacWorkerMain(int argc, char *argv[])
 		 * database, rather than making any progress on stuff it can connect
 		 * to.
 		 */
-		pgstat_initialize();
 		pgstat_report_autovac(dbid);
 
 		/*
