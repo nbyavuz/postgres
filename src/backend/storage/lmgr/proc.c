@@ -466,6 +466,15 @@ InitProcess(void)
 	 */
 	InitLWLockAccess();
 	InitDeadLockChecking();
+
+	/*
+	 * Once LWLocks are initalized we can do stats reporting. pgstats needs to
+	 * be initialized before transactions are executed and, in case of
+	 * autovacuum workers, before InitPostres() is called. It's not super
+	 * clean to do the initialization here (and InitAuxiliaryProcess), but
+	 * otherwise we need to do so in many more places.
+	 */
+	pgstat_initialize();
 }
 
 /*
@@ -616,6 +625,9 @@ InitAuxiliaryProcess(void)
 	 * Arrange to clean up at process exit.
 	 */
 	on_shmem_exit(AuxiliaryProcKill, Int32GetDatum(proctype));
+
+	/* see InitProcess() */
+	pgstat_initialize();
 }
 
 /*

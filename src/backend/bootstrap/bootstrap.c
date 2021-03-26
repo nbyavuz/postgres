@@ -407,9 +407,6 @@ AuxiliaryProcessMain(int argc, char *argv[])
 		 */
 		CreateAuxProcessResourceOwner();
 
-		/* Initialize statistics reporting */
-		pgstat_initialize();
-
 		/* Initialize backend status information */
 		pgbestat_backend_initialize();
 		pgstat_bestart();
