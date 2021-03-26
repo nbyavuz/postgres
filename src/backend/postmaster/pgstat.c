@@ -4351,7 +4351,7 @@ pgstat_fetch_stat_dbentry(Oid dbid)
 	}
 
 	shent = (PgStatShm_StatDBEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid, true, false,
+		get_shared_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid, false, false,
 							  NULL);
 
 	if (!shent)
@@ -4419,7 +4419,7 @@ pgstat_fetch_stat_tabentry_extended(bool shared, Oid reloid)
 		return &cached_tabent;
 
 	shent = (PgStatShm_StatTabEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, reloid, true, false,
+		get_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, reloid, false, false,
 							  NULL);
 
 	if (!shent)
@@ -4465,7 +4465,7 @@ pgstat_fetch_stat_funcentry(Oid func_id)
 		return &cached_funcent;
 
 	shent = (PgStatShm_StatFuncEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_FUNCTION, dboid, func_id, true,
+		get_shared_stat_entry(PGSTAT_TYPE_FUNCTION, dboid, func_id, false,
 							  false, NULL);
 
 	if (!shent)
