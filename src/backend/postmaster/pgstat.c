@@ -630,6 +630,7 @@ static bool pgstat_drop_stats_entry(dshash_seq_status *hstat);
 static void *get_pending_stat_entry(PgStatTypes type, Oid dbid,
 									Oid objid, bool create,
 									bool *found);
+static void delete_pending_stats_entry(PgStatPendingEntry *pending_entry);
 
 static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dbid, bool for_update);
 static PgStat_TableStatus *get_pending_tabstat_entry(Oid rel_id, bool isshared);
@@ -2223,6 +2224,27 @@ get_pending_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
 	return entry->pending;
 }
 
+static void
+delete_pending_stats_entry(PgStatPendingEntry *pending_entry)
+{
+	void *pending_data = pending_entry->pending;
+
+	switch (pending_entry->key.type)
+	{
+		case PGSTAT_TYPE_TABLE:
+			pgstat_delinkstats(((PgStat_TableStatus *) pending_data)->relation);
+			break;
+		case PGSTAT_TYPE_DB:
+		case PGSTAT_TYPE_FUNCTION:
+			break;
+	}
+
+	pfree(pending_data);
+	pending_entry->pending = NULL;
+	pgstat_pending_delete(pgStatPendingHash, pending_entry->key);
+
+}
+
 /* ----------
  * get_pending_dbstat_entry() -
  *
@@ -2554,9 +2576,7 @@ flush_object_stats(bool nowait)
 		}
 
 		/* Remove the successfully flushed entry */
-		pfree(lent->pending);
-		lent->pending = NULL;
-		pgstat_pending_delete(pgStatPendingHash, lent->key);
+		delete_pending_stats_entry(lent);
 	}
 
 	if (remains <= 0)
@@ -2604,8 +2624,6 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 	if (memcmp(&lstats->t_counts, &all_zeroes,
 			   sizeof(PgStat_TableCounts)) == 0)
 	{
-		/* This pending entry is going to be dropped, delink from relcache. */
-		pgstat_delinkstats(lstats->relation);
 		return true;
 	}
 
@@ -2659,9 +2677,6 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 	ldbstats->n_tuples_deleted += lstats->t_counts.t_tuples_deleted;
 	ldbstats->n_blocks_fetched += lstats->t_counts.t_blocks_fetched;
 	ldbstats->n_blocks_hit += lstats->t_counts.t_blocks_hit;
-
-	/* This local entry is going to be dropped, delink from relcache. */
-	pgstat_delinkstats(lstats->relation);
 
 	return true;
 }
