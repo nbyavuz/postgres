@@ -473,7 +473,7 @@ extern void pgstat_vacuum_stat(void);
 extern void pgstat_drop_database(Oid databaseid);
 
 extern void pgstat_drop_relation(Relation rel);
-extern void pgstat_schedule_drop_function(Oid proid);
+extern void pgstat_drop_function(Oid proid);
 extern int pgstat_pending_stats_drops(struct PgStat_DroppedStatsItem **items);
 extern void pgstat_perform_drops(int ndrops, struct PgStat_DroppedStatsItem *items, bool is_redo);
 

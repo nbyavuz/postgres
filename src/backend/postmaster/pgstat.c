@@ -897,26 +897,33 @@ pgstat_initialize(void)
 static void
 pgstat_truncdrop_save_counters(PgStat_TableXactStatus *trans, bool is_drop);
 
-void
-pgstat_drop_relation(Relation rel)
+static void
+pgstat_schedule_drop(PgStatTypes stattype, Oid dboid, Oid objoid)
 {
 	int			nest_level = GetCurrentTransactionNestLevel();
 	PgStat_SubXactStatus *xact_state;
 	PgStat_PendingDroppedStatsItem *drop = (PgStat_PendingDroppedStatsItem *)
 		MemoryContextAlloc(TopMemoryContext, sizeof(PgStat_PendingDroppedStatsItem));
-	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
 
 	xact_state = get_tabstat_stack_level(nest_level);
 
-	drop->item.type = PGSTAT_TYPE_TABLE;
-	if (rel->rd_rel->relisshared)
-		drop->item.dboid = InvalidOid;
-	else
-		drop->item.dboid = MyDatabaseId;
-	drop->item.objid = RelationGetRelid(rel);
+	drop->item.type = stattype;
+	drop->item.dboid = dboid;
+	drop->item.objid = objoid;
 
 	dlist_push_tail(&xact_state->pending_drops, &drop->node);
 	xact_state->pending_drops_count++;
+}
+
+void
+pgstat_drop_relation(Relation rel)
+{
+	int			nest_level = GetCurrentTransactionNestLevel();
+	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
+
+	pgstat_schedule_drop(PGSTAT_TYPE_TABLE,
+						 rel->rd_rel->relisshared ? InvalidOid : MyDatabaseId,
+						 RelationGetRelid(rel));
 
 	if (pgstat_info &&
 		pgstat_info->trans != NULL &&
@@ -927,6 +934,14 @@ pgstat_drop_relation(Relation rel)
 		pgstat_info->trans->tuples_updated = 0;
 		pgstat_info->trans->tuples_deleted = 0;
 	}
+}
+
+void
+pgstat_drop_function(Oid proid)
+{
+	pgstat_schedule_drop(PGSTAT_TYPE_FUNCTION,
+						 MyDatabaseId,
+						 proid);
 }
 
 int

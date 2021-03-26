@@ -13,6 +13,8 @@ SET enable_seqscan TO on;
 SET enable_indexscan TO on;
 -- for the moment, we don't want index-only scans here
 SET enable_indexonlyscan TO off;
+-- not enabled by default, but we want to test it...
+SET track_functions TO 'all';
 
 -- save counters
 CREATE TABLE prevstats AS
@@ -159,6 +161,42 @@ INSERT INTO drop_stats_test_subxact DEFAULT VALUES;
 SELECT 'drop_stats_test_subxact'::regclass::oid AS drop_stats_test_subxact_oid \gset
 
 
+-- Basic testing for track_functions
+CREATE FUNCTION stats_test_func1() RETURNS VOID LANGUAGE plpgsql AS $$BEGIN END;$$;
+SELECT 'stats_test_func1()'::regprocedure::oid AS stats_test_func1_oid \gset
+CREATE FUNCTION stats_test_func2() RETURNS VOID LANGUAGE plpgsql AS $$BEGIN END;$$;
+SELECT 'stats_test_func2()'::regprocedure::oid AS stats_test_func2_oid \gset
+
+-- Basic test that stats are accumulated
+BEGIN;
+SELECT pg_stat_get_function_calls(:stats_test_func1_oid);
+SELECT pg_stat_get_xact_function_calls(:stats_test_func1_oid);
+SELECT stats_test_func1();
+SELECT pg_stat_get_xact_function_calls(:stats_test_func1_oid);
+SELECT stats_test_func1();
+SELECT pg_stat_get_xact_function_calls(:stats_test_func1_oid);
+SELECT pg_stat_get_function_calls(:stats_test_func1_oid);
+COMMIT;
+
+-- Verify that function stats are not transactional (displayed after
+-- wait_for_stats() below)
+
+-- rolled back savepoint in committing transaction
+BEGIN;
+SELECT stats_test_func2();
+SAVEPOINT foo;
+SELECT stats_test_func2();
+ROLLBACK TO SAVEPOINT foo;
+SELECT pg_stat_get_xact_function_calls(:stats_test_func2_oid);
+SELECT stats_test_func2();
+COMMIT;
+
+-- rolled back transaction
+BEGIN;
+SELECT stats_test_func2();
+ROLLBACK;
+
+
 -- We can't just call wait_for_stats() at this point, because we only
 -- transmit stats when the session goes idle, and we probably didn't
 -- transmit the last couple of counts yet thanks to the rate-limiting logic
@@ -256,9 +294,47 @@ RELEASE SAVEPOINT sp1;
 COMMIT;
 SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
 
+-----
+-- continuation of track function tests
+-----
+
+-- check stats were collected
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func1_oid;
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func2_oid;
+
+-- check that a rolled back drop function stats leaves stats alive
+BEGIN;
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func1_oid;
+DROP FUNCTION stats_test_func1();
+-- shouldn't be visible via view
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func1_oid;
+-- but still via oid access
+SELECT pg_stat_get_function_calls(:stats_test_func1_oid);
+ROLLBACK;
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func1_oid;
+SELECT pg_stat_get_function_calls(:stats_test_func1_oid);
+
+-- check that function dropped in main transaction leaves no stats behind
+BEGIN;
+DROP FUNCTION stats_test_func1();
+COMMIT;
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func1_oid;
+SELECT pg_stat_get_function_calls(:stats_test_func1_oid);
+
+-- check that function dropped in a subtransaction leaves no stats behind
+BEGIN;
+SELECT stats_test_func2();
+SAVEPOINT a;
+SELECT stats_test_func2();
+SAVEPOINT b;
+DROP FUNCTION stats_test_func2();
+COMMIT;
+SELECT funcname, calls FROM pg_stat_user_functions WHERE funcid = :stats_test_func2_oid;
+SELECT pg_stat_get_function_calls(:stats_test_func2_oid);
 
 DROP TABLE trunc_stats_test, trunc_stats_test1, trunc_stats_test2, trunc_stats_test3, trunc_stats_test4;
 DROP TABLE prevstats;
 
 \dt *stats_test*
+\dv *stats_test*
 -- End of Stats Test
