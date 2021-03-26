@@ -2009,8 +2009,23 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 		}
 		else if (lohashent->shared)
 		{
-			Assert(lohashent->shared->magic == 0xdeadbeef);
+			shheader = lohashent->shared;
+			Assert(shheader->magic == 0xdeadbeef);
 			Assert(DsaPointerIsValid(lohashent->dsapointer));
+			/* should have at least our reference */
+			Assert(pg_atomic_read_u32(&shheader->refcount) > 0);
+
+			if (shheader->dropped)
+			{
+				Assert(!create);
+				/*
+				 * XXX: Should we drop our reference? Most of the time the GC
+				 * path above should have handled this already.
+				 */
+				if (found)
+					*found = false;
+				return NULL;
+			}
 
 			if (found)
 				*found = true;
@@ -2049,6 +2064,9 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 
 			pg_atomic_add_fetch_u32(&shheader->refcount, 1);
 		}
+
+		/* dropped entries shouldn't be in pgStatSharedHash */
+		Assert(!shheader->dropped);
 
 		/*
 		 * We can expose this shared entry now. The refcount has either been
