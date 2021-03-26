@@ -4148,10 +4148,10 @@ AtEOSubXact_PgStat(bool isCommit, int nestDepth)
 		/* delink xact_state from stack immediately to simplify reuse case */
 		pgStatXactStack = xact_state->prev;
 
-		pgstat_eosubxact_drops(xact_state, isCommit, nestDepth);
-
 		/* relations */
 		pgstat_eosubxact_relations(xact_state, isCommit, nestDepth);
+
+		pgstat_eosubxact_drops(xact_state, isCommit, nestDepth);
 
 		pfree(xact_state);
 	}
