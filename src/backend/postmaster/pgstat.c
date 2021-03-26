@@ -783,13 +783,12 @@ StatsShmemInit(void)
 /*
  * pgstat_restore_stats() - read on-disk stats into memory at server start.
  *
- * Should only be called by the startup process.
+ * Should only be called by the startup process or in single user mode.
  */
 void
 pgstat_restore_stats(void)
 {
-	if (IsUnderPostmaster)
-		pgstat_read_statsfile();
+	pgstat_read_statsfile();
 }
 
 /*
@@ -798,7 +797,7 @@ pgstat_restore_stats(void)
  * Remove the stats file.  This is currently used only if WAL recovery is
  * needed after a crash.
  *
- * Should only be called by the startup process.
+ * Should only be called by the startup process or in single user mode.
  */
 void
 pgstat_discard_stats(void)
@@ -835,8 +834,7 @@ pgstat_discard_stats(void)
 void
 pgstat_write_stats(void)
 {
-	if (IsUnderPostmaster)
-		pgstat_write_statsfile();
+	pgstat_write_statsfile();
 }
 
 /* ----------
@@ -853,25 +851,21 @@ pgstat_write_stats(void)
 void
 pgstat_initialize(void)
 {
+	MemoryContext oldcontext;
+
 	/* should only get initialized once */
 	Assert(StatsDSA == NULL);
 
-	/* XXX: should we handle single user mode differently? */
-	if (IsUnderPostmaster)
-	{
-		MemoryContext oldcontext;
+	/* stats shared memory persists for the backend lifetime */
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
-		/* stats shared memory persists for the backend lifetime */
-		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	StatsDSA = dsa_attach_in_place(StatsShmem->raw_dsa_area, NULL);
+	dsa_pin_mapping(StatsDSA);
 
-		StatsDSA = dsa_attach_in_place(StatsShmem->raw_dsa_area, NULL);
-		dsa_pin_mapping(StatsDSA);
+	pgStatSharedHash = dshash_attach(StatsDSA, &dsh_params,
+									 StatsShmem->hash_handle, 0);
 
-		pgStatSharedHash = dshash_attach(StatsDSA, &dsh_params,
-										 StatsShmem->hash_handle, 0);
-
-		MemoryContextSwitchTo(oldcontext);
-	}
+	MemoryContextSwitchTo(oldcontext);
 
 	/*
 	 * Initialize prevWalUsage with pgWalUsage so that pgstat_report_wal() can
@@ -902,9 +896,6 @@ pgstat_drop_database(Oid databaseid)
 	uint64		not_freed_count = 0;
 
 	Assert(OidIsValid(databaseid));
-
-	if (!IsUnderPostmaster)
-		return;
 
 	Assert(pgStatSharedHash != NULL);
 
@@ -964,9 +955,6 @@ pgstat_report_stat(bool force)
 	bool		nowait;
 	int			i;
 	uint64		oldval;
-
-	if (!IsUnderPostmaster)
-		return 0;
 
 	/* Don't expend a clock check if nothing to do */
 	if (!havePendingDbStats &&
@@ -1137,10 +1125,6 @@ pgstat_vacuum_stat(void)
 	dshash_seq_status dshstat;
 	PgStatShmHashEntry *ent;
 
-	/* we don't collect stats under standalone mode */
-	if (!IsUnderPostmaster)
-		return;
-
 	/* collect oids of existent objects */
 	dbids = collect_oids(DatabaseRelationId, Anum_pg_database_oid);
 	relids = collect_oids(RelationRelationId, Anum_pg_class_oid);
@@ -1250,9 +1234,6 @@ pgstat_reset_counters(void)
 {
 	dshash_seq_status hstat;
 	PgStatShmHashEntry *p;
-
-	if (!IsUnderPostmaster || !pgStatSharedHash)
-		return;
 
 	/* dshash entry is not modified, take shared lock */
 	dshash_seq_init(&hstat, pgStatSharedHash, false);
@@ -1465,9 +1446,6 @@ pgstat_reset_replslot_counter(const char *name)
 	int			endidx;
 	int			i;
 	TimestampTz ts;
-
-	if (!IsUnderPostmaster || !pgStatSharedHash)
-		return;
 
 	/*
 	 * AFIXME: pgstats has business no looking into slot.c structures at
@@ -1729,7 +1707,7 @@ pgstat_read_statsfile(void)
 	const char *statfile = PGSTAT_STAT_PERMANENT_FILENAME;
 
 	/* shouldn't be called from postmaster */
-	Assert(IsUnderPostmaster);
+	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
 
 	elog(DEBUG2, "reading stats file \"%s\"", statfile);
 
@@ -1925,6 +1903,8 @@ done:
 static void
 pgstat_shutdown_hook(int code, Datum arg)
 {
+	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
+
 	/*
 	 * If we got as far as discovering our own database ID, we can report what
 	 * we did to the shared stats.  Otherwise, we'd be sending an invalid
@@ -1947,22 +1927,19 @@ pgstat_shutdown_hook(int code, Datum arg)
 
 	ReplicationSlotCleanup();
 
-	if (IsUnderPostmaster)
-	{
-		Assert(StatsDSA);
+	Assert(StatsDSA);
 
-		/* We shouldn't leave a reference to shared stats. */
-		pgstat_release_stats_references();
+	/* We shouldn't leave a reference to shared stats. */
+	pgstat_release_stats_references();
 
-		dshash_detach(pgStatSharedHash);
-		pgStatSharedHash = NULL;
+	dshash_detach(pgStatSharedHash);
+	pgStatSharedHash = NULL;
 
-		/* We are going to exit. Don't bother destroying local hashes. */
-		pgStatPendingHash = NULL;
+	/* We are going to exit. Don't bother destroying local hashes. */
+	pgStatPendingHash = NULL;
 
-		dsa_detach(StatsDSA);
-		StatsDSA = NULL;
-	}
+	dsa_detach(StatsDSA);
+	StatsDSA = NULL;
 }
 
 /* ----------
@@ -2967,7 +2944,7 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
 	TimestampTz ts;
 
-	if (!IsUnderPostmaster || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
 	/* Store the data in the table's hash table entry. */
@@ -3032,7 +3009,7 @@ pgstat_report_analyze(Relation rel,
 	PgStatShm_StatTabEntry *tabentry;
 	Oid			dboid = (rel->rd_rel->relisshared ? InvalidOid : MyDatabaseId);
 
-	if (!IsUnderPostmaster || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
 	/*
@@ -3154,7 +3131,7 @@ pgstat_report_deadlock(void)
 {
 	PgStat_StatDBEntry *dbent;
 
-	if (!IsUnderPostmaster || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
 	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
@@ -3172,7 +3149,7 @@ pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount)
 {
 	PgStatShm_StatDBEntry *sharedent;
 
-	if (!IsUnderPostmaster || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
 	/*
@@ -3202,7 +3179,7 @@ pgstat_report_checksum_failure(void)
 {
 	PgStat_StatDBEntry *dbent;
 
-	if (!IsUnderPostmaster || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
 	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
@@ -3220,7 +3197,7 @@ pgstat_report_tempfile(size_t filesize)
 {
 	PgStat_StatDBEntry *dbent;
 
-	if (!IsUnderPostmaster || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
 	if (filesize == 0)			/* Is there a case where filesize is really 0? */
@@ -3248,7 +3225,6 @@ pgstat_report_replslot(uint32 index,
 	Assert(index < max_replication_slots);
 	Assert(slotname[0] != '\0' && strlen(slotname) < NAMEDATALEN);
 
-	Assert(IsUnderPostmaster);
 	if (!pgstat_track_counts)
 		return;
 
@@ -3297,7 +3273,7 @@ pgstat_report_replslot_drop(uint32 index, const char *slotname)
 	Assert(index < max_replication_slots);
 	Assert(slotname[0] != '\0' && strlen(slotname) < NAMEDATALEN);
 
-	if (!IsUnderPostmaster || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
 	statent = &StatsShmem->replslot.stats[index];
@@ -3442,7 +3418,7 @@ pgstat_initstats(Relation rel)
 		return;
 	}
 
-	if (!IsUnderPostmaster || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 	{
 		/* We're not counting at all */
 		rel->pgstat_info = NULL;
@@ -4364,7 +4340,7 @@ pgstat_fetch_stat_dbentry(Oid dbid)
 	PgStatShm_StatDBEntry *shent;
 
 	/* should be called from backends */
-	Assert(IsUnderPostmaster);
+	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
 
 	/* the simple cache doesn't work properly for InvalidOid */
 	if (dbid != InvalidOid)
@@ -4432,7 +4408,7 @@ pgstat_fetch_stat_tabentry_extended(bool shared, Oid reloid)
 	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
 
 	/* should be called from backends */
-	Assert(IsUnderPostmaster);
+	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
 
 	/* the simple cache doesn't work properly for the InvalidOid */
 	Assert(reloid != InvalidOid);
@@ -4478,7 +4454,7 @@ pgstat_fetch_stat_funcentry(Oid func_id)
 	Oid			dboid = MyDatabaseId;
 
 	/* should be called from backends */
-	Assert(IsUnderPostmaster);
+	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
 
 	/* the simple cache doesn't work properly for the InvalidOid */
 	Assert(func_id != InvalidOid);
