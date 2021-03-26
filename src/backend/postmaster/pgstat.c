@@ -627,9 +627,9 @@ static void pgstat_lookup_cache_gc(void);
 static void pgstat_release_stats_references(void);
 
 static bool pgstat_drop_stats_entry(dshash_seq_status *hstat);
-static PgStatShm_StatEntryHeader *get_pending_stat_entry(PgStatTypes type, Oid dbid,
-													  Oid objid, bool create,
-													  bool *found);
+static void *get_pending_stat_entry(PgStatTypes type, Oid dbid,
+									Oid objid, bool create,
+									bool *found);
 
 static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dbid, bool for_update);
 static PgStat_TableStatus *get_pending_tabstat_entry(Oid rel_id, bool isshared);
@@ -1379,6 +1379,7 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 	dbentry = (PgStatShm_StatDBEntry *)
 		get_shared_stat_entry(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid, false,
 							  false, NULL);
+	/* FIXME: can't arbitrary oids be passed in here? */
 	Assert(dbentry);
 
 	/* Set the reset timestamp for the whole database */
@@ -2187,7 +2188,7 @@ pgstat_lookup_cache_gc(void)
  *  memory.
  * ----------
  */
-static PgStatShm_StatEntryHeader *
+static void *
 get_pending_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
 					 bool create, bool *found)
 {
@@ -2945,7 +2946,7 @@ pgstat_report_autovac(Oid dboid)
 		get_shared_stat_entry(PGSTAT_TYPE_DB, dboid, InvalidOid, false, true,
 							  NULL);
 
-	ts = GetCurrentTimestamp();;
+	ts = GetCurrentTimestamp();
 	LWLockAcquire(&dbentry->header.lock, LW_EXCLUSIVE);
 	dbentry->stats.last_autovac_time = ts;
 	LWLockRelease(&dbentry->header.lock);
@@ -3476,7 +3477,7 @@ pgstat_delinkstats(Relation rel)
 	/* remove the link to stats info if any */
 	if (rel && rel->pgstat_info)
 	{
-		/* ilnk sanity check */
+		/* link sanity check */
 		Assert(rel->pgstat_info->relation == rel);
 		rel->pgstat_info->relation = NULL;
 		rel->pgstat_info = NULL;

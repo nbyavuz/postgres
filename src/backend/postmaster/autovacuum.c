@@ -1687,9 +1687,6 @@ AutoVacWorkerMain(int argc, char *argv[])
 		 * autovac from getting "stuck" repeatedly selecting an unopenable
 		 * database, rather than making any progress on stuff it can connect
 		 * to.
-		 *
-		 * For that to work we need to start the stats subsystem earlier than
-		 * normal... XXX: We should probably just always do so?
 		 */
 		pgstat_initialize();
 		pgstat_report_autovac(dbid);
