@@ -123,6 +123,7 @@ typedef enum PgStatTypes
 	PGSTAT_TYPE_TABLE,			/* per-table statistics */
 	PGSTAT_TYPE_FUNCTION,		/* per-function statistics */
 } PgStatTypes;
+#define PGSTAT_TYPE_LAST PGSTAT_TYPE_FUNCTION
 
 
 /* ----------
@@ -190,16 +191,6 @@ typedef struct PgStatPendingEntry
 	char		status;			/* for simplehash use */
 	void	   *pending;			/* the pending data itself */
 } PgStatPendingEntry;
-
-/*
- * We shoud avoid overwriting header part of a shared entry. Use these macros
- * to know what portion of the struct to be written or read. PSTAT_SHENT_BODY
- * returns a bit smaller address than the actual address of the next member but
- * that doesn't matter.
- */
-#define PGSTAT_SHENT_BODY(e) (((char *)(e)) + sizeof(PgStatShm_StatEntryHeader))
-#define PGSTAT_SHENT_BODY_LEN(t) \
-	(pgstat_sharedentsize[t] - sizeof(PgStatShm_StatEntryHeader))
 
 
 /* entry type for oid hash */
@@ -275,6 +266,38 @@ typedef struct PgStat_SubXactStatus
 	PgStat_TableXactStatus *first;	/* head of list for this subxact */
 } PgStat_SubXactStatus;
 
+
+/*
+ * Metadata for a specific type of statistics.
+ */
+typedef struct pgstat_type_info
+{
+	/*
+	 * The size of an entry in the shared stats hash table (pointed to by
+	 * PgStatShmHashEntry->body).
+	 */
+	uint32 shared_size;
+
+	/*
+	 * The offset/size of the statistics inside the shared stats entry. This
+	 * is used to e.g. avoid touching lwlocks when serializing / restoring
+	 * stats snapshot serialized to / from disk respectively.
+	 */
+	uint32 shared_data_off;
+	uint32 shared_data_len;
+
+	/*
+	 * The size of the pending data for this type. E.g. how large
+	 * PgStatPendingEntry->pending is. Used for allocations.
+	 *
+	 * -1 signal that an entry of this type should never have a pending
+     * entry.
+	 */
+	uint32 pending_size;
+} pgstat_type_info;
+
+/* Indexed by PgStatTypes. */
+static const pgstat_type_info pgstat_types[];
 
 /*
  * List of SLRU names that we keep stats for.  There is no central registry of
@@ -442,23 +465,28 @@ char      *pgstat_stat_tmpname = NULL;
  * ----------
  */
 
-/*
- * entry body size lookup table of shared statistics entries corresponding to
- * PgStatTypes
- */
-static const size_t pgstat_sharedentsize[] =
-{
-	sizeof(PgStatShm_StatDBEntry), /* PGSTAT_TYPE_DB */
-	sizeof(PgStatShm_StatTabEntry),	/* PGSTAT_TYPE_TABLE */
-	sizeof(PgStatShm_StatFuncEntry),	/* PGSTAT_TYPE_FUNCTION */
-};
+/* see comments for struct pgstat_type_info */
+static const pgstat_type_info pgstat_types[] = {
+	[PGSTAT_TYPE_DB] = {
+		.shared_size = sizeof(PgStatShm_StatDBEntry),
+		.shared_data_off = offsetof(PgStatShm_StatDBEntry, stats),
+		.shared_data_len = sizeof(((PgStatShm_StatDBEntry*) 0)->stats),
+		.pending_size = -1, /* PGSTAT_TYPE_DB is never in pending table */
+	},
 
-/* Ditto for pending statistics entries */
-static const size_t pgstat_pendingentsize[] =
-{
-	-1, /* PGSTAT_TYPE_DB is never in pending table */
-	sizeof(PgStat_TableStatus), /* PGSTAT_TYPE_TABLE */
-	sizeof(PgStat_BackendFunctionEntry),	/* PGSTAT_TYPE_FUNCTION */
+	[PGSTAT_TYPE_TABLE] = {
+		.shared_size = sizeof(PgStatShm_StatTabEntry),
+		.shared_data_off = offsetof(PgStatShm_StatTabEntry, stats),
+		.shared_data_len = sizeof(((PgStatShm_StatTabEntry*) 0)->stats),
+		.pending_size = sizeof(PgStat_TableStatus),
+	},
+
+	[PGSTAT_TYPE_FUNCTION] = {
+		.shared_size = sizeof(PgStatShm_StatFuncEntry),
+		.shared_data_off = offsetof(PgStatShm_StatFuncEntry, stats),
+		.shared_data_len = sizeof(((PgStatShm_StatFuncEntry*) 0)->stats),
+		.pending_size = sizeof(PgStat_BackendFunctionEntry),
+	},
 };
 
 /* parameter for the shared hash */
@@ -636,6 +664,9 @@ static PgStatShm_StatEntryHeader *get_lock_shared_stat_entry(PgStatTypes type,
 															 Oid dbid,
 															 Oid objid,
 															 bool nowait);
+static inline size_t shared_stat_entry_len(PgStatTypes stattype);
+static inline void* shared_stat_entry_data(PgStatTypes stattype, PgStatShm_StatEntryHeader *entry);
+
 static bool pgstat_lookup_cache_needs_gc(void);
 static void pgstat_lookup_cache_gc(void);
 
@@ -1458,8 +1489,8 @@ pgstat_reset_counters(void)
 		header = dsa_get_address(StatsDSA, p->body);
 
 		LWLockAcquire(&header->lock, LW_EXCLUSIVE);
-		memset(PGSTAT_SHENT_BODY(header), 0,
-			   PGSTAT_SHENT_BODY_LEN(p->key.type));
+		memset(shared_stat_entry_data(p->key.type, header), 0,
+			   shared_stat_entry_len(p->key.type));
 
 		if (p->key.type == PGSTAT_TYPE_DB)
 		{
@@ -1597,7 +1628,8 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 								   false, NULL);
 
 	LWLockAcquire(&header->lock, LW_EXCLUSIVE);
-	memset(PGSTAT_SHENT_BODY(header), 0, PGSTAT_SHENT_BODY_LEN(stattype));
+	memset(shared_stat_entry_data(stattype, header), 0,
+		   shared_stat_entry_len(stattype));
 	LWLockRelease(&header->lock);
 }
 
@@ -1845,8 +1877,8 @@ pgstat_write_statsfile(void)
 		rc = fwrite(&ps->key, sizeof(PgStatHashKey), 1, fpout);
 
 		/* Write except the header part of the etnry */
-		len = PGSTAT_SHENT_BODY_LEN(ps->key.type);
-		rc = fwrite(PGSTAT_SHENT_BODY(shent), len, 1, fpout);
+		len = shared_stat_entry_len(ps->key.type);
+		rc = fwrite(shared_stat_entry_data(ps->key.type, shent), len, 1, fpout);
 		(void) rc;				/* we'll check for error with ferror */
 	}
 	dshash_seq_term(&hstat);
@@ -2056,9 +2088,9 @@ pgstat_read_statsfile(void)
 					}
 
 					/* Avoid overwriting header part */
-					len = PGSTAT_SHENT_BODY_LEN(key.type);
+					len = shared_stat_entry_len(key.type);
 
-					if (fread(PGSTAT_SHENT_BODY(p), 1, len, fpin) != len)
+					if (fread(shared_stat_entry_data(key.type, p), 1, len, fpin) != len)
 					{
 						ereport(LOG,
 								(errmsg("corrupted statistics file \"%s\"", statfile)));
@@ -2255,7 +2287,7 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 			/* Create new stats entry. */
 			dsa_pointer chunk;
 
-			chunk = dsa_allocate0(StatsDSA, pgstat_sharedentsize[type]);
+			chunk = dsa_allocate0(StatsDSA, pgstat_types[type].shared_size);
 			shheader = dsa_get_address(StatsDSA, chunk);
 			shheader->magic = 0xdeadbeef;
 			LWLockInitialize(&shheader->lock, LWTRANCHE_STATS);
@@ -2327,6 +2359,35 @@ get_lock_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objid, bool nowait)
 		return false;
 
 	return header;
+}
+
+/*
+ * The length of the data portion of a shared memory stats entry (i.e. without
+ * transient data such as refcoutns, lwlocks, ...).
+ */
+static inline size_t
+shared_stat_entry_len(PgStatTypes stattype)
+{
+	size_t		sz = pgstat_types[stattype].shared_data_len;
+
+	AssertArg(stattype <= PGSTAT_TYPE_LAST);
+	Assert(sz != 0 && sz < PG_UINT32_MAX);
+
+	return sz;
+}
+
+/*
+ * Returns a pointer to the data portion of a shared memory stats entry.
+ */
+static inline void*
+shared_stat_entry_data(PgStatTypes stattype, PgStatShm_StatEntryHeader *entry)
+{
+	size_t		off = pgstat_types[stattype].shared_data_off;
+
+	AssertArg(stattype <= PGSTAT_TYPE_LAST);
+	Assert(off != 0 && off < PG_UINT32_MAX);
+
+	return ((char *)(entry)) + off;
 }
 
 static bool
@@ -2424,7 +2485,7 @@ get_pending_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
 
 	if (create && !*found)
 	{
-		size_t entrysize = pgstat_pendingentsize[type];
+		size_t entrysize = pgstat_types[type].pending_size;
 
 		Assert(entrysize != (size_t)-1);
 
