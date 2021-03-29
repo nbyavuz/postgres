@@ -548,6 +548,11 @@ static MemoryContext pgStatCacheContext = NULL;
 
 static PgStat_SubXactStatus *pgStatXactStack = NULL;
 
+/*
+ * Force the next stats flush to happen regardless of
+ * PGSTAT_MIN_INTERVAL. Useful in test scripts.
+ */
+static bool pgStatForceNextFlush = false;
 
 
 /* ----------
@@ -1198,6 +1203,13 @@ pgstat_report_stat(bool force)
 	int			i;
 	uint64		oldval;
 
+	/* "absorb" the forced flush even if there's nothing to flush */
+	if (pgStatForceNextFlush)
+	{
+		force = true;
+		pgStatForceNextFlush = false;
+	}
+
 	/* Don't expend a clock check if nothing to do */
 	if (!havePendingDbStats &&
 		pgStatPendingHash == NULL &&
@@ -1338,6 +1350,16 @@ pgstat_clear_snapshot(void)
 
 	/* forward to stats sub-subsystems */
 	pgbestat_clear_snapshot();
+}
+
+/*
+ * Force locally pending stats to be flushed during the next
+ * pgstat_report_stat() call. This is useful for writing tests.
+ */
+void
+pgstat_force_next_flush(void)
+{
+	pgStatForceNextFlush = true;
 }
 
 /* ----------

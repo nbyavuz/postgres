@@ -1,0 +1,141 @@
+setup
+{
+    CREATE TABLE test_stat_oid(name text NOT NULL, oid oid);
+
+    CREATE TABLE test_stat_tab(id serial NOT NULL);
+    INSERT INTO test_stat_tab DEFAULT VALUES;
+    INSERT INTO test_stat_oid(name, oid) VALUES('test_stat_tab', 'test_stat_tab'::regclass);
+
+    CREATE FUNCTION test_stat_func() RETURNS VOID LANGUAGE plpgsql AS $$BEGIN END;$$;
+    INSERT INTO test_stat_oid(name, oid) VALUES('test_stat_func', 'test_stat_func'::regproc);
+
+    CREATE FUNCTION test_stat_func2() RETURNS VOID LANGUAGE plpgsql AS $$BEGIN END;$$;
+    INSERT INTO test_stat_oid(name, oid) VALUES('test_stat_func2', 'test_stat_func2'::regproc);
+}
+
+teardown
+{
+    DROP TABLE test_stat_oid;
+
+    DROP TABLE IF EXISTS test_stat_tab;
+    DROP FUNCTION IF EXISTS test_stat_func();
+    DROP FUNCTION IF EXISTS test_stat_func2();
+}
+
+session "s1"
+step "s1_track_funcs_all" { SET track_functions = 'all'; }
+step "s1_track_funcs_none" { SET track_functions = 'none'; }
+step "s1_begin" { BEGIN; }
+step "s1_commit" { COMMIT; }
+step "s1_rollback" { ROLLBACK; }
+step "s1_ff" { SELECT pg_stat_force_next_flush(); }
+step "s1_func_call" { SELECT test_stat_func(); }
+step "s1_func_drop" { DROP FUNCTION test_stat_func(); }
+step "s1_func_stats_reset" { SELECT pg_stat_reset_single_function_counters('test_stat_func'::regproc); }
+step "s1_reset" { SELECT pg_stat_reset(); }
+step "s1_func_stats" {
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func'
+}
+step "s1_func_stats2" {
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func2'
+}
+#step "s1_func_stats_debug" {SELECT * FROM pg_stat_user_functions;}
+
+session "s2"
+step "s2_track_funcs_all" { SET track_functions = 'all'; }
+step "s2_begin" { BEGIN; }
+step "s2_commit" { COMMIT; }
+step "s2_rollback" { ROLLBACK; }
+step "s2_ff" { SELECT pg_stat_force_next_flush(); }
+step "s2_func_call" { SELECT test_stat_func() }
+step "s2_func_call2" { SELECT test_stat_func2() }
+step "s2_func_stats" {
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func'
+}
+
+
+######################
+# Function stats tests
+######################
+
+# check that stats are collected iff enabled
+permutation
+  "s1_track_funcs_none" "s1_func_stats" "s1_func_call" "s1_func_call" "s1_ff" "s1_func_stats"
+permutation
+  "s1_track_funcs_all" "s1_func_stats" "s1_func_call" "s1_func_call" "s1_ff" "s1_func_stats"
+
+# multiple function calls are accurately reported, across separate connections
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all" "s1_func_stats" "s2_func_stats"
+  "s1_func_call" "s2_func_call" "s1_func_call" "s2_func_call" "s2_func_call" "s1_ff" "s2_ff" "s1_func_stats" "s2_func_stats"
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all" "s1_func_stats" "s2_func_stats"
+  "s1_func_call" "s1_ff" "s2_func_call" "s2_func_call" "s2_ff" "s1_func_stats" "s2_func_stats"
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all" "s1_func_stats" "s2_func_stats"
+  "s1_begin" "s1_func_call" "s1_func_call" "s1_commit" "s1_ff" "s1_func_stats" "s2_func_stats"
+
+
+# Check interaction between dropping and stats reporting
+
+# dropping a table remove stats iff committed
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all" "s1_func_stats" "s2_func_stats"
+  "s1_begin" "s1_func_call" "s2_func_call" "s1_func_drop" "s2_func_call" "s2_ff" "s2_func_stats" "s1_commit" "s1_ff" "s1_func_stats" "s2_func_stats"
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all" "s1_func_stats" "s2_func_stats"
+  "s1_begin" "s1_func_call" "s2_func_call" "s1_func_drop" "s2_func_call" "s2_ff" "s2_func_stats" "s1_rollback" "s1_ff" "s1_func_stats" "s2_func_stats"
+
+# Verify that pending stats from before a drop do not lead to
+# "reviving" stats for a dropped object
+# FIXME: That actually happens right now, but only if the stats weren't previously accessed
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s2_func_call" "s2_ff" # this access increments refcount, preventing the shared entry from being dropped
+  "s2_begin" "s2_func_call" "s1_func_drop" "s1_func_stats" "s2_commit" "s2_ff" "s1_func_stats" "s2_func_stats"
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s2_begin" "s2_func_call" "s1_func_drop" "s1_func_stats" "s2_commit" "s2_ff" "s1_func_stats" "s2_func_stats"
+
+
+# test pg_stat_reset_single_function_counters
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s1_func_call"
+  "s2_func_call"
+  "s2_func_call2"
+  "s1_ff" "s2_ff"
+  "s1_func_stats"
+  "s2_func_call" "s2_func_call2" "s2_ff"
+  "s1_func_stats" "s1_func_stats2" "s1_func_stats"
+  "s1_func_stats_reset"
+  "s1_func_stats" "s1_func_stats2" "s1_func_stats"
+
+# test pg_stat_reset
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s1_func_call"
+  "s2_func_call"
+  "s2_func_call2"
+  "s1_ff" "s2_ff"
+  "s1_func_stats" "s1_func_stats2" "s1_func_stats"
+  "s1_reset"
+  "s1_func_stats" "s1_func_stats2" "s1_func_stats"

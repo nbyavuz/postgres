@@ -478,6 +478,7 @@ extern int pgstat_pending_stats_drops(struct PgStat_DroppedStatsItem **items);
 extern void pgstat_perform_drops(int ndrops, struct PgStat_DroppedStatsItem *items, bool is_redo);
 
 extern void pgstat_clear_snapshot(void);
+extern void pgstat_force_next_flush(void);
 extern void pgstat_reset_counters(void);
 extern void pgstat_reset_shared_counters(const char *target);
 extern void pgstat_reset_single_counter(Oid objectid, PgStat_Single_Reset_Type type);
