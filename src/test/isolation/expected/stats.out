@@ -827,4 +827,233 @@ step s1_func_stats:
 name           pg_stat_get_function_callstotal_above_zeroself_above_zero
 
 test_stat_func 1              t              t              
+
+starting permutation: s1_track_funcs_all s1_fetch_consistency_cache s1_func_call s1_ff s1_func_stats
+step s1_track_funcs_all: SET track_functions = 'all';
+step s1_fetch_consistency_cache: SET stats_fetch_consistency = 'cache';
+step s1_func_call: SELECT test_stat_func();
+test_stat_func 
+
+               
+step s1_ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+
+               
+step s1_func_stats: 
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func'
+
+name           pg_stat_get_function_callstotal_above_zeroself_above_zero
+
+test_stat_func 1              t              t              
+
+starting permutation: s1_track_funcs_all s1_fetch_consistency_snapshot s1_func_call s1_ff s1_func_stats
+step s1_track_funcs_all: SET track_functions = 'all';
+step s1_fetch_consistency_snapshot: SET stats_fetch_consistency = 'snapshot';
+step s1_func_call: SELECT test_stat_func();
+test_stat_func 
+
+               
+step s1_ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+
+               
+step s1_func_stats: 
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func'
+
+name           pg_stat_get_function_callstotal_above_zeroself_above_zero
+
+test_stat_func 1              t              t              
+
+starting permutation: s1_track_funcs_all s2_track_funcs_all s1_fetch_consistency_none s2_func_call s2_ff s1_begin s1_func_stats s2_func_call s2_ff s1_func_stats s1_commit
+step s1_track_funcs_all: SET track_functions = 'all';
+step s2_track_funcs_all: SET track_functions = 'all';
+step s1_fetch_consistency_none: SET stats_fetch_consistency = 'none';
+step s2_func_call: SELECT test_stat_func()
+test_stat_func 
+
+               
+step s2_ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+
+               
+step s1_begin: BEGIN;
+step s1_func_stats: 
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func'
+
+name           pg_stat_get_function_callstotal_above_zeroself_above_zero
+
+test_stat_func 1              t              t              
+step s2_func_call: SELECT test_stat_func()
+test_stat_func 
+
+               
+step s2_ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+
+               
+step s1_func_stats: 
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func'
+
+name           pg_stat_get_function_callstotal_above_zeroself_above_zero
+
+test_stat_func 2              t              t              
+step s1_commit: COMMIT;
+
+starting permutation: s1_track_funcs_all s2_track_funcs_all s1_fetch_consistency_cache s2_func_call s2_func_call2 s2_ff s1_begin s1_func_stats s2_func_call s2_func_call2 s2_ff s1_func_stats s1_func_stats2 s1_commit
+step s1_track_funcs_all: SET track_functions = 'all';
+step s2_track_funcs_all: SET track_functions = 'all';
+step s1_fetch_consistency_cache: SET stats_fetch_consistency = 'cache';
+step s2_func_call: SELECT test_stat_func()
+test_stat_func 
+
+               
+step s2_func_call2: SELECT test_stat_func2()
+test_stat_func2
+
+               
+step s2_ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+
+               
+step s1_begin: BEGIN;
+step s1_func_stats: 
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func'
+
+name           pg_stat_get_function_callstotal_above_zeroself_above_zero
+
+test_stat_func 1              t              t              
+step s2_func_call: SELECT test_stat_func()
+test_stat_func 
+
+               
+step s2_func_call2: SELECT test_stat_func2()
+test_stat_func2
+
+               
+step s2_ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+
+               
+step s1_func_stats: 
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func'
+
+name           pg_stat_get_function_callstotal_above_zeroself_above_zero
+
+test_stat_func 1              t              t              
+step s1_func_stats2: 
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func2'
+
+name           pg_stat_get_function_callstotal_above_zeroself_above_zero
+
+test_stat_func22              t              t              
+step s1_commit: COMMIT;
+
+starting permutation: s1_track_funcs_all s2_track_funcs_all s1_fetch_consistency_snapshot s2_func_call s2_func_call2 s2_ff s1_begin s1_func_stats s2_func_call s2_func_call2 s2_ff s1_func_stats s1_func_stats2 s1_commit
+step s1_track_funcs_all: SET track_functions = 'all';
+step s2_track_funcs_all: SET track_functions = 'all';
+step s1_fetch_consistency_snapshot: SET stats_fetch_consistency = 'snapshot';
+step s2_func_call: SELECT test_stat_func()
+test_stat_func 
+
+               
+step s2_func_call2: SELECT test_stat_func2()
+test_stat_func2
+
+               
+step s2_ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+
+               
+step s1_begin: BEGIN;
+step s1_func_stats: 
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func'
+
+name           pg_stat_get_function_callstotal_above_zeroself_above_zero
+
+test_stat_func 1              t              t              
+step s2_func_call: SELECT test_stat_func()
+test_stat_func 
+
+               
+step s2_func_call2: SELECT test_stat_func2()
+test_stat_func2
+
+               
+step s2_ff: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+
+               
+step s1_func_stats: 
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func'
+
+name           pg_stat_get_function_callstotal_above_zeroself_above_zero
+
+test_stat_func 1              t              t              
+step s1_func_stats2: 
+    SELECT
+        tso.name,
+        pg_stat_get_function_calls(tso.oid),
+	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+    FROM test_stat_oid AS tso
+    WHERE tso.name = 'test_stat_func2'
+
+name           pg_stat_get_function_callstotal_above_zeroself_above_zero
+
+test_stat_func21              t              t              
+step s1_commit: COMMIT;
 unused step name: s2_rollback

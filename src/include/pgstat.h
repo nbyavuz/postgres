@@ -39,6 +39,14 @@ typedef enum TrackFunctionsLevel
 	TRACK_FUNC_ALL
 }			TrackFunctionsLevel;
 
+typedef enum PgStatsFetchConsistency
+{
+	STATS_FETCH_CONSISTENCY_NONE,
+	STATS_FETCH_CONSISTENCY_CACHE,
+	STATS_FETCH_CONSISTENCY_SNAPSHOT,
+} PgStatsFetchConsistency;
+
+
 /* Values to track the cause of session termination */
 typedef enum SessionEndType
 {
@@ -406,6 +414,7 @@ struct PgStat_DroppedStatsItem;
  */
 extern PGDLLIMPORT bool pgstat_track_counts;
 extern PGDLLIMPORT int pgstat_track_functions;
+extern PGDLLIMPORT int pgstat_fetch_consistency;
 extern char *pgstat_stat_directory;
 
 /* No longer used, but will be removed with GUC */

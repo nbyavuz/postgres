@@ -192,6 +192,13 @@ typedef struct PgStatPendingEntry
 	void	   *pending;			/* the pending data itself */
 } PgStatPendingEntry;
 
+/* locally pending stats hash table entry */
+typedef struct PgStatSnapshotEntry
+{
+	PgStatHashKey key;
+	char		status;			/* for simplehash use */
+	void	   *data;			/* the stats data itself */
+} PgStatSnapshotEntry;
 
 /* entry type for oid hash */
 typedef struct pgstat_oident
@@ -427,6 +434,22 @@ typedef struct StatsShmemStruct
 #define SH_DECLARE
 #include "lib/simplehash.h"
 
+/*
+ * For stats snapshot entries. This is currently practically the same as
+ * pgstat_pending, but it seems cleaner to have separate types.
+ */
+#define SH_PREFIX pgstat_snapshot
+#define SH_ELEMENT_TYPE PgStatSnapshotEntry
+#define SH_KEY_TYPE PgStatHashKey
+#define SH_KEY key
+#define SH_HASH_KEY(tb, key) \
+	hash_bytes((unsigned char *)&key, sizeof(PgStatHashKey))
+#define SH_EQUAL(tb, a, b) (memcmp(&a, &b, sizeof(PgStatHashKey)) == 0)
+#define SH_SCOPE static inline
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
 /* for OID hashes. */
 StaticAssertDecl(sizeof(Oid) == 4, "oid is not compatible with uint32");
 #define SH_PREFIX pgstat_oid
@@ -442,11 +465,48 @@ StaticAssertDecl(sizeof(Oid) == 4, "oid is not compatible with uint32");
 
 
 /* ----------
+ * Cached statistics snapshot
+ * ----------
+ */
+
+typedef struct PgStatSnapshot
+{
+	PgStatsFetchConsistency mode;
+
+	struct
+	{
+		bool archiver;
+		bool bgwriter;
+		bool checkpointer;
+		bool replslot;
+		bool slru;
+		bool wal;
+	} valid;
+
+	PgStat_ArchiverStats archiver;
+
+	PgStat_BgWriterStats bgwriter;
+
+	PgStat_CheckPointerStats checkpointer;
+
+	int replslot_count;
+	PgStat_ReplSlotStats *replslot;
+
+	PgStat_SLRUStats slru[SLRU_NUM_ELEMENTS];
+
+	PgStat_WalStats wal;
+
+	pgstat_snapshot_hash *stats;
+} PgStatSnapshot;
+
+
+/* ----------
  * GUC parameters
  * ----------
  */
 bool		pgstat_track_counts = false;
 int			pgstat_track_functions = TRACK_FUNC_OFF;
+int			pgstat_fetch_consistency = STATS_FETCH_CONSISTENCY_NONE;
 
 /* ----------
  * Built from GUC parameters
@@ -629,22 +689,7 @@ static PgStat_StatDBEntry pendingSharedDBStats;
  * ----------
  */
 
-static PgStatHashKey stathashkey_zero = {0};
-static PgStatHashKey cached_dbent_key = {0};
-static PgStat_StatDBEntry cached_dbent;
-static PgStatHashKey cached_tabent_key = {0};
-static PgStat_StatTabEntry cached_tabent;
-static PgStatHashKey cached_funcent_key = {0};
-static PgStat_StatFuncEntry cached_funcent;
-
-static PgStat_ArchiverStats cached_archiverstats;
-static PgStat_BgWriterStats cached_bgwriterstats;
-static PgStat_CheckPointerStats cached_checkpointerstats;
-static PgStat_WalStats cached_walstats;
-static bool cached_walstats_is_valid = false;
-static PgStat_SLRUStats cached_slrustats[SLRU_NUM_ELEMENTS];
-static PgStat_ReplSlotStats *cached_replslotstats = NULL;
-static int	n_cached_replslotstats = -1;
+static PgStatSnapshot stats_snapshot;
 
 
 /* ----------
@@ -1332,6 +1377,10 @@ pgstat_report_stat(bool force)
 void
 pgstat_clear_snapshot(void)
 {
+	memset(&stats_snapshot.valid, 0, sizeof(stats_snapshot.valid));
+	stats_snapshot.stats = NULL;
+	stats_snapshot.mode = STATS_FETCH_CONSISTENCY_NONE;
+
 	/* Release memory, if any was allocated */
 	if (pgStatLocalContext)
 	{
@@ -1340,13 +1389,6 @@ pgstat_clear_snapshot(void)
 		/* Reset variables */
 		pgStatLocalContext = NULL;
 	}
-
-	/* Invalidate the simple cache keys */
-	cached_dbent_key = stathashkey_zero;
-	cached_tabent_key = stathashkey_zero;
-	cached_funcent_key = stathashkey_zero;
-	cached_walstats_is_valid = false;
-	n_cached_replslotstats = -1;
 
 	/* forward to stats sub-subsystems */
 	pgbestat_clear_snapshot();
@@ -1523,11 +1565,6 @@ pgstat_reset_counters(void)
 		LWLockRelease(&header->lock);
 	}
 	dshash_seq_term(&hstat);
-
-	/* Invalidate the simple cache keys */
-	cached_dbent_key = stathashkey_zero;
-	cached_tabent_key = stathashkey_zero;
-	cached_funcent_key = stathashkey_zero;
 }
 
 /* ----------
@@ -1597,7 +1634,6 @@ pgstat_reset_shared_counters(const char *target)
 			MemSet(&StatsShmem->wal.stats, 0, sizeof(PgStat_WalStats));
 			StatsShmem->wal.stats.stat_reset_timestamp = now;
 			LWLockRelease(&StatsShmem->wal.lock);
-			cached_walstats_is_valid = false;
 			break;
 	}
 
@@ -4695,6 +4731,118 @@ pgstat_count_slru_truncate(int slru_idx)
  *------------------------------------------------------------
  */
 
+static void
+pgstat_snapshot_build(void)
+{
+	dshash_seq_status hstat;
+	PgStatShmHashEntry *p;
+
+	Assert(stats_snapshot.stats != NULL &&
+		   stats_snapshot.stats->members == 0);
+
+	dshash_seq_init(&hstat, pgStatSharedHash, false);
+	while ((p = dshash_seq_next(&hstat)) != NULL)
+	{
+		bool found;
+		PgStatSnapshotEntry *entry = NULL;
+		size_t entry_len;
+		PgStatShm_StatEntryHeader *stats_data;
+
+		stats_data = dsa_get_address(StatsDSA, p->body);
+		Assert(stats_data);
+		Assert(!stats_data->dropped);
+		Assert(pg_atomic_read_u32(&stats_data->refcount) > 0);
+
+		entry = pgstat_snapshot_insert(stats_snapshot.stats, p->key, &found);
+		Assert(!found);
+
+		entry_len = pgstat_types[p->key.type].shared_size;
+		entry->data = MemoryContextAlloc(pgStatLocalContext, entry_len);
+		memcpy(entry->data,
+			   shared_stat_entry_data(p->key.type, stats_data),
+			   entry_len);
+	}
+	dshash_seq_term(&hstat);
+
+	stats_snapshot.mode = STATS_FETCH_CONSISTENCY_SNAPSHOT;
+}
+
+static void*
+pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
+{
+	PgStatHashKey key;
+	PgStatShm_StatEntryHeader *shent;
+	void *stats_data;
+	size_t data_size;
+	size_t data_offset;
+
+	/* should be called from backends */
+	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
+
+	key.type = type;
+	key.databaseid = dboid;
+	key.objectid = objoid;
+
+	if (stats_snapshot.stats == NULL)
+	{
+		pgstat_setup_memcxt();
+
+		stats_snapshot.stats = pgstat_snapshot_create(pgStatLocalContext,
+													  PGSTAT_TABLE_HASH_SIZE,
+													  NULL);
+	}
+
+	/* if we need to build a full snapshot, do so */
+	if (stats_snapshot.mode != STATS_FETCH_CONSISTENCY_SNAPSHOT &&
+		pgstat_fetch_consistency == STATS_FETCH_CONSISTENCY_SNAPSHOT)
+		pgstat_snapshot_build();
+
+	/* if caching is desired, look up in cache */
+	if (pgstat_fetch_consistency > STATS_FETCH_CONSISTENCY_NONE)
+	{
+		PgStatSnapshotEntry *entry = NULL;
+
+		entry = pgstat_snapshot_lookup(stats_snapshot.stats, key);
+
+		if (entry)
+			return entry->data;
+	}
+
+	/*
+	 * if we built a full snapshot and it's not in stats_snapshot.stats, it
+	 * doesn't exist.
+	 */
+	if (pgstat_fetch_consistency == STATS_FETCH_CONSISTENCY_SNAPSHOT)
+		return NULL;
+
+	stats_snapshot.mode = pgstat_fetch_consistency;
+
+	shent = get_shared_stat_entry(type, dboid, objoid, false, false, NULL);
+
+	if (!shent)
+	{
+		/* FIXME: need to remember that STATS_FETCH_CONSISTENCY_CACHE */
+		return NULL;
+	}
+
+	data_size = pgstat_types[type].shared_data_len;
+	data_offset = pgstat_types[type].shared_data_off;
+	stats_data = MemoryContextAlloc(pgStatLocalContext, data_size);
+	memcpy(stats_data, ((char*) shent) + data_offset, data_size);
+
+	if (pgstat_fetch_consistency > STATS_FETCH_CONSISTENCY_NONE)
+	{
+		PgStatSnapshotEntry *entry = NULL;
+		bool found;
+
+		entry = pgstat_snapshot_insert(stats_snapshot.stats, key, &found);
+		entry->data = stats_data;
+	}
+
+	return stats_data;
+}
+
+
 /* ----------
  * pgstat_fetch_stat_dbentry() -
  *
@@ -4707,34 +4855,8 @@ pgstat_count_slru_truncate(int slru_idx)
 PgStat_StatDBEntry *
 pgstat_fetch_stat_dbentry(Oid dbid)
 {
-	PgStatShm_StatDBEntry *shent;
-
-	/* should be called from backends */
-	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
-
-	/* the simple cache doesn't work properly for InvalidOid */
-	if (dbid != InvalidOid)
-	{
-		/* Return cached result if it is valid. */
-		if (cached_dbent_key.databaseid == dbid)
-			return &cached_dbent;
-	}
-
-	shent = (PgStatShm_StatDBEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_DB, dbid, InvalidOid, false, false,
-							  NULL);
-
-	if (!shent)
-		return NULL;
-
-	LWLockAcquire(&shent->header.lock, LW_SHARED);
-	cached_dbent = shent->stats;
-	LWLockRelease(&shent->header.lock);
-
-	/* remember the key for the cached entry */
-	cached_dbent_key.databaseid = dbid;
-
-	return &cached_dbent;
+	return (PgStat_StatDBEntry *)
+		pgstat_fetch_entry(PGSTAT_TYPE_DB, dbid, InvalidOid);
 }
 
 /* ----------
@@ -4774,36 +4896,10 @@ pgstat_fetch_stat_tabentry(Oid relid)
 PgStat_StatTabEntry *
 pgstat_fetch_stat_tabentry_extended(bool shared, Oid reloid)
 {
-	PgStatShm_StatTabEntry *shent;
 	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
 
-	/* should be called from backends */
-	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
-
-	/* the simple cache doesn't work properly for the InvalidOid */
-	Assert(reloid != InvalidOid);
-
-	/* Return cached result if it is valid. */
-	if (cached_tabent_key.databaseid == dboid &&
-		cached_tabent_key.objectid == reloid)
-		return &cached_tabent;
-
-	shent = (PgStatShm_StatTabEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, reloid, false, false,
-							  NULL);
-
-	if (!shent)
-		return NULL;
-
-	LWLockAcquire(&shent->header.lock, LW_SHARED);
-	cached_tabent = shent->stats;
-	LWLockRelease(&shent->header.lock);
-
-	/* remember the key for the cached entry */
-	cached_tabent_key.databaseid = dboid;
-	cached_tabent_key.objectid = reloid;
-
-	return &cached_tabent;
+	return (PgStat_StatTabEntry *)
+		pgstat_fetch_entry(PGSTAT_TYPE_TABLE, dboid, reloid);
 }
 
 
@@ -4820,36 +4916,8 @@ pgstat_fetch_stat_tabentry_extended(bool shared, Oid reloid)
 PgStat_StatFuncEntry *
 pgstat_fetch_stat_funcentry(Oid func_id)
 {
-	PgStatShm_StatFuncEntry *shent;
-	Oid			dboid = MyDatabaseId;
-
-	/* should be called from backends */
-	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
-
-	/* the simple cache doesn't work properly for the InvalidOid */
-	Assert(func_id != InvalidOid);
-
-	/* Return cached result if it is valid. */
-	if (cached_funcent_key.databaseid == dboid &&
-		cached_funcent_key.objectid == func_id)
-		return &cached_funcent;
-
-	shent = (PgStatShm_StatFuncEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_FUNCTION, dboid, func_id, false,
-							  false, NULL);
-
-	if (!shent)
-		return NULL;
-
-	LWLockAcquire(&shent->header.lock, LW_SHARED);
-	cached_funcent = shent->stats;
-	LWLockRelease(&shent->header.lock);
-
-	/* remember the key for the cached entry */
-	cached_funcent_key.databaseid = dboid;
-	cached_funcent_key.objectid = func_id;
-
-	return &cached_funcent;
+	return (PgStat_StatFuncEntry *)
+		pgstat_fetch_entry(PGSTAT_TYPE_FUNCTION, MyDatabaseId, func_id);
 }
 
 /*
@@ -4878,10 +4946,13 @@ pgstat_fetch_stat_archiver(void)
 {
 	PgStat_ArchiverStats reset;
 	PgStat_ArchiverStats *reset_offset = &StatsShmem->archiver.reset_offset;
-	PgStat_ArchiverStats *shared = &StatsShmem->archiver.stats;
-	PgStat_ArchiverStats *cached = &cached_archiverstats;
 
-	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_ArchiverStats),
+	if (stats_snapshot.valid.archiver)
+		return &stats_snapshot.archiver;
+
+	pgstat_copy_global_stats(&stats_snapshot.archiver,
+							 &StatsShmem->archiver.stats,
+							 sizeof(PgStat_ArchiverStats),
 							 &StatsShmem->archiver.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
@@ -4889,23 +4960,25 @@ pgstat_fetch_stat_archiver(void)
 	LWLockRelease(StatsLock);
 
 	/* compensate by reset offsets */
-	if (cached->archived_count == reset.archived_count)
+	if (stats_snapshot.archiver.archived_count == reset.archived_count)
 	{
-		cached->last_archived_wal[0] = 0;
-		cached->last_archived_timestamp = 0;
+		stats_snapshot.archiver.last_archived_wal[0] = 0;
+		stats_snapshot.archiver.last_archived_timestamp = 0;
 	}
-	cached->archived_count -= reset.archived_count;
+	stats_snapshot.archiver.archived_count -= reset.archived_count;
 
-	if (cached->failed_count == reset.failed_count)
+	if (stats_snapshot.archiver.failed_count == reset.failed_count)
 	{
-		cached->last_failed_wal[0] = 0;
-		cached->last_failed_timestamp = 0;
+		stats_snapshot.archiver.last_failed_wal[0] = 0;
+		stats_snapshot.archiver.last_failed_timestamp = 0;
 	}
-	cached->failed_count -= reset.failed_count;
+	stats_snapshot.archiver.failed_count -= reset.failed_count;
 
-	cached->stat_reset_timestamp = reset.stat_reset_timestamp;
+	stats_snapshot.archiver.stat_reset_timestamp = reset.stat_reset_timestamp;
 
-	return &cached_archiverstats;
+	stats_snapshot.valid.archiver = true;
+
+	return &stats_snapshot.archiver;
 }
 
 
@@ -4923,10 +4996,13 @@ pgstat_fetch_stat_bgwriter(void)
 {
 	PgStat_BgWriterStats reset;
 	PgStat_BgWriterStats *reset_offset = &StatsShmem->bgwriter.reset_offset;
-	PgStat_BgWriterStats *shared = &StatsShmem->bgwriter.stats;
-	PgStat_BgWriterStats *cached = &cached_bgwriterstats;
 
-	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_BgWriterStats),
+	if (stats_snapshot.valid.bgwriter)
+		return &stats_snapshot.bgwriter;
+
+	pgstat_copy_global_stats(&stats_snapshot.bgwriter,
+							 &StatsShmem->bgwriter.stats,
+							 sizeof(PgStat_BgWriterStats),
 							 &StatsShmem->bgwriter.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
@@ -4934,12 +5010,14 @@ pgstat_fetch_stat_bgwriter(void)
 	LWLockRelease(StatsLock);
 
 	/* compensate by reset offsets */
-	cached->buf_written_clean -= reset.buf_written_clean;
-	cached->maxwritten_clean -= reset.maxwritten_clean;
-	cached->buf_alloc -= reset.buf_alloc;
-	cached->stat_reset_timestamp = reset.stat_reset_timestamp;
+	stats_snapshot.bgwriter.buf_written_clean -= reset.buf_written_clean;
+	stats_snapshot.bgwriter.maxwritten_clean -= reset.maxwritten_clean;
+	stats_snapshot.bgwriter.buf_alloc -= reset.buf_alloc;
+	stats_snapshot.bgwriter.stat_reset_timestamp = reset.stat_reset_timestamp;
 
-	return &cached_bgwriterstats;
+	stats_snapshot.valid.bgwriter = true;
+
+	return &stats_snapshot.bgwriter;
 }
 
 /*
@@ -4956,10 +5034,13 @@ pgstat_fetch_stat_checkpointer(void)
 {
 	PgStat_CheckPointerStats reset;
 	PgStat_CheckPointerStats *reset_offset = &StatsShmem->checkpointer.reset_offset;
-	PgStat_CheckPointerStats *shared = &StatsShmem->checkpointer.stats;
-	PgStat_CheckPointerStats *cached = &cached_checkpointerstats;
 
-	pgstat_copy_global_stats(cached, shared, sizeof(PgStat_CheckPointerStats),
+	if (stats_snapshot.valid.checkpointer)
+		return &stats_snapshot.checkpointer;
+
+	pgstat_copy_global_stats(&stats_snapshot.checkpointer,
+							 &StatsShmem->checkpointer.stats,
+							 sizeof(PgStat_CheckPointerStats),
 							 &StatsShmem->checkpointer.changecount);
 
 	LWLockAcquire(StatsLock, LW_SHARED);
@@ -4967,15 +5048,17 @@ pgstat_fetch_stat_checkpointer(void)
 	LWLockRelease(StatsLock);
 
 	/* compensate by reset offsets */
-	cached->timed_checkpoints -= reset.timed_checkpoints;
-	cached->requested_checkpoints -= reset.requested_checkpoints;
-	cached->buf_written_checkpoints -= reset.buf_written_checkpoints;
-	cached->buf_written_backend -= reset.buf_written_backend;
-	cached->buf_fsync_backend -= reset.buf_fsync_backend;
-	cached->checkpoint_write_time -= reset.checkpoint_write_time;
-	cached->checkpoint_sync_time -= reset.checkpoint_sync_time;
+	stats_snapshot.checkpointer.timed_checkpoints -= reset.timed_checkpoints;
+	stats_snapshot.checkpointer.requested_checkpoints -= reset.requested_checkpoints;
+	stats_snapshot.checkpointer.buf_written_checkpoints -= reset.buf_written_checkpoints;
+	stats_snapshot.checkpointer.buf_written_backend -= reset.buf_written_backend;
+	stats_snapshot.checkpointer.buf_fsync_backend -= reset.buf_fsync_backend;
+	stats_snapshot.checkpointer.checkpoint_write_time -= reset.checkpoint_write_time;
+	stats_snapshot.checkpointer.checkpoint_sync_time -= reset.checkpoint_sync_time;
 
-	return &cached_checkpointerstats;
+	stats_snapshot.valid.checkpointer = true;
+
+	return &stats_snapshot.checkpointer;
 }
 
 /*
@@ -4990,16 +5073,16 @@ pgstat_fetch_stat_checkpointer(void)
 PgStat_WalStats *
 pgstat_fetch_stat_wal(void)
 {
-	if (!cached_walstats_is_valid)
-	{
-		LWLockAcquire(StatsLock, LW_SHARED);
-		memcpy(&cached_walstats, &StatsShmem->wal.stats, sizeof(PgStat_WalStats));
-		LWLockRelease(StatsLock);
-	}
+	if (!stats_snapshot.valid.wal)
+		return &stats_snapshot.wal;
 
-	cached_walstats_is_valid = true;
+	LWLockAcquire(StatsLock, LW_SHARED);
+	memcpy(&stats_snapshot.wal, &StatsShmem->wal.stats, sizeof(PgStat_WalStats));
+	LWLockRelease(StatsLock);
 
-	return &cached_walstats;
+	stats_snapshot.valid.wal = true;
+
+	return &stats_snapshot.wal;
 }
 
 /*
@@ -5013,13 +5096,18 @@ pgstat_fetch_stat_wal(void)
 PgStat_SLRUStats *
 pgstat_fetch_slru(void)
 {
+	if (stats_snapshot.valid.slru)
+		return stats_snapshot.slru;
+
 	LWLockAcquire(&StatsShmem->slru.lock, LW_SHARED);
 
-	memcpy(&cached_slrustats, &StatsShmem->slru.stats, SizeOfSlruStats);
+	memcpy(stats_snapshot.slru, &StatsShmem->slru.stats, SizeOfSlruStats);
 
 	LWLockRelease(&StatsShmem->slru.lock);
 
-	return cached_slrustats;
+	stats_snapshot.valid.slru = true;
+
+	return stats_snapshot.slru;
 }
 
 /*
@@ -5034,36 +5122,37 @@ pgstat_fetch_slru(void)
 PgStat_ReplSlotStats *
 pgstat_fetch_replslot(int *nslots_p)
 {
-	if (cached_replslotstats == NULL)
+	if (stats_snapshot.valid.replslot)
 	{
-		pgstat_setup_memcxt();
-		cached_replslotstats = (PgStat_ReplSlotStats *)
-			MemoryContextAlloc(pgStatCacheContext,
+		*nslots_p = stats_snapshot.replslot_count;
+		return stats_snapshot.replslot;
+	}
+
+	if (stats_snapshot.replslot == NULL)
+	{
+		stats_snapshot.replslot = (PgStat_ReplSlotStats *)
+			MemoryContextAlloc(TopMemoryContext,
 							   sizeof(PgStat_ReplSlotStats) * max_replication_slots);
 	}
 
-	if (n_cached_replslotstats < 0)
+	stats_snapshot.replslot_count = 0;
+
+	LWLockAcquire(&StatsShmem->replslot.lock, LW_EXCLUSIVE);
+
+	for (int i = 0; i < max_replication_slots; i++)
 	{
-		int			n = 0;
-		int			i;
+		PgStat_ReplSlotStats *statent = &StatsShmem->replslot.stats[i];
 
-		LWLockAcquire(&StatsShmem->replslot.lock, LW_EXCLUSIVE);
-
-		for (i = 0; i < max_replication_slots; i++)
+		if (statent->index != -1)
 		{
-			PgStat_ReplSlotStats *statent = &StatsShmem->replslot.stats[i];
-
-			if (statent->index != -1)
-			{
-				cached_replslotstats[n++] = *statent;
-			}
+			stats_snapshot.replslot[stats_snapshot.replslot_count++] = *statent;
 		}
-
-		LWLockRelease(&StatsShmem->replslot.lock);
-
-		n_cached_replslotstats = n;
 	}
 
-	*nslots_p = n_cached_replslotstats;
-	return cached_replslotstats;
+	LWLockRelease(&StatsShmem->replslot.lock);
+
+	stats_snapshot.valid.replslot = true;
+
+	*nslots_p = stats_snapshot.replslot_count;
+	return stats_snapshot.replslot;
 }

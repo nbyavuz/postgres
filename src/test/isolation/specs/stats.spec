@@ -25,6 +25,9 @@ teardown
 session "s1"
 step "s1_track_funcs_all" { SET track_functions = 'all'; }
 step "s1_track_funcs_none" { SET track_functions = 'none'; }
+step "s1_fetch_consistency_none" { SET stats_fetch_consistency = 'none'; }
+step "s1_fetch_consistency_cache" { SET stats_fetch_consistency = 'cache'; }
+step "s1_fetch_consistency_snapshot" { SET stats_fetch_consistency = 'snapshot'; }
 step "s1_begin" { BEGIN; }
 step "s1_commit" { COMMIT; }
 step "s1_rollback" { ROLLBACK; }
@@ -139,3 +142,50 @@ permutation
   "s1_func_stats" "s1_func_stats2" "s1_func_stats"
   "s1_reset"
   "s1_func_stats" "s1_func_stats2" "s1_func_stats"
+
+
+# Check the different snapshot consistency models
+
+# First just some dead-trivial test verifying each model doesn't crash
+permutation
+  "s1_track_funcs_all" "s1_fetch_consistency_none" "s1_func_call" "s1_ff" "s1_func_stats"
+permutation
+  "s1_track_funcs_all" "s1_fetch_consistency_cache" "s1_func_call" "s1_ff" "s1_func_stats"
+permutation
+  "s1_track_funcs_all" "s1_fetch_consistency_snapshot" "s1_func_call" "s1_ff" "s1_func_stats"
+
+# with stats_fetch_consistency=none s1 should see flushed changes in s2, despite being in a transaction
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s1_fetch_consistency_none"
+  "s2_func_call" "s2_ff"
+  "s1_begin"
+  "s1_func_stats"
+  "s2_func_call" "s2_ff"
+  "s1_func_stats"
+  "s1_commit"
+
+# with stats_fetch_consistency=cache s1 should not see concurrent
+# changes to the same object after the first access, but a separate
+# object should show changes
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s1_fetch_consistency_cache"
+  "s2_func_call" "s2_func_call2" "s2_ff"
+  "s1_begin"
+  "s1_func_stats"
+  "s2_func_call" "s2_func_call2" "s2_ff"
+  "s1_func_stats" "s1_func_stats2"
+  "s1_commit"
+
+# with stats_fetch_consistency=snapshot s1 should not see any
+# concurrent changes after the first access
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s1_fetch_consistency_snapshot"
+  "s2_func_call" "s2_func_call2" "s2_ff"
+  "s1_begin"
+  "s1_func_stats"
+  "s2_func_call" "s2_func_call2" "s2_ff"
+  "s1_func_stats" "s1_func_stats2"
+  "s1_commit"
