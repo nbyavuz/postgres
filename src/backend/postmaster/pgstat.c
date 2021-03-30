@@ -119,11 +119,20 @@
 /* The types of statistics entries */
 typedef enum PgStatTypes
 {
+	/* stats with a variable number of entries */
 	PGSTAT_TYPE_DB,				/* database-wide statistics */
 	PGSTAT_TYPE_TABLE,			/* per-table statistics */
 	PGSTAT_TYPE_FUNCTION,		/* per-function statistics */
+
+	/* stats with a constant number of entries */
+	PGSTAT_TYPE_ARCHIVER,
+	PGSTAT_TYPE_BGWRITER,
+	PGSTAT_TYPE_CHECKPOINTER,
+	PGSTAT_TYPE_REPLSLOT,
+	PGSTAT_TYPE_SLRU,
+	PGSTAT_TYPE_WAL,
 } PgStatTypes;
-#define PGSTAT_TYPE_LAST PGSTAT_TYPE_FUNCTION
+#define PGSTAT_TYPE_LAST PGSTAT_TYPE_WAL
 
 
 /* ----------
@@ -277,8 +286,15 @@ typedef struct PgStat_SubXactStatus
 /*
  * Metadata for a specific type of statistics.
  */
+typedef void (PgStatTypeSnapshotCB)(void);
 typedef struct pgstat_type_info
 {
+	/*
+	 * Is the stats type a global one (of which a precise number exists) or
+	 * not (e.g. tables).
+	 */
+	bool is_global;
+
 	/*
 	 * The size of an entry in the shared stats hash table (pointed to by
 	 * PgStatShmHashEntry->body).
@@ -301,6 +317,11 @@ typedef struct pgstat_type_info
      * entry.
 	 */
 	uint32 pending_size;
+
+	/*
+	 * For global statistics: Fetch a snapshot of appropriate global stats.
+	 */
+	PgStatTypeSnapshotCB *snapshot_cb;
 } pgstat_type_info;
 
 /* Indexed by PgStatTypes. */
@@ -473,15 +494,7 @@ typedef struct PgStatSnapshot
 {
 	PgStatsFetchConsistency mode;
 
-	struct
-	{
-		bool archiver;
-		bool bgwriter;
-		bool checkpointer;
-		bool replslot;
-		bool slru;
-		bool wal;
-	} valid;
+	bool global_valid[PGSTAT_TYPE_LAST];
 
 	PgStat_ArchiverStats archiver;
 
@@ -555,12 +568,17 @@ static void pgstat_update_connstats(bool disconnect);
 
 static inline bool walstats_pending(void);
 
-
 static inline void changecount_before_write(uint32 *cc);
 static inline void changecount_after_write(uint32 *cc);
 static inline uint32 changecount_before_read(uint32 *cc);
 static inline bool changecount_after_read(uint32 *cc, uint32 cc_before);
 
+static void pgstat_snapshot_archiver(void);
+static void pgstat_snapshot_bgwriter(void);
+static void pgstat_snapshot_checkpointer(void);
+static void pgstat_snapshot_replslot(void);
+static void pgstat_snapshot_slru(void);
+static void pgstat_snapshot_wal(void);
 
 
 /* ----------
@@ -722,7 +740,11 @@ static PgStatSnapshot stats_snapshot;
 
 /* see comments for struct pgstat_type_info */
 static const pgstat_type_info pgstat_types[] = {
+
+	/* stats types with a variable number of stats */
+
 	[PGSTAT_TYPE_DB] = {
+		.is_global = false,
 		.shared_size = sizeof(PgStatShm_StatDBEntry),
 		.shared_data_off = offsetof(PgStatShm_StatDBEntry, stats),
 		.shared_data_len = sizeof(((PgStatShm_StatDBEntry*) 0)->stats),
@@ -730,6 +752,7 @@ static const pgstat_type_info pgstat_types[] = {
 	},
 
 	[PGSTAT_TYPE_TABLE] = {
+		.is_global = false,
 		.shared_size = sizeof(PgStatShm_StatTabEntry),
 		.shared_data_off = offsetof(PgStatShm_StatTabEntry, stats),
 		.shared_data_len = sizeof(((PgStatShm_StatTabEntry*) 0)->stats),
@@ -737,11 +760,46 @@ static const pgstat_type_info pgstat_types[] = {
 	},
 
 	[PGSTAT_TYPE_FUNCTION] = {
+		.is_global = false,
 		.shared_size = sizeof(PgStatShm_StatFuncEntry),
 		.shared_data_off = offsetof(PgStatShm_StatFuncEntry, stats),
 		.shared_data_len = sizeof(((PgStatShm_StatFuncEntry*) 0)->stats),
 		.pending_size = sizeof(PgStat_BackendFunctionEntry),
 	},
+
+
+	/* global stats */
+
+	[PGSTAT_TYPE_ARCHIVER] = {
+		.is_global = true,
+		.snapshot_cb = pgstat_snapshot_archiver,
+	},
+
+	[PGSTAT_TYPE_BGWRITER] = {
+		.is_global = true,
+		.snapshot_cb = pgstat_snapshot_bgwriter,
+	},
+
+	[PGSTAT_TYPE_CHECKPOINTER] = {
+		.is_global = true,
+		.snapshot_cb = pgstat_snapshot_checkpointer,
+	},
+
+	[PGSTAT_TYPE_REPLSLOT] = {
+		.is_global = true,
+		.snapshot_cb = pgstat_snapshot_replslot,
+	},
+
+	[PGSTAT_TYPE_SLRU] = {
+		.is_global = true,
+		.snapshot_cb = pgstat_snapshot_slru,
+	},
+
+	[PGSTAT_TYPE_WAL] = {
+		.is_global = true,
+		.snapshot_cb = pgstat_snapshot_wal,
+	},
+
 };
 
 /* parameter for the shared hash */
@@ -1378,7 +1436,7 @@ pgstat_report_stat(bool force)
 void
 pgstat_clear_snapshot(void)
 {
-	memset(&stats_snapshot.valid, 0, sizeof(stats_snapshot.valid));
+	memset(&stats_snapshot.global_valid, 0, sizeof(stats_snapshot.global_valid));
 	stats_snapshot.stats = NULL;
 	stats_snapshot.mode = STATS_FETCH_CONSISTENCY_NONE;
 
@@ -1476,6 +1534,9 @@ pgstat_vacuum_stat(void)
 				if (pgstat_oid_lookup(funcids, ent->key.objectid) != NULL)
 					continue;
 
+				break;
+			default:
+				elog(ERROR, "unexpected");
 				break;
 		}
 
@@ -2567,6 +2628,9 @@ delete_pending_stats_entry(PgStatPendingEntry *pending_entry)
 		case PGSTAT_TYPE_DB:
 		case PGSTAT_TYPE_FUNCTION:
 			break;
+		default:
+			elog(ERROR, "unexpected");
+			break;
 	}
 
 	pfree(pending_data);
@@ -2896,6 +2960,10 @@ flush_object_stats(bool nowait)
 			case PGSTAT_TYPE_DB:
 				/* We don't have that kind of pending entry */
 				Assert(false);
+				break;
+			default:
+				elog(ERROR, "unexpected");
+				break;
 		}
 
 		if (!remove)
@@ -4738,8 +4806,16 @@ pgstat_snapshot_build(void)
 	dshash_seq_status hstat;
 	PgStatShmHashEntry *p;
 
-	Assert(stats_snapshot.stats != NULL &&
-		   stats_snapshot.stats->members == 0);
+	if (stats_snapshot.stats == NULL)
+	{
+		pgstat_setup_memcxt();
+
+		stats_snapshot.stats = pgstat_snapshot_create(pgStatLocalContext,
+													  PGSTAT_TABLE_HASH_SIZE,
+													  NULL);
+	}
+	else
+		Assert(stats_snapshot.stats->members == 0);
 
 	dshash_seq_init(&hstat, pgStatSharedHash, false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
@@ -4765,6 +4841,24 @@ pgstat_snapshot_build(void)
 	}
 	dshash_seq_term(&hstat);
 
+	for (int stattype = 0; stattype < PGSTAT_TYPE_LAST; stattype++)
+	{
+		if (!pgstat_types[stattype].is_global)
+		{
+			Assert(pgstat_types[stattype].snapshot_cb == NULL);
+			continue;
+		}
+
+		Assert(pgstat_types[stattype].snapshot_cb != NULL);
+
+		stats_snapshot.global_valid[stattype] = false;
+
+		pgstat_types[stattype].snapshot_cb();
+
+		Assert(!stats_snapshot.global_valid[stattype]);
+		stats_snapshot.global_valid[stattype] = true;
+	}
+
 	stats_snapshot.mode = STATS_FETCH_CONSISTENCY_SNAPSHOT;
 }
 
@@ -4779,6 +4873,9 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
 
 	/* should be called from backends */
 	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
+
+	AssertArg(type <= PGSTAT_TYPE_LAST);
+	AssertArg(!pgstat_types[type].is_global);
 
 	key.type = type;
 	key.databaseid = dboid;
@@ -4933,23 +5030,38 @@ pgstat_get_stat_timestamp(void)
 	return (TimestampTz) pg_atomic_read_u64(&StatsShmem->stats_timestamp);
 }
 
-/*
- * ---------
- * pgstat_fetch_stat_archiver() -
- *
- *	Support function for the SQL-callable pgstat* functions.  The returned
- *  entry is stored in static memory so the content is valid until the next
- *  call.
- * ---------
- */
-PgStat_ArchiverStats *
-pgstat_fetch_stat_archiver(void)
+
+static void
+pgstat_snapshot_global(PgStatTypes stattype)
+{
+	AssertArg(stattype <= PGSTAT_TYPE_LAST);
+	AssertArg(pgstat_types[stattype].is_global);
+
+	if (pgstat_fetch_consistency == STATS_FETCH_CONSISTENCY_SNAPSHOT)
+	{
+		if (stats_snapshot.mode != STATS_FETCH_CONSISTENCY_SNAPSHOT)
+			pgstat_snapshot_build();
+
+		Assert(stats_snapshot.global_valid[stattype] == true);
+	}
+	else if (pgstat_fetch_consistency == STATS_FETCH_CONSISTENCY_NONE ||
+		!stats_snapshot.global_valid[stattype])
+	{
+		if (pgstat_fetch_consistency == STATS_FETCH_CONSISTENCY_NONE)
+			stats_snapshot.global_valid[stattype] = false;
+
+		pgstat_types[stattype].snapshot_cb();
+
+		Assert(!stats_snapshot.global_valid[stattype]);
+		stats_snapshot.global_valid[stattype] = true;
+	}
+}
+
+static void
+pgstat_snapshot_archiver(void)
 {
 	PgStat_ArchiverStats reset;
 	PgStat_ArchiverStats *reset_offset = &StatsShmem->archiver.reset_offset;
-
-	if (stats_snapshot.valid.archiver)
-		return &stats_snapshot.archiver;
 
 	pgstat_copy_global_stats(&stats_snapshot.archiver,
 							 &StatsShmem->archiver.stats,
@@ -4976,30 +5088,24 @@ pgstat_fetch_stat_archiver(void)
 	stats_snapshot.archiver.failed_count -= reset.failed_count;
 
 	stats_snapshot.archiver.stat_reset_timestamp = reset.stat_reset_timestamp;
-
-	stats_snapshot.valid.archiver = true;
-
-	return &stats_snapshot.archiver;
 }
 
 
 /*
  * ---------
- * pgstat_fetch_stat_bgwriter() -
+ * pgstat_fetch_[cache_]stat_bgwriter() -
  *
  *	Support function for the SQL-callable pgstat* functions.  The returned
  *  entry is stored in static memory so the content is valid until the next
  *  call.
  * ---------
  */
-PgStat_BgWriterStats *
-pgstat_fetch_stat_bgwriter(void)
+
+static void
+pgstat_snapshot_bgwriter(void)
 {
 	PgStat_BgWriterStats reset;
 	PgStat_BgWriterStats *reset_offset = &StatsShmem->bgwriter.reset_offset;
-
-	if (stats_snapshot.valid.bgwriter)
-		return &stats_snapshot.bgwriter;
 
 	pgstat_copy_global_stats(&stats_snapshot.bgwriter,
 							 &StatsShmem->bgwriter.stats,
@@ -5015,29 +5121,13 @@ pgstat_fetch_stat_bgwriter(void)
 	stats_snapshot.bgwriter.maxwritten_clean -= reset.maxwritten_clean;
 	stats_snapshot.bgwriter.buf_alloc -= reset.buf_alloc;
 	stats_snapshot.bgwriter.stat_reset_timestamp = reset.stat_reset_timestamp;
-
-	stats_snapshot.valid.bgwriter = true;
-
-	return &stats_snapshot.bgwriter;
 }
 
-/*
- * ---------
- * pgstat_fetch_stat_checkpinter() -
- *
- *	Support function for the SQL-callable pgstat* functions.  The returned
- *  entry is stored in static memory so the content is valid until the next
- *  call.
- * ---------
- */
-PgStat_CheckPointerStats *
-pgstat_fetch_stat_checkpointer(void)
+static void
+pgstat_snapshot_checkpointer(void)
 {
 	PgStat_CheckPointerStats reset;
 	PgStat_CheckPointerStats *reset_offset = &StatsShmem->checkpointer.reset_offset;
-
-	if (stats_snapshot.valid.checkpointer)
-		return &stats_snapshot.checkpointer;
 
 	pgstat_copy_global_stats(&stats_snapshot.checkpointer,
 							 &StatsShmem->checkpointer.stats,
@@ -5056,79 +5146,29 @@ pgstat_fetch_stat_checkpointer(void)
 	stats_snapshot.checkpointer.buf_fsync_backend -= reset.buf_fsync_backend;
 	stats_snapshot.checkpointer.checkpoint_write_time -= reset.checkpoint_write_time;
 	stats_snapshot.checkpointer.checkpoint_sync_time -= reset.checkpoint_sync_time;
-
-	stats_snapshot.valid.checkpointer = true;
-
-	return &stats_snapshot.checkpointer;
 }
 
-/*
- * ---------
- * pgstat_fetch_stat_wal() -
- *
- *	Support function for the SQL-callable pgstat* functions. The returned entry
- *  is stored in static memory so the content is valid until the next
- *  call.
- * ---------
- */
-PgStat_WalStats *
-pgstat_fetch_stat_wal(void)
+static void
+pgstat_snapshot_wal(void)
 {
-	if (!stats_snapshot.valid.wal)
-		return &stats_snapshot.wal;
-
 	LWLockAcquire(StatsLock, LW_SHARED);
 	memcpy(&stats_snapshot.wal, &StatsShmem->wal.stats, sizeof(PgStat_WalStats));
 	LWLockRelease(StatsLock);
-
-	stats_snapshot.valid.wal = true;
-
-	return &stats_snapshot.wal;
 }
 
-/*
- * ---------
- * pgstat_fetch_slru() -
- *
- *	Support function for the SQL-callable pgstat* functions. Returns
- *	a pointer to the slru statistics struct.
- * ---------
- */
-PgStat_SLRUStats *
-pgstat_fetch_slru(void)
+static void
+pgstat_snapshot_slru(void)
 {
-	if (stats_snapshot.valid.slru)
-		return stats_snapshot.slru;
-
 	LWLockAcquire(&StatsShmem->slru.lock, LW_SHARED);
 
 	memcpy(stats_snapshot.slru, &StatsShmem->slru.stats, SizeOfSlruStats);
 
 	LWLockRelease(&StatsShmem->slru.lock);
-
-	stats_snapshot.valid.slru = true;
-
-	return stats_snapshot.slru;
 }
 
-/*
- * ---------
- * pgstat_fetch_replslot() -
- *
- *	Support function for the SQL-callable pgstat* functions. Returns
- *	a pointer to the replication slot statistics struct and sets the
- *	number of entries in nslots_p.
- * ---------
- */
-PgStat_ReplSlotStats *
-pgstat_fetch_replslot(int *nslots_p)
+static void
+pgstat_snapshot_replslot(void)
 {
-	if (stats_snapshot.valid.replslot)
-	{
-		*nslots_p = stats_snapshot.replslot_count;
-		return stats_snapshot.replslot;
-	}
-
 	if (stats_snapshot.replslot == NULL)
 	{
 		stats_snapshot.replslot = (PgStat_ReplSlotStats *)
@@ -5151,8 +5191,54 @@ pgstat_fetch_replslot(int *nslots_p)
 	}
 
 	LWLockRelease(&StatsShmem->replslot.lock);
+}
 
-	stats_snapshot.valid.replslot = true;
+
+PgStat_ArchiverStats *
+pgstat_fetch_stat_archiver(void)
+{
+	pgstat_snapshot_global(PGSTAT_TYPE_ARCHIVER);
+
+	return &stats_snapshot.archiver;
+}
+
+PgStat_BgWriterStats *
+pgstat_fetch_stat_bgwriter(void)
+{
+	pgstat_snapshot_global(PGSTAT_TYPE_BGWRITER);
+
+	return &stats_snapshot.bgwriter;
+}
+
+
+PgStat_CheckPointerStats *
+pgstat_fetch_stat_checkpointer(void)
+{
+	pgstat_snapshot_global(PGSTAT_TYPE_CHECKPOINTER);
+
+	return &stats_snapshot.checkpointer;
+}
+
+PgStat_WalStats *
+pgstat_fetch_stat_wal(void)
+{
+	pgstat_snapshot_global(PGSTAT_TYPE_WAL);
+
+	return &stats_snapshot.wal;
+}
+
+PgStat_SLRUStats *
+pgstat_fetch_slru(void)
+{
+	pgstat_snapshot_global(PGSTAT_TYPE_SLRU);
+
+	return stats_snapshot.slru;
+}
+
+PgStat_ReplSlotStats *
+pgstat_fetch_replslot(int *nslots_p)
+{
+	pgstat_snapshot_global(PGSTAT_TYPE_REPLSLOT);
 
 	*nslots_p = stats_snapshot.replslot_count;
 	return stats_snapshot.replslot;
