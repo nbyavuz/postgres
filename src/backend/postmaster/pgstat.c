@@ -1192,7 +1192,7 @@ pgstat_perform_drops(int ndrops, struct PgStat_DroppedStatsItem *items, bool is_
 
 	for (int i = 0; i < ndrops; i++)
 		pgstat_perform_drop(&items[i]);
-	pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
+	pg_atomic_fetch_add_u64(&StatsShmem->gc_count, 1);
 }
 
 static void
@@ -1226,7 +1226,7 @@ pgstat_perform_stats_drops(PgStat_SubXactStatus *xact_state, bool isCommit)
 		pfree(pending);
 	}
 
-	pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
+	pg_atomic_fetch_add_u64(&StatsShmem->gc_count, 1);
 }
 
 /* ----------
@@ -1271,7 +1271,7 @@ pgstat_drop_database(Oid dboid)
 	 * holders to run garbage collection of their cached pgStatShmLookupCache.
 	 */
 	if (not_freed_count > 0)
-		pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
+		pg_atomic_fetch_add_u64(&StatsShmem->gc_count, 1);
 }
 
 /* ----------
@@ -1554,7 +1554,7 @@ pgstat_vacuum_stat(void)
 	 * holders to run garbage collection of their cached pgStatShmLookupCache.
 	 */
 	if (not_freed_count > 0)
-		pg_atomic_add_fetch_u64(&StatsShmem->gc_count, 1);
+		pg_atomic_fetch_add_u64(&StatsShmem->gc_count, 1);
 }
 
 /*
@@ -2422,7 +2422,7 @@ get_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objoid, bool nowait,
 			Assert(shheader->magic == 0xdeadbeef);
 			Assert(pg_atomic_read_u32(&shheader->refcount) > 0);
 
-			pg_atomic_add_fetch_u32(&shheader->refcount, 1);
+			pg_atomic_fetch_add_u32(&shheader->refcount, 1);
 		}
 
 		/* dropped entries shouldn't be in pgStatSharedHash */
