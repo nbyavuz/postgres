@@ -254,7 +254,7 @@ typedef struct PgStat_DroppedStatsItem
 {
 	Oid type;
 	Oid dboid;
-	Oid objid;
+	Oid objoid;
 } PgStat_DroppedStatsItem;
 
 typedef struct xl_xact_dropped_stats

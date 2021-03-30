@@ -304,7 +304,7 @@ xact_desc_dropped_stats(StringInfo buf, int ndropped,
 			appendStringInfo(buf, " %u/%u/%u",
 							 dropped_stats[i].type,
 							 dropped_stats[i].dboid,
-							 dropped_stats[i].objid);
+							 dropped_stats[i].objoid);
 		}
 	}
 }

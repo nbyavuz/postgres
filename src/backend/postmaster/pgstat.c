@@ -172,8 +172,8 @@ typedef struct PgStatShm_StatEntryHeader
 typedef struct PgStatHashKey
 {
 	PgStatTypes type;			/* statistics entry type */
-	Oid			databaseid;		/* database ID. InvalidOid for shared objects. */
-	Oid			objectid;		/* object ID, either table or function. */
+	Oid			dboid;		/* database ID. InvalidOid for shared objects. */
+	Oid			objoid;		/* object ID, either table or function. */
 } PgStatHashKey;
 
 /* struct for shared statistics hash entry */
@@ -528,13 +528,13 @@ static PgStat_SubXactStatus *get_tabstat_stack_level(int nest_level);
 
 
 static PgStatShm_StatEntryHeader *get_shared_stat_entry(PgStatTypes type,
-														Oid dbid, Oid objid,
+														Oid dboid, Oid objoid,
 														bool nowait,
 														bool create,
 														bool *found);
 static PgStatShm_StatEntryHeader *get_lock_shared_stat_entry(PgStatTypes type,
-															 Oid dbid,
-															 Oid objid,
+															 Oid dboid,
+															 Oid objoid,
 															 bool nowait);
 static inline size_t shared_stat_entry_len(PgStatTypes stattype);
 static inline void* shared_stat_entry_data(PgStatTypes stattype, PgStatShm_StatEntryHeader *entry);
@@ -545,12 +545,12 @@ static void pgstat_lookup_cache_gc(void);
 static void pgstat_release_stats_references(void);
 
 static bool pgstat_drop_stats_entry(dshash_seq_status *hstat);
-static void *get_pending_stat_entry(PgStatTypes type, Oid dbid,
-									Oid objid, bool create,
+static void *get_pending_stat_entry(PgStatTypes type, Oid dboid,
+									Oid objoid, bool create,
 									bool *found);
 static void delete_pending_stats_entry(PgStatPendingEntry *pending_entry);
 
-static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dbid, bool for_update);
+static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dboid, bool for_update);
 static PgStat_TableStatus *get_pending_tabstat_entry(Oid rel_id, bool isshared);
 
 static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
@@ -1049,7 +1049,7 @@ pgstat_schedule_drop(PgStatTypes stattype, Oid dboid, Oid objoid)
 
 	drop->item.type = stattype;
 	drop->item.dboid = dboid;
-	drop->item.objid = objoid;
+	drop->item.objoid = objoid;
 
 	dlist_push_tail(&xact_state->pending_drops, &drop->node);
 	xact_state->pending_drops_count++;
@@ -1122,8 +1122,8 @@ pgstat_perform_drop(PgStat_DroppedStatsItem *drop)
 	PgStatHashKey key;
 
 	key.type = drop->type;
-	key.databaseid = drop->dboid;
-	key.objectid = drop->objid;
+	key.dboid = drop->dboid;
+	key.objoid = drop->objoid;
 
 	if (pgStatPendingHash)
 	{
@@ -1214,7 +1214,7 @@ pgstat_perform_stats_drops(PgStat_SubXactStatus *xact_state, bool isCommit)
 		elog(DEBUG2, "dropping stats %u/%u/%u",
 			 pending->item.type,
 			 pending->item.dboid,
-			 pending->item.objid);
+			 pending->item.objoid);
 
 		if (isCommit)
 		{
@@ -1240,13 +1240,13 @@ pgstat_perform_stats_drops(PgStat_SubXactStatus *xact_state, bool isCommit)
  *	----------
  */
 void
-pgstat_drop_database(Oid databaseid)
+pgstat_drop_database(Oid dboid)
 {
 	dshash_seq_status hstat;
 	PgStatShmHashEntry *p;
 	uint64		not_freed_count = 0;
 
-	Assert(OidIsValid(databaseid));
+	Assert(OidIsValid(dboid));
 
 	Assert(pgStatSharedHash != NULL);
 
@@ -1254,7 +1254,7 @@ pgstat_drop_database(Oid databaseid)
 	dshash_seq_init(&hstat, pgStatSharedHash, true);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
-		if (p->key.databaseid == MyDatabaseId)
+		if (p->key.dboid == MyDatabaseId)
 		{
 			/*
 			 * Even statistics for a dropped database might currently be
@@ -1483,7 +1483,7 @@ pgstat_force_next_flush(void)
 void
 pgstat_vacuum_stat(void)
 {
-	pgstat_oid_hash *dbids;		/* database ids */
+	pgstat_oid_hash *dboids;		/* database ids */
 	pgstat_oid_hash *relids;	/* relation ids in the current database */
 	pgstat_oid_hash *funcids;	/* function ids in the current database */
 	uint64		not_freed_count = 0;
@@ -1491,7 +1491,7 @@ pgstat_vacuum_stat(void)
 	PgStatShmHashEntry *ent;
 
 	/* collect oids of existent objects */
-	dbids = collect_oids(DatabaseRelationId, Anum_pg_database_oid);
+	dboids = collect_oids(DatabaseRelationId, Anum_pg_database_oid);
 	relids = collect_oids(RelationRelationId, Anum_pg_class_oid);
 	funcids = collect_oids(ProcedureRelationId, Anum_pg_proc_oid);
 
@@ -1506,7 +1506,7 @@ pgstat_vacuum_stat(void)
 		 * current database.
 		 */
 		if (ent->key.type != PGSTAT_TYPE_DB &&
-			ent->key.databaseid != MyDatabaseId)
+			ent->key.dboid != MyDatabaseId)
 			continue;
 
 		switch (ent->key.type)
@@ -1516,22 +1516,22 @@ pgstat_vacuum_stat(void)
 				 * don't remove database entry for shared tables and existing
 				 * tables
 				 */
-				if (ent->key.databaseid == 0 ||
-					pgstat_oid_lookup(dbids, ent->key.databaseid) != NULL)
+				if (ent->key.dboid == 0 ||
+					pgstat_oid_lookup(dboids, ent->key.dboid) != NULL)
 					continue;
 
 				break;
 
 			case PGSTAT_TYPE_TABLE:
 				/* don't remove existing relations */
-				if (pgstat_oid_lookup(relids, ent->key.objectid) != NULL)
+				if (pgstat_oid_lookup(relids, ent->key.objoid) != NULL)
 					continue;
 
 				break;
 
 			case PGSTAT_TYPE_FUNCTION:
 				/* don't remove existing functions  */
-				if (pgstat_oid_lookup(funcids, ent->key.objectid) != NULL)
+				if (pgstat_oid_lookup(funcids, ent->key.objoid) != NULL)
 					continue;
 
 				break;
@@ -1545,7 +1545,7 @@ pgstat_vacuum_stat(void)
 			not_freed_count++;
 	}
 	dshash_seq_term(&dshstat);
-	pgstat_oid_destroy(dbids);
+	pgstat_oid_destroy(dboids);
 	pgstat_oid_destroy(relids);
 	pgstat_oid_destroy(funcids);
 
@@ -1609,7 +1609,7 @@ pgstat_reset_counters(void)
 	{
 		PgStatShm_StatEntryHeader *header;
 
-		if (p->key.databaseid != MyDatabaseId)
+		if (p->key.dboid != MyDatabaseId)
 			continue;
 
 		header = dsa_get_address(StatsDSA, p->body);
@@ -2195,7 +2195,7 @@ pgstat_read_statsfile(void)
 						goto done;
 					}
 
-					p = get_shared_stat_entry(key.type, key.databaseid, key.objectid,
+					p = get_shared_stat_entry(key.type, key.dboid, key.objoid,
 											  false, true, &found);
 
 					/* don't allow duplicate entries */
@@ -2308,7 +2308,7 @@ pgstat_shutdown_hook(int code, Datum arg)
 /* ----------
  * get_shared_stat_entry() -
  *
- *	get shared stats entry for specified type, dbid and objid.
+ *	get shared stats entry for specified type, dboid and objoid.
  *  If nowait is true, returns NULL on lock failure.
  *
  *  If initfunc is not NULL, new entry is created if not yet and the function
@@ -2317,7 +2317,7 @@ pgstat_shutdown_hook(int code, Datum arg)
  *  ----------
  */
 static PgStatShm_StatEntryHeader *
-get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
+get_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objoid, bool nowait,
 					  bool create, bool *found)
 {
 	PgStatHashKey key;
@@ -2327,8 +2327,8 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
 	bool		shfound;
 
 	key.type = type;
-	key.databaseid = dbid;
-	key.objectid = objid;
+	key.dboid = dboid;
+	key.objoid = objoid;
 
 	pgstat_setup_memcxt();
 
@@ -2460,13 +2460,13 @@ get_shared_stat_entry(PgStatTypes type, Oid dbid, Oid objid, bool nowait,
  * entry for flush_tabstat, flush_funcstat and flush_dbstat.
  */
 static PgStatShm_StatEntryHeader *
-get_lock_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objid, bool nowait)
+get_lock_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objoid, bool nowait)
 {
 	PgStatShm_StatEntryHeader *header;
 
 	/* find shared table stats entry corresponding to the local entry */
 	header = (PgStatShm_StatEntryHeader *)
-		get_shared_stat_entry(type, dboid, objid, nowait, true, NULL);
+		get_shared_stat_entry(type, dboid, objoid, nowait, true, NULL);
 
 	/* skip if dshash failed to acquire lock */
 	if (header == NULL)
@@ -2566,7 +2566,7 @@ pgstat_lookup_cache_gc(void)
 /* ----------
  * get_pending_stat_entry() -
  *
- *  Returns pending stats entry for the type, dbid and objid.
+ *  Returns pending stats entry for the type, dboid and objoid.
  *  If create is true, new entry is created if not yet.  found must be non-null
  *  in the case.
  *
@@ -2576,7 +2576,7 @@ pgstat_lookup_cache_gc(void)
  * ----------
  */
 static void *
-get_pending_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
+get_pending_stat_entry(PgStatTypes type, Oid dboid, Oid objoid,
 					 bool create, bool *found)
 {
 	PgStatHashKey key;
@@ -2593,8 +2593,8 @@ get_pending_stat_entry(PgStatTypes type, Oid dbid, Oid objid,
 
 	/* Find an entry or create a new one. */
 	key.type = type;
-	key.databaseid = dbid;
-	key.objectid = objid;
+	key.dboid = dboid;
+	key.objoid = objoid;
 	if (create)
 		entry = pgstat_pending_insert(pgStatPendingHash, key, found);
 	else
@@ -2642,17 +2642,17 @@ delete_pending_stats_entry(PgStatPendingEntry *pending_entry)
 /* ----------
  * get_pending_dbstat_entry() -
  *
- *  Find or create a local PgStat_StatDBEntry entry for dbid.
+ *  Find or create a local PgStat_StatDBEntry entry for dboid.
  */
 static PgStat_StatDBEntry *
-get_pending_dbstat_entry(Oid dbid, bool for_update)
+get_pending_dbstat_entry(Oid dboid, bool for_update)
 {
 	if (for_update)
 		havePendingDbStats = true;
 
-	if (dbid == InvalidOid)
+	if (dboid == InvalidOid)
 		return &pendingSharedDBStats;
-	Assert(dbid == MyDatabaseId);
+	Assert(dboid == MyDatabaseId);
 	return &pendingDBStats;
 }
 
@@ -3013,7 +3013,7 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 
 	Assert(ent->key.type == PGSTAT_TYPE_TABLE);
 	lstats = (PgStat_TableStatus *) ent->pending;
-	dboid = ent->key.databaseid;
+	dboid = ent->key.dboid;
 
 	/*
 	 * Ignore entries that didn't accumulate any actual counts, such as
@@ -3027,7 +3027,7 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 
 	/* find shared table stats entry corresponding to the local entry */
 	shtabstats = (PgStatShm_StatTabEntry *)
-		get_lock_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, ent->key.objectid,
+		get_lock_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, ent->key.objoid,
 								   nowait);
 
 	if (shtabstats == NULL)
@@ -3101,7 +3101,7 @@ flush_funcstat(PgStatPendingEntry *ent, bool nowait)
 	/* find shared table stats entry corresponding to the local entry */
 	shfuncent = (PgStatShm_StatFuncEntry *)
 		get_lock_shared_stat_entry(PGSTAT_TYPE_FUNCTION, MyDatabaseId,
-								   ent->key.objectid, nowait);
+								   ent->key.objoid, nowait);
 	if (shfuncent == NULL)
 		return false;			/* failed to acquire lock, skip */
 
@@ -4878,8 +4878,8 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
 	AssertArg(!pgstat_types[type].is_global);
 
 	key.type = type;
-	key.databaseid = dboid;
-	key.objectid = objoid;
+	key.dboid = dboid;
+	key.objoid = objoid;
 
 	if (stats_snapshot.stats == NULL)
 	{
@@ -4951,10 +4951,10 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
  * ----------
  */
 PgStat_StatDBEntry *
-pgstat_fetch_stat_dbentry(Oid dbid)
+pgstat_fetch_stat_dbentry(Oid dboid)
 {
 	return (PgStat_StatDBEntry *)
-		pgstat_fetch_entry(PGSTAT_TYPE_DB, dbid, InvalidOid);
+		pgstat_fetch_entry(PGSTAT_TYPE_DB, dboid, InvalidOid);
 }
 
 /* ----------
