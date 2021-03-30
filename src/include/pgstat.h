@@ -465,7 +465,7 @@ extern void StatsShmemInit(void);
 
 
 /* ----------
- * Functions called startup / shutdown
+ * Functions called server startup / shutdown
  * ----------
  */
 extern void pgstat_restore_stats(void);
@@ -474,12 +474,37 @@ extern void pgstat_write_stats(void);
 
 
 /* ----------
+ * Functions called from other subsystems that pgstat integrates with.
+ * ----------
+ */
+
+extern void pgstat_initialize(void);
+
+extern void AtEOXact_PgStat(bool isCommit, bool parallel);
+extern void AtEOSubXact_PgStat(bool isCommit, int nestDepth);
+
+extern void AtPrepare_PgStat(void);
+extern void PostPrepare_PgStat(void);
+
+extern void pgstat_twophase_postcommit(TransactionId xid, uint16 info,
+									   void *recdata, uint32 len);
+extern void pgstat_twophase_postabort(TransactionId xid, uint16 info,
+									  void *recdata, uint32 len);
+
+extern void pgstat_initstats(Relation rel);
+extern void pgstat_delinkstats(Relation rel);
+
+
+/* ----------
  * Functions called from backends
  * ----------
  */
+
 extern long pgstat_report_stat(bool force);
 extern void pgstat_vacuum_stat(void);
 extern void pgstat_drop_database(Oid databaseid);
+
+extern void pgstat_copy_relation_stats(Relation dstrel, Relation srcrel);
 
 extern void pgstat_drop_relation(Relation rel);
 extern void pgstat_drop_function(Oid proid);
@@ -488,11 +513,21 @@ extern void pgstat_perform_drops(int ndrops, struct PgStat_DroppedStatsItem *ite
 
 extern void pgstat_clear_snapshot(void);
 extern void pgstat_force_next_flush(void);
+
 extern void pgstat_reset_counters(void);
 extern void pgstat_reset_shared_counters(const char *target);
 extern void pgstat_reset_single_counter(Oid objectid, PgStat_Single_Reset_Type type);
 extern void pgstat_reset_slru_counter(const char *);
 extern void pgstat_reset_replslot_counter(const char *name);
+
+extern PgStat_TableStatus *find_tabstat_entry(Oid rel_id);
+extern PgStat_BackendFunctionEntry *find_funcstat_entry(Oid func_id);
+
+
+/* ----------
+ * Reporting of new stats data
+ * ----------
+ */
 
 extern void pgstat_report_wal(bool force);
 extern void pgstat_report_autovac(Oid dboid);
@@ -509,15 +544,6 @@ extern void pgstat_report_checksum_failure(void);
 extern void pgstat_report_replslot(uint32 index, const char *slotname, int spilltxns, int spillcount,
 								   int spillbytes, int streamtxns, int streamcount, int streambytes);
 extern void pgstat_report_replslot_drop(uint32 index, const char *slotname);
-
-extern void pgstat_initialize(void);
-
-
-extern PgStat_TableStatus *find_tabstat_entry(Oid rel_id);
-extern PgStat_BackendFunctionEntry *find_funcstat_entry(Oid func_id);
-
-extern void pgstat_initstats(Relation rel);
-extern void pgstat_delinkstats(Relation rel);
 
 
 /* nontransactional event counts are simple enough to inline */
@@ -578,17 +604,6 @@ extern void pgstat_init_function_usage(struct FunctionCallInfoBaseData *fcinfo,
 extern void pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu,
 									  bool finalize);
 
-extern void AtEOXact_PgStat(bool isCommit, bool parallel);
-extern void AtEOSubXact_PgStat(bool isCommit, int nestDepth);
-
-extern void AtPrepare_PgStat(void);
-extern void PostPrepare_PgStat(void);
-
-extern void pgstat_twophase_postcommit(TransactionId xid, uint16 info,
-									   void *recdata, uint32 len);
-extern void pgstat_twophase_postabort(TransactionId xid, uint16 info,
-									  void *recdata, uint32 len);
-
 extern void pgstat_report_archiver(const char *xlog, bool failed);
 extern void pgstat_report_bgwriter(void);
 extern void pgstat_report_checkpointer(void);
@@ -603,6 +618,7 @@ extern void pgstat_count_slru_truncate(int slru_idx);
 extern const char *pgstat_slru_name(int slru_idx);
 extern int	pgstat_slru_index(const char *name);
 
+
 /* ----------
  * Support functions for the SQL-callable functions to
  * generate the pgstat* views.
@@ -612,7 +628,6 @@ extern PgStat_StatDBEntry *pgstat_fetch_stat_dbentry(Oid dbid);
 extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry(Oid relid);
 extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry_extended(bool shared,
 																Oid relid);
-extern void pgstat_copy_relation_stats(Relation dstrel, Relation srcrel);
 extern PgStat_StatFuncEntry *pgstat_fetch_stat_funcentry(Oid funcid);
 extern TimestampTz pgstat_get_stat_timestamp(void);
 extern PgStat_ArchiverStats *pgstat_fetch_stat_archiver(void);
