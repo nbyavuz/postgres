@@ -1717,17 +1717,14 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 	PgStatShm_StatEntryHeader *header;
 	PgStatShm_StatDBEntry *dbentry;
 	PgStatTypes stattype;
-	TimestampTz ts;
+	TimestampTz ts = GetCurrentTimestamp();
 
 	dbentry = (PgStatShm_StatDBEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid, false,
-							  false, NULL);
-	/* FIXME: can't arbitrary oids be passed in here? */
-	Assert(dbentry);
+		get_lock_shared_stat_entry(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid, false);
+	if (!dbentry)
+		return;
 
 	/* Set the reset timestamp for the whole database */
-	ts = GetCurrentTimestamp();
-	LWLockAcquire(&dbentry->header.lock, LW_EXCLUSIVE);
 	dbentry->stats.stat_reset_timestamp = ts;
 	LWLockRelease(&dbentry->header.lock);
 
@@ -2465,8 +2462,7 @@ get_lock_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objoid, bool nowait)
 	PgStatShm_StatEntryHeader *header;
 
 	/* find shared table stats entry corresponding to the local entry */
-	header = (PgStatShm_StatEntryHeader *)
-		get_shared_stat_entry(type, dboid, objoid, nowait, true, NULL);
+	header = get_shared_stat_entry(type, dboid, objoid, nowait, true, NULL);
 
 	/* skip if dshash failed to acquire lock */
 	if (header == NULL)
@@ -3335,7 +3331,6 @@ void
 pgstat_report_autovac(Oid dboid)
 {
 	PgStatShm_StatDBEntry *dbentry;
-	TimestampTz ts;
 
 	/* can't get here in single user mode */
 	Assert(StatsDSA != NULL);
@@ -3351,12 +3346,10 @@ pgstat_report_autovac(Oid dboid)
 	 * operation so it doesn't matter if we get blocked here a little.
 	 */
 	dbentry = (PgStatShm_StatDBEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_DB, dboid, InvalidOid, false, true,
-							  NULL);
-
-	ts = GetCurrentTimestamp();
-	LWLockAcquire(&dbentry->header.lock, LW_EXCLUSIVE);
-	dbentry->stats.last_autovac_time = ts;
+		get_lock_shared_stat_entry(PGSTAT_TYPE_DB, dboid, InvalidOid, false);
+	if (!dbentry)
+		return;
+	dbentry->stats.last_autovac_time = GetCurrentTimestamp();
 	LWLockRelease(&dbentry->header.lock);
 }
 
@@ -3390,10 +3383,8 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	 * reasons.
 	 */
 	shtabentry = (PgStatShm_StatTabEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, tableoid, false, true,
-							  NULL);
+		get_lock_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, tableoid, false);
 
-	LWLockAcquire(&shtabentry->header.lock, LW_EXCLUSIVE);
 	shtabentry->stats.n_live_tuples = livetuples;
 	shtabentry->stats.n_dead_tuples = deadtuples;
 
@@ -3478,10 +3469,12 @@ pgstat_report_analyze(Relation rel,
 	 * above reasons.
 	 */
 	tabentry = (PgStatShm_StatTabEntry *)
-		get_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, RelationGetRelid(rel),
-							  false, true, NULL);
+		get_lock_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid,
+								   RelationGetRelid(rel),
+								   false);
+	/* can't get dropped while accessed */
+	Assert(tabentry != NULL);
 
-	LWLockAcquire(&tabentry->header.lock, LW_EXCLUSIVE);
 	tabentry->stats.n_live_tuples = livetuples;
 	tabentry->stats.n_dead_tuples = deadtuples;
 
