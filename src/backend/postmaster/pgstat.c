@@ -1743,6 +1743,8 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 
 	header = get_shared_stat_entry(stattype, MyDatabaseId, objoid, false,
 								   false, NULL);
+	if (!header)
+		return;
 
 	LWLockAcquire(&header->lock, LW_EXCLUSIVE);
 	memset(shared_stat_entry_data(stattype, header), 0,
