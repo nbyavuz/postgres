@@ -500,6 +500,69 @@ typedef struct PgStatSnapshot
 } PgStatSnapshot;
 
 
+
+/* ----------
+ * Local function forward declarations
+ * ----------
+ */
+
+static void pgstat_setup_memcxt(void);
+static void pgstat_write_statsfile(void);
+static void pgstat_read_statsfile(void);
+static void pgstat_shutdown_hook(int code, Datum arg);
+
+static PgStat_SubXactStatus *get_tabstat_stack_level(int nest_level);
+
+
+static PgStatShm_StatEntryHeader *get_shared_stat_entry(PgStatTypes type,
+														Oid dbid, Oid objid,
+														bool nowait,
+														bool create,
+														bool *found);
+static PgStatShm_StatEntryHeader *get_lock_shared_stat_entry(PgStatTypes type,
+															 Oid dbid,
+															 Oid objid,
+															 bool nowait);
+static inline size_t shared_stat_entry_len(PgStatTypes stattype);
+static inline void* shared_stat_entry_data(PgStatTypes stattype, PgStatShm_StatEntryHeader *entry);
+
+static bool pgstat_lookup_cache_needs_gc(void);
+static void pgstat_lookup_cache_gc(void);
+
+static void pgstat_release_stats_references(void);
+
+static bool pgstat_drop_stats_entry(dshash_seq_status *hstat);
+static void *get_pending_stat_entry(PgStatTypes type, Oid dbid,
+									Oid objid, bool create,
+									bool *found);
+static void delete_pending_stats_entry(PgStatPendingEntry *pending_entry);
+
+static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dbid, bool for_update);
+static PgStat_TableStatus *get_pending_tabstat_entry(Oid rel_id, bool isshared);
+
+static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
+
+static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
+											uint32 *changecount);
+
+static bool flush_object_stats(bool nowait);
+static bool flush_tabstat(PgStatPendingEntry *ent, bool nowait);
+static bool flush_funcstat(PgStatPendingEntry *ent, bool nowait);
+static bool flush_dbstat(PgStat_StatDBEntry *dbent, Oid dboid, bool nowait);
+static bool flush_walstat(bool nowait);
+static bool flush_slrustat(bool nowait);
+static void pgstat_update_connstats(bool disconnect);
+
+static inline bool walstats_pending(void);
+
+
+static inline void changecount_before_write(uint32 *cc);
+static inline void changecount_after_write(uint32 *cc);
+static inline uint32 changecount_before_read(uint32 *cc);
+static inline bool changecount_after_read(uint32 *cc, uint32 cc_before);
+
+
+
 /* ----------
  * GUC parameters
  * ----------
@@ -517,47 +580,6 @@ char      *pgstat_stat_directory = NULL;
 /* No longer used, but will be removed with GUC */
 char      *pgstat_stat_filename = NULL;
 char      *pgstat_stat_tmpname = NULL;
-
-
-
-/* ----------
- * Constants
- * ----------
- */
-
-/* see comments for struct pgstat_type_info */
-static const pgstat_type_info pgstat_types[] = {
-	[PGSTAT_TYPE_DB] = {
-		.shared_size = sizeof(PgStatShm_StatDBEntry),
-		.shared_data_off = offsetof(PgStatShm_StatDBEntry, stats),
-		.shared_data_len = sizeof(((PgStatShm_StatDBEntry*) 0)->stats),
-		.pending_size = -1, /* PGSTAT_TYPE_DB is never in pending table */
-	},
-
-	[PGSTAT_TYPE_TABLE] = {
-		.shared_size = sizeof(PgStatShm_StatTabEntry),
-		.shared_data_off = offsetof(PgStatShm_StatTabEntry, stats),
-		.shared_data_len = sizeof(((PgStatShm_StatTabEntry*) 0)->stats),
-		.pending_size = sizeof(PgStat_TableStatus),
-	},
-
-	[PGSTAT_TYPE_FUNCTION] = {
-		.shared_size = sizeof(PgStatShm_StatFuncEntry),
-		.shared_data_off = offsetof(PgStatShm_StatFuncEntry, stats),
-		.shared_data_len = sizeof(((PgStatShm_StatFuncEntry*) 0)->stats),
-		.pending_size = sizeof(PgStat_BackendFunctionEntry),
-	},
-};
-
-/* parameter for the shared hash */
-static const dshash_parameters dsh_params = {
-	sizeof(PgStatHashKey),
-	sizeof(PgStatShmHashEntry),
-	dshash_memcmp,
-	dshash_memhash,
-	LWTRANCHE_STATS
-};
-
 
 
 /* ----------
@@ -692,65 +714,44 @@ static PgStat_StatDBEntry pendingSharedDBStats;
 static PgStatSnapshot stats_snapshot;
 
 
+
 /* ----------
- * Local function forward declarations
+ * Constants
  * ----------
  */
 
-static void pgstat_setup_memcxt(void);
-static void pgstat_write_statsfile(void);
-static void pgstat_read_statsfile(void);
-static void pgstat_shutdown_hook(int code, Datum arg);
+/* see comments for struct pgstat_type_info */
+static const pgstat_type_info pgstat_types[] = {
+	[PGSTAT_TYPE_DB] = {
+		.shared_size = sizeof(PgStatShm_StatDBEntry),
+		.shared_data_off = offsetof(PgStatShm_StatDBEntry, stats),
+		.shared_data_len = sizeof(((PgStatShm_StatDBEntry*) 0)->stats),
+		.pending_size = -1, /* PGSTAT_TYPE_DB is never in pending table */
+	},
 
-static PgStat_SubXactStatus *get_tabstat_stack_level(int nest_level);
+	[PGSTAT_TYPE_TABLE] = {
+		.shared_size = sizeof(PgStatShm_StatTabEntry),
+		.shared_data_off = offsetof(PgStatShm_StatTabEntry, stats),
+		.shared_data_len = sizeof(((PgStatShm_StatTabEntry*) 0)->stats),
+		.pending_size = sizeof(PgStat_TableStatus),
+	},
 
+	[PGSTAT_TYPE_FUNCTION] = {
+		.shared_size = sizeof(PgStatShm_StatFuncEntry),
+		.shared_data_off = offsetof(PgStatShm_StatFuncEntry, stats),
+		.shared_data_len = sizeof(((PgStatShm_StatFuncEntry*) 0)->stats),
+		.pending_size = sizeof(PgStat_BackendFunctionEntry),
+	},
+};
 
-static PgStatShm_StatEntryHeader *get_shared_stat_entry(PgStatTypes type,
-														Oid dbid, Oid objid,
-														bool nowait,
-														bool create,
-														bool *found);
-static PgStatShm_StatEntryHeader *get_lock_shared_stat_entry(PgStatTypes type,
-															 Oid dbid,
-															 Oid objid,
-															 bool nowait);
-static inline size_t shared_stat_entry_len(PgStatTypes stattype);
-static inline void* shared_stat_entry_data(PgStatTypes stattype, PgStatShm_StatEntryHeader *entry);
-
-static bool pgstat_lookup_cache_needs_gc(void);
-static void pgstat_lookup_cache_gc(void);
-
-static void pgstat_release_stats_references(void);
-
-static bool pgstat_drop_stats_entry(dshash_seq_status *hstat);
-static void *get_pending_stat_entry(PgStatTypes type, Oid dbid,
-									Oid objid, bool create,
-									bool *found);
-static void delete_pending_stats_entry(PgStatPendingEntry *pending_entry);
-
-static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dbid, bool for_update);
-static PgStat_TableStatus *get_pending_tabstat_entry(Oid rel_id, bool isshared);
-
-static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
-
-static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
-											uint32 *changecount);
-
-static bool flush_object_stats(bool nowait);
-static bool flush_tabstat(PgStatPendingEntry *ent, bool nowait);
-static bool flush_funcstat(PgStatPendingEntry *ent, bool nowait);
-static bool flush_dbstat(PgStat_StatDBEntry *dbent, Oid dboid, bool nowait);
-static bool flush_walstat(bool nowait);
-static bool flush_slrustat(bool nowait);
-static void pgstat_update_connstats(bool disconnect);
-
-static inline bool walstats_pending(void);
-
-
-static inline void changecount_before_write(uint32 *cc);
-static inline void changecount_after_write(uint32 *cc);
-static inline uint32 changecount_before_read(uint32 *cc);
-static inline bool changecount_after_read(uint32 *cc, uint32 cc_before);
+/* parameter for the shared hash */
+static const dshash_parameters dsh_params = {
+	sizeof(PgStatHashKey),
+	sizeof(PgStatShmHashEntry),
+	dshash_memcmp,
+	dshash_memhash,
+	LWTRANCHE_STATS
+};
 
 
 /* ------------------------------------------------------------
