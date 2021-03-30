@@ -23,6 +23,7 @@ teardown
 }
 
 session "s1"
+setup { SET stats_fetch_consistency = 'none'; }
 step "s1_track_funcs_all" { SET track_functions = 'all'; }
 step "s1_track_funcs_none" { SET track_functions = 'none'; }
 step "s1_fetch_consistency_none" { SET stats_fetch_consistency = 'none'; }
@@ -40,8 +41,8 @@ step "s1_func_stats" {
     SELECT
         tso.name,
         pg_stat_get_function_calls(tso.oid),
-	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
-	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+        pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+        pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
     FROM test_stat_oid AS tso
     WHERE tso.name = 'test_stat_func'
 }
@@ -49,14 +50,15 @@ step "s1_func_stats2" {
     SELECT
         tso.name,
         pg_stat_get_function_calls(tso.oid),
-	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
-	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+        pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+        pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
     FROM test_stat_oid AS tso
     WHERE tso.name = 'test_stat_func2'
 }
 #step "s1_func_stats_debug" {SELECT * FROM pg_stat_user_functions;}
 
 session "s2"
+setup { SET stats_fetch_consistency = 'none'; }
 step "s2_track_funcs_all" { SET track_functions = 'all'; }
 step "s2_begin" { BEGIN; }
 step "s2_commit" { COMMIT; }
@@ -68,8 +70,8 @@ step "s2_func_stats" {
     SELECT
         tso.name,
         pg_stat_get_function_calls(tso.oid),
-	pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
-	pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
+        pg_stat_get_function_total_time(tso.oid) > 0 total_above_zero,
+        pg_stat_get_function_self_time(tso.oid) > 0 self_above_zero
     FROM test_stat_oid AS tso
     WHERE tso.name = 'test_stat_func'
 }
