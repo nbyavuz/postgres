@@ -3120,9 +3120,6 @@ flush_funcstat(PgStatPendingEntry *ent, bool nowait)
  *
  * Returns true if the entry could not be flushed out.
  */
-#define PGSTAT_ACCUM_DBCOUNT(sh, lo, item)		\
-	(sh)->stats.item += (lo)->item
-
 static bool
 flush_dbstat(PgStat_StatDBEntry *pendingent, Oid dboid, bool nowait)
 {
@@ -3137,26 +3134,30 @@ flush_dbstat(PgStat_StatDBEntry *pendingent, Oid dboid, bool nowait)
 	if (!sharedent)
 		return true;			/* failed to acquire lock, skip */
 
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_returned);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_fetched);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_inserted);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_updated);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_tuples_deleted);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_blocks_fetched);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_blocks_hit);
+#define PGSTAT_ACCUM_DBCOUNT(item)		\
+	(sharedent)->stats.item += (pendingent)->item
 
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_deadlocks);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_temp_bytes);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_temp_files);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_checksum_failures);
+	PGSTAT_ACCUM_DBCOUNT(n_tuples_returned);
+	PGSTAT_ACCUM_DBCOUNT(n_tuples_fetched);
+	PGSTAT_ACCUM_DBCOUNT(n_tuples_inserted);
+	PGSTAT_ACCUM_DBCOUNT(n_tuples_updated);
+	PGSTAT_ACCUM_DBCOUNT(n_tuples_deleted);
+	PGSTAT_ACCUM_DBCOUNT(n_blocks_fetched);
+	PGSTAT_ACCUM_DBCOUNT(n_blocks_hit);
 
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_session_time);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_active_time);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, total_idle_in_xact_time);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_abandoned);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_fatal);
-	PGSTAT_ACCUM_DBCOUNT(sharedent, pendingent, n_sessions_killed);
+	PGSTAT_ACCUM_DBCOUNT(n_deadlocks);
+	PGSTAT_ACCUM_DBCOUNT(n_temp_bytes);
+	PGSTAT_ACCUM_DBCOUNT(n_temp_files);
+	PGSTAT_ACCUM_DBCOUNT(n_checksum_failures);
+
+	PGSTAT_ACCUM_DBCOUNT(n_sessions);
+	PGSTAT_ACCUM_DBCOUNT(total_session_time);
+	PGSTAT_ACCUM_DBCOUNT(total_active_time);
+	PGSTAT_ACCUM_DBCOUNT(total_idle_in_xact_time);
+	PGSTAT_ACCUM_DBCOUNT(n_sessions_abandoned);
+	PGSTAT_ACCUM_DBCOUNT(n_sessions_fatal);
+	PGSTAT_ACCUM_DBCOUNT(n_sessions_killed);
+#undef PGSTAT_ACCUM_DBCOUNT
 
 	/*
 	 * Accumulate xact commit/rollback and I/O timings to stats entry of the
