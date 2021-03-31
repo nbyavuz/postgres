@@ -84,36 +84,27 @@
 /*
  * Types to define shared statistics structure.
  *
- * Per-object statistics are stored in a "shared stats", corresponding struct
- * that has a header part common among all object types in DSA-allocated
- * memory. All shared stats are pointed from a dshash via a dsa_pointer. This
- * structure make the shared stats immovable against dshash resizing, allows a
- * backend point to shared stats entries via a native pointer and allows
- * locking at stats-entry level. The per-entry locking reduces lock contention
- * compared to partition lock of dshash. A backend accumulates stats numbers
- * in a stats entry in local memory then flushes the numbers to shared stats
- * entries at basically transaction end.
+ * Per-object statistics are stored in the "shared stats" hashtable. That
+ * table's entries (PgStatShmHashEntry) contain a pointer to the actual stats
+ * data for the object (the size of the stats data varies depending on the
+ * type of stats). The table is keyed by PgStatHashKey.
  *
- * Each stat entry type has a fixed member PgStat_HashEntryHeader as the first
- * element.
+ * Once a backend has a reference to a shared stats entry, it increments the
+ * entry's refcount. Even after stats data is dropped (e.g. due to a DROP
+ * TABLE), the entry itself can only be deleted once all references have been
+ * released.
  *
- * Shared stats are stored as:
+ * These refcounts, in combination with a backend local hashtable
+ * (pgStatShmLookupCache, with entries pointing to PgStatSharedRef) in front
+ * of the shared hash table, mean that most stats work can happen without
+ * touching the shared hash table, reducing contention.
  *
- * dshash pgStatShmHash
- *    -> PgStatShmHashEntry					(dshash entry)
- *      (dsa_pointer)-> PgStat_Stat*Entry	(dsa memory block)
+ * Once there are pending stats updates for a table PgStatSharedRef->pending
+ * is allocated to contain a working space for as-of-yet-unapplied stats
+ * updates. Once the stats are flushed, PgStatSharedRef->pending is freed.
  *
- * Shared stats entries are directly pointed from pgstat_shm_lookup_cache hash:
- *
- * pgstat_shm_lookup_cache pgStatShmLookupCache
- *    -> PgStatShmLookupCacheEntry           (local hash entry)
- *      (native pointer)-> PgStat_Stat*Entry (dsa memory block)
- *
- * Pending stats that are waiting for being flushed to share stats are stored as:
- *
- * pgstat_pending_hash pgStatPendingHash
- *    -> PgStatPendingHashEntry			     (local hash entry)
- *      (native pointer)-> PgStat_Stat*Entry/TableStatus (palloc'ed memory)
+ * Each stat entry type in the shared hash table has a fixed member
+ * PgStat_HashEntryHeader as the first element.
  */
 
 /* The types of statistics entries */
@@ -184,32 +175,40 @@ typedef struct PgStatShmHashEntry
 								 * PgStat_StatEntryHeader */
 } PgStatShmHashEntry;
 
+/*
+ * A backend local reference to a shared stats entry. As long as at least one
+ * such reference exists, the shared stats entry will not be released.
+ *
+ * If there are pending stats update to the shared stats, these are stored in
+ * ->pending.
+ */
 typedef struct PgStatSharedRef
 {
 	PgStatHashKey key;
-	bool		have_pending;
-	PgStatShm_StatEntryHeader *shared;	/* address pointer to stats body */
+
+	/*
+	 * The shared stats referenced. We store both the dsa pointer and a native
+	 * pointer so we can free the shared stats if necessary.
+	 *
+	 * XXX: Seems better to look up the shared stats entry in that case? Need
+	 * that for locking anyway, I think?
+	 */
 	dsa_pointer dsapointer;		/* dsa pointer of body */
+	PgStatShm_StatEntryHeader *shared;	/* address pointer to stats body */
+
+	dlist_node	pending_node;	/* membership in pgStatPending list */
+	void	   *pending;		/* the pending data itself */
 } PgStatSharedRef;
 
-/* backend local cache entry in front of PgStatShmHash */
-typedef struct PgStatShmLookupCacheEntry
+/* hash table entry for finding the PgStatSharedRef for a key */
+typedef struct PgStatSharedRefHashEntry
 {
 	PgStatHashKey key;			/* hash key */
 	char		status;			/* for simplehash use */
 	PgStatSharedRef *shared_ref;
-} PgStatShmLookupCacheEntry;
+} PgStatSharedRefHashEntry;
 
-/* locally pending stats hash table entry */
-typedef struct PgStatPendingEntry
-{
-	PgStatHashKey key;
-	char		status;			/* for simplehash use */
-	PgStatSharedRef *shared_ref;
-	void	   *pending;			/* the pending data itself */
-} PgStatPendingEntry;
-
-/* locally pending stats hash table entry */
+/* hash table for statistics snapshots entry */
 typedef struct PgStatSnapshotEntry
 {
 	PgStatHashKey key;
@@ -445,8 +444,8 @@ typedef struct StatsShmemStruct
  */
 
 /* for caching shared hashtable lookups */
-#define SH_PREFIX pgstat_shm_lookup_cache
-#define SH_ELEMENT_TYPE PgStatShmLookupCacheEntry
+#define SH_PREFIX pgstat_shared_ref_hash
+#define SH_ELEMENT_TYPE PgStatSharedRefHashEntry
 #define SH_KEY_TYPE PgStatHashKey
 #define SH_KEY key
 #define SH_HASH_KEY(tb, key) \
@@ -457,23 +456,7 @@ typedef struct StatsShmemStruct
 #define SH_DECLARE
 #include "lib/simplehash.h"
 
-/* for local pending entries */
-#define SH_PREFIX pgstat_pending
-#define SH_ELEMENT_TYPE PgStatPendingEntry
-#define SH_KEY_TYPE PgStatHashKey
-#define SH_KEY key
-#define SH_HASH_KEY(tb, key) \
-	hash_bytes((unsigned char *)&key, sizeof(PgStatHashKey))
-#define SH_EQUAL(tb, a, b) (memcmp(&a, &b, sizeof(PgStatHashKey)) == 0)
-#define SH_SCOPE static inline
-#define SH_DEFINE
-#define SH_DECLARE
-#include "lib/simplehash.h"
-
-/*
- * For stats snapshot entries. This is currently practically the same as
- * pgstat_pending, but it seems cleaner to have separate types.
- */
+/* for stats snapshot entries */
 #define SH_PREFIX pgstat_snapshot
 #define SH_ELEMENT_TYPE PgStatSnapshotEntry
 #define SH_KEY_TYPE PgStatHashKey
@@ -565,12 +548,12 @@ static void pgstat_release_stats_references(void);
 
 static bool pgstat_drop_stats_entry(dshash_seq_status *hstat);
 
-static void *get_pending_stat_entry(PgStatTypes type, Oid dboid, Oid objoid);
-static void *fetch_pending_stat_entry(PgStatTypes type, Oid dboid, Oid objoid);
-static void delete_pending_stats_entry(PgStatPendingEntry *pending_entry);
+static PgStatSharedRef *pgstat_pending_stat_prepare(PgStatTypes type, Oid dboid, Oid objoid);
+static PgStatSharedRef *pgstat_pending_stat_fetch(PgStatTypes type, Oid dboid, Oid objoid);
+static void pgstat_pending_stat_delete(PgStatSharedRef *shared_ref);
 
-static PgStat_StatDBEntry *get_pending_dbstat_entry(Oid dboid, bool for_update);
-static PgStat_TableStatus *get_pending_tabstat_entry(Oid rel_id, bool isshared);
+static PgStat_StatDBEntry *pgstat_pending_stat_db_prepare(Oid dboid);
+static PgStat_TableStatus *pgstat_pending_stat_tab_prepare(Oid rel_id, bool isshared);
 
 static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
 
@@ -578,8 +561,8 @@ static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
 											uint32 *changecount);
 
 static bool flush_object_stats(bool nowait);
-static bool flush_tabstat(PgStatPendingEntry *ent, bool nowait);
-static bool flush_funcstat(PgStatPendingEntry *ent, bool nowait);
+static bool flush_tabstat(PgStatSharedRef *shared_ref, bool nowait);
+static bool flush_funcstat(PgStatSharedRef *shared_ref, bool nowait);
 static bool flush_dbstat(PgStat_PendingStatDBEntry *dbent, Oid dboid, bool nowait);
 static bool flush_walstat(bool nowait);
 static bool flush_slrustat(bool nowait);
@@ -641,20 +624,25 @@ static dshash_table *pgStatSharedHash = NULL;
  */
 
 /*
- * Locally pending stats that will need to be submitted.
+ * Backend local references to shared stats entries. If there are pending
+ * updates to a stats entry, the PgStatSharedRef is added to the pgStatPending
+ * list.
+ *
+ * When a stats entry is dropped each backend needs to release its reference
+ * to it before the memory can be released. To trigger that
+ * StatsShmem->gc_count is incremented - which each backend compares to their
+ * copy of pgStatSharedRefAge on a regular basis.
  */
-static pgstat_pending_hash *pgStatPendingHash = NULL;
+static pgstat_shared_ref_hash_hash *pgStatSharedRefHash = NULL;
+static int	pgStatSharedRefAge = 0;	/* cache age of pgStatShmLookupCache */
 
 /*
- * Local cache for faster / less contended lookup shared stats entries.
+ * List of PgStatSharedRefs with unflushed pending stats.
  *
- * This is a local hash to store native pointers to shared hash
- * entries. pgStatShmLookupCacheAge is copied from StatsShmem->gc_count at creation
- * and garbage collection.
+ * Newly pending entries should only ever be added to the end of the list,
+ * otherwise flush_object_stats() might not see them immediately.
  */
-static pgstat_shm_lookup_cache_hash *pgStatShmLookupCache = NULL;
-static int	pgStatShmLookupCacheAge = 0;	/* cache age of pgStatShmLookupCache */
-
+dlist_head pgStatPending = DLIST_STATIC_INIT(pgStatPending);
 
 /* Variables for backend status snapshot */
 static MemoryContext pgStatLocalContext = NULL;
@@ -732,7 +720,7 @@ static WalUsage prevWalUsage;
 
 /*
  * As a backend's database doesn't change over time, we don't need to go
- * through pgStatPendingHash to find our database. That avoids unnecessary
+ * through pgStatShmLookupCache to find our database. That avoids unnecessary
  * lookups, and makes flushing table stats (which roll over into database
  * stats) easier.
  *
@@ -1136,7 +1124,6 @@ pgstat_pending_stats_drops(PgStat_DroppedStatsItem **items)
 static void
 pgstat_perform_drop(PgStat_DroppedStatsItem *drop)
 {
-	PgStatPendingEntry *pending_entry;
 	PgStatShmHashEntry *shent;
 	PgStatHashKey key;
 
@@ -1144,21 +1131,19 @@ pgstat_perform_drop(PgStat_DroppedStatsItem *drop)
 	key.dboid = drop->dboid;
 	key.objoid = drop->objoid;
 
-	if (pgStatPendingHash)
+	if (pgStatSharedRefHash)
 	{
-		pending_entry = pgstat_pending_lookup(pgStatPendingHash, key);
-		if (pending_entry)
-			delete_pending_stats_entry(pending_entry);
-	}
+		PgStatSharedRefHashEntry *lohashent;
 
-	if (pgStatShmLookupCache)
-	{
-		PgStatShmLookupCacheEntry *lohashent;
-
-		lohashent = pgstat_shm_lookup_cache_lookup(pgStatShmLookupCache, key);
+		lohashent = pgstat_shared_ref_hash_lookup(pgStatSharedRefHash, key);
 
 		if (lohashent)
+		{
+			if (lohashent->shared_ref && lohashent->shared_ref->pending)
+				pgstat_pending_stat_delete(lohashent->shared_ref);
+
 			pgstat_shared_ref_release(lohashent->shared_ref);
+		}
 	}
 
 	shent = dshash_find(pgStatSharedHash, &key, true);
@@ -1331,7 +1316,7 @@ pgstat_report_stat(bool force)
 
 	/* Don't expend a clock check if nothing to do */
 	if (!havePendingDbStats &&
-		pgStatPendingHash == NULL &&
+		dlist_is_empty(&pgStatPending) &&
 		!have_slrustats
 		&& !walstats_pending())
 	{
@@ -2332,7 +2317,7 @@ pgstat_shutdown_hook(int code, Datum arg)
 	pgStatSharedHash = NULL;
 
 	/* We are going to exit. Don't bother destroying local hashes. */
-	pgStatPendingHash = NULL;
+	dlist_init(&pgStatPending);
 
 	dsa_detach(StatsDSA);
 	StatsDSA = NULL;
@@ -2362,21 +2347,21 @@ static bool
 get_shared_stat_entry_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 {
 	bool found;
-	PgStatShmLookupCacheEntry *cache_entry;
+	PgStatSharedRefHashEntry *cache_entry;
 
 	pgstat_setup_memcxt();
 
-	if (!pgStatShmLookupCache)
+	if (!pgStatSharedRefHash)
 	{
-		pgStatShmLookupCache =
-			pgstat_shm_lookup_cache_create(pgStatCacheContext,
-										   PGSTAT_TABLE_HASH_SIZE, NULL);
-		pgStatShmLookupCacheAge =
+		pgStatSharedRefHash =
+			pgstat_shared_ref_hash_create(pgStatCacheContext,
+										  PGSTAT_TABLE_HASH_SIZE, NULL);
+		pgStatSharedRefAge =
 			pg_atomic_read_u64(&StatsShmem->gc_count);
 	}
 
 	/*
-	 * pgStatShmLookupCacheAge increments quite slowly than the time the
+	 * pgStatSharedRefAge increments quite slowly than the time the
 	 * following loop takes so this is expected to iterate no more than
 	 * twice.
 	 *
@@ -2392,7 +2377,7 @@ get_shared_stat_entry_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 	 * PgStatShm_StatEntryHeader->refcount.
 	 */
 
-	cache_entry = pgstat_shm_lookup_cache_insert(pgStatShmLookupCache, key, &found);
+	cache_entry = pgstat_shared_ref_hash_insert(pgStatSharedRefHash, key, &found);
 
 	if (!found)
 	{
@@ -2403,7 +2388,7 @@ get_shared_stat_entry_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 		shared_ref->key = key;
 		shared_ref->shared = NULL;
 		shared_ref->dsapointer = InvalidDsaPointer;
-		shared_ref->have_pending = false;
+		shared_ref->pending = NULL;
 	}
 	else if (!cache_entry->shared_ref ||
 			 !cache_entry->shared_ref->shared)
@@ -2579,18 +2564,18 @@ pgstat_lookup_cache_needs_gc(void)
 {
 	uint64		currage;
 
-	if (!pgStatShmLookupCache)
+	if (!pgStatSharedRefHash)
 		return false;
 
 	currage = pg_atomic_read_u64(&StatsShmem->gc_count);
 
-	return pgStatShmLookupCacheAge != currage;
+	return pgStatSharedRefAge != currage;
 }
 
 static void
 pgstat_shared_ref_release(PgStatSharedRef *shared_ref)
 {
-	Assert(!shared_ref->have_pending);
+	Assert(shared_ref->pending == NULL);
 
 	/*
 	 * FIXME: this may be racy.
@@ -2610,15 +2595,15 @@ pgstat_shared_ref_release(PgStatSharedRef *shared_ref)
 		shared_ref->shared = NULL;
 	}
 
-	if (!pgstat_shm_lookup_cache_delete(pgStatShmLookupCache, shared_ref->key))
+	if (!pgstat_shared_ref_hash_delete(pgStatSharedRefHash, shared_ref->key))
 		elog(PANIC, "something has gone wrong");
 }
 
 static void
 pgstat_lookup_cache_gc(void)
 {
-	pgstat_shm_lookup_cache_iterator i;
-	PgStatShmLookupCacheEntry *ent;
+	pgstat_shared_ref_hash_iterator i;
+	PgStatSharedRefHashEntry *ent;
 	uint64		currage;
 
 	currage = pg_atomic_read_u64(&StatsShmem->gc_count);
@@ -2627,77 +2612,45 @@ pgstat_lookup_cache_gc(void)
 	 * Some entries have been dropped. Invalidate cache pointer to
 	 * them.
 	 */
-	pgstat_shm_lookup_cache_start_iterate(pgStatShmLookupCache, &i);
-	while ((ent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i)) != NULL)
+	pgstat_shared_ref_hash_start_iterate(pgStatSharedRefHash, &i);
+	while ((ent = pgstat_shared_ref_hash_iterate(pgStatSharedRefHash, &i)) != NULL)
 	{
 		PgStatSharedRef *shared_ref = ent->shared_ref;
 		Assert(!shared_ref->shared || shared_ref->shared->magic == 0xdeadbeef);
 
 		/* cannot gc shared ref that has pending data */
-		if (shared_ref->have_pending)
+		if (shared_ref->pending != NULL)
 			continue;
 
 		if (shared_ref->shared && shared_ref->shared->dropped)
 			pgstat_shared_ref_release(shared_ref);
 	}
 
-	pgStatShmLookupCacheAge = currage;
+	pgStatSharedRefAge = currage;
 }
 
 /*
- * Returns a pending stats entry for the type, creating the entry if
- * necessary.
- *
- * The caller is responsible to initialize the statsbody part of the returned
- * memory.
+ * Returns the appropriate PgStatSharedRef, preparing it to receive pending
+ * stats if not already done.
  */
-static void *
-get_pending_stat_entry(PgStatTypes type, Oid dboid, Oid objoid)
+static PgStatSharedRef*
+pgstat_pending_stat_prepare(PgStatTypes type, Oid dboid, Oid objoid)
 {
-	PgStatHashKey key;
-	PgStatPendingEntry *entry;
-	size_t entrysize;
-	bool found;
+	PgStatSharedRef *shared_ref;
 
-	if (unlikely(pgStatPendingHash == NULL))
+	shared_ref = get_shared_stat_entry(type, dboid, objoid, false, true);
+
+	if (shared_ref->pending == NULL)
 	{
-		pgstat_setup_memcxt();
-
-		pgStatPendingHash = pgstat_pending_create(pgStatCacheContext,
-												  PGSTAT_TABLE_HASH_SIZE,
-												  NULL);
-	}
-
-	/* Find an entry or create a new one. */
-	key.type = type;
-	key.dboid = dboid;
-	key.objoid = objoid;
-
-	entry = pgstat_pending_insert(pgStatPendingHash, key, &found);
-
-	/* XXX: Handle OOM */
-	if (!found)
-	{
-		PgStatSharedRef *shared_ref;
-
-		entrysize = pgstat_types[type].pending_size;
+		size_t entrysize = pgstat_types[type].pending_size;
 
 		Assert(entrysize != (size_t)-1);
 
-		entry->pending = MemoryContextAllocZero(TopMemoryContext, entrysize);
-
-		shared_ref = get_shared_stat_entry(type, dboid, objoid, false, true);
-
-		/* each ref can only have, at most, one pending entry */
-		Assert(!shared_ref->have_pending);
-
-		entry->shared_ref = shared_ref;
-		shared_ref->have_pending = true;
+		shared_ref->pending = MemoryContextAllocZero(TopMemoryContext, entrysize);
+		dlist_push_tail(&pgStatPending, &shared_ref->pending_node);
 	}
 
-	Assert(entry->shared_ref->shared != NULL);
-
-	return entry->pending;
+	return shared_ref;
 }
 
 /*
@@ -2706,39 +2659,27 @@ get_pending_stat_entry(PgStatTypes type, Oid dboid, Oid objoid)
  * This should only be used for helper function for pgstatfuncs.c - outside of
  * that it shouldn't be needed.
  */
-static void*
-fetch_pending_stat_entry(PgStatTypes type, Oid dboid, Oid objoid)
+static PgStatSharedRef*
+pgstat_pending_stat_fetch(PgStatTypes type, Oid dboid, Oid objoid)
 {
-	PgStatHashKey key;
-	PgStatPendingEntry *entry;
+	PgStatSharedRef *shared_ref;
 
-	if (pgStatPendingHash == NULL)
+	shared_ref = get_shared_stat_entry(type, dboid, objoid, false, false);
+
+	if (shared_ref == NULL || shared_ref->pending == NULL)
 		return NULL;
 
-	key.type = type;
-	key.dboid = dboid;
-	key.objoid = objoid;
-
-
-	entry = pgstat_pending_lookup(pgStatPendingHash, key);
-
-	if (entry == NULL)
-		return NULL;
-
-	Assert(entry->shared_ref != NULL);
-	Assert(entry->shared_ref->have_pending);
-
-	return entry->pending;
+	return shared_ref;
 }
 
 static void
-delete_pending_stats_entry(PgStatPendingEntry *pending_entry)
+pgstat_pending_stat_delete(PgStatSharedRef *shared_ref)
 {
-	void *pending_data = pending_entry->pending;
+	void *pending_data = shared_ref->pending;
 
-	Assert(pending_entry->shared_ref != NULL);
+	Assert(pending_data != NULL);
 
-	switch (pending_entry->key.type)
+	switch (shared_ref->key.type)
 	{
 		case PGSTAT_TYPE_TABLE:
 			pgstat_delinkstats(((PgStat_TableStatus *) pending_data)->relation);
@@ -2752,27 +2693,18 @@ delete_pending_stats_entry(PgStatPendingEntry *pending_entry)
 	}
 
 	pfree(pending_data);
-	pending_entry->pending = NULL;
+	shared_ref->pending = NULL;
 
-	Assert(pending_entry->shared_ref->have_pending);
-	pending_entry->shared_ref->have_pending = false;
-	pending_entry->shared_ref = NULL;
-
-	pgstat_pending_delete(pgStatPendingHash, pending_entry->key);
+	dlist_delete(&shared_ref->pending_node);
 }
 
-/* ----------
- * get_pending_dbstat_entry() -
- *
+/*
  *  Find or create a local PgStat_StatDBEntry entry for dboid.
  */
 static PgStat_StatDBEntry *
-get_pending_dbstat_entry(Oid dboid, bool for_update)
+pgstat_pending_stat_db_prepare(Oid dboid)
 {
 	PgStat_PendingStatDBEntry *dbent;
-
-	if (for_update)
-		havePendingDbStats = true;
 
 	if (dboid == InvalidOid)
 		dbent = &pendingSharedDBStats;
@@ -2793,26 +2725,27 @@ get_pending_dbstat_entry(Oid dboid, bool for_update)
 		pg_atomic_fetch_add_u32(&dbent->shared->header.refcount, 1);
 	}
 
+	havePendingDbStats = true;
+
 	return &dbent->pending;
 }
 
 /* ----------
- * get_pending_tabstat_entry() -
+ * pgstat_pending_stat_tab_prepare() -
  *  Find or create a PgStat_TableStatus entry for rel. New entry is created and
  *  initialized if not exists.
  * ----------
  */
 static PgStat_TableStatus *
-get_pending_tabstat_entry(Oid rel_id, bool isshared)
+pgstat_pending_stat_tab_prepare(Oid rel_id, bool isshared)
 {
-	PgStat_TableStatus *tabentry;
+	PgStatSharedRef *shared_ref;
 
-	tabentry = (PgStat_TableStatus *)
-		get_pending_stat_entry(PGSTAT_TYPE_TABLE,
-							   isshared ? InvalidOid : MyDatabaseId,
-							   rel_id);
+	shared_ref = pgstat_pending_stat_prepare(PGSTAT_TYPE_TABLE,
+											 isshared ? InvalidOid : MyDatabaseId,
+											 rel_id);
 
-	return tabentry;
+	return shared_ref->pending;
 }
 
 /*
@@ -2824,14 +2757,14 @@ get_pending_tabstat_entry(Oid rel_id, bool isshared)
 static void
 pgstat_release_stats_references(void)
 {
-	pgstat_shm_lookup_cache_iterator i;
-	PgStatShmLookupCacheEntry *ent;
+	pgstat_shared_ref_hash_iterator i;
+	PgStatSharedRefHashEntry *ent;
 
-	if (pgStatShmLookupCache == NULL)
+	if (pgStatSharedRefHash == NULL)
 		return;
 
-	pgstat_shm_lookup_cache_start_iterate(pgStatShmLookupCache, &i);
-	while ((ent = pgstat_shm_lookup_cache_iterate(pgStatShmLookupCache, &i))
+	pgstat_shared_ref_hash_start_iterate(pgStatSharedRefHash, &i);
+	while ((ent = pgstat_shared_ref_hash_iterate(pgStatSharedRefHash, &i))
 		   != NULL)
 	{
 		PgStatSharedRef *shared_ref = ent->shared_ref;
@@ -2841,7 +2774,7 @@ pgstat_release_stats_references(void)
 
 		Assert(shared_ref->shared->magic == 0xdeadbeef);
 		Assert(DsaPointerIsValid(shared_ref->shared->magic));
-		Assert(!shared_ref->have_pending);
+		Assert(shared_ref->pending == NULL);
 
 		/*
 		 * Free the shared memory chunk for the entry if we were the last
@@ -2861,11 +2794,11 @@ pgstat_release_stats_references(void)
 
 	/*
 	 * This function is expected to be called during backend exit. So we don't
-	 * bother destroying pgStatShmLookupCache.
+	 * bother destroying pgStatSharedRefHash.
 	 */
-	pgStatShmLookupCache = NULL;
+	pgStatSharedRefHash = NULL;
 
-	elog(DEBUG1, "deleting pgStatShmLookupCache");
+	elog(DEBUG1, "deleting pgStatSharedRefHash");
 }
 
 /*
@@ -2905,11 +2838,11 @@ pgstat_drop_stats_entry(dshash_seq_status *hstat)
 	 *
 	 * XXX: don't do this while holding the dshash lock.
 	 */
-	if (pgStatShmLookupCache)
+	if (pgStatSharedRefHash)
 	{
-		PgStatShmLookupCacheEntry *ent;
+		PgStatSharedRefHashEntry *ent;
 
-		ent = pgstat_shm_lookup_cache_lookup(pgStatShmLookupCache, key);
+		ent = pgstat_shared_ref_hash_lookup(pgStatSharedRefHash, key);
 
 		if (ent && ent->shared_ref)
 			pgstat_shared_ref_release(ent->shared_ref);
@@ -3072,29 +3005,35 @@ changecount_after_read(uint32 *cc, uint32 before_cc)
 static bool
 flush_object_stats(bool nowait)
 {
-	int			remains = 0;
-	pgstat_pending_iterator i;
-	PgStatPendingEntry *lent;
-	bool have_pending = false;
+	bool		have_pending = false;
+	dlist_node *cur = NULL;
 
-	if (!pgStatPendingHash)
-		return false;
+	/*
+	 * Need to be a bit careful iterating over the list of pending
+	 * entries. Processing a pending entry may queue further pending entries
+	 * to the end of the list that we want to process, so a simple iteration
+	 * won't do. Further complicating matter is that we want to delete the
+	 * current entry in each iteration from the list if we flushed
+	 * successfully.
+	 *
+	 * So we just keep track of the next pointer in each loop iteration.
+	 */
+	if (!dlist_is_empty(&pgStatPending))
+		cur = dlist_head_node(&pgStatPending);
 
-	/* Step 1: flush out other than database stats */
-	pgstat_pending_start_iterate(pgStatPendingHash, &i);
-	while ((lent = pgstat_pending_iterate(pgStatPendingHash, &i)) != NULL)
+	while (cur)
 	{
+		PgStatSharedRef *shared_ref = dlist_container(PgStatSharedRef, pending_node, cur);
 		bool		remove = false;
+		dlist_node *next;
 
-		switch (lent->key.type)
+		switch (shared_ref->key.type)
 		{
 			case PGSTAT_TYPE_TABLE:
-				if (flush_tabstat(lent, nowait))
-					remove = true;
+				remove = flush_tabstat(shared_ref, nowait);
 				break;
 			case PGSTAT_TYPE_FUNCTION:
-				if (flush_funcstat(lent, nowait))
-					remove = true;
+				remove = flush_funcstat(shared_ref, nowait);
 				break;
 			case PGSTAT_TYPE_DB:
 				/* We don't have that kind of pending entry */
@@ -3105,25 +3044,26 @@ flush_object_stats(bool nowait)
 				break;
 		}
 
-		if (!remove)
-		{
-			remains++;
+		/* determine next entry, before deleting the pending entry */
+		if (dlist_has_next(&pgStatPending, cur))
+			next = dlist_next_node(&pgStatPending, cur);
+		else
+			next = NULL;
+
+		/* if successfully flushed, remove entry */
+		if (remove)
+			pgstat_pending_stat_delete(shared_ref);
+		else
 			have_pending = true;
-			continue;
-		}
 
-		/* Remove the successfully flushed entry */
-		delete_pending_stats_entry(lent);
+		cur = next;
 	}
 
-	if (remains <= 0)
-	{
-		pgstat_pending_destroy(pgStatPendingHash);
-		pgStatPendingHash = NULL;
-	}
+	Assert(dlist_is_empty(&pgStatPending) == !have_pending);
 
 	have_pending |= flush_dbstat(&pendingDBStats, MyDatabaseId, nowait);
 	have_pending |= flush_dbstat(&pendingSharedDBStats, InvalidOid, nowait);
+
 	if (!have_pending)
 		havePendingDbStats = false;
 
@@ -3142,7 +3082,7 @@ flush_object_stats(bool nowait)
  * Returns true if the entry is successfully flushed out.
  */
 static bool
-flush_tabstat(PgStatPendingEntry *ent, bool nowait)
+flush_tabstat(PgStatSharedRef *shared_ref, bool nowait)
 {
 	static const PgStat_TableCounts all_zeroes;
 	Oid			dboid;			/* database OID of the table */
@@ -3150,9 +3090,9 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 	PgStatShm_StatTabEntry *shtabstats;	/* table entry of shared stats */
 	PgStat_StatDBEntry *ldbstats;	/* pending database entry */
 
-	Assert(ent->key.type == PGSTAT_TYPE_TABLE);
-	lstats = (PgStat_TableStatus *) ent->pending;
-	dboid = ent->key.dboid;
+	Assert(shared_ref->key.type == PGSTAT_TYPE_TABLE);
+	lstats = (PgStat_TableStatus *) shared_ref->pending;
+	dboid = shared_ref->key.dboid;
 
 	/*
 	 * Ignore entries that didn't accumulate any actual counts, such as
@@ -3164,8 +3104,8 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 		return true;
 	}
 
-	shtabstats = (PgStatShm_StatTabEntry *) ent->shared_ref->shared;
-	if (!lock_shared_stat_entry(ent->shared_ref->shared, nowait))
+	shtabstats = (PgStatShm_StatTabEntry *) shared_ref->shared;
+	if (!lock_shared_stat_entry(shared_ref->shared, nowait))
 		return false;			/* failed to acquire lock, skip */
 
 	/* add the values to the shared entry. */
@@ -3202,7 +3142,7 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
 	LWLockRelease(&shtabstats->header.lock);
 
 	/* The entry is successfully flushed so the same to add to database stats */
-	ldbstats = get_pending_dbstat_entry(dboid, true);
+	ldbstats = pgstat_pending_stat_db_prepare(dboid);
 	ldbstats->n_tuples_returned += lstats->t_counts.t_tuples_returned;
 	ldbstats->n_tuples_fetched += lstats->t_counts.t_tuples_fetched;
 	ldbstats->n_tuples_inserted += lstats->t_counts.t_tuples_inserted;
@@ -3223,19 +3163,19 @@ flush_tabstat(PgStatPendingEntry *ent, bool nowait)
  * Returns true if the entry is successfully flushed out.
  */
 static bool
-flush_funcstat(PgStatPendingEntry *ent, bool nowait)
+flush_funcstat(PgStatSharedRef *shared_ref, bool nowait)
 {
 	PgStat_BackendFunctionEntry *localent;	/* local stats entry */
 	PgStatShm_StatFuncEntry *shfuncent = NULL; /* shared stats entry */
 
-	Assert(ent->key.type == PGSTAT_TYPE_FUNCTION);
-	localent = (PgStat_BackendFunctionEntry *) ent->pending;
+	Assert(shared_ref->key.type == PGSTAT_TYPE_FUNCTION);
+	localent = (PgStat_BackendFunctionEntry *) shared_ref->pending;
 
 	/* localent always has non-zero content */
 
-	shfuncent = (PgStatShm_StatFuncEntry *) ent->shared_ref->shared;
+	shfuncent = (PgStatShm_StatFuncEntry *) shared_ref->shared;
 	Assert(shfuncent);
-	if (!lock_shared_stat_entry(ent->shared_ref->shared, nowait))
+	if (!lock_shared_stat_entry(shared_ref->shared, nowait))
 		return false;			/* failed to acquire lock, skip */
 
 	shfuncent->stats.f_numcalls += localent->f_counts.f_numcalls;
@@ -3654,7 +3594,7 @@ pgstat_report_recovery_conflict(int reason)
 	if (!pgstat_track_counts)
 		return;
 
-	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
+	dbent = pgstat_pending_stat_db_prepare(MyDatabaseId);
 
 	switch (reason)
 	{
@@ -3698,7 +3638,7 @@ pgstat_report_deadlock(void)
 	if (!pgstat_track_counts)
 		return;
 
-	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
+	dbent = pgstat_pending_stat_db_prepare(MyDatabaseId);
 	dbent->n_deadlocks++;
 }
 
@@ -3746,7 +3686,7 @@ pgstat_report_checksum_failure(void)
 	if (!pgstat_track_counts)
 		return;
 
-	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
+	dbent = pgstat_pending_stat_db_prepare(MyDatabaseId);
 	dbent->n_checksum_failures++;
 }
 
@@ -3767,7 +3707,7 @@ pgstat_report_tempfile(size_t filesize)
 	if (filesize == 0)			/* Is there a case where filesize is really 0? */
 		return;
 
-	dbent = get_pending_dbstat_entry(MyDatabaseId, true);
+	dbent = pgstat_pending_stat_db_prepare(MyDatabaseId);
 	dbent->n_temp_bytes += filesize; /* needs check overflow */
 	dbent->n_temp_files++;
 }
@@ -3862,7 +3802,8 @@ void
 pgstat_init_function_usage(FunctionCallInfo fcinfo,
 						   PgStat_FunctionCallUsage *fcu)
 {
-	PgStat_BackendFunctionEntry *htabent;
+	PgStatSharedRef *shared_ref;
+	PgStat_BackendFunctionEntry *pending;
 
 	if (pgstat_track_functions <= fcinfo->flinfo->fn_stats)
 	{
@@ -3871,14 +3812,15 @@ pgstat_init_function_usage(FunctionCallInfo fcinfo,
 		return;
 	}
 
-	htabent = (PgStat_BackendFunctionEntry *)
-		get_pending_stat_entry(PGSTAT_TYPE_FUNCTION, MyDatabaseId,
-							   fcinfo->flinfo->fn_oid);
+	shared_ref = pgstat_pending_stat_prepare(PGSTAT_TYPE_FUNCTION,
+											 MyDatabaseId,
+											 fcinfo->flinfo->fn_oid);
+	pending = shared_ref->pending;
 
-	fcu->fs = &htabent->f_counts;
+	fcu->fs = &pending->f_counts;
 
 	/* save stats for this function, later used to compensate for recursion */
-	fcu->save_f_total_time = htabent->f_counts.f_total_time;
+	fcu->save_f_total_time = pending->f_counts.f_total_time;
 
 	/* save current backend-wide total time */
 	fcu->save_total = total_func_time;
@@ -3897,12 +3839,13 @@ pgstat_init_function_usage(FunctionCallInfo fcinfo,
 PgStat_BackendFunctionEntry *
 find_funcstat_entry(Oid func_id)
 {
-	PgStat_BackendFunctionEntry *ent;
+	PgStatSharedRef *shared_ref;
 
-	ent = (PgStat_BackendFunctionEntry *)
-		fetch_pending_stat_entry(PGSTAT_TYPE_FUNCTION, MyDatabaseId, func_id);
+	shared_ref = pgstat_pending_stat_fetch(PGSTAT_TYPE_FUNCTION, MyDatabaseId, func_id);
 
-	return ent;
+	if (shared_ref)
+		return shared_ref->pending;
+	return NULL;
 }
 
 /*
@@ -3999,7 +3942,7 @@ pgstat_allocstats(Relation rel)
 	Assert(rel->pgstat_info == NULL);
 
 	/* Else find or make the PgStat_TableStatus entry, and update link */
-	rel->pgstat_info = get_pending_tabstat_entry(RelationGetRelid(rel), rel->rd_rel->relisshared);
+	rel->pgstat_info = pgstat_pending_stat_tab_prepare(RelationGetRelid(rel), rel->rd_rel->relisshared);
 	/* mark this relation as the owner */
 
 	/* don't allow link a stats to multiple relcache entries */
@@ -4038,15 +3981,15 @@ pgstat_delinkstats(Relation rel)
 PgStat_TableStatus *
 find_tabstat_entry(Oid rel_id)
 {
-	PgStat_TableStatus *ent;
+	PgStatSharedRef *shared_ref;
 
-	ent = (PgStat_TableStatus *)
-		fetch_pending_stat_entry(PGSTAT_TYPE_TABLE, MyDatabaseId, rel_id);
-	if (!ent)
-		ent = (PgStat_TableStatus *)
-			fetch_pending_stat_entry(PGSTAT_TYPE_TABLE, InvalidOid, rel_id);
+	shared_ref = pgstat_pending_stat_fetch(PGSTAT_TYPE_TABLE, MyDatabaseId, rel_id);
+	if (!shared_ref)
+		shared_ref = pgstat_pending_stat_fetch(PGSTAT_TYPE_TABLE, InvalidOid, rel_id);
 
-	return ent;
+	if (shared_ref)
+		return shared_ref->pending;
+	return NULL;
 }
 
 /*
@@ -4587,7 +4530,7 @@ pgstat_twophase_postcommit(TransactionId xid, uint16 info,
 	PgStat_TableStatus *pgstat_info;
 
 	/* Find or create a tabstat entry for the rel */
-	pgstat_info = get_pending_tabstat_entry(rec->t_id, rec->t_shared);
+	pgstat_info = pgstat_pending_stat_tab_prepare(rec->t_id, rec->t_shared);
 
 	/* Same math as in AtEOXact_PgStat, commit case */
 	pgstat_info->t_counts.t_tuples_inserted += rec->tuples_inserted;
@@ -4623,7 +4566,7 @@ pgstat_twophase_postabort(TransactionId xid, uint16 info,
 	PgStat_TableStatus *pgstat_info;
 
 	/* Find or create a tabstat entry for the rel */
-	pgstat_info = get_pending_tabstat_entry(rec->t_id, rec->t_shared);
+	pgstat_info = pgstat_pending_stat_tab_prepare(rec->t_id, rec->t_shared);
 
 	/* Same math as in AtEOXact_PgStat, abort case */
 	if (rec->t_truncdropped)
@@ -4786,7 +4729,7 @@ pgstat_update_connstats(bool disconnect)
 	if (disconnect)
 		session_end_type = pgStatSessionEndCause;
 
-	ldbstats = get_pending_dbstat_entry(MyDatabaseId, true);
+	ldbstats = pgstat_pending_stat_db_prepare(MyDatabaseId);
 
 	ldbstats->n_sessions = (last_report == 0 ? 1 : 0);
 	ldbstats->total_session_time += secs * 1000000 + usecs;
