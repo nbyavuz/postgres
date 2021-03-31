@@ -205,7 +205,7 @@ SELECT pg_stat_get_xact_function_calls(:stats_test_func1_oid);
 SELECT pg_stat_get_function_calls(:stats_test_func1_oid);
  pg_stat_get_function_calls 
 ----------------------------
-                           
+                          0
 (1 row)
 
 COMMIT;

@@ -492,6 +492,7 @@ extern void pgstat_twophase_postabort(TransactionId xid, uint16 info,
 									  void *recdata, uint32 len);
 
 extern void pgstat_initstats(Relation rel);
+extern void pgstat_allocstats(Relation rel);
 extern void pgstat_delinkstats(Relation rel);
 
 
@@ -546,41 +547,45 @@ extern void pgstat_report_replslot(uint32 index, const char *slotname, int spill
 extern void pgstat_report_replslot_drop(uint32 index, const char *slotname);
 
 
+#define pgstat_count_rel(rel)										\
+	(likely((rel)->pgstat_info != NULL) ? true :					\
+	 ((rel)->pgstat_enabled ? pgstat_allocstats(rel), true : false))
+
 /* nontransactional event counts are simple enough to inline */
 
 #define pgstat_count_heap_scan(rel)									\
 	do {															\
-		if ((rel)->pgstat_info != NULL)								\
+		if (pgstat_count_rel(rel))									\
 			(rel)->pgstat_info->t_counts.t_numscans++;				\
 	} while (0)
 #define pgstat_count_heap_getnext(rel)								\
 	do {															\
-		if ((rel)->pgstat_info != NULL)								\
+		if (pgstat_count_rel(rel))									\
 			(rel)->pgstat_info->t_counts.t_tuples_returned++;		\
 	} while (0)
 #define pgstat_count_heap_fetch(rel)								\
 	do {															\
-		if ((rel)->pgstat_info != NULL)								\
+		if (pgstat_count_rel(rel))									\
 			(rel)->pgstat_info->t_counts.t_tuples_fetched++;		\
 	} while (0)
 #define pgstat_count_index_scan(rel)								\
 	do {															\
-		if ((rel)->pgstat_info != NULL)								\
+		if (pgstat_count_rel(rel))									\
 			(rel)->pgstat_info->t_counts.t_numscans++;				\
 	} while (0)
 #define pgstat_count_index_tuples(rel, n)							\
 	do {															\
-		if ((rel)->pgstat_info != NULL)								\
+		if (pgstat_count_rel(rel))									\
 			(rel)->pgstat_info->t_counts.t_tuples_returned += (n);	\
 	} while (0)
 #define pgstat_count_buffer_read(rel)								\
 	do {															\
-		if ((rel)->pgstat_info != NULL)								\
+		if (pgstat_count_rel(rel))									\
 			(rel)->pgstat_info->t_counts.t_blocks_fetched++;		\
 	} while (0)
 #define pgstat_count_buffer_hit(rel)								\
 	do {															\
-		if ((rel)->pgstat_info != NULL)								\
+		if (pgstat_count_rel(rel))									\
 			(rel)->pgstat_info->t_counts.t_blocks_hit++;			\
 	} while (0)
 #define pgstat_count_buffer_read_time(n)							\
