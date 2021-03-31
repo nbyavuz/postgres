@@ -644,13 +644,12 @@ static int	pgStatSharedRefAge = 0;	/* cache age of pgStatShmLookupCache */
  */
 dlist_head pgStatPending = DLIST_STATIC_INIT(pgStatPending);
 
-/* Variables for backend status snapshot */
-static MemoryContext pgStatLocalContext = NULL;
-
 /*
- * Make our own memory context to make it easy to track memory usage.
+ * Memory context containing the pgStatSharedRefHash table, the
+ * pgStatSharedRef entries, and pending data. Mostly to make it easier to
+ * track memory usage.
  */
-static MemoryContext pgStatCacheContext = NULL;
+static MemoryContext pgStatSharedRefContext = NULL;
 
 
 static PgStat_SubXactStatus *pgStatXactStack = NULL;
@@ -660,6 +659,16 @@ static PgStat_SubXactStatus *pgStatXactStack = NULL;
  * PGSTAT_MIN_INTERVAL. Useful in test scripts.
  */
 static bool pgStatForceNextFlush = false;
+
+
+/*
+ * Memory context containing stats snapshot related data, to free snapshot in
+ * bulk.
+ */
+static MemoryContext pgStatSnapshotContext = NULL;
+
+/* the current statistics snapshot */
+static PgStatSnapshot stats_snapshot;
 
 
 /* ----------
@@ -730,13 +739,6 @@ static WalUsage prevWalUsage;
 bool havePendingDbStats = false;
 static PgStat_PendingStatDBEntry pendingDBStats;
 static PgStat_PendingStatDBEntry pendingSharedDBStats;
-
-/* ----------
- * Cache state  for pgstatfuncs
- * ----------
- */
-
-static PgStatSnapshot stats_snapshot;
 
 
 
@@ -1443,12 +1445,12 @@ pgstat_clear_snapshot(void)
 	stats_snapshot.mode = STATS_FETCH_CONSISTENCY_NONE;
 
 	/* Release memory, if any was allocated */
-	if (pgStatLocalContext)
+	if (pgStatSnapshotContext)
 	{
-		MemoryContextDelete(pgStatLocalContext);
+		MemoryContextDelete(pgStatSnapshotContext);
 
 		/* Reset variables */
-		pgStatLocalContext = NULL;
+		pgStatSnapshotContext = NULL;
 	}
 
 	/* forward to stats sub-subsystems */
@@ -1886,22 +1888,22 @@ pgstat_reset_replslot_counter(const char *name)
 /* ----------
  * pgstat_setup_memcxt() -
  *
- *	Create pgStatLocalContext if not already done.
+ *	Create pgStatSnapshotContext if not already done.
  * ----------
  */
 static void
 pgstat_setup_memcxt(void)
 {
-	if (unlikely(!pgStatLocalContext))
-		pgStatLocalContext =
-			AllocSetContextCreate(TopMemoryContext,
-								  "Backend statistics snapshot",
+	if (unlikely(!pgStatSharedRefContext))
+		pgStatSharedRefContext =
+			AllocSetContextCreate(CacheMemoryContext,
+								  "Backend statistics data",
 								  ALLOCSET_SMALL_SIZES);
 
-	if (unlikely(!pgStatCacheContext))
-		pgStatCacheContext =
-			AllocSetContextCreate(CacheMemoryContext,
-								  "Activity statistics",
+	if (unlikely(!pgStatSnapshotContext))
+		pgStatSnapshotContext =
+			AllocSetContextCreate(TopMemoryContext,
+								  "Backend statistics snapshot",
 								  ALLOCSET_SMALL_SIZES);
 }
 
@@ -2354,7 +2356,7 @@ get_shared_stat_entry_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 	if (!pgStatSharedRefHash)
 	{
 		pgStatSharedRefHash =
-			pgstat_shared_ref_hash_create(pgStatCacheContext,
+			pgstat_shared_ref_hash_create(pgStatSharedRefContext,
 										  PGSTAT_TABLE_HASH_SIZE, NULL);
 		pgStatSharedRefAge =
 			pg_atomic_read_u64(&StatsShmem->gc_count);
@@ -2384,7 +2386,8 @@ get_shared_stat_entry_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 		PgStatSharedRef *shared_ref;
 
 		cache_entry->shared_ref = shared_ref =
-			MemoryContextAlloc(pgStatCacheContext, sizeof(PgStatSharedRef));
+			MemoryContextAlloc(pgStatSharedRefContext,
+							   sizeof(PgStatSharedRef));
 		shared_ref->key = key;
 		shared_ref->shared = NULL;
 		shared_ref->dsapointer = InvalidDsaPointer;
@@ -4884,7 +4887,7 @@ pgstat_snapshot_build(void)
 	{
 		pgstat_setup_memcxt();
 
-		stats_snapshot.stats = pgstat_snapshot_create(pgStatLocalContext,
+		stats_snapshot.stats = pgstat_snapshot_create(pgStatSnapshotContext,
 													  PGSTAT_TABLE_HASH_SIZE,
 													  NULL);
 	}
@@ -4919,7 +4922,7 @@ pgstat_snapshot_build(void)
 		Assert(!found);
 
 		entry_len = pgstat_types[p->key.type].shared_size;
-		entry->data = MemoryContextAlloc(pgStatLocalContext, entry_len);
+		entry->data = MemoryContextAlloc(pgStatSnapshotContext, entry_len);
 		memcpy(entry->data,
 			   shared_stat_entry_data(p->key.type, stats_data),
 			   entry_len);
@@ -4970,7 +4973,7 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
 	{
 		pgstat_setup_memcxt();
 
-		stats_snapshot.stats = pgstat_snapshot_create(pgStatLocalContext,
+		stats_snapshot.stats = pgstat_snapshot_create(pgStatSnapshotContext,
 													  PGSTAT_TABLE_HASH_SIZE,
 													  NULL);
 	}
@@ -5010,7 +5013,7 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
 
 	data_size = pgstat_types[type].shared_data_len;
 	data_offset = pgstat_types[type].shared_data_off;
-	stats_data = MemoryContextAlloc(pgStatLocalContext, data_size);
+	stats_data = MemoryContextAlloc(pgStatSnapshotContext, data_size);
 	memcpy(stats_data, ((char*) shared_ref->shared) + data_offset, data_size);
 
 	if (pgstat_fetch_consistency > STATS_FETCH_CONSISTENCY_NONE)
