@@ -60,6 +60,7 @@ step "s1_func_stats2" {
 session "s2"
 setup { SET stats_fetch_consistency = 'none'; }
 step "s2_track_funcs_all" { SET track_functions = 'all'; }
+step "s2_track_funcs_none" { SET track_functions = 'none'; }
 step "s2_begin" { BEGIN; }
 step "s2_commit" { COMMIT; }
 step "s2_rollback" { ROLLBACK; }
@@ -111,7 +112,6 @@ permutation
 
 # Verify that pending stats from before a drop do not lead to
 # "reviving" stats for a dropped object
-# FIXME: That actually happens right now, but only if the stats weren't previously accessed
 permutation
   "s1_track_funcs_all" "s2_track_funcs_all"
   "s2_func_call" "s2_ff" # this access increments refcount, preventing the shared entry from being dropped
@@ -119,7 +119,17 @@ permutation
 permutation
   "s1_track_funcs_all" "s2_track_funcs_all"
   "s2_begin" "s2_func_call" "s1_func_drop" "s1_func_stats" "s2_commit" "s2_ff" "s1_func_stats" "s2_func_stats"
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s1_func_call" "s2_begin" "s2_func_call" "s1_func_drop" "s2_func_call" "s2_commit" "s2_ff" "s1_func_stats" "s2_func_stats"
 
+# FIXME: this shows the bug that stats will be revived, because the
+# shared stats in s2 is only referenced *after* the DROP FUNCTION
+# committed. That's only possible because there is no locking (and
+# thus no stats invalidation) around function calls.
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_none"
+  "s1_func_call" "s2_begin" "s2_func_call" "s1_func_drop" "s2_track_funcs_all" "s2_func_call" "s2_commit" "s2_ff" "s1_func_stats" "s2_func_stats"
 
 # test pg_stat_reset_single_function_counters
 permutation
