@@ -193,7 +193,6 @@ typedef struct PgStatSharedRef
 	 * XXX: Seems better to look up the shared stats entry in that case? Need
 	 * that for locking anyway, I think?
 	 */
-	dsa_pointer dsapointer;		/* dsa pointer of body */
 	PgStatShm_StatEntryHeader *shared;	/* address pointer to stats body */
 
 	dlist_node	pending_node;	/* membership in pgStatPending list */
@@ -1187,6 +1186,7 @@ pgstat_perform_drops(int ndrops, struct PgStat_DroppedStatsItem *items, bool is_
 
 	for (int i = 0; i < ndrops; i++)
 		pgstat_perform_drop(&items[i]);
+
 	pg_atomic_fetch_add_u64(&StatsShmem->gc_count, 1);
 }
 
@@ -1244,6 +1244,12 @@ pgstat_drop_database(Oid dboid)
 	Assert(OidIsValid(dboid));
 
 	Assert(pgStatSharedHash != NULL);
+
+	/*
+	 * FIXME: need to do this using the transactional mechanism. Not such much
+	 * because of rollbacks, but so the stats are removed on a standby
+	 * too. Maybe a dedicated drop type?
+	 */
 
 	/* some of the dshash entries are to be removed, take exclusive lock. */
 	dshash_seq_init(&hstat, pgStatSharedHash, true);
@@ -2390,7 +2396,6 @@ get_shared_stat_entry_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 							   sizeof(PgStatSharedRef));
 		shared_ref->key = key;
 		shared_ref->shared = NULL;
-		shared_ref->dsapointer = InvalidDsaPointer;
 		shared_ref->pending = NULL;
 	}
 	else if (!cache_entry->shared_ref ||
@@ -2404,7 +2409,6 @@ get_shared_stat_entry_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 
 		shheader = cache_entry->shared_ref->shared;
 		Assert(shheader->magic == 0xdeadbeef);
-		Assert(DsaPointerIsValid(cache_entry->shared_ref->dsapointer));
 		/* should have at least our reference */
 		Assert(pg_atomic_read_u32(&shheader->refcount) > 0);
 	}
@@ -2459,7 +2463,6 @@ get_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objoid, bool nowait,
 	}
 
 	Assert(lohashent != NULL);
-	Assert(!DsaPointerIsValid(lohashent->dsapointer));
 
 	shhashent = dshash_find_extended(pgStatSharedHash, &key,
 									 create, nowait, create, &shfound);
@@ -2489,7 +2492,6 @@ get_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objoid, bool nowait,
 		dshash_release_lock(pgStatSharedHash, shhashent);
 
 		lohashent->shared = shheader;
-		lohashent->dsapointer = shhashent->body;
 	}
 
 	/*
@@ -2580,26 +2582,51 @@ pgstat_shared_ref_release(PgStatSharedRef *shared_ref)
 {
 	Assert(shared_ref->pending == NULL);
 
-	/*
-	 * FIXME: this may be racy.
-	 */
-
-	if (shared_ref->shared &&
-		pg_atomic_fetch_sub_u32(&shared_ref->shared->refcount, 1) == 1)
+	if (shared_ref->shared)
 	{
-		/*
-		 * We're the last referrer to this entry, drop the
-		 * shared entry.
-		 */
-		if (!dshash_delete_key(pgStatSharedHash, &shared_ref->key))
-			elog(PANIC, "unexpected deletion failure");
-		dsa_free(StatsDSA, shared_ref->dsapointer);
+		Assert(shared_ref->shared->magic == 0xdeadbeef);
+		Assert(shared_ref->pending == NULL);
 
-		shared_ref->shared = NULL;
+		/*
+		 * FIXME: this may be racy.
+		 */
+		if (pg_atomic_fetch_sub_u32(&shared_ref->shared->refcount, 1) == 1)
+		{
+			PgStatShmHashEntry *shent;
+			dsa_pointer dsap;
+
+			/*
+			 * We're the last referrer to this entry, try to drop the shared
+			 * entry.
+			 */
+
+			/* only dropped entries can reach a 0 refcount */
+			Assert(shared_ref->shared->dropped);
+
+			shent = dshash_find(pgStatSharedHash, &shared_ref->key, true);
+
+			if (!shent)
+				elog(PANIC, "could not find just referenced shared stats entry");
+			if (pg_atomic_read_u32(&shared_ref->shared->refcount) != 0)
+				elog(PANIC, "concurrent access to stats entry during deletion");
+
+			/*
+			 * Fetch dsa pointer before deleting entry - that way we can free the
+			 * memory after releasing the lock.
+			 */
+			dsap = shent->body;
+
+			dshash_delete_entry(pgStatSharedHash, shent);
+
+			dsa_free(StatsDSA, dsap);
+			shared_ref->shared = NULL;
+		}
 	}
 
 	if (!pgstat_shared_ref_hash_delete(pgStatSharedRefHash, shared_ref->key))
 		elog(PANIC, "something has gone wrong");
+
+	pfree(shared_ref);
 }
 
 static void
@@ -2767,41 +2794,20 @@ pgstat_release_stats_references(void)
 		return;
 
 	pgstat_shared_ref_hash_start_iterate(pgStatSharedRefHash, &i);
+
 	while ((ent = pgstat_shared_ref_hash_iterate(pgStatSharedRefHash, &i))
 		   != NULL)
 	{
 		PgStatSharedRef *shared_ref = ent->shared_ref;
 
-		if (!shared_ref || !shared_ref->shared)
-			continue;
+		Assert(shared_ref != NULL);
 
-		Assert(shared_ref->shared->magic == 0xdeadbeef);
-		Assert(DsaPointerIsValid(shared_ref->shared->magic));
-		Assert(shared_ref->pending == NULL);
-
-		/*
-		 * Free the shared memory chunk for the entry if we were the last
-		 * referrer to a dropped entry.
-		 */
-		if (pg_atomic_fetch_sub_u32(&shared_ref->shared->refcount, 1) == 1)
-		{
-			Assert(shared_ref->shared->dropped);  /* cannot reach 0 otherwise */
-
-			if (!dshash_delete_key(pgStatSharedHash, &ent->key))
-				elog(PANIC, "unexpected deletion failure");
-			dsa_free(StatsDSA, shared_ref->dsapointer);
-		}
-		shared_ref->dsapointer = InvalidDsaPointer;
-		shared_ref->shared = NULL;
+		pgstat_shared_ref_release(shared_ref);
 	}
 
-	/*
-	 * This function is expected to be called during backend exit. So we don't
-	 * bother destroying pgStatSharedRefHash.
-	 */
+	Assert(pgStatSharedRefHash->members == 0);
+	pgstat_shared_ref_hash_destroy(pgStatSharedRefHash);
 	pgStatSharedRefHash = NULL;
-
-	elog(DEBUG1, "deleting pgStatSharedRefHash");
 }
 
 /*
