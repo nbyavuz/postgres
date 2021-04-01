@@ -258,13 +258,6 @@ typedef struct TwoPhasePgStatRecord
 	bool		t_truncdropped;	/* was the relation truncated/dropped? */
 } TwoPhasePgStatRecord;
 
-typedef struct PgStat_PendingStatDBEntry
-{
-	PgStatSharedRef *shared_ref;
-	PgStat_StatDBEntry pending;
-} PgStat_PendingStatDBEntry;
-
-
 typedef struct PgStat_PendingDroppedStatsItem
 {
 	PgStat_DroppedStatsItem item;
@@ -557,7 +550,7 @@ static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
 static bool pgstat_flush_object_stats(bool nowait);
 static bool pgstat_flush_table(PgStatSharedRef *shared_ref, bool nowait);
 static bool pgstat_flush_function(PgStatSharedRef *shared_ref, bool nowait);
-static bool pgstat_flush_db(PgStat_PendingStatDBEntry *dbent, Oid dboid, bool nowait);
+static bool pgstat_flush_db(PgStatSharedRef *shared_ref, bool nowait);
 static bool pgstat_flush_wal(bool nowait);
 static bool pgstat_flush_slru(bool nowait);
 static void pgstat_update_connstats(bool disconnect);
@@ -721,20 +714,6 @@ static bool have_slrustats = false;
  */
 static WalUsage prevWalUsage;
 
-/*
- * As a backend's database doesn't change over time, we don't need to go
- * through pgStatShmLookupCache to find our database. That avoids unnecessary
- * lookups, and makes flushing table stats (which roll over into database
- * stats) easier.
- *
- * The only complication is that we need entries not just for "our" database,
- * but also for oid '0', which tracks shared table stats.
- */
-bool havePendingDbStats = false;
-static PgStat_PendingStatDBEntry pendingDBStats;
-static PgStat_PendingStatDBEntry pendingSharedDBStats;
-
-
 
 /* ----------
  * Constants
@@ -751,7 +730,7 @@ static const pgstat_type_info pgstat_types[] = {
 		.shared_size = sizeof(PgStatShm_StatDBEntry),
 		.shared_data_off = offsetof(PgStatShm_StatDBEntry, stats),
 		.shared_data_len = sizeof(((PgStatShm_StatDBEntry*) 0)->stats),
-		.pending_size = -1, /* PGSTAT_TYPE_DB is never in pending table */
+		.pending_size = sizeof(PgStat_StatDBEntry),
 	},
 
 	[PGSTAT_TYPE_TABLE] = {
@@ -1312,8 +1291,7 @@ pgstat_report_stat(bool force)
 	}
 
 	/* Don't expend a clock check if nothing to do */
-	if (!havePendingDbStats &&
-		dlist_is_empty(&pgStatPending) &&
+	if (dlist_is_empty(&pgStatPending) &&
 		!have_slrustats
 		&& !walstats_pending())
 	{
@@ -2761,26 +2739,12 @@ pgstat_pending_delete(PgStatSharedRef *shared_ref)
 static PgStat_StatDBEntry *
 pgstat_pending_db_prepare(Oid dboid)
 {
-	PgStat_PendingStatDBEntry *dbent;
+	PgStatSharedRef *shared_ref;
 
-	if (dboid == InvalidOid)
-		dbent = &pendingSharedDBStats;
-	else
-	{
-		Assert(dboid == MyDatabaseId);
-		dbent = &pendingSharedDBStats;
-	}
+	shared_ref = pgstat_pending_prepare(PGSTAT_TYPE_DB, dboid, InvalidOid);
 
-	if (dbent->shared_ref == NULL)
-	{
-		dbent->shared_ref =
-			pgstat_shared_ref_get(PGSTAT_TYPE_DB, dboid, InvalidOid, true);
-		pg_atomic_fetch_add_u32(&dbent->shared_ref->shared_entry->refcount, 1);
-	}
+	return shared_ref->pending;
 
-	havePendingDbStats = true;
-
-	return &dbent->pending;
 }
 
 /* ----------
@@ -3069,8 +3033,7 @@ pgstat_flush_object_stats(bool nowait)
 				remove = pgstat_flush_function(shared_ref, nowait);
 				break;
 			case PGSTAT_TYPE_DB:
-				/* We don't have that kind of pending entry */
-				Assert(false);
+				remove = pgstat_flush_db(shared_ref, nowait);
 				break;
 			default:
 				elog(ERROR, "unexpected");
@@ -3093,12 +3056,6 @@ pgstat_flush_object_stats(bool nowait)
 	}
 
 	Assert(dlist_is_empty(&pgStatPending) == !have_pending);
-
-	have_pending |= pgstat_flush_db(&pendingDBStats, MyDatabaseId, nowait);
-	have_pending |= pgstat_flush_db(&pendingSharedDBStats, InvalidOid, nowait);
-
-	if (!have_pending)
-		havePendingDbStats = false;
 
 	return have_pending;
 }
@@ -3228,23 +3185,24 @@ pgstat_flush_function(PgStatSharedRef *shared_ref, bool nowait)
  * If nowait is true, this function returns false on lock failure. Otherwise
  * this function always returns true.
  *
- * Returns true if the entry could not be flushed out.
+ * Returns true if the entry is successfully flushed out.
  */
 static bool
-pgstat_flush_db(PgStat_PendingStatDBEntry *pendingent, Oid dboid, bool nowait)
+pgstat_flush_db(PgStatSharedRef *shared_ref, bool nowait)
 {
 	PgStatShm_StatDBEntry *sharedent;
+	PgStat_StatDBEntry *pendingent = (PgStat_StatDBEntry *) shared_ref->pending;
 
-	if (pendingent->shared_ref == NULL)
+	if (shared_ref == NULL)
 		return false;
 
-	if (!pgstat_shared_stat_lock(pendingent->shared_ref, nowait))
-		return true;			/* failed to acquire lock, skip */
+	if (!pgstat_shared_stat_lock(shared_ref, nowait))
+		return false;			/* failed to acquire lock, skip */
 
-	sharedent = (PgStatShm_StatDBEntry *) pendingent->shared_ref->shared_stats;
+	sharedent = (PgStatShm_StatDBEntry *) shared_ref->shared_stats;
 
 #define PGSTAT_ACCUM_DBCOUNT(item)		\
-	(sharedent)->stats.item += (pendingent)->pending.item
+	(sharedent)->stats.item += (pendingent)->item
 
 	PGSTAT_ACCUM_DBCOUNT(n_tuples_returned);
 	PGSTAT_ACCUM_DBCOUNT(n_tuples_fetched);
@@ -3272,7 +3230,7 @@ pgstat_flush_db(PgStat_PendingStatDBEntry *pendingent, Oid dboid, bool nowait)
 	 * Accumulate xact commit/rollback and I/O timings to stats entry of the
 	 * current database.
 	 */
-	if (OidIsValid(dboid))
+	if (OidIsValid(shared_ref->shared_entry->key.dboid))
 	{
 		sharedent->stats.n_xact_commit += pgStatXactCommit;
 		sharedent->stats.n_xact_rollback += pgStatXactRollback;
@@ -3291,11 +3249,11 @@ pgstat_flush_db(PgStat_PendingStatDBEntry *pendingent, Oid dboid, bool nowait)
 		sharedent->stats.n_block_write_time = 0;
 	}
 
-	pgstat_shared_stat_unlock(pendingent->shared_ref);
+	pgstat_shared_stat_unlock(shared_ref);
 
 	memset(pendingent, 0, sizeof(*pendingent));
 
-	return false;
+	return true;
 }
 
 /*
