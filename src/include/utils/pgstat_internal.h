@@ -103,9 +103,8 @@ typedef struct PgStatShmHashEntry
 								 * PgStat_StatEntryHeader */
 } PgStatShmHashEntry;
 
-/* ----------
- * PgStatShm_StatEntryHead			common header struct for PgStatShm_Stat*Entry
- * ----------
+/*
+ * Common header struct for PgStatShm_Stat*Entry.
  */
 typedef struct PgStatShm_StatEntryHeader
 {
@@ -329,8 +328,6 @@ typedef struct PgStatShm_StatFuncEntry
 	PgStat_StatFuncEntry stats;
 } PgStatShm_StatFuncEntry;
 
-
-
 /* Record that's written to 2PC state file when pgstat state is persisted */
 typedef struct TwoPhasePgStatRecord
 {
@@ -345,7 +342,6 @@ typedef struct TwoPhasePgStatRecord
 	bool		t_shared;		/* is it a shared catalog? */
 	bool		t_truncdropped;	/* was the relation truncated/dropped? */
 } TwoPhasePgStatRecord;
-
 
 
 /* ----------
@@ -376,6 +372,22 @@ typedef struct PgStatSnapshot
 } PgStatSnapshot;
 
 
+/*
+ * Inline functions defined further below.
+ */
+
+static inline void changecount_before_write(uint32 *cc);
+static inline void changecount_after_write(uint32 *cc);
+static inline uint32 changecount_before_read(uint32 *cc);
+static inline bool changecount_after_read(uint32 *cc, uint32 cc_before);
+
+static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
+											uint32 *cc);
+
+/*
+ * Functions in pgstat.c
+ */
+
 extern PgStatSharedRef *pgstat_shared_ref_get(PgStatKind kind,
 											  Oid dboid, Oid objoid,
 											  bool create);
@@ -391,22 +403,17 @@ extern PgStatSharedRef *pgstat_pending_fetch(PgStatKind kind, Oid dboid, Oid obj
 
 extern PgStat_SubXactStatus *pgstat_xact_stack_level_get(int nest_level);
 
-extern void* pgstat_fetch_entry(PgStatKind kind, Oid dboid, Oid objoid);
-
 extern void pgstat_schedule_drop(PgStatKind kind, Oid dboid, Oid objoid);
 
-static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
-											uint32 *cc);
-
+extern void* pgstat_fetch_entry(PgStatKind kind, Oid dboid, Oid objoid);
 extern void pgstat_snapshot_global(PgStatKind kind);
 
+
+/*
+ * Functions in pgstat_kinds.c
+ */
+
 extern bool walstats_pending(void);
-
-static inline void changecount_before_write(uint32 *cc);
-static inline void changecount_after_write(uint32 *cc);
-static inline uint32 changecount_before_read(uint32 *cc);
-static inline bool changecount_after_read(uint32 *cc, uint32 cc_before);
-
 
 extern bool pgstat_flush_wal(bool nowait);
 extern bool pgstat_flush_slru(bool nowait);
@@ -419,19 +426,29 @@ extern void AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
 extern void PostPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
 
 
-extern const pgstat_kind_info pgstat_kind_infos[PGSTAT_KIND_WAL + 1];
+/*
+ * Variables in pgstat.c
+ */
+
 extern StatsShmemStruct *StatsShmem;
+extern PgStatSnapshot stats_snapshot;
+
+
+/*
+ * Variables in pgstat_kinds.c
+ */
+extern const pgstat_kind_info pgstat_kind_infos[PGSTAT_KIND_WAL + 1];
 
 extern WalUsage prevWalUsage;
 extern bool have_slrustats;
-
-/* the current statistics snapshot */
-extern PgStatSnapshot stats_snapshot;
 
 extern int	pgStatXactCommit;
 extern int	pgStatXactRollback;
 
 
+/*
+ * Implementation of inline functions declared above.
+ */
 
 /*
  * Helpers for changecount manipulation. See comments around struct
