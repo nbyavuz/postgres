@@ -16,6 +16,7 @@ include $(top_builddir)/src/Makefile.global
 OBJS = \
 	backend_progress.o \
 	backend_status.o \
+	pgstat_kinds.o \
 	wait_event.o
 
 include $(top_srcdir)/src/backend/common.mk
