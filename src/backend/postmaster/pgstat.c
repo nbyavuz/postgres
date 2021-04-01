@@ -523,25 +523,23 @@ static void pgstat_shutdown_hook(int code, Datum arg);
 
 static PgStat_SubXactStatus *get_tabstat_stack_level(int nest_level);
 
-
-static PgStatShm_StatEntryHeader *init_shared_stat_entry(PgStatTypes stattype,
-														 PgStatShmHashEntry *shhashent,
-														 int init_refcount);
-static PgStatSharedRef *get_shared_stat_entry(PgStatTypes type,
+static PgStatShm_StatEntryHeader *pgstat_shared_stat_entry_init(PgStatTypes stattype,
+																PgStatShmHashEntry *shhashent,
+																int init_refcount);
+static PgStatSharedRef *pgstat_shared_ref_get(PgStatTypes type,
 											   Oid dboid, Oid objoid,
-											   bool nowait,
 											   bool create);
-static PgStatShm_StatEntryHeader *get_lock_shared_stat_entry(PgStatTypes type,
-															 Oid dboid,
-															 Oid objoid,
-															 bool nowait);
-static bool lock_shared_stat_entry(PgStatShm_StatEntryHeader *header, bool nowait);
+static void pgstat_shared_ref_release(PgStatSharedRef *shared_ref);
+static PgStatShm_StatEntryHeader *pgstat_shared_stat_locked(PgStatTypes type,
+															Oid dboid,
+															Oid objoid,
+															bool nowait);
+static bool pgstat_shared_stat_lock(PgStatShm_StatEntryHeader *header, bool nowait);
 static inline size_t shared_stat_entry_len(PgStatTypes stattype);
 static inline void* shared_stat_entry_data(PgStatTypes stattype, PgStatShm_StatEntryHeader *entry);
 
-static bool pgstat_lookup_cache_needs_gc(void);
-static void pgstat_lookup_cache_gc(void);
-static void pgstat_shared_ref_release(PgStatSharedRef *shared_ref);
+static bool pgstat_shared_refs_need_gc(void);
+static void pgstat_shared_refs_gc(void);
 
 static void pgstat_release_stats_references(void);
 
@@ -1591,10 +1589,10 @@ pgstat_copy_relation_stats(Relation dst, Relation src)
 		return;
 
 	dstshstats = (PgStatShm_StatTabEntry *)
-		get_lock_shared_stat_entry(PGSTAT_TYPE_TABLE,
-								   dst->rd_rel->relisshared ? InvalidOid : MyDatabaseId,
-								   RelationGetRelid(dst),
-								   false);
+		pgstat_shared_stat_locked(PGSTAT_TYPE_TABLE,
+								  dst->rd_rel->relisshared ? InvalidOid : MyDatabaseId,
+								  RelationGetRelid(dst),
+								  false);
 	dstshstats->stats = *srcstats;
 
 	LWLockRelease(&dstshstats->header.lock);
@@ -1742,7 +1740,8 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 	TimestampTz ts = GetCurrentTimestamp();
 
 	dbentry = (PgStatShm_StatDBEntry *)
-		get_lock_shared_stat_entry(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid, false);
+		pgstat_shared_stat_locked(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid,
+								  false);
 	if (!dbentry)
 		return;
 
@@ -1763,8 +1762,7 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 			return;
 	}
 
-	shared_ref = get_shared_stat_entry(stattype, MyDatabaseId, objoid, false,
-									   false);
+	shared_ref = pgstat_shared_ref_get(stattype, MyDatabaseId, objoid, false);
 	if (!shared_ref || shared_ref->shared->dropped)
 		return;
 	header = shared_ref->shared;
@@ -2229,7 +2227,7 @@ pgstat_read_statsfile(void)
 						goto done;
 					}
 
-					header = init_shared_stat_entry(key.type, p, 1);
+					header = pgstat_shared_stat_entry_init(key.type, p, 1);
 					dshash_release_lock(pgStatSharedHash, p);
 
 					/* Avoid overwriting header part */
@@ -2332,7 +2330,9 @@ pgstat_shutdown_hook(int code, Datum arg)
 }
 
 static PgStatShm_StatEntryHeader *
-init_shared_stat_entry(PgStatTypes stattype, PgStatShmHashEntry *shhashent, int init_refcount)
+pgstat_shared_stat_entry_init(PgStatTypes stattype,
+							  PgStatShmHashEntry *shhashent,
+							  int init_refcount)
 {
 	/* Create new stats entry. */
 	dsa_pointer chunk;
@@ -2351,8 +2351,11 @@ init_shared_stat_entry(PgStatTypes stattype, PgStatShmHashEntry *shhashent, int 
 	return shheader;
 }
 
+/*
+ * Helper function for pgstat_shared_ref_get().
+ */
 static bool
-get_shared_stat_entry_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
+pgstat_shared_ref_get_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 {
 	bool found;
 	PgStatSharedRefHashEntry *cache_entry;
@@ -2375,8 +2378,8 @@ get_shared_stat_entry_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 	 *
 	 * XXX: Why is this a good place to do this?
 	 */
-	while (pgstat_lookup_cache_needs_gc())
-		pgstat_lookup_cache_gc();
+	while (pgstat_shared_refs_need_gc())
+		pgstat_shared_refs_gc();
 
 	/*
 	 * We immediately insert a cache entry, because it avoids 1) multiple
@@ -2417,25 +2420,18 @@ get_shared_stat_entry_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 	return found;
 }
 
-/* ----------
- * get_shared_stat_entry() -
- *
- *	get shared stats entry for specified type, dboid and objoid.
- *  If nowait is true, returns NULL on lock failure.
- *
- *  If initfunc is not NULL, new entry is created if not yet and the function
- *  is called with the new base entry. If found is not NULL, it is set to true
- *  if existing entry is found or false if not.
- *  ----------
+
+/*
+ * Get a shared stats reference. If create is true, the shared stats object is
+ * created if it does not exist.
  */
 static PgStatSharedRef *
-get_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objoid, bool nowait,
-					  bool create)
+pgstat_shared_ref_get(PgStatTypes type, Oid dboid, Oid objoid, bool create)
 {
 	PgStatHashKey key;
 	PgStatShmHashEntry *shhashent;
 	PgStatShm_StatEntryHeader *shheader = NULL;
-	PgStatSharedRef *lohashent;
+	PgStatSharedRef *shared_ref;
 	bool		shfound;
 
 	key.type = type;
@@ -2448,27 +2444,28 @@ get_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objoid, bool nowait,
 	 * First check the lookup cache hashtable in local memory. If we find a
 	 * match here we can avoid taking locks / contention.
 	 */
-	if (get_shared_stat_entry_cached(key, &lohashent))
+	if (pgstat_shared_ref_get_cached(key, &shared_ref))
 	{
-		Assert(lohashent->shared);
+		Assert(shared_ref->shared);
 
-		/*
-		 * Shouldn't ever need to make new references for stats data that's
-		 * already dropped - we should have gotten the reference when back
-		 * when the object was still alive.
-		 */
-		Assert(!create || !lohashent->shared->dropped);
-
-		return lohashent;
+		return shared_ref;
 	}
 
-	Assert(lohashent != NULL);
+	Assert(shared_ref != NULL);
 
-	shhashent = dshash_find_extended(pgStatSharedHash, &key,
-									 create, nowait, create, &shfound);
+	/*
+	 * Do a lookup in the hash table first - it's quite likely that the entry
+	 * already exists, and that way we only need a shared lock.
+	 */
+	shhashent = dshash_find(pgStatSharedHash, &key, false);
+
 	if (shhashent)
+		shfound = true;
+	else if (create)
 	{
-		if (create && !shfound)
+		shhashent = dshash_find_extended(pgStatSharedHash, &key,
+										 true, false, true, &shfound);
+		if (!shfound)
 		{
 			/*
 			 * Initialize refcount to 2, (1 marking it as valid, one for the
@@ -2477,104 +2474,36 @@ get_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objoid, bool nowait,
 			 * freed before the initialization because it can't be found as
 			 * long as we hold the dshash partition lock.
 			 */
-			shheader = init_shared_stat_entry(type, shhashent, 2);
-		}
-		else
-		{
-			shheader = dsa_get_address(StatsDSA, shhashent->body);
+			shheader = pgstat_shared_stat_entry_init(type, shhashent, 2);
 
-			Assert(shheader->magic == 0xdeadbeef);
-			Assert(shheader->dropped
-				   || pg_atomic_read_u32(&shheader->refcount) > 0);
-			pg_atomic_fetch_add_u32(&shheader->refcount, 1);
+			dshash_release_lock(pgStatSharedHash, shhashent);
+			shared_ref->shared = shheader;
 		}
+	}
+	else
+	{
+		/*
+		 * XXX: In case of a non-existing shared entry, should we delete the
+		 * ref again? Probably not worth it, it is likely to soon be created.
+		 */
+		shfound = false;
+	}
+
+	if (shfound)
+	{
+		shheader = dsa_get_address(StatsDSA, shhashent->body);
+
+		Assert(shheader->magic == 0xdeadbeef);
+		Assert(shheader->dropped || pg_atomic_read_u32(&shheader->refcount) > 0);
+
+		pg_atomic_fetch_add_u32(&shheader->refcount, 1);
 
 		dshash_release_lock(pgStatSharedHash, shhashent);
 
-		lohashent->shared = shheader;
+		shared_ref->shared = shheader;
 	}
 
-	/*
-	 * XXX: In case of a non-existing shared entry, should we delete the
-	 * lookup again? Probably not worth it, it is likely to soon be created.
-	 */
-
-	return lohashent;
-}
-
-static bool
-lock_shared_stat_entry(PgStatShm_StatEntryHeader *header, bool nowait)
-{
-	if (nowait)
-		return LWLockConditionalAcquire(&header->lock, LW_EXCLUSIVE);
-
-	LWLockAcquire(&header->lock, LW_EXCLUSIVE);
-	return true;
-}
-
-/*
- * get_lock_shared_stat_entry - common helper function to fetch and lock a stats
- * entry for flush_tabstat, flush_funcstat and flush_dbstat.
- */
-static PgStatShm_StatEntryHeader *
-get_lock_shared_stat_entry(PgStatTypes type, Oid dboid, Oid objoid, bool nowait)
-{
-	PgStatSharedRef *shared_ref;
-
-	/* find shared table stats entry corresponding to the local entry */
-	shared_ref = get_shared_stat_entry(type, dboid, objoid, nowait, true);
-
-	/* skip if dshash failed to acquire lock */
-	if (shared_ref == NULL)
-		return NULL;
-
-	/* lock the shared entry to protect the content, skip if failed */
-	if (!lock_shared_stat_entry(shared_ref->shared, nowait))
-		return NULL;
-
-	return shared_ref->shared;
-}
-
-/*
- * The length of the data portion of a shared memory stats entry (i.e. without
- * transient data such as refcoutns, lwlocks, ...).
- */
-static inline size_t
-shared_stat_entry_len(PgStatTypes stattype)
-{
-	size_t		sz = pgstat_types[stattype].shared_data_len;
-
-	AssertArg(stattype <= PGSTAT_TYPE_LAST);
-	Assert(sz != 0 && sz < PG_UINT32_MAX);
-
-	return sz;
-}
-
-/*
- * Returns a pointer to the data portion of a shared memory stats entry.
- */
-static inline void*
-shared_stat_entry_data(PgStatTypes stattype, PgStatShm_StatEntryHeader *entry)
-{
-	size_t		off = pgstat_types[stattype].shared_data_off;
-
-	AssertArg(stattype <= PGSTAT_TYPE_LAST);
-	Assert(off != 0 && off < PG_UINT32_MAX);
-
-	return ((char *)(entry)) + off;
-}
-
-static bool
-pgstat_lookup_cache_needs_gc(void)
-{
-	uint64		currage;
-
-	if (!pgStatSharedRefHash)
-		return false;
-
-	currage = pg_atomic_read_u64(&StatsShmem->gc_count);
-
-	return pgStatSharedRefAge != currage;
+	return shared_ref;
 }
 
 static void
@@ -2629,8 +2558,83 @@ pgstat_shared_ref_release(PgStatSharedRef *shared_ref)
 	pfree(shared_ref);
 }
 
+static bool
+pgstat_shared_stat_lock(PgStatShm_StatEntryHeader *header, bool nowait)
+{
+	if (nowait)
+		return LWLockConditionalAcquire(&header->lock, LW_EXCLUSIVE);
+
+	LWLockAcquire(&header->lock, LW_EXCLUSIVE);
+	return true;
+}
+
+/*
+ * pgstat_shared_stat_locked - common helper function to fetch and lock a stats
+ * entry for flush_tabstat, flush_funcstat and flush_dbstat.
+ */
+static PgStatShm_StatEntryHeader *
+pgstat_shared_stat_locked(PgStatTypes type, Oid dboid, Oid objoid, bool nowait)
+{
+	PgStatSharedRef *shared_ref;
+
+	/* find shared table stats entry corresponding to the local entry */
+	shared_ref = pgstat_shared_ref_get(type, dboid, objoid, true);
+
+	/* skip if dshash failed to acquire lock */
+	if (shared_ref == NULL)
+		return NULL;
+
+	/* lock the shared entry to protect the content, skip if failed */
+	if (!pgstat_shared_stat_lock(shared_ref->shared, nowait))
+		return NULL;
+
+	return shared_ref->shared;
+}
+
+/*
+ * The length of the data portion of a shared memory stats entry (i.e. without
+ * transient data such as refcoutns, lwlocks, ...).
+ */
+static inline size_t
+shared_stat_entry_len(PgStatTypes stattype)
+{
+	size_t		sz = pgstat_types[stattype].shared_data_len;
+
+	AssertArg(stattype <= PGSTAT_TYPE_LAST);
+	Assert(sz != 0 && sz < PG_UINT32_MAX);
+
+	return sz;
+}
+
+/*
+ * Returns a pointer to the data portion of a shared memory stats entry.
+ */
+static inline void*
+shared_stat_entry_data(PgStatTypes stattype, PgStatShm_StatEntryHeader *entry)
+{
+	size_t		off = pgstat_types[stattype].shared_data_off;
+
+	AssertArg(stattype <= PGSTAT_TYPE_LAST);
+	Assert(off != 0 && off < PG_UINT32_MAX);
+
+	return ((char *)(entry)) + off;
+}
+
+static bool
+pgstat_shared_refs_need_gc(void)
+{
+	uint64		currage;
+
+	if (!pgStatSharedRefHash)
+		return false;
+
+	currage = pg_atomic_read_u64(&StatsShmem->gc_count);
+
+	return pgStatSharedRefAge != currage;
+}
+
 static void
-pgstat_lookup_cache_gc(void)
+pgstat_shared_refs_gc(void)
 {
 	pgstat_shared_ref_hash_iterator i;
 	PgStatSharedRefHashEntry *ent;
@@ -2668,7 +2672,7 @@ pgstat_pending_stat_prepare(PgStatTypes type, Oid dboid, Oid objoid)
 {
 	PgStatSharedRef *shared_ref;
 
-	shared_ref = get_shared_stat_entry(type, dboid, objoid, false, true);
+	shared_ref = pgstat_shared_ref_get(type, dboid, objoid, true);
 
 	if (shared_ref->pending == NULL)
 	{
@@ -2694,7 +2698,7 @@ pgstat_pending_stat_fetch(PgStatTypes type, Oid dboid, Oid objoid)
 {
 	PgStatSharedRef *shared_ref;
 
-	shared_ref = get_shared_stat_entry(type, dboid, objoid, false, false);
+	shared_ref = pgstat_shared_ref_get(type, dboid, objoid, false);
 
 	if (shared_ref == NULL || shared_ref->pending == NULL)
 		return NULL;
@@ -2748,8 +2752,8 @@ pgstat_pending_stat_db_prepare(Oid dboid)
 	{
 		PgStatSharedRef *shared_ref;
 
-		shared_ref = get_shared_stat_entry(PGSTAT_TYPE_DB, dboid, InvalidOid,
-										   false, true);
+		shared_ref = pgstat_shared_ref_get(PGSTAT_TYPE_DB, dboid, InvalidOid,
+										   true);
 
 		dbent->shared = (PgStatShm_StatDBEntry *) shared_ref->shared;
 		pg_atomic_fetch_add_u32(&dbent->shared->header.refcount, 1);
@@ -3114,7 +3118,7 @@ flush_tabstat(PgStatSharedRef *shared_ref, bool nowait)
 	}
 
 	shtabstats = (PgStatShm_StatTabEntry *) shared_ref->shared;
-	if (!lock_shared_stat_entry(shared_ref->shared, nowait))
+	if (!pgstat_shared_stat_lock(shared_ref->shared, nowait))
 		return false;			/* failed to acquire lock, skip */
 
 	/* add the values to the shared entry. */
@@ -3184,7 +3188,7 @@ flush_funcstat(PgStatSharedRef *shared_ref, bool nowait)
 
 	shfuncent = (PgStatShm_StatFuncEntry *) shared_ref->shared;
 	Assert(shfuncent);
-	if (!lock_shared_stat_entry(shared_ref->shared, nowait))
+	if (!pgstat_shared_stat_lock(shared_ref->shared, nowait))
 		return false;			/* failed to acquire lock, skip */
 
 	shfuncent->stats.f_numcalls += localent->f_counts.f_numcalls;
@@ -3214,7 +3218,7 @@ flush_dbstat(PgStat_PendingStatDBEntry *pendingent, Oid dboid, bool nowait)
 	if (pendingent->shared == NULL)
 		return false;
 
-	if (!lock_shared_stat_entry(&pendingent->shared->header, nowait))
+	if (!pgstat_shared_stat_lock(&pendingent->shared->header, nowait))
 		return true;			/* failed to acquire lock, skip */
 
 	sharedent = pendingent->shared;
@@ -3435,7 +3439,7 @@ pgstat_report_autovac(Oid dboid)
 	 * operation so it doesn't matter if we get blocked here a little.
 	 */
 	dbentry = (PgStatShm_StatDBEntry *)
-		get_lock_shared_stat_entry(PGSTAT_TYPE_DB, dboid, InvalidOid, false);
+		pgstat_shared_stat_locked(PGSTAT_TYPE_DB, dboid, InvalidOid, false);
 	if (!dbentry)
 		return;
 	dbentry->stats.last_autovac_time = GetCurrentTimestamp();
@@ -3472,7 +3476,7 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	 * reasons.
 	 */
 	shtabentry = (PgStatShm_StatTabEntry *)
-		get_lock_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid, tableoid, false);
+		pgstat_shared_stat_locked(PGSTAT_TYPE_TABLE, dboid, tableoid, false);
 
 	shtabentry->stats.n_live_tuples = livetuples;
 	shtabentry->stats.n_dead_tuples = deadtuples;
@@ -3558,9 +3562,9 @@ pgstat_report_analyze(Relation rel,
 	 * above reasons.
 	 */
 	tabentry = (PgStatShm_StatTabEntry *)
-		get_lock_shared_stat_entry(PGSTAT_TYPE_TABLE, dboid,
-								   RelationGetRelid(rel),
-								   false);
+		pgstat_shared_stat_locked(PGSTAT_TYPE_TABLE, dboid,
+								  RelationGetRelid(rel),
+								  false);
 	/* can't get dropped while accessed */
 	Assert(tabentry != NULL);
 
@@ -3673,9 +3677,7 @@ pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount)
 	 * relations).
 	 */
 	sharedent = (PgStatShm_StatDBEntry *)
-		get_lock_shared_stat_entry(PGSTAT_TYPE_DB,
-								   dboid,
-								   InvalidOid, false);
+		pgstat_shared_stat_locked(PGSTAT_TYPE_DB, dboid, InvalidOid, false);
 	sharedent->stats.n_checksum_failures += failurecount;
 
 	LWLockRelease(&sharedent->header.lock);
@@ -5016,7 +5018,7 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
 
 	stats_snapshot.mode = pgstat_fetch_consistency;
 
-	shared_ref = get_shared_stat_entry(type, dboid, objoid, false, false);
+	shared_ref = pgstat_shared_ref_get(type, dboid, objoid, false);
 
 	if (shared_ref->shared == NULL || shared_ref->shared->dropped)
 	{
