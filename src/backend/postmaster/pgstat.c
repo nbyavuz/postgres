@@ -485,7 +485,7 @@ typedef struct PgStatSnapshot
 {
 	PgStatsFetchConsistency mode;
 
-	bool global_valid[PGSTAT_TYPE_LAST];
+	bool global_valid[PGSTAT_TYPE_LAST + 1];
 
 	PgStat_ArchiverStats archiver;
 
