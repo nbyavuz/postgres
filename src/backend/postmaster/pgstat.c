@@ -4918,11 +4918,13 @@ pgstat_fetch_snapshot_build(void)
 		PgStatShm_StatEntryHeader *stats_data;
 
 		/*
-		 * Stats in other databases cannot be accessed, so we don't need to
-		 * snapshot them.
+		 * Most stats in other databases cannot be accessed, so we don't need
+		 * to snapshot them. But database stats for other databases are
+		 * accessible via pg_stat_database.
 		 */
 		if (p->key.dboid != MyDatabaseId &&
-			p->key.dboid != InvalidOid)
+			p->key.dboid != InvalidOid &&
+			p->key.type != PGSTAT_TYPE_DB)
 			continue;
 
 		stats_data = dsa_get_address(StatsDSA, p->body);
