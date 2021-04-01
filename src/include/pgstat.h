@@ -634,7 +634,7 @@ extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry(Oid relid);
 extern PgStat_StatTabEntry *pgstat_fetch_stat_tabentry_extended(bool shared,
 																Oid relid);
 extern PgStat_StatFuncEntry *pgstat_fetch_stat_funcentry(Oid funcid);
-extern TimestampTz pgstat_get_stat_timestamp(void);
+extern TimestampTz pgstat_get_stat_snapshot_timestamp(bool *have_snapshot);
 extern PgStat_ArchiverStats *pgstat_fetch_stat_archiver(void);
 extern PgStat_BgWriterStats *pgstat_fetch_stat_bgwriter(void);
 extern PgStat_CheckPointerStats *pgstat_fetch_stat_checkpointer(void);

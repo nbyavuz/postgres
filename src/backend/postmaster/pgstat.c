@@ -726,8 +726,6 @@ pgstat_report_stat(bool force)
 	bool		partial_flush;
 	TimestampTz now;
 	bool		nowait;
-	int			i;
-	uint64		oldval;
 
 	/* "absorb" the forced flush even if there's nothing to flush */
 	if (pgStatForceNextFlush)
@@ -785,24 +783,6 @@ pgstat_report_stat(bool force)
 
 	/* flush SLRU stats */
 	partial_flush |= pgstat_flush_slru(nowait);
-
-	/*
-	 * Publish the time of the last flush, but we don't notify the change of
-	 * the timestamp itself. Readers will get sufficiently recent timestamp.
-	 * If we failed to update the value, concurrent processes should have
-	 * updated it to sufficiently recent time.
-	 *
-	 * XXX: The loop might be unnecessary for the reason above.
-	 */
-	oldval = pg_atomic_read_u64(&StatsShmem->stats_timestamp);
-
-	for (i = 0; i < 10; i++)
-	{
-		if (oldval >= now ||
-			pg_atomic_compare_exchange_u64(&StatsShmem->stats_timestamp,
-										   &oldval, (uint64) now))
-			break;
-	}
 
 	/*
 	 * Some of the pending stats may have not been flushed due to lock
@@ -1068,11 +1048,6 @@ pgstat_write_statsfile(void)
 						tmpfile)));
 		return;
 	}
-
-	/*
-	 * Set the timestamp of the stats file.
-	 */
-	pg_atomic_write_u64(&StatsShmem->stats_timestamp, GetCurrentTimestamp());
 
 	/*
 	 * Write the file header --- currently just a format ID.
@@ -2240,6 +2215,8 @@ pgstat_fetch_snapshot_build(void)
 
 	Assert(stats_snapshot.stats->members == 0);
 
+	stats_snapshot.snapshot_timestamp = GetCurrentTimestamp();
+
 	/*
 	 * Build snapshot all variable stats.
 	 */
@@ -2383,15 +2360,22 @@ pgstat_fetch_entry(PgStatKind type, Oid dboid, Oid objoid)
 }
 
 /*
- * ---------
- * pgstat_get_stat_timestamp() -
- *
- *  Returns the last update timstamp of global staticstics.
+ * If a stats snapshot has been taken, return the timestamp at which that was
+ * done, and set *have_snapshot to true. Otherwise *hav_snapshot is set to
+ * false.
  */
 TimestampTz
-pgstat_get_stat_timestamp(void)
+pgstat_get_stat_snapshot_timestamp(bool *have_snapshot)
 {
-	return (TimestampTz) pg_atomic_read_u64(&StatsShmem->stats_timestamp);
+	if (stats_snapshot.mode == STATS_FETCH_CONSISTENCY_SNAPSHOT)
+	{
+		*have_snapshot = true;
+		return stats_snapshot.snapshot_timestamp;
+	}
+
+	*have_snapshot = false;
+
+	return 0;
 }
 
 

@@ -17,6 +17,8 @@ SET enable_indexonlyscan TO off;
 SET track_functions TO 'all';
 
 -- save counters
+BEGIN;
+SET LOCAL stats_fetch_consistency = snapshot;
 CREATE TABLE prevstats AS
 SELECT t.seq_scan, t.seq_tup_read, t.idx_scan, t.idx_tup_fetch,
        (b.heap_blks_read + b.heap_blks_hit) AS heap_blks,
@@ -25,6 +27,7 @@ SELECT t.seq_scan, t.seq_tup_read, t.idx_scan, t.idx_tup_fetch,
   FROM pg_catalog.pg_stat_user_tables AS t,
        pg_catalog.pg_statio_user_tables AS b
  WHERE t.relname='tenk2' AND b.relname='tenk2';
+COMMIT;
 
 -- function to wait for counters to advance
 create function wait_for_stats() returns void as $$
@@ -35,6 +38,8 @@ declare
   updated3 bool;
   updated4 bool;
 begin
+  SET LOCAL stats_fetch_consistency = snapshot;
+
   -- we don't want to wait forever; loop will exit after 30 seconds
   for i in 1 .. 300 loop
 
@@ -209,6 +214,10 @@ ROLLBACK;
 SELECT wait_for_stats();
 
 -- check effects
+BEGIN;
+
+SET LOCAL stats_fetch_consistency = snapshot;
+
 SELECT relname, n_tup_ins, n_tup_upd, n_tup_del, n_live_tup, n_dead_tup
   FROM pg_stat_user_tables
  WHERE relname like 'trunc_stats_test%' order by relname;
@@ -227,6 +236,8 @@ SELECT st.heap_blks_read + st.heap_blks_hit >= pr.heap_blks + cl.relpages,
 
 SELECT pr.snap_ts < pg_stat_get_snapshot_timestamp() as snapshot_newer
 FROM prevstats AS pr;
+
+COMMIT;
 
 
 -- check stats are dropped (happens synchronously)

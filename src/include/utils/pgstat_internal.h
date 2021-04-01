@@ -299,9 +299,6 @@ typedef struct StatsShmemStruct
 		LWLock		lock;
 		PgStat_WalStats stats;
 	} wal;
-
-	/* protected by StatsLock */
-	pg_atomic_uint64 stats_timestamp;
 } StatsShmemStruct;
 
 
@@ -352,6 +349,9 @@ typedef struct TwoPhasePgStatRecord
 typedef struct PgStatSnapshot
 {
 	PgStatsFetchConsistency mode;
+
+	/* time at which snapshot was taken */
+	TimestampTz snapshot_timestamp;
 
 	bool global_valid[PGSTAT_KIND_LAST + 1];
 
