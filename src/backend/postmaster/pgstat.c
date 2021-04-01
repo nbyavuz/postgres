@@ -146,12 +146,12 @@ static void pgstat_write_statsfile(void);
 static void pgstat_read_statsfile(void);
 static void pgstat_shutdown_hook(int code, Datum arg);
 
-static PgStatShm_StatEntryHeader *pgstat_shared_stat_entry_init(PgStatTypes stattype,
+static PgStatShm_StatEntryHeader *pgstat_shared_stat_entry_init(PgStatKind kind,
 																PgStatShmHashEntry *shhashent,
 																int init_refcount);
 static void pgstat_shared_ref_release(PgStatHashKey key, PgStatSharedRef *shared_ref);
-static inline size_t shared_stat_entry_len(PgStatTypes stattype);
-static inline void* shared_stat_entry_data(PgStatTypes stattype, PgStatShm_StatEntryHeader *entry);
+static inline size_t shared_stat_entry_len(PgStatKind kind);
+static inline void* shared_stat_entry_data(PgStatKind kind, PgStatShm_StatEntryHeader *entry);
 
 static bool pgstat_shared_refs_need_gc(void);
 static void pgstat_shared_refs_gc(void);
@@ -495,7 +495,7 @@ pgstat_initialize(void)
 }
 
 void
-pgstat_schedule_drop(PgStatTypes stattype, Oid dboid, Oid objoid)
+pgstat_schedule_drop(PgStatKind kind, Oid dboid, Oid objoid)
 {
 	int			nest_level = GetCurrentTransactionNestLevel();
 	PgStat_SubXactStatus *xact_state;
@@ -504,7 +504,7 @@ pgstat_schedule_drop(PgStatTypes stattype, Oid dboid, Oid objoid)
 
 	xact_state = get_tabstat_stack_level(nest_level);
 
-	drop->item.type = stattype;
+	drop->item.kind = kind;
 	drop->item.dboid = dboid;
 	drop->item.objoid = objoid;
 
@@ -548,7 +548,7 @@ pgstat_perform_drop(PgStat_DroppedStatsItem *drop)
 	PgStatShmHashEntry *shent;
 	PgStatHashKey key;
 
-	key.type = drop->type;
+	key.kind = drop->kind;
 	key.dboid = drop->dboid;
 	key.objoid = drop->objoid;
 
@@ -625,7 +625,7 @@ AtEOXact_PgStat_DroppedStats(PgStat_SubXactStatus *xact_state, bool isCommit)
 			dlist_container(PgStat_PendingDroppedStatsItem, node, iter.cur);
 
 		elog(DEBUG2, "dropping stats %u/%u/%u",
-			 pending->item.type,
+			 pending->item.kind,
 			 pending->item.dboid,
 			 pending->item.objoid);
 
@@ -931,10 +931,10 @@ pgstat_reset_counters(void)
 			continue;
 
 		LWLockAcquire(&p->lock, LW_EXCLUSIVE);
-		memset(shared_stat_entry_data(p->key.type, header), 0,
-			   shared_stat_entry_len(p->key.type));
+		memset(shared_stat_entry_data(p->key.kind, header), 0,
+			   shared_stat_entry_len(p->key.kind));
 
-		if (p->key.type == PGSTAT_TYPE_DB)
+		if (p->key.kind == PGSTAT_KIND_DB)
 		{
 			PgStatShm_StatDBEntry *dbstat = (PgStatShm_StatDBEntry *) header;
 
@@ -962,10 +962,10 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 
 	PgStatShm_StatEntryHeader *header;
 	PgStatShm_StatDBEntry *dbentry;
-	PgStatTypes stattype;
+	PgStatKind kind;
 	TimestampTz ts = GetCurrentTimestamp();
 
-	db_ref = pgstat_shared_ref_get(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid,
+	db_ref = pgstat_shared_ref_get(PGSTAT_KIND_DB, MyDatabaseId, InvalidOid,
 								   false);
 	if (db_ref == NULL)
 		return;
@@ -981,24 +981,24 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 	switch (type)
 	{
 		case RESET_TABLE:
-			stattype = PGSTAT_TYPE_TABLE;
+			kind = PGSTAT_KIND_TABLE;
 			break;
 		case RESET_FUNCTION:
-			stattype = PGSTAT_TYPE_FUNCTION;
+			kind = PGSTAT_KIND_FUNCTION;
 			break;
 		default:
 			return;
 	}
 
-	counter_ref = pgstat_shared_ref_get(stattype, MyDatabaseId, objoid, false);
+	counter_ref = pgstat_shared_ref_get(kind, MyDatabaseId, objoid, false);
 	if (!counter_ref || counter_ref->shared_entry->dropped)
 		return;
 
 	pgstat_shared_stat_lock(counter_ref, false);
 
 	header = counter_ref->shared_stats;
-	memset(shared_stat_entry_data(stattype, header), 0,
-		   shared_stat_entry_len(stattype));
+	memset(shared_stat_entry_data(kind, header), 0,
+		   shared_stat_entry_len(kind));
 
 	pgstat_shared_stat_unlock(counter_ref);
 }
@@ -1138,8 +1138,8 @@ pgstat_write_statsfile(void)
 		rc = fwrite(&ps->key, sizeof(PgStatHashKey), 1, fpout);
 
 		/* Write except the header part of the etnry */
-		len = shared_stat_entry_len(ps->key.type);
-		rc = fwrite(shared_stat_entry_data(ps->key.type, shstats), len, 1, fpout);
+		len = shared_stat_entry_len(ps->key.kind);
+		rc = fwrite(shared_stat_entry_data(ps->key.kind, shstats), len, 1, fpout);
 		(void) rc;				/* we'll check for error with ferror */
 	}
 	dshash_seq_term(&hstat);
@@ -1342,19 +1342,20 @@ pgstat_read_statsfile(void)
 					/* don't allow duplicate entries */
 					if (found)
 					{
+						dshash_release_lock(pgStatSharedHash, p);
 						ereport(LOG,
 								(errmsg("corrupted statistics file \"%s\"",
 										statfile)));
 						goto done;
 					}
 
-					header = pgstat_shared_stat_entry_init(key.type, p, 1);
+					header = pgstat_shared_stat_entry_init(key.kind, p, 1);
 					dshash_release_lock(pgStatSharedHash, p);
 
 					/* Avoid overwriting header part */
-					len = shared_stat_entry_len(key.type);
+					len = shared_stat_entry_len(key.kind);
 
-					if (fread(shared_stat_entry_data(key.type, header), 1, len, fpin) != len)
+					if (fread(shared_stat_entry_data(key.kind, header), 1, len, fpin) != len)
 					{
 						ereport(LOG,
 								(errmsg("corrupted statistics file \"%s\"", statfile)));
@@ -1451,7 +1452,7 @@ pgstat_shutdown_hook(int code, Datum arg)
 }
 
 static PgStatShm_StatEntryHeader *
-pgstat_shared_stat_entry_init(PgStatTypes stattype,
+pgstat_shared_stat_entry_init(PgStatKind kind,
 							  PgStatShmHashEntry *shhashent,
 							  int init_refcount)
 {
@@ -1463,7 +1464,7 @@ pgstat_shared_stat_entry_init(PgStatTypes stattype,
 	pg_atomic_init_u32(&shhashent->refcount, init_refcount);
 	shhashent->dropped = false;
 
-	chunk = dsa_allocate0(StatsDSA, pgstat_types[stattype].shared_size);
+	chunk = dsa_allocate0(StatsDSA, pgstat_kind_infos[kind].shared_size);
 	shheader = dsa_get_address(StatsDSA, chunk);
 	shheader->magic = 0xdeadbeef;
 
@@ -1553,7 +1554,7 @@ pgstat_shared_ref_get_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
  * created if it does not exist.
  */
 PgStatSharedRef *
-pgstat_shared_ref_get(PgStatTypes type, Oid dboid, Oid objoid, bool create)
+pgstat_shared_ref_get(PgStatKind type, Oid dboid, Oid objoid, bool create)
 {
 	PgStatHashKey key;
 	PgStatShmHashEntry *shhashent;
@@ -1561,7 +1562,7 @@ pgstat_shared_ref_get(PgStatTypes type, Oid dboid, Oid objoid, bool create)
 	PgStatSharedRef *shared_ref;
 	bool		shfound;
 
-	key.type = type;
+	key.kind = type;
 	key.dboid = dboid;
 	key.objoid = objoid;
 
@@ -1719,7 +1720,7 @@ pgstat_shared_stat_unlock(PgStatSharedRef *shared_ref)
  * Helper function to fetch and lock shared stats.
  */
 PgStatSharedRef *
-pgstat_shared_stat_locked(PgStatTypes type, Oid dboid, Oid objoid, bool nowait)
+pgstat_shared_stat_locked(PgStatKind type, Oid dboid, Oid objoid, bool nowait)
 {
 	PgStatSharedRef *shared_ref;
 
@@ -1738,11 +1739,11 @@ pgstat_shared_stat_locked(PgStatTypes type, Oid dboid, Oid objoid, bool nowait)
  * transient data such as refcoutns, lwlocks, ...).
  */
 static inline size_t
-shared_stat_entry_len(PgStatTypes stattype)
+shared_stat_entry_len(PgStatKind kind)
 {
-	size_t		sz = pgstat_types[stattype].shared_data_len;
+	size_t		sz = pgstat_kind_infos[kind].shared_data_len;
 
-	AssertArg(stattype <= PGSTAT_TYPE_LAST);
+	AssertArg(kind <= PGSTAT_KIND_LAST);
 	Assert(sz != 0 && sz < PG_UINT32_MAX);
 
 	return sz;
@@ -1752,11 +1753,11 @@ shared_stat_entry_len(PgStatTypes stattype)
  * Returns a pointer to the data portion of a shared memory stats entry.
  */
 static inline void*
-shared_stat_entry_data(PgStatTypes stattype, PgStatShm_StatEntryHeader *entry)
+shared_stat_entry_data(PgStatKind kind, PgStatShm_StatEntryHeader *entry)
 {
-	size_t		off = pgstat_types[stattype].shared_data_off;
+	size_t		off = pgstat_kind_infos[kind].shared_data_off;
 
-	AssertArg(stattype <= PGSTAT_TYPE_LAST);
+	AssertArg(kind <= PGSTAT_KIND_LAST);
 	Assert(off != 0 && off < PG_UINT32_MAX);
 
 	return ((char *)(entry)) + off;
@@ -1811,7 +1812,7 @@ pgstat_shared_refs_gc(void)
  * stats if not already done.
  */
 PgStatSharedRef*
-pgstat_pending_prepare(PgStatTypes type, Oid dboid, Oid objoid)
+pgstat_pending_prepare(PgStatKind type, Oid dboid, Oid objoid)
 {
 	PgStatSharedRef *shared_ref;
 
@@ -1819,7 +1820,7 @@ pgstat_pending_prepare(PgStatTypes type, Oid dboid, Oid objoid)
 
 	if (shared_ref->pending == NULL)
 	{
-		size_t entrysize = pgstat_types[type].pending_size;
+		size_t entrysize = pgstat_kind_infos[type].pending_size;
 
 		Assert(entrysize != (size_t)-1);
 
@@ -1837,7 +1838,7 @@ pgstat_pending_prepare(PgStatTypes type, Oid dboid, Oid objoid)
  * that it shouldn't be needed.
  */
 PgStatSharedRef*
-pgstat_pending_fetch(PgStatTypes type, Oid dboid, Oid objoid)
+pgstat_pending_fetch(PgStatKind type, Oid dboid, Oid objoid)
 {
 	PgStatSharedRef *shared_ref;
 
@@ -1856,13 +1857,13 @@ pgstat_pending_delete(PgStatSharedRef *shared_ref)
 
 	Assert(pending_data != NULL);
 
-	switch (shared_ref->shared_entry->key.type)
+	switch (shared_ref->shared_entry->key.kind)
 	{
-		case PGSTAT_TYPE_TABLE:
+		case PGSTAT_KIND_TABLE:
 			pgstat_relation_delink(((PgStat_TableStatus *) pending_data)->relation);
 			break;
-		case PGSTAT_TYPE_DB:
-		case PGSTAT_TYPE_FUNCTION:
+		case PGSTAT_KIND_DB:
+		case PGSTAT_KIND_FUNCTION:
 			break;
 		default:
 			elog(ERROR, "unexpected");
@@ -2007,11 +2008,11 @@ pgstat_flush_object_stats(bool nowait)
 
 		key = shared_ref->shared_entry->key;
 
-		Assert(!pgstat_types[key.type].is_global);
-		Assert(pgstat_types[key.type].flush_pending_cb != NULL);
+		Assert(!pgstat_kind_infos[key.kind].is_global);
+		Assert(pgstat_kind_infos[key.kind].flush_pending_cb != NULL);
 
 		/* flush the stats, if possible */
-		remove = pgstat_types[key.type].flush_pending_cb(shared_ref, nowait);
+		remove = pgstat_kind_infos[key.kind].flush_pending_cb(shared_ref, nowait);
 
 		Assert(remove || nowait);
 
@@ -2285,7 +2286,7 @@ pgstat_fetch_snapshot_build(void)
 		 */
 		if (p->key.dboid != MyDatabaseId &&
 			p->key.dboid != InvalidOid &&
-			!pgstat_types[p->key.type].accessed_across_databases)
+			!pgstat_kind_infos[p->key.kind].accessed_across_databases)
 			continue;
 
 		if (p->dropped)
@@ -2299,10 +2300,10 @@ pgstat_fetch_snapshot_build(void)
 		entry = pgstat_snapshot_insert(stats_snapshot.stats, p->key, &found);
 		Assert(!found);
 
-		entry_len = pgstat_types[p->key.type].shared_size;
+		entry_len = pgstat_kind_infos[p->key.kind].shared_size;
 		entry->data = MemoryContextAlloc(pgStatSnapshotContext, entry_len);
 		memcpy(entry->data,
-			   shared_stat_entry_data(p->key.type, stats_data),
+			   shared_stat_entry_data(p->key.kind, stats_data),
 			   entry_len);
 	}
 	dshash_seq_term(&hstat);
@@ -2310,29 +2311,29 @@ pgstat_fetch_snapshot_build(void)
 	/*
 	 * Build snapshot of all global stats.
 	 */
-	for (int stattype = 0; stattype < PGSTAT_TYPE_LAST; stattype++)
+	for (int kind = 0; kind < PGSTAT_KIND_LAST; kind++)
 	{
-		if (!pgstat_types[stattype].is_global)
+		if (!pgstat_kind_infos[kind].is_global)
 		{
-			Assert(pgstat_types[stattype].snapshot_cb == NULL);
+			Assert(pgstat_kind_infos[kind].snapshot_cb == NULL);
 			continue;
 		}
 
-		Assert(pgstat_types[stattype].snapshot_cb != NULL);
+		Assert(pgstat_kind_infos[kind].snapshot_cb != NULL);
 
-		stats_snapshot.global_valid[stattype] = false;
+		stats_snapshot.global_valid[kind] = false;
 
-		pgstat_types[stattype].snapshot_cb();
+		pgstat_kind_infos[kind].snapshot_cb();
 
-		Assert(!stats_snapshot.global_valid[stattype]);
-		stats_snapshot.global_valid[stattype] = true;
+		Assert(!stats_snapshot.global_valid[kind]);
+		stats_snapshot.global_valid[kind] = true;
 	}
 
 	stats_snapshot.mode = STATS_FETCH_CONSISTENCY_SNAPSHOT;
 }
 
 void*
-pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
+pgstat_fetch_entry(PgStatKind type, Oid dboid, Oid objoid)
 {
 	PgStatHashKey key;
 	PgStatSharedRef *shared_ref;
@@ -2345,10 +2346,10 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
 
 	pgstat_fetch_prepare();
 
-	AssertArg(type <= PGSTAT_TYPE_LAST);
-	AssertArg(!pgstat_types[type].is_global);
+	AssertArg(type <= PGSTAT_KIND_LAST);
+	AssertArg(!pgstat_kind_infos[type].is_global);
 
-	key.type = type;
+	key.kind = type;
 	key.dboid = dboid;
 	key.objoid = objoid;
 
@@ -2390,8 +2391,8 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
 	 * stats in calling context?
 	 */
 
-	data_size = pgstat_types[type].shared_data_len;
-	data_offset = pgstat_types[type].shared_data_off;
+	data_size = pgstat_kind_infos[type].shared_data_len;
+	data_offset = pgstat_kind_infos[type].shared_data_off;
 	stats_data = MemoryContextAlloc(pgStatSnapshotContext, data_size);
 	memcpy(stats_data, ((char*) shared_ref->shared_stats) + data_offset, data_size);
 
@@ -2421,27 +2422,27 @@ pgstat_get_stat_timestamp(void)
 
 
 void
-pgstat_snapshot_global(PgStatTypes stattype)
+pgstat_snapshot_global(PgStatKind kind)
 {
-	AssertArg(stattype <= PGSTAT_TYPE_LAST);
-	AssertArg(pgstat_types[stattype].is_global);
+	AssertArg(kind <= PGSTAT_KIND_LAST);
+	AssertArg(pgstat_kind_infos[kind].is_global);
 
 	if (pgstat_fetch_consistency == STATS_FETCH_CONSISTENCY_SNAPSHOT)
 	{
 		if (stats_snapshot.mode != STATS_FETCH_CONSISTENCY_SNAPSHOT)
 			pgstat_fetch_snapshot_build();
 
-		Assert(stats_snapshot.global_valid[stattype] == true);
+		Assert(stats_snapshot.global_valid[kind] == true);
 	}
 	else if (pgstat_fetch_consistency == STATS_FETCH_CONSISTENCY_NONE ||
-		!stats_snapshot.global_valid[stattype])
+		!stats_snapshot.global_valid[kind])
 	{
 		if (pgstat_fetch_consistency == STATS_FETCH_CONSISTENCY_NONE)
-			stats_snapshot.global_valid[stattype] = false;
+			stats_snapshot.global_valid[kind] = false;
 
-		pgstat_types[stattype].snapshot_cb();
+		pgstat_kind_infos[kind].snapshot_cb();
 
-		Assert(!stats_snapshot.global_valid[stattype]);
-		stats_snapshot.global_valid[stattype] = true;
+		Assert(!stats_snapshot.global_valid[kind]);
+		stats_snapshot.global_valid[kind] = true;
 	}
 }

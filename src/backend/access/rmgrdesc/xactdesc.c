@@ -302,7 +302,7 @@ xact_desc_dropped_stats(StringInfo buf, int ndropped,
 		for (i = 0; i < ndropped; i++)
 		{
 			appendStringInfo(buf, " %u/%u/%u",
-							 dropped_stats[i].type,
+							 dropped_stats[i].kind,
 							 dropped_stats[i].dboid,
 							 dropped_stats[i].objoid);
 		}

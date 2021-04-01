@@ -250,9 +250,14 @@ typedef struct xl_xact_relfilenodes
 } xl_xact_relfilenodes;
 #define MinSizeOfXactRelfilenodes offsetof(xl_xact_relfilenodes, xnodes)
 
+/*
+ * This is defined here as we don't want to include pgstat.h - unfortunately
+ * pgstat.h (indirectly) includes atomics.h, which we do not want to expose to
+ * frontend code (xact.h is included from frontend code).
+ */
 typedef struct PgStat_DroppedStatsItem
 {
-	Oid type;
+	uint32 kind;
 	Oid dboid;
 	Oid objoid;
 } PgStat_DroppedStatsItem;

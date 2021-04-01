@@ -43,18 +43,18 @@ static void pgstat_truncdrop_save_counters(PgStat_TableXactStatus *trans, bool i
 
 
 /*
- * Define the different kinds of statistics. If reasonably possible handling
+ * Define the different kinds of statistics. If reasonably possible, handling
  * specific to one kind of stats should go through this abstraction, rather
  * than making pgstat.c aware.
  *
- * See comments for struct pgstat_type_info for details about the individual
+ * See comments for struct pgstat_kind_info for details about the individual
  * fields.
  */
-const pgstat_type_info pgstat_types[PGSTAT_TYPE_WAL + 1] = {
+const pgstat_kind_info pgstat_kind_infos[PGSTAT_KIND_WAL + 1] = {
 
 	/* stats types with a variable number of stats */
 
-	[PGSTAT_TYPE_DB] = {
+	[PGSTAT_KIND_DB] = {
 		.is_global = false,
 		/* so pg_stat_database entries can be seen in all databases */
 		.accessed_across_databases = true,
@@ -67,7 +67,7 @@ const pgstat_type_info pgstat_types[PGSTAT_TYPE_WAL + 1] = {
 		.flush_pending_cb = pgstat_flush_db,
 	},
 
-	[PGSTAT_TYPE_TABLE] = {
+	[PGSTAT_KIND_TABLE] = {
 		.is_global = false,
 		.shared_size = sizeof(PgStatShm_StatTabEntry),
 		.shared_data_off = offsetof(PgStatShm_StatTabEntry, stats),
@@ -77,7 +77,7 @@ const pgstat_type_info pgstat_types[PGSTAT_TYPE_WAL + 1] = {
 		.flush_pending_cb = pgstat_flush_table,
 	},
 
-	[PGSTAT_TYPE_FUNCTION] = {
+	[PGSTAT_KIND_FUNCTION] = {
 		.is_global = false,
 		.shared_size = sizeof(PgStatShm_StatFuncEntry),
 		.shared_data_off = offsetof(PgStatShm_StatFuncEntry, stats),
@@ -90,37 +90,37 @@ const pgstat_type_info pgstat_types[PGSTAT_TYPE_WAL + 1] = {
 
 	/* global stats */
 
-	[PGSTAT_TYPE_ARCHIVER] = {
+	[PGSTAT_KIND_ARCHIVER] = {
 		.is_global = true,
 
 		.snapshot_cb = pgstat_snapshot_archiver,
 	},
 
-	[PGSTAT_TYPE_BGWRITER] = {
+	[PGSTAT_KIND_BGWRITER] = {
 		.is_global = true,
 
 		.snapshot_cb = pgstat_snapshot_bgwriter,
 	},
 
-	[PGSTAT_TYPE_CHECKPOINTER] = {
+	[PGSTAT_KIND_CHECKPOINTER] = {
 		.is_global = true,
 
 		.snapshot_cb = pgstat_snapshot_checkpointer,
 	},
 
-	[PGSTAT_TYPE_REPLSLOT] = {
+	[PGSTAT_KIND_REPLSLOT] = {
 		.is_global = true,
 
 		.snapshot_cb = pgstat_snapshot_replslot,
 	},
 
-	[PGSTAT_TYPE_SLRU] = {
+	[PGSTAT_KIND_SLRU] = {
 		.is_global = true,
 
 		.snapshot_cb = pgstat_snapshot_slru,
 	},
 
-	[PGSTAT_TYPE_WAL] = {
+	[PGSTAT_KIND_WAL] = {
 		.is_global = true,
 
 		.snapshot_cb = pgstat_snapshot_wal,
@@ -203,7 +203,7 @@ pgstat_copy_relation_stats(Relation dst, Relation src)
 	if (!srcstats)
 		return;
 
-	dst_ref = pgstat_shared_ref_get(PGSTAT_TYPE_TABLE,
+	dst_ref = pgstat_shared_ref_get(PGSTAT_KIND_TABLE,
 									dst->rd_rel->relisshared ? InvalidOid : MyDatabaseId,
 									RelationGetRelid(dst),
 									true);
@@ -406,7 +406,7 @@ pgstat_drop_relation(Relation rel)
 	int			nest_level = GetCurrentTransactionNestLevel();
 	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
 
-	pgstat_schedule_drop(PGSTAT_TYPE_TABLE,
+	pgstat_schedule_drop(PGSTAT_KIND_TABLE,
 						 rel->rd_rel->relisshared ? InvalidOid : MyDatabaseId,
 						 RelationGetRelid(rel));
 
@@ -424,7 +424,7 @@ pgstat_drop_relation(Relation rel)
 void
 pgstat_drop_function(Oid proid)
 {
-	pgstat_schedule_drop(PGSTAT_TYPE_FUNCTION,
+	pgstat_schedule_drop(PGSTAT_KIND_FUNCTION,
 						 MyDatabaseId,
 						 proid);
 }
@@ -438,7 +438,7 @@ pgstat_pending_db_prepare(Oid dboid)
 {
 	PgStatSharedRef *shared_ref;
 
-	shared_ref = pgstat_pending_prepare(PGSTAT_TYPE_DB, dboid, InvalidOid);
+	shared_ref = pgstat_pending_prepare(PGSTAT_KIND_DB, dboid, InvalidOid);
 
 	return shared_ref->pending;
 
@@ -455,7 +455,7 @@ pgstat_pending_tab_prepare(Oid rel_id, bool isshared)
 {
 	PgStatSharedRef *shared_ref;
 
-	shared_ref = pgstat_pending_prepare(PGSTAT_TYPE_TABLE,
+	shared_ref = pgstat_pending_prepare(PGSTAT_KIND_TABLE,
 										isshared ? InvalidOid : MyDatabaseId,
 										rel_id);
 
@@ -489,7 +489,7 @@ pgstat_flush_table(PgStatSharedRef *shared_ref, bool nowait)
 	PgStatShm_StatTabEntry *shtabstats;	/* table entry of shared stats */
 	PgStat_StatDBEntry *ldbstats;	/* pending database entry */
 
-	Assert(shared_ref->shared_entry->key.type == PGSTAT_TYPE_TABLE);
+	Assert(shared_ref->shared_entry->key.kind == PGSTAT_KIND_TABLE);
 	lstats = (PgStat_TableStatus *) shared_ref->pending;
 	dboid = shared_ref->shared_entry->key.dboid;
 
@@ -567,7 +567,7 @@ pgstat_flush_function(PgStatSharedRef *shared_ref, bool nowait)
 	PgStat_BackendFunctionEntry *localent;	/* local stats entry */
 	PgStatShm_StatFuncEntry *shfuncent = NULL; /* shared stats entry */
 
-	Assert(shared_ref->shared_entry->key.type == PGSTAT_TYPE_FUNCTION);
+	Assert(shared_ref->shared_entry->key.kind == PGSTAT_KIND_FUNCTION);
 	localent = (PgStat_BackendFunctionEntry *) shared_ref->pending;
 
 	/* localent always has non-zero content */
@@ -825,7 +825,7 @@ pgstat_report_autovac(Oid dboid)
 	 * operation so it doesn't matter if we get blocked here a little.
 	 */
 	shared_ref =
-		pgstat_shared_ref_get(PGSTAT_TYPE_DB, dboid, InvalidOid, true);
+		pgstat_shared_ref_get(PGSTAT_KIND_DB, dboid, InvalidOid, true);
 
 	pgstat_shared_stat_lock(shared_ref, false);
 
@@ -866,7 +866,7 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 	 * reasons.
 	 */
 	shared_ref =
-		pgstat_shared_stat_locked(PGSTAT_TYPE_TABLE, dboid, tableoid, false);
+		pgstat_shared_stat_locked(PGSTAT_KIND_TABLE, dboid, tableoid, false);
 
 	shtabentry = (PgStatShm_StatTabEntry *) shared_ref->shared_stats;
 	shtabentry->stats.n_live_tuples = livetuples;
@@ -953,7 +953,7 @@ pgstat_report_analyze(Relation rel,
 	 * delayed analyze report. Update shared stats entry directly for the
 	 * above reasons.
 	 */
-	shared_ref = pgstat_shared_stat_locked(PGSTAT_TYPE_TABLE, dboid,
+	shared_ref = pgstat_shared_stat_locked(PGSTAT_KIND_TABLE, dboid,
 										   RelationGetRelid(rel),
 										   false);
 	/* can't get dropped while accessed */
@@ -1072,7 +1072,7 @@ pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount)
 	 * relations).
 	 */
 	shared_ref =
-		pgstat_shared_stat_locked(PGSTAT_TYPE_DB, dboid, InvalidOid, false);
+		pgstat_shared_stat_locked(PGSTAT_KIND_DB, dboid, InvalidOid, false);
 
 	sharedent = (PgStatShm_StatDBEntry *) shared_ref->shared_stats;
 	sharedent->stats.n_checksum_failures += failurecount;
@@ -1220,7 +1220,7 @@ pgstat_init_function_usage(FunctionCallInfo fcinfo,
 		return;
 	}
 
-	shared_ref = pgstat_pending_prepare(PGSTAT_TYPE_FUNCTION,
+	shared_ref = pgstat_pending_prepare(PGSTAT_KIND_FUNCTION,
 											 MyDatabaseId,
 											 fcinfo->flinfo->fn_oid);
 	pending = shared_ref->pending;
@@ -1249,7 +1249,7 @@ find_funcstat_entry(Oid func_id)
 {
 	PgStatSharedRef *shared_ref;
 
-	shared_ref = pgstat_pending_fetch(PGSTAT_TYPE_FUNCTION, MyDatabaseId, func_id);
+	shared_ref = pgstat_pending_fetch(PGSTAT_KIND_FUNCTION, MyDatabaseId, func_id);
 
 	if (shared_ref)
 		return shared_ref->pending;
@@ -1397,9 +1397,9 @@ find_tabstat_entry(Oid rel_id)
 {
 	PgStatSharedRef *shared_ref;
 
-	shared_ref = pgstat_pending_fetch(PGSTAT_TYPE_TABLE, MyDatabaseId, rel_id);
+	shared_ref = pgstat_pending_fetch(PGSTAT_KIND_TABLE, MyDatabaseId, rel_id);
 	if (!shared_ref)
-		shared_ref = pgstat_pending_fetch(PGSTAT_TYPE_TABLE, InvalidOid, rel_id);
+		shared_ref = pgstat_pending_fetch(PGSTAT_KIND_TABLE, InvalidOid, rel_id);
 
 	if (shared_ref)
 		return shared_ref->pending;
@@ -2119,7 +2119,7 @@ PgStat_StatDBEntry *
 pgstat_fetch_stat_dbentry(Oid dboid)
 {
 	return (PgStat_StatDBEntry *)
-		pgstat_fetch_entry(PGSTAT_TYPE_DB, dboid, InvalidOid);
+		pgstat_fetch_entry(PGSTAT_KIND_DB, dboid, InvalidOid);
 }
 
 /* ----------
@@ -2162,7 +2162,7 @@ pgstat_fetch_stat_tabentry_extended(bool shared, Oid reloid)
 	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
 
 	return (PgStat_StatTabEntry *)
-		pgstat_fetch_entry(PGSTAT_TYPE_TABLE, dboid, reloid);
+		pgstat_fetch_entry(PGSTAT_KIND_TABLE, dboid, reloid);
 }
 
 
@@ -2180,7 +2180,7 @@ PgStat_StatFuncEntry *
 pgstat_fetch_stat_funcentry(Oid func_id)
 {
 	return (PgStat_StatFuncEntry *)
-		pgstat_fetch_entry(PGSTAT_TYPE_FUNCTION, MyDatabaseId, func_id);
+		pgstat_fetch_entry(PGSTAT_KIND_FUNCTION, MyDatabaseId, func_id);
 }
 
 
@@ -2324,7 +2324,7 @@ pgstat_snapshot_replslot(void)
 PgStat_ArchiverStats *
 pgstat_fetch_stat_archiver(void)
 {
-	pgstat_snapshot_global(PGSTAT_TYPE_ARCHIVER);
+	pgstat_snapshot_global(PGSTAT_KIND_ARCHIVER);
 
 	return &stats_snapshot.archiver;
 }
@@ -2332,7 +2332,7 @@ pgstat_fetch_stat_archiver(void)
 PgStat_BgWriterStats *
 pgstat_fetch_stat_bgwriter(void)
 {
-	pgstat_snapshot_global(PGSTAT_TYPE_BGWRITER);
+	pgstat_snapshot_global(PGSTAT_KIND_BGWRITER);
 
 	return &stats_snapshot.bgwriter;
 }
@@ -2341,7 +2341,7 @@ pgstat_fetch_stat_bgwriter(void)
 PgStat_CheckPointerStats *
 pgstat_fetch_stat_checkpointer(void)
 {
-	pgstat_snapshot_global(PGSTAT_TYPE_CHECKPOINTER);
+	pgstat_snapshot_global(PGSTAT_KIND_CHECKPOINTER);
 
 	return &stats_snapshot.checkpointer;
 }
@@ -2349,7 +2349,7 @@ pgstat_fetch_stat_checkpointer(void)
 PgStat_WalStats *
 pgstat_fetch_stat_wal(void)
 {
-	pgstat_snapshot_global(PGSTAT_TYPE_WAL);
+	pgstat_snapshot_global(PGSTAT_KIND_WAL);
 
 	return &stats_snapshot.wal;
 }
@@ -2357,7 +2357,7 @@ pgstat_fetch_stat_wal(void)
 PgStat_SLRUStats *
 pgstat_fetch_slru(void)
 {
-	pgstat_snapshot_global(PGSTAT_TYPE_SLRU);
+	pgstat_snapshot_global(PGSTAT_KIND_SLRU);
 
 	return stats_snapshot.slru;
 }
@@ -2365,7 +2365,7 @@ pgstat_fetch_slru(void)
 PgStat_ReplSlotStats *
 pgstat_fetch_replslot(int *nslots_p)
 {
-	pgstat_snapshot_global(PGSTAT_TYPE_REPLSLOT);
+	pgstat_snapshot_global(PGSTAT_KIND_REPLSLOT);
 
 	*nslots_p = stats_snapshot.replslot_count;
 	return stats_snapshot.replslot;

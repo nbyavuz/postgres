@@ -24,7 +24,7 @@
  * Per-object statistics are stored in the "shared stats" hashtable. That
  * table's entries (PgStatShmHashEntry) contain a pointer to the actual stats
  * data for the object (the size of the stats data varies depending on the
- * type of stats). The table is keyed by PgStatHashKey.
+ * kind of stats). The table is keyed by PgStatHashKey.
  *
  * Once a backend has a reference to a shared stats entry, it increments the
  * entry's refcount. Even after stats data is dropped (e.g. due to a DROP
@@ -40,33 +40,33 @@
  * is allocated to contain a working space for as-of-yet-unapplied stats
  * updates. Once the stats are flushed, PgStatSharedRef->pending is freed.
  *
- * Each stat entry type in the shared hash table has a fixed member
+ * Each stat kind in the shared hash table has a fixed member
  * PgStat_HashEntryHeader as the first element.
  */
 
 /* The types of statistics entries */
-typedef enum PgStatTypes
+typedef enum PgStatKind
 {
 	/* stats with a variable number of entries */
-	PGSTAT_TYPE_DB,				/* database-wide statistics */
-	PGSTAT_TYPE_TABLE,			/* per-table statistics */
-	PGSTAT_TYPE_FUNCTION,		/* per-function statistics */
+	PGSTAT_KIND_DB,				/* database-wide statistics */
+	PGSTAT_KIND_TABLE,			/* per-table statistics */
+	PGSTAT_KIND_FUNCTION,		/* per-function statistics */
 
 	/* stats with a constant number of entries */
-	PGSTAT_TYPE_ARCHIVER,
-	PGSTAT_TYPE_BGWRITER,
-	PGSTAT_TYPE_CHECKPOINTER,
-	PGSTAT_TYPE_REPLSLOT,
-	PGSTAT_TYPE_SLRU,
-	PGSTAT_TYPE_WAL,
-} PgStatTypes;
-#define PGSTAT_TYPE_LAST PGSTAT_TYPE_WAL
+	PGSTAT_KIND_ARCHIVER,
+	PGSTAT_KIND_BGWRITER,
+	PGSTAT_KIND_CHECKPOINTER,
+	PGSTAT_KIND_REPLSLOT,
+	PGSTAT_KIND_SLRU,
+	PGSTAT_KIND_WAL,
+} PgStatKind;
+#define PGSTAT_KIND_LAST PGSTAT_KIND_WAL
 
 
 /* struct for shared statistics hash entry key. */
 typedef struct PgStatHashKey
 {
-	PgStatTypes type;			/* statistics entry type */
+	PgStatKind	kind;			/* statistics entry kind */
 	Oid			dboid;		/* database ID. InvalidOid for shared objects. */
 	Oid			objoid;		/* object ID, either table or function. */
 } PgStatHashKey;
@@ -156,15 +156,15 @@ typedef struct PgStat_SubXactStatus
 
 
 /*
- * Metadata for a specific type of statistics.
+ * Metadata for a specific kinds of statistics.
  */
-typedef void (PgStatTypeSnapshotCB)(void);
-typedef bool (PgStatTypeFlushCB)(PgStatSharedRef *sr, bool nowait);
-typedef struct pgstat_type_info
+typedef void (PgStatKindSnapshotCB)(void);
+typedef bool (PgStatKindFlushCB)(PgStatSharedRef *sr, bool nowait);
+typedef struct pgstat_kind_info
 {
 	/*
-	 * Is the stats type a global one (of which a precise number exists) or
-	 * not (e.g. tables).
+	 * Is this kind of stats global (i.e. a precise number exists)
+	 * or not (e.g. tables).
 	 */
 	bool is_global : 1;
 
@@ -189,24 +189,23 @@ typedef struct pgstat_type_info
 	uint32 shared_data_len;
 
 	/*
-	 * The size of the pending data for this type. E.g. how large
+	 * The size of the pending data for this kind. E.g. how large
 	 * PgStatPendingEntry->pending is. Used for allocations.
 	 *
-	 * -1 signal that an entry of this type should never have a pending
-     * entry.
+	 * -1 signal that an entry of this kind should never have a pending entry.
 	 */
 	uint32 pending_size;
 
 	/*
 	 * For global statistics: Fetch a snapshot of appropriate global stats.
 	 */
-	PgStatTypeSnapshotCB *snapshot_cb;
+	PgStatKindSnapshotCB *snapshot_cb;
 
 	/*
 	 * For variable number stats: flush pending stats.
 	 */
-	PgStatTypeFlushCB *flush_pending_cb;
-} pgstat_type_info;
+	PgStatKindFlushCB *flush_pending_cb;
+} pgstat_kind_info;
 
 
 /*
@@ -236,7 +235,7 @@ typedef struct StatsShmemStruct
 
 	/*
 	 * Stats for objects for which a variable number exists are kept in this
-	 * shared hash table. See comment above PgStatTypes for details.
+	 * shared hash table. See comment above PgStatKind for details.
 	 */
 	dshash_table_handle hash_handle;	/* shared dbstat hash */
 
@@ -299,7 +298,7 @@ typedef struct StatsShmemStruct
 
 
 /* ----------
- * Types and definitions for individual statistic types
+ * Types and definitions for different kinds of stats
  * ----------
  */
 
@@ -349,7 +348,7 @@ typedef struct PgStatSnapshot
 {
 	PgStatsFetchConsistency mode;
 
-	bool global_valid[PGSTAT_TYPE_LAST + 1];
+	bool global_valid[PGSTAT_KIND_LAST + 1];
 
 	PgStat_ArchiverStats archiver;
 
@@ -372,27 +371,27 @@ typedef struct PgStatSnapshot
 extern PgStat_SubXactStatus *get_tabstat_stack_level(int nest_level);
 extern void add_tabstat_xact_level(PgStat_TableStatus *pgstat_info, int nest_level);
 
-extern PgStatSharedRef *pgstat_shared_ref_get(PgStatTypes type,
+extern PgStatSharedRef *pgstat_shared_ref_get(PgStatKind kind,
 											  Oid dboid, Oid objoid,
 											  bool create);
 extern bool pgstat_shared_stat_lock(PgStatSharedRef *shared_ref, bool nowait);
 extern void pgstat_shared_stat_unlock(PgStatSharedRef *shared_ref);
-extern PgStatSharedRef *pgstat_shared_stat_locked(PgStatTypes type,
+extern PgStatSharedRef *pgstat_shared_stat_locked(PgStatKind kind,
 												  Oid dboid,
 												  Oid objoid,
 												  bool nowait);
 
-extern PgStatSharedRef *pgstat_pending_prepare(PgStatTypes type, Oid dboid, Oid objoid);
-extern PgStatSharedRef *pgstat_pending_fetch(PgStatTypes type, Oid dboid, Oid objoid);
+extern PgStatSharedRef *pgstat_pending_prepare(PgStatKind kind, Oid dboid, Oid objoid);
+extern PgStatSharedRef *pgstat_pending_fetch(PgStatKind kind, Oid dboid, Oid objoid);
 
-extern void* pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid);
+extern void* pgstat_fetch_entry(PgStatKind kind, Oid dboid, Oid objoid);
 
-extern void pgstat_schedule_drop(PgStatTypes stattype, Oid dboid, Oid objoid);
+extern void pgstat_schedule_drop(PgStatKind kind, Oid dboid, Oid objoid);
 
 static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
 											uint32 *cc);
 
-extern void pgstat_snapshot_global(PgStatTypes stattype);
+extern void pgstat_snapshot_global(PgStatKind kind);
 
 extern bool walstats_pending(void);
 
@@ -413,7 +412,7 @@ extern void AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
 extern void PostPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
 
 
-extern const pgstat_type_info pgstat_types[PGSTAT_TYPE_WAL + 1];
+extern const pgstat_kind_info pgstat_kind_infos[PGSTAT_KIND_WAL + 1];
 extern StatsShmemStruct *StatsShmem;
 
 extern WalUsage prevWalUsage;
