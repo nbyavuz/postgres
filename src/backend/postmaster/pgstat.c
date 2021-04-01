@@ -664,7 +664,7 @@ pgstat_drop_database(Oid dboid)
 	Assert(pgStatSharedHash != NULL);
 
 	/*
-	 * FIXME: need to do this using the transactional mechanism. Not such much
+	 * FIXME: need to do this using the transactional mechanism. Not so much
 	 * because of rollbacks, but so the stats are removed on a standby
 	 * too. Maybe a dedicated drop type?
 	 */

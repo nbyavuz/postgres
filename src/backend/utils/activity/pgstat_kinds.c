@@ -260,8 +260,9 @@ pgstat_reset_shared_counters(const char *target)
 		case RESET_WAL:
 
 			/*
-			 * Differntly from the two above, WAL statistics has many writer
-			 * processes and protected by wal_stats_lock.
+			 * Differently from the two cases above, WAL statistics has many
+			 * writer processes with the shared stats protected by
+			 * StatsShmem->wal.lock.
 			 */
 			LWLockAcquire(&StatsShmem->wal.lock, LW_EXCLUSIVE);
 			MemSet(&StatsShmem->wal.stats, 0, sizeof(PgStat_WalStats));
