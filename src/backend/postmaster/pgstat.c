@@ -4878,11 +4878,8 @@ pgstat_count_slru_truncate(int slru_idx)
  */
 
 static void
-pgstat_snapshot_build(void)
+pgstat_fetch_prepare(void)
 {
-	dshash_seq_status hstat;
-	PgStatShmHashEntry *p;
-
 	if (stats_snapshot.stats == NULL)
 	{
 		pgstat_setup_memcxt();
@@ -4891,9 +4888,21 @@ pgstat_snapshot_build(void)
 													  PGSTAT_TABLE_HASH_SIZE,
 													  NULL);
 	}
-	else
-		Assert(stats_snapshot.stats->members == 0);
+}
 
+static void
+pgstat_fetch_snapshot_build(void)
+{
+	dshash_seq_status hstat;
+	PgStatShmHashEntry *p;
+
+	pgstat_fetch_prepare();
+
+	Assert(stats_snapshot.stats->members == 0);
+
+	/*
+	 * Build snapshot all variable stats.
+	 */
 	dshash_seq_init(&hstat, pgStatSharedHash, false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
@@ -4929,6 +4938,9 @@ pgstat_snapshot_build(void)
 	}
 	dshash_seq_term(&hstat);
 
+	/*
+	 * Build snapshot of all global stats.
+	 */
 	for (int stattype = 0; stattype < PGSTAT_TYPE_LAST; stattype++)
 	{
 		if (!pgstat_types[stattype].is_global)
@@ -4962,6 +4974,8 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
 	/* should be called from backends */
 	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
 
+	pgstat_fetch_prepare();
+
 	AssertArg(type <= PGSTAT_TYPE_LAST);
 	AssertArg(!pgstat_types[type].is_global);
 
@@ -4969,19 +4983,10 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
 	key.dboid = dboid;
 	key.objoid = objoid;
 
-	if (stats_snapshot.stats == NULL)
-	{
-		pgstat_setup_memcxt();
-
-		stats_snapshot.stats = pgstat_snapshot_create(pgStatSnapshotContext,
-													  PGSTAT_TABLE_HASH_SIZE,
-													  NULL);
-	}
-
 	/* if we need to build a full snapshot, do so */
 	if (stats_snapshot.mode != STATS_FETCH_CONSISTENCY_SNAPSHOT &&
 		pgstat_fetch_consistency == STATS_FETCH_CONSISTENCY_SNAPSHOT)
-		pgstat_snapshot_build();
+		pgstat_fetch_snapshot_build();
 
 	/* if caching is desired, look up in cache */
 	if (pgstat_fetch_consistency > STATS_FETCH_CONSISTENCY_NONE)
@@ -5010,6 +5015,11 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
 		/* FIXME: need to remember that STATS_FETCH_CONSISTENCY_CACHE */
 		return NULL;
 	}
+
+	/*
+	 * FIXME: For STATS_FETCH_CONSISTENCY_NONE, should we instead allocate
+	 * stats in calling context?
+	 */
 
 	data_size = pgstat_types[type].shared_data_len;
 	data_offset = pgstat_types[type].shared_data_off;
@@ -5128,7 +5138,7 @@ pgstat_snapshot_global(PgStatTypes stattype)
 	if (pgstat_fetch_consistency == STATS_FETCH_CONSISTENCY_SNAPSHOT)
 	{
 		if (stats_snapshot.mode != STATS_FETCH_CONSISTENCY_SNAPSHOT)
-			pgstat_snapshot_build();
+			pgstat_fetch_snapshot_build();
 
 		Assert(stats_snapshot.global_valid[stattype] == true);
 	}
