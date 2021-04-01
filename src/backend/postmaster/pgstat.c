@@ -3451,10 +3451,6 @@ pgstat_report_autovac(Oid dboid)
 	Assert(StatsDSA != NULL);
 	Assert(IsUnderPostmaster);
 
-	/* FIXME: this didn't use to exist? Why? */
-	if (!pgstat_track_counts)
-		return;
-
 	/*
 	 * End-of-vacuum is reported instantly. Report the start the same way for
 	 * consistency. Vacuum doesn't run frequently and is a long-lasting
