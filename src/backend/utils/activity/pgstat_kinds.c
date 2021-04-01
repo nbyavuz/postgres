@@ -32,6 +32,10 @@ static void pgstat_snapshot_replslot(void);
 static void pgstat_snapshot_slru(void);
 static void pgstat_snapshot_wal(void);
 
+static bool pgstat_flush_table(PgStatSharedRef *shared_ref, bool nowait);
+static bool pgstat_flush_function(PgStatSharedRef *shared_ref, bool nowait);
+static bool pgstat_flush_db(PgStatSharedRef *shared_ref, bool nowait);
+
 static PgStat_StatDBEntry *pgstat_pending_db_prepare(Oid dboid);
 static PgStat_TableStatus *pgstat_pending_tab_prepare(Oid rel_id, bool isshared);
 
@@ -52,10 +56,15 @@ const pgstat_type_info pgstat_types[PGSTAT_TYPE_WAL + 1] = {
 
 	[PGSTAT_TYPE_DB] = {
 		.is_global = false,
+		/* so pg_stat_database entries can be seen in all databases */
+		.accessed_across_databases = true,
+
 		.shared_size = sizeof(PgStatShm_StatDBEntry),
 		.shared_data_off = offsetof(PgStatShm_StatDBEntry, stats),
 		.shared_data_len = sizeof(((PgStatShm_StatDBEntry*) 0)->stats),
 		.pending_size = sizeof(PgStat_StatDBEntry),
+
+		.flush_pending_cb = pgstat_flush_db,
 	},
 
 	[PGSTAT_TYPE_TABLE] = {
@@ -64,6 +73,8 @@ const pgstat_type_info pgstat_types[PGSTAT_TYPE_WAL + 1] = {
 		.shared_data_off = offsetof(PgStatShm_StatTabEntry, stats),
 		.shared_data_len = sizeof(((PgStatShm_StatTabEntry*) 0)->stats),
 		.pending_size = sizeof(PgStat_TableStatus),
+
+		.flush_pending_cb = pgstat_flush_table,
 	},
 
 	[PGSTAT_TYPE_FUNCTION] = {
@@ -72,6 +83,8 @@ const pgstat_type_info pgstat_types[PGSTAT_TYPE_WAL + 1] = {
 		.shared_data_off = offsetof(PgStatShm_StatFuncEntry, stats),
 		.shared_data_len = sizeof(((PgStatShm_StatFuncEntry*) 0)->stats),
 		.pending_size = sizeof(PgStat_BackendFunctionEntry),
+
+		.flush_pending_cb = pgstat_flush_function,
 	},
 
 
@@ -79,31 +92,37 @@ const pgstat_type_info pgstat_types[PGSTAT_TYPE_WAL + 1] = {
 
 	[PGSTAT_TYPE_ARCHIVER] = {
 		.is_global = true,
+
 		.snapshot_cb = pgstat_snapshot_archiver,
 	},
 
 	[PGSTAT_TYPE_BGWRITER] = {
 		.is_global = true,
+
 		.snapshot_cb = pgstat_snapshot_bgwriter,
 	},
 
 	[PGSTAT_TYPE_CHECKPOINTER] = {
 		.is_global = true,
+
 		.snapshot_cb = pgstat_snapshot_checkpointer,
 	},
 
 	[PGSTAT_TYPE_REPLSLOT] = {
 		.is_global = true,
+
 		.snapshot_cb = pgstat_snapshot_replslot,
 	},
 
 	[PGSTAT_TYPE_SLRU] = {
 		.is_global = true,
+
 		.snapshot_cb = pgstat_snapshot_slru,
 	},
 
 	[PGSTAT_TYPE_WAL] = {
 		.is_global = true,
+
 		.snapshot_cb = pgstat_snapshot_wal,
 	},
 
@@ -461,7 +480,7 @@ pgstat_pending_tab_prepare(Oid rel_id, bool isshared)
  *
  * Returns true if the entry is successfully flushed out.
  */
-bool
+static bool
 pgstat_flush_table(PgStatSharedRef *shared_ref, bool nowait)
 {
 	static const PgStat_TableCounts all_zeroes;
@@ -542,7 +561,7 @@ pgstat_flush_table(PgStatSharedRef *shared_ref, bool nowait)
  *
  * Returns true if the entry is successfully flushed out.
  */
-bool
+static bool
 pgstat_flush_function(PgStatSharedRef *shared_ref, bool nowait)
 {
 	PgStat_BackendFunctionEntry *localent;	/* local stats entry */
@@ -577,7 +596,7 @@ pgstat_flush_function(PgStatSharedRef *shared_ref, bool nowait)
  *
  * Returns true if the entry is successfully flushed out.
  */
-bool
+static bool
 pgstat_flush_db(PgStatSharedRef *shared_ref, bool nowait)
 {
 	PgStatShm_StatDBEntry *sharedent;

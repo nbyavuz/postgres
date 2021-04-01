@@ -159,13 +159,20 @@ typedef struct PgStat_SubXactStatus
  * Metadata for a specific type of statistics.
  */
 typedef void (PgStatTypeSnapshotCB)(void);
+typedef bool (PgStatTypeFlushCB)(PgStatSharedRef *sr, bool nowait);
 typedef struct pgstat_type_info
 {
 	/*
 	 * Is the stats type a global one (of which a precise number exists) or
 	 * not (e.g. tables).
 	 */
-	bool is_global;
+	bool is_global : 1;
+
+	/*
+	 * Can stats of this kind be accessed from another database? Determines
+	 * whether a stats object gets included in stats snapshots.
+	 */
+	bool accessed_across_databases : 1;
 
 	/*
 	 * The size of an entry in the shared stats hash table (pointed to by
@@ -194,6 +201,11 @@ typedef struct pgstat_type_info
 	 * For global statistics: Fetch a snapshot of appropriate global stats.
 	 */
 	PgStatTypeSnapshotCB *snapshot_cb;
+
+	/*
+	 * For variable number stats: flush pending stats.
+	 */
+	PgStatTypeFlushCB *flush_pending_cb;
 } pgstat_type_info;
 
 
@@ -381,11 +393,6 @@ static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
 											uint32 *cc);
 
 extern void pgstat_snapshot_global(PgStatTypes stattype);
-
-
-extern bool pgstat_flush_table(PgStatSharedRef *shared_ref, bool nowait);
-extern bool pgstat_flush_function(PgStatSharedRef *shared_ref, bool nowait);
-extern bool pgstat_flush_db(PgStatSharedRef *shared_ref, bool nowait);
 
 extern bool walstats_pending(void);
 

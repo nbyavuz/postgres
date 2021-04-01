@@ -1999,25 +1999,21 @@ pgstat_flush_object_stats(bool nowait)
 
 	while (cur)
 	{
-		PgStatSharedRef *shared_ref = dlist_container(PgStatSharedRef, pending_node, cur);
-		bool		remove = false;
+		PgStatSharedRef *shared_ref
+			= dlist_container(PgStatSharedRef, pending_node, cur);
+		PgStatHashKey key;
+		bool		remove;
 		dlist_node *next;
 
-		switch (shared_ref->shared_entry->key.type)
-		{
-			case PGSTAT_TYPE_TABLE:
-				remove = pgstat_flush_table(shared_ref, nowait);
-				break;
-			case PGSTAT_TYPE_FUNCTION:
-				remove = pgstat_flush_function(shared_ref, nowait);
-				break;
-			case PGSTAT_TYPE_DB:
-				remove = pgstat_flush_db(shared_ref, nowait);
-				break;
-			default:
-				elog(ERROR, "unexpected");
-				break;
-		}
+		key = shared_ref->shared_entry->key;
+
+		Assert(!pgstat_types[key.type].is_global);
+		Assert(pgstat_types[key.type].flush_pending_cb != NULL);
+
+		/* flush the stats, if possible */
+		remove = pgstat_types[key.type].flush_pending_cb(shared_ref, nowait);
+
+		Assert(remove || nowait);
 
 		/* determine next entry, before deleting the pending entry */
 		if (dlist_has_next(&pgStatPending, cur))
@@ -2281,13 +2277,15 @@ pgstat_fetch_snapshot_build(void)
 		PgStatShm_StatEntryHeader *stats_data;
 
 		/*
-		 * Most stats in other databases cannot be accessed, so we don't need
-		 * to snapshot them. But database stats for other databases are
-		 * accessible via pg_stat_database.
+		 * Check if the stats object should be included in the
+		 * snapshot. Unless the stats kind can be accessed from all databases
+		 * (e.g. database stats themselves), we only include stats for the
+		 * current database or objects not associated with a database
+		 * (e.g. shared relations).
 		 */
 		if (p->key.dboid != MyDatabaseId &&
 			p->key.dboid != InvalidOid &&
-			p->key.type != PGSTAT_TYPE_DB)
+			!pgstat_types[p->key.type].accessed_across_databases)
 			continue;
 
 		if (p->dropped)
