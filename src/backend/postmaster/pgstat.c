@@ -95,8 +95,8 @@
  * released.
  *
  * These refcounts, in combination with a backend local hashtable
- * (pgStatShmLookupCache, with entries pointing to PgStatSharedRef) in front
- * of the shared hash table, mean that most stats work can happen without
+ * (pgStatSharedRefHash, with entries pointing to PgStatSharedRef) in front of
+ * the shared hash table, mean that most stats work can happen without
  * touching the shared hash table, reducing contention.
  *
  * Once there are pending stats updates for a table PgStatSharedRef->pending
@@ -185,9 +185,11 @@ typedef struct PgStatShm_StatEntryHeader
 typedef struct PgStatSharedRef
 {
 	/*
+	 * Pointers to both the hash table entry pgStatSharedHash, and the stats
+	 * (as a local pointer, to avoid dsa_get_address()).
 	 */
-	PgStatShm_StatEntryHeader *shared_stats;
 	PgStatShmHashEntry *shared_entry;
+	PgStatShm_StatEntryHeader *shared_stats;
 
 	dlist_node	pending_node;	/* membership in pgStatPending list */
 	void	   *pending;		/* the pending data itself */
