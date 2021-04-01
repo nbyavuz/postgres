@@ -521,8 +521,8 @@ static PgStatShm_StatEntryHeader *pgstat_shared_stat_entry_init(PgStatTypes stat
 																PgStatShmHashEntry *shhashent,
 																int init_refcount);
 static PgStatSharedRef *pgstat_shared_ref_get(PgStatTypes type,
-											   Oid dboid, Oid objoid,
-											   bool create);
+											  Oid dboid, Oid objoid,
+											  bool create);
 static void pgstat_shared_ref_release(PgStatHashKey key, PgStatSharedRef *shared_ref);
 static PgStatSharedRef *pgstat_shared_stat_locked(PgStatTypes type,
 												  Oid dboid,
@@ -1736,7 +1736,7 @@ pgstat_reset_single_counter(Oid objoid, PgStat_Single_Reset_Type type)
 
 	db_ref = pgstat_shared_ref_get(PGSTAT_TYPE_DB, MyDatabaseId, InvalidOid,
 								   false);
-	if (!db_ref || !db_ref->shared_stats)
+	if (db_ref == NULL)
 		return;
 
 	dbentry = (PgStatShm_StatDBEntry *) db_ref->shared_stats;
@@ -2403,7 +2403,7 @@ pgstat_shared_ref_get_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 
 		found = false;
 	}
-	else if (!cache_entry->shared_ref->shared_stats)
+	else if (cache_entry->shared_ref->shared_stats == NULL)
 	{
 		Assert(cache_entry->shared_ref->shared_entry == NULL);
 		found = false;
@@ -2450,11 +2450,7 @@ pgstat_shared_ref_get(PgStatTypes type, Oid dboid, Oid objoid, bool create)
 	 * match here we can avoid taking locks / contention.
 	 */
 	if (pgstat_shared_ref_get_cached(key, &shared_ref))
-	{
-		Assert(shared_ref->shared_stats);
-
 		return shared_ref;
-	}
 
 	Assert(shared_ref != NULL);
 
@@ -2498,6 +2494,10 @@ pgstat_shared_ref_get(PgStatTypes type, Oid dboid, Oid objoid, bool create)
 		 * ref again? Probably not worth it, it is likely to soon be created.
 		 */
 		shfound = false;
+
+		pgstat_shared_ref_release(key, shared_ref);
+
+		return NULL;
 	}
 
 	if (shfound)
@@ -2603,10 +2603,6 @@ pgstat_shared_stat_locked(PgStatTypes type, Oid dboid, Oid objoid, bool nowait)
 
 	/* find shared table stats entry corresponding to the local entry */
 	shared_ref = pgstat_shared_ref_get(type, dboid, objoid, true);
-
-	/* skip if dshash failed to acquire lock */
-	if (shared_ref == NULL)
-		return NULL;
 
 	/* lock the shared entry to protect the content, skip if failed */
 	if (!pgstat_shared_stat_lock(shared_ref, nowait))
@@ -5050,7 +5046,7 @@ pgstat_fetch_entry(PgStatTypes type, Oid dboid, Oid objoid)
 
 	shared_ref = pgstat_shared_ref_get(type, dboid, objoid, false);
 
-	if (shared_ref->shared_stats == NULL || shared_ref->shared_entry->dropped)
+	if (shared_ref == NULL || shared_ref->shared_entry->dropped)
 	{
 		/* FIXME: need to remember that STATS_FETCH_CONSISTENCY_CACHE */
 		return NULL;
