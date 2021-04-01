@@ -1,12 +1,13 @@
 /* ----------
  * pgstat.c
+ *	  Activity statistics infrastructure.
  *
- *	Activity Statistics facility.
+ * Provides the infrastructure to collect and access activity statistics,
+ * e.g. per-table access statistics, of all backends in shared memory.
  *
- *  Collects activity statistics, e.g. per-table access statistics, of
- *  all backends in shared memory. The activity numbers are first stored
- *  locally in each process, then flushed to shared memory at commit
- *  time or by idle-timeout.
+ * For many times of statistics pending stats updates are first accumulated
+ * locally in each process, then later flushed to shared memory (just after
+ * commit, or by idle-timeout)
  *
  * To avoid congestion on the shared memory, shared stats is updated no more
  * often than once per PGSTAT_MIN_INTERVAL (10000ms). If some local numbers
@@ -14,13 +15,13 @@
  * PGSTAT_RETRY_MIN_INTERVAL (1000ms) then doubled at every retry. Finally we
  * force update after PGSTAT_MAX_INTERVAL (60000ms) since the first trial.
  *
- *  The first process that uses activity statistics facility creates the area
- *  then load the stored stats file if any, and the last process at shutdown
- *  writes the shared stats to the file then destroy the area before exit.
+ * NB: Code for individual kinds of statistics belongs into pgstat_kinds.c
+ * whenever possible, not here.
  *
- *	Copyright (c) 2001-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2021, PostgreSQL Global Development Group
  *
- *	src/backend/postmaster/pgstat.c
+ * IDENTIFICATION
+ *	  src/backend/postmaster/pgstat.c
  * ----------
  */
 #include "postgres.h"
@@ -42,6 +43,7 @@
 #include "utils/pgstat_internal.h"
 #include "utils/timestamp.h"
 
+
 /* ----------
  * Timer definitions.
  * ----------
@@ -54,6 +56,7 @@
 
 #define PGSTAT_MAX_INTERVAL			60000	/* Longest interval of stats data
 											 * updates */
+
 
 /* ----------
  * The initial size hints for the hash tables used in the activity statistics.
@@ -154,7 +157,6 @@ static bool pgstat_drop_stats_entry(dshash_seq_status *hstat);
 static void pgstat_pending_delete(PgStatSharedRef *shared_ref);
 
 static bool pgstat_flush_object_stats(bool nowait);
-
 
 
 /* ----------
@@ -287,8 +289,7 @@ stats_replslot_size(void)
 }
 
 /*
- * StatsShmemSize
- *		Compute shared memory space needed for activity statistic
+ * Compute shared memory space needed for activity statistics
  */
 Size
 StatsShmemSize(void)
@@ -303,7 +304,7 @@ StatsShmemSize(void)
 }
 
 /*
- * StatsShmemInit - initialize during shared-memory creation
+ * Initialize activity statistics initialize during startup
  */
 void
 StatsShmemInit(void)
@@ -587,26 +588,23 @@ pgstat_drop_database(Oid dboid)
 		pg_atomic_fetch_add_u64(&StatsShmem->gc_count, 1);
 }
 
-/* ----------
- * pgstat_report_stat() -
+/*
+ * Must be called by processes that performs DML: tcop/postgres.c, logical
+ * receiver processes, SPI worker, etc. to apply the so far collected
+ * per-table and function usage statistics to the shared statistics hashes.
  *
- *	Must be called by processes that performs DML: tcop/postgres.c, logical
- *	receiver processes, SPI worker, etc. to apply the so far collected
- *	per-table and function usage statistics to the shared statistics hashes.
+ * Updates are applied not more frequent than the interval of
+ * PGSTAT_MIN_INTERVAL milliseconds. They are also postponed on lock
+ * failure if force is false and there's no pending updates longer than
+ * PGSTAT_MAX_INTERVAL milliseconds. Postponed updates are retried in
+ * succeeding calls of this function.
  *
- *	Updates are applied not more frequent than the interval of
- *	PGSTAT_MIN_INTERVAL milliseconds. They are also postponed on lock
- *	failure if force is false and there's no pending updates longer than
- *	PGSTAT_MAX_INTERVAL milliseconds. Postponed updates are retried in
- *	succeeding calls of this function.
+ * Returns the time until the next timing when updates are applied in
+ * milliseconds if there are no updates held for more than
+ * PGSTAT_MIN_INTERVAL milliseconds.
  *
- *	Returns the time until the next timing when updates are applied in
- *	milliseconds if there are no updates held for more than
- *	PGSTAT_MIN_INTERVAL milliseconds.
- *
- *	Note that this is called only out of a transaction, so it is fine to use
- *	transaction stop time as an approximation of current time.
- *	----------
+ * Note that this is called only when not within a transaction, so it is fair
+ * to use transaction stop time as an approximation of current time.
  */
 long
 pgstat_report_stat(bool force)
@@ -965,6 +963,12 @@ pgstat_write_statsfile(void)
 	(void) rc;					/* we'll check for error with ferror */
 
 	/*
+	 * XXX: The following could now be generalized to just iterate over
+	 * pgstat_kind_infos instead of knowing about the different kinds of
+	 * stats.
+	 */
+
+	/*
 	 * Write bgwriter global stats struct
 	 */
 	rc = fwrite(&StatsShmem->bgwriter.stats, sizeof(PgStat_BgWriterStats), 1, fpout);
@@ -1137,6 +1141,12 @@ pgstat_read_statsfile(void)
 				(errmsg("corrupted statistics file \"%s\"", statfile)));
 		goto done;
 	}
+
+	/*
+	 * XXX: The following could now be generalized to just iterate over
+	 * pgstat_kind_infos instead of knowing about the different kinds of
+	 * stats.
+	 */
 
 	/*
 	 * Read bgwiter stats struct
