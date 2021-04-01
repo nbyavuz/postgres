@@ -400,9 +400,8 @@ extern bool pgstat_flush_slru(bool nowait);
 
 extern void pgstat_update_connstats(bool disconnect);
 
-extern void pgstat_eoxact_relations(PgStat_SubXactStatus *xact_state, bool isCommit);
-extern void pgstat_eosubxact_relations(PgStat_SubXactStatus *xact_state, bool isCommit, int nestDepth);
-
+extern void AtEOXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit);
+extern void AtEOSubXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit, int nestDepth);
 extern void AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
 extern void PostPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state);
 

@@ -609,7 +609,7 @@ pgstat_perform_drops(int ndrops, struct PgStat_DroppedStatsItem *items, bool is_
 }
 
 static void
-pgstat_eoxact_stats_drops(PgStat_SubXactStatus *xact_state, bool isCommit)
+AtEOXact_PgStat_DroppedStats(PgStat_SubXactStatus *xact_state, bool isCommit)
 {
 	dlist_mutable_iter iter;
 
@@ -2122,10 +2122,8 @@ AtEOXact_PgStat(bool isCommit, bool parallel)
 		Assert(xact_state->nest_level == 1);
 		Assert(xact_state->prev == NULL);
 
-		/* relations */
-		pgstat_eoxact_relations(xact_state, isCommit);
-
-		pgstat_eoxact_stats_drops(xact_state, isCommit);
+		AtEOXact_PgStat_Relations(xact_state, isCommit);
+		AtEOXact_PgStat_DroppedStats(xact_state, isCommit);
 	}
 	pgStatXactStack = NULL;
 
@@ -2141,7 +2139,8 @@ AtEOXact_PgStat(bool isCommit, bool parallel)
  * subtransaction state.
  */
 static void
-pgstat_eosubxact_drops(PgStat_SubXactStatus *xact_state, bool isCommit, int nestDepth)
+AtEOSubXact_PgStat_DroppedStats(PgStat_SubXactStatus *xact_state,
+								bool isCommit, int nestDepth)
 {
 	PgStat_SubXactStatus *parent_xact_state;
 	dlist_mutable_iter iter;
@@ -2193,10 +2192,8 @@ AtEOSubXact_PgStat(bool isCommit, int nestDepth)
 		/* delink xact_state from stack immediately to simplify reuse case */
 		pgStatXactStack = xact_state->prev;
 
-		/* relations */
-		pgstat_eosubxact_relations(xact_state, isCommit, nestDepth);
-
-		pgstat_eosubxact_drops(xact_state, isCommit, nestDepth);
+		AtEOSubXact_PgStat_Relations(xact_state, isCommit, nestDepth);
+		AtEOSubXact_PgStat_DroppedStats(xact_state, isCommit, nestDepth);
 
 		pfree(xact_state);
 	}
@@ -2206,9 +2203,6 @@ AtEOSubXact_PgStat(bool isCommit, int nestDepth)
 /*
  * AtPrepare_PgStat
  *		Save the transactional stats state at 2PC transaction prepare.
- *
- * In this phase we just generate 2PC records for all the pending
- * transaction-dependent stats work.
  */
 void
 AtPrepare_PgStat(void)
@@ -2224,11 +2218,6 @@ AtPrepare_PgStat(void)
 /*
  * PostPrepare_PgStat
  *		Clean up after successful PREPARE.
- *
- * All we need do here is unlink the transaction stats state from the
- * nontransactional state.  The nontransactional action counts will be
- * reported to the activity stats facility immediately, while the effects on
- * live and dead tuple counts are preserved in the 2PC state file.
  *
  * Note: AtEOXact_PgStat is not called during PREPARE.
  */

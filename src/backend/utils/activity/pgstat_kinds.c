@@ -1533,7 +1533,7 @@ pgstat_update_heap_dead_tuples(Relation rel, int delta)
  * TopTransactionContext and will go away anyway.
  */
 void
-pgstat_eoxact_relations(PgStat_SubXactStatus *xact_state, bool isCommit)
+AtEOXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit)
 {
 	PgStat_TableXactStatus *trans;
 
@@ -1586,8 +1586,14 @@ pgstat_eoxact_relations(PgStat_SubXactStatus *xact_state, bool isCommit)
 	}
 }
 
+/*
+ * Perform relation stats specific end-of-subtransaction work. Helper for
+ * AtEOSubXact_PgStat.
+ *
+ * This just merge the sub-transaction's transactional stats into the parent.
+ */
 void
-pgstat_eosubxact_relations(PgStat_SubXactStatus *xact_state, bool isCommit, int nestDepth)
+AtEOSubXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit, int nestDepth)
 {
 	PgStat_TableXactStatus *trans;
 	PgStat_TableXactStatus *next_trans;
@@ -1663,7 +1669,6 @@ pgstat_eosubxact_relations(PgStat_SubXactStatus *xact_state, bool isCommit, int 
 	}
 }
 
-
 /*
  * Generate 2PC records for all the pending transaction-dependent stats work.
  */
@@ -1699,6 +1704,14 @@ AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state)
 	}
 }
 
+/*
+ * All we need do here is unlink the transaction stats state from the
+ * nontransactional state.  The nontransactional action counts will be
+ * reported to the activity stats facility immediately, while the effects on
+ * live and dead tuple counts are preserved in the 2PC state file.
+ *
+ * Note: AtEOXact_PgStat_Relations is not called during PREPARE.
+ */
 void
 PostPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state)
 {
@@ -1713,7 +1726,6 @@ PostPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state)
 	}
 
 }
-
 
 /*
  * 2PC processing routine for COMMIT PREPARED case.
