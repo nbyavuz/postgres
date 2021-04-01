@@ -541,28 +541,28 @@ static inline void* shared_stat_entry_data(PgStatTypes stattype, PgStatShm_StatE
 static bool pgstat_shared_refs_need_gc(void);
 static void pgstat_shared_refs_gc(void);
 
-static void pgstat_release_stats_references(void);
+static void pgstat_shared_refs_release_all(void);
 
 static bool pgstat_drop_stats_entry(dshash_seq_status *hstat);
 
-static PgStatSharedRef *pgstat_pending_stat_prepare(PgStatTypes type, Oid dboid, Oid objoid);
-static PgStatSharedRef *pgstat_pending_stat_fetch(PgStatTypes type, Oid dboid, Oid objoid);
-static void pgstat_pending_stat_delete(PgStatSharedRef *shared_ref);
+static PgStatSharedRef *pgstat_pending_prepare(PgStatTypes type, Oid dboid, Oid objoid);
+static PgStatSharedRef *pgstat_pending_fetch(PgStatTypes type, Oid dboid, Oid objoid);
+static void pgstat_pending_delete(PgStatSharedRef *shared_ref);
 
-static PgStat_StatDBEntry *pgstat_pending_stat_db_prepare(Oid dboid);
-static PgStat_TableStatus *pgstat_pending_stat_tab_prepare(Oid rel_id, bool isshared);
+static PgStat_StatDBEntry *pgstat_pending_db_prepare(Oid dboid);
+static PgStat_TableStatus *pgstat_pending_tab_prepare(Oid rel_id, bool isshared);
 
 static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
 
 static inline void pgstat_copy_global_stats(void *dst, void *src, size_t len,
 											uint32 *changecount);
 
-static bool flush_object_stats(bool nowait);
-static bool flush_tabstat(PgStatSharedRef *shared_ref, bool nowait);
-static bool flush_funcstat(PgStatSharedRef *shared_ref, bool nowait);
-static bool flush_dbstat(PgStat_PendingStatDBEntry *dbent, Oid dboid, bool nowait);
-static bool flush_walstat(bool nowait);
-static bool flush_slrustat(bool nowait);
+static bool pgstat_flush_object_stats(bool nowait);
+static bool pgstat_flush_table(PgStatSharedRef *shared_ref, bool nowait);
+static bool pgstat_flush_function(PgStatSharedRef *shared_ref, bool nowait);
+static bool pgstat_flush_db(PgStat_PendingStatDBEntry *dbent, Oid dboid, bool nowait);
+static bool pgstat_flush_wal(bool nowait);
+static bool pgstat_flush_slru(bool nowait);
 static void pgstat_update_connstats(bool disconnect);
 
 static inline bool walstats_pending(void);
@@ -637,7 +637,7 @@ static int	pgStatSharedRefAge = 0;	/* cache age of pgStatShmLookupCache */
  * List of PgStatSharedRefs with unflushed pending stats.
  *
  * Newly pending entries should only ever be added to the end of the list,
- * otherwise flush_object_stats() might not see them immediately.
+ * otherwise pgstat_flush_object_stats() might not see them immediately.
  */
 dlist_head pgStatPending = DLIST_STATIC_INIT(pgStatPending);
 
@@ -1139,7 +1139,7 @@ pgstat_perform_drop(PgStat_DroppedStatsItem *drop)
 		if (lohashent)
 		{
 			if (lohashent->shared_ref && lohashent->shared_ref->pending)
-				pgstat_pending_stat_delete(lohashent->shared_ref);
+				pgstat_pending_delete(lohashent->shared_ref);
 
 			pgstat_shared_ref_release(lohashent->shared_ref);
 		}
@@ -1363,13 +1363,13 @@ pgstat_report_stat(bool force)
 	partial_flush = false;
 
 	/* flush database / relation / function stats */
-	partial_flush |= flush_object_stats(nowait);
+	partial_flush |= pgstat_flush_object_stats(nowait);
 
 	/* flush wal stats */
-	partial_flush |= flush_walstat(nowait);
+	partial_flush |= pgstat_flush_wal(nowait);
 
 	/* flush SLRU stats */
-	partial_flush |= flush_slrustat(nowait);
+	partial_flush |= pgstat_flush_slru(nowait);
 
 	/*
 	 * Publish the time of the last flush, but we don't notify the change of
@@ -2317,7 +2317,7 @@ pgstat_shutdown_hook(int code, Datum arg)
 	Assert(StatsDSA);
 
 	/* We shouldn't leave a reference to shared stats. */
-	pgstat_release_stats_references();
+	pgstat_shared_refs_release_all();
 
 	dshash_detach(pgStatSharedHash);
 	pgStatSharedHash = NULL;
@@ -2569,8 +2569,7 @@ pgstat_shared_stat_lock(PgStatShm_StatEntryHeader *header, bool nowait)
 }
 
 /*
- * pgstat_shared_stat_locked - common helper function to fetch and lock a stats
- * entry for flush_tabstat, flush_funcstat and flush_dbstat.
+ * Helper function to fetch and lock shared stats.
  */
 static PgStatShm_StatEntryHeader *
 pgstat_shared_stat_locked(PgStatTypes type, Oid dboid, Oid objoid, bool nowait)
@@ -2668,7 +2667,7 @@ pgstat_shared_refs_gc(void)
  * stats if not already done.
  */
 static PgStatSharedRef*
-pgstat_pending_stat_prepare(PgStatTypes type, Oid dboid, Oid objoid)
+pgstat_pending_prepare(PgStatTypes type, Oid dboid, Oid objoid)
 {
 	PgStatSharedRef *shared_ref;
 
@@ -2694,7 +2693,7 @@ pgstat_pending_stat_prepare(PgStatTypes type, Oid dboid, Oid objoid)
  * that it shouldn't be needed.
  */
 static PgStatSharedRef*
-pgstat_pending_stat_fetch(PgStatTypes type, Oid dboid, Oid objoid)
+pgstat_pending_fetch(PgStatTypes type, Oid dboid, Oid objoid)
 {
 	PgStatSharedRef *shared_ref;
 
@@ -2707,7 +2706,7 @@ pgstat_pending_stat_fetch(PgStatTypes type, Oid dboid, Oid objoid)
 }
 
 static void
-pgstat_pending_stat_delete(PgStatSharedRef *shared_ref)
+pgstat_pending_delete(PgStatSharedRef *shared_ref)
 {
 	void *pending_data = shared_ref->pending;
 
@@ -2736,7 +2735,7 @@ pgstat_pending_stat_delete(PgStatSharedRef *shared_ref)
  *  Find or create a local PgStat_StatDBEntry entry for dboid.
  */
 static PgStat_StatDBEntry *
-pgstat_pending_stat_db_prepare(Oid dboid)
+pgstat_pending_db_prepare(Oid dboid)
 {
 	PgStat_PendingStatDBEntry *dbent;
 
@@ -2765,19 +2764,19 @@ pgstat_pending_stat_db_prepare(Oid dboid)
 }
 
 /* ----------
- * pgstat_pending_stat_tab_prepare() -
+ * pgstat_pending_tab_prepare() -
  *  Find or create a PgStat_TableStatus entry for rel. New entry is created and
  *  initialized if not exists.
  * ----------
  */
 static PgStat_TableStatus *
-pgstat_pending_stat_tab_prepare(Oid rel_id, bool isshared)
+pgstat_pending_tab_prepare(Oid rel_id, bool isshared)
 {
 	PgStatSharedRef *shared_ref;
 
-	shared_ref = pgstat_pending_stat_prepare(PGSTAT_TYPE_TABLE,
-											 isshared ? InvalidOid : MyDatabaseId,
-											 rel_id);
+	shared_ref = pgstat_pending_prepare(PGSTAT_TYPE_TABLE,
+										isshared ? InvalidOid : MyDatabaseId,
+										rel_id);
 
 	return shared_ref->pending;
 }
@@ -2786,10 +2785,10 @@ pgstat_pending_stat_tab_prepare(Oid rel_id, bool isshared)
  * Release all local references to shared stats entries.
  *
  * When a process exits it cannot do so while still holding references onto
- * stats entries, otherwise the memory will never be freed.
+ * stats entries, otherwise the shared stats entries could never be freed.
  */
 static void
-pgstat_release_stats_references(void)
+pgstat_shared_refs_release_all(void)
 {
 	pgstat_shared_ref_hash_iterator i;
 	PgStatSharedRefHashEntry *ent;
@@ -3016,7 +3015,7 @@ changecount_after_read(uint32 *cc, uint32 before_cc)
  * functions).
  */
 static bool
-flush_object_stats(bool nowait)
+pgstat_flush_object_stats(bool nowait)
 {
 	bool		have_pending = false;
 	dlist_node *cur = NULL;
@@ -3043,10 +3042,10 @@ flush_object_stats(bool nowait)
 		switch (shared_ref->key.type)
 		{
 			case PGSTAT_TYPE_TABLE:
-				remove = flush_tabstat(shared_ref, nowait);
+				remove = pgstat_flush_table(shared_ref, nowait);
 				break;
 			case PGSTAT_TYPE_FUNCTION:
-				remove = flush_funcstat(shared_ref, nowait);
+				remove = pgstat_flush_function(shared_ref, nowait);
 				break;
 			case PGSTAT_TYPE_DB:
 				/* We don't have that kind of pending entry */
@@ -3065,7 +3064,7 @@ flush_object_stats(bool nowait)
 
 		/* if successfully flushed, remove entry */
 		if (remove)
-			pgstat_pending_stat_delete(shared_ref);
+			pgstat_pending_delete(shared_ref);
 		else
 			have_pending = true;
 
@@ -3074,8 +3073,8 @@ flush_object_stats(bool nowait)
 
 	Assert(dlist_is_empty(&pgStatPending) == !have_pending);
 
-	have_pending |= flush_dbstat(&pendingDBStats, MyDatabaseId, nowait);
-	have_pending |= flush_dbstat(&pendingSharedDBStats, InvalidOid, nowait);
+	have_pending |= pgstat_flush_db(&pendingDBStats, MyDatabaseId, nowait);
+	have_pending |= pgstat_flush_db(&pendingSharedDBStats, InvalidOid, nowait);
 
 	if (!have_pending)
 		havePendingDbStats = false;
@@ -3084,7 +3083,7 @@ flush_object_stats(bool nowait)
 }
 
 /*
- * flush_tabstat - flush out a pending table stats entry
+ * pgstat_flush_table - flush out a pending table stats entry
  *
  * Some of the stats numbers are copied to pending database stats entry after
  * successful flush-out.
@@ -3095,7 +3094,7 @@ flush_object_stats(bool nowait)
  * Returns true if the entry is successfully flushed out.
  */
 static bool
-flush_tabstat(PgStatSharedRef *shared_ref, bool nowait)
+pgstat_flush_table(PgStatSharedRef *shared_ref, bool nowait)
 {
 	static const PgStat_TableCounts all_zeroes;
 	Oid			dboid;			/* database OID of the table */
@@ -3155,7 +3154,7 @@ flush_tabstat(PgStatSharedRef *shared_ref, bool nowait)
 	LWLockRelease(&shtabstats->header.lock);
 
 	/* The entry is successfully flushed so the same to add to database stats */
-	ldbstats = pgstat_pending_stat_db_prepare(dboid);
+	ldbstats = pgstat_pending_db_prepare(dboid);
 	ldbstats->n_tuples_returned += lstats->t_counts.t_tuples_returned;
 	ldbstats->n_tuples_fetched += lstats->t_counts.t_tuples_fetched;
 	ldbstats->n_tuples_inserted += lstats->t_counts.t_tuples_inserted;
@@ -3168,7 +3167,7 @@ flush_tabstat(PgStatSharedRef *shared_ref, bool nowait)
 }
 
 /*
- * flush_funcstat - flush out a local function stats entry
+ * pgstat_flush_function - flush out a local function stats entry
  *
  * If nowait is true, this function returns false on lock failure. Otherwise
  * this function always returns true.
@@ -3176,7 +3175,7 @@ flush_tabstat(PgStatSharedRef *shared_ref, bool nowait)
  * Returns true if the entry is successfully flushed out.
  */
 static bool
-flush_funcstat(PgStatSharedRef *shared_ref, bool nowait)
+pgstat_flush_function(PgStatSharedRef *shared_ref, bool nowait)
 {
 	PgStat_BackendFunctionEntry *localent;	/* local stats entry */
 	PgStatShm_StatFuncEntry *shfuncent = NULL; /* shared stats entry */
@@ -3203,7 +3202,7 @@ flush_funcstat(PgStatSharedRef *shared_ref, bool nowait)
 }
 
 /*
- * flush_dbstat - flush out a local database stats entry
+ * pgstat_flush_db - flush out a local database stats entry
  *
  * If nowait is true, this function returns false on lock failure. Otherwise
  * this function always returns true.
@@ -3211,7 +3210,8 @@ flush_funcstat(PgStatSharedRef *shared_ref, bool nowait)
  * Returns true if the entry could not be flushed out.
  */
 static bool
-flush_dbstat(PgStat_PendingStatDBEntry *pendingent, Oid dboid, bool nowait)
+pgstat_flush_db(PgStat_PendingStatDBEntry *pendingent, Oid dboid,
+						bool nowait)
 {
 	PgStatShm_StatDBEntry *sharedent;
 
@@ -3293,7 +3293,7 @@ walstats_pending(void)
 }
 
 /*
- * flush_walstat - flush out a locally pending WAL stats entries
+ * pgstat_flush_wal - flush out a locally pending WAL stats entries
  *
  * If nowait is true, this function returns false on lock failure. Otherwise
  * this function always returns true.
@@ -3301,7 +3301,7 @@ walstats_pending(void)
  * Returns true if not all pending stats have been flushed out.
  */
 static bool
-flush_walstat(bool nowait)
+pgstat_flush_wal(bool nowait)
 {
 	PgStat_WalStats *s = &StatsShmem->wal.stats;
 	PgStat_WalStats *l = &WalStats;
@@ -3356,7 +3356,7 @@ flush_walstat(bool nowait)
 }
 
 /*
- * flush_slrustat - flush out locally pending SLRU stats entries
+ * pgstat_flush_slru - flush out locally pending SLRU stats entries
  *
  * If nowait is true, this function returns false on lock failure. Otherwise
  * this function always returns true. Writer processes are mutually excluded
@@ -3366,7 +3366,7 @@ flush_walstat(bool nowait)
  * Returns true if not all pending stats have been flushed out.
  */
 static bool
-flush_slrustat(bool nowait)
+pgstat_flush_slru(bool nowait)
 {
 	int			i;
 
@@ -3607,7 +3607,7 @@ pgstat_report_recovery_conflict(int reason)
 	if (!pgstat_track_counts)
 		return;
 
-	dbent = pgstat_pending_stat_db_prepare(MyDatabaseId);
+	dbent = pgstat_pending_db_prepare(MyDatabaseId);
 
 	switch (reason)
 	{
@@ -3651,7 +3651,7 @@ pgstat_report_deadlock(void)
 	if (!pgstat_track_counts)
 		return;
 
-	dbent = pgstat_pending_stat_db_prepare(MyDatabaseId);
+	dbent = pgstat_pending_db_prepare(MyDatabaseId);
 	dbent->n_deadlocks++;
 }
 
@@ -3697,7 +3697,7 @@ pgstat_report_checksum_failure(void)
 	if (!pgstat_track_counts)
 		return;
 
-	dbent = pgstat_pending_stat_db_prepare(MyDatabaseId);
+	dbent = pgstat_pending_db_prepare(MyDatabaseId);
 	dbent->n_checksum_failures++;
 }
 
@@ -3718,7 +3718,7 @@ pgstat_report_tempfile(size_t filesize)
 	if (filesize == 0)			/* Is there a case where filesize is really 0? */
 		return;
 
-	dbent = pgstat_pending_stat_db_prepare(MyDatabaseId);
+	dbent = pgstat_pending_db_prepare(MyDatabaseId);
 	dbent->n_temp_bytes += filesize; /* needs check overflow */
 	dbent->n_temp_files++;
 }
@@ -3823,7 +3823,7 @@ pgstat_init_function_usage(FunctionCallInfo fcinfo,
 		return;
 	}
 
-	shared_ref = pgstat_pending_stat_prepare(PGSTAT_TYPE_FUNCTION,
+	shared_ref = pgstat_pending_prepare(PGSTAT_TYPE_FUNCTION,
 											 MyDatabaseId,
 											 fcinfo->flinfo->fn_oid);
 	pending = shared_ref->pending;
@@ -3852,7 +3852,7 @@ find_funcstat_entry(Oid func_id)
 {
 	PgStatSharedRef *shared_ref;
 
-	shared_ref = pgstat_pending_stat_fetch(PGSTAT_TYPE_FUNCTION, MyDatabaseId, func_id);
+	shared_ref = pgstat_pending_fetch(PGSTAT_TYPE_FUNCTION, MyDatabaseId, func_id);
 
 	if (shared_ref)
 		return shared_ref->pending;
@@ -3953,7 +3953,7 @@ pgstat_allocstats(Relation rel)
 	Assert(rel->pgstat_info == NULL);
 
 	/* Else find or make the PgStat_TableStatus entry, and update link */
-	rel->pgstat_info = pgstat_pending_stat_tab_prepare(RelationGetRelid(rel), rel->rd_rel->relisshared);
+	rel->pgstat_info = pgstat_pending_tab_prepare(RelationGetRelid(rel), rel->rd_rel->relisshared);
 	/* mark this relation as the owner */
 
 	/* don't allow link a stats to multiple relcache entries */
@@ -3994,9 +3994,9 @@ find_tabstat_entry(Oid rel_id)
 {
 	PgStatSharedRef *shared_ref;
 
-	shared_ref = pgstat_pending_stat_fetch(PGSTAT_TYPE_TABLE, MyDatabaseId, rel_id);
+	shared_ref = pgstat_pending_fetch(PGSTAT_TYPE_TABLE, MyDatabaseId, rel_id);
 	if (!shared_ref)
-		shared_ref = pgstat_pending_stat_fetch(PGSTAT_TYPE_TABLE, InvalidOid, rel_id);
+		shared_ref = pgstat_pending_fetch(PGSTAT_TYPE_TABLE, InvalidOid, rel_id);
 
 	if (shared_ref)
 		return shared_ref->pending;
@@ -4541,7 +4541,7 @@ pgstat_twophase_postcommit(TransactionId xid, uint16 info,
 	PgStat_TableStatus *pgstat_info;
 
 	/* Find or create a tabstat entry for the rel */
-	pgstat_info = pgstat_pending_stat_tab_prepare(rec->t_id, rec->t_shared);
+	pgstat_info = pgstat_pending_tab_prepare(rec->t_id, rec->t_shared);
 
 	/* Same math as in AtEOXact_PgStat, commit case */
 	pgstat_info->t_counts.t_tuples_inserted += rec->tuples_inserted;
@@ -4577,7 +4577,7 @@ pgstat_twophase_postabort(TransactionId xid, uint16 info,
 	PgStat_TableStatus *pgstat_info;
 
 	/* Find or create a tabstat entry for the rel */
-	pgstat_info = pgstat_pending_stat_tab_prepare(rec->t_id, rec->t_shared);
+	pgstat_info = pgstat_pending_tab_prepare(rec->t_id, rec->t_shared);
 
 	/* Same math as in AtEOXact_PgStat, abort case */
 	if (rec->t_truncdropped)
@@ -4707,7 +4707,7 @@ pgstat_report_checkpointer(void)
 void
 pgstat_report_wal(bool force)
 {
-	flush_walstat(force);
+	pgstat_flush_wal(force);
 }
 
 /* ----------
@@ -4740,7 +4740,7 @@ pgstat_update_connstats(bool disconnect)
 	if (disconnect)
 		session_end_type = pgStatSessionEndCause;
 
-	ldbstats = pgstat_pending_stat_db_prepare(MyDatabaseId);
+	ldbstats = pgstat_pending_db_prepare(MyDatabaseId);
 
 	ldbstats->n_sessions = (last_report == 0 ? 1 : 0);
 	ldbstats->total_session_time += secs * 1000000 + usecs;
