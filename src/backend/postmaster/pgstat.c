@@ -158,6 +158,7 @@ static void pgstat_shared_refs_gc(void);
 
 static void pgstat_shared_refs_release_all(void);
 
+static void pgstat_perform_drop(PgStat_DroppedStatsItem *drop);
 static bool pgstat_drop_stats_entry(dshash_seq_status *hstat);
 
 static void pgstat_pending_delete(PgStatSharedRef *shared_ref);
@@ -542,106 +543,6 @@ pgstat_pending_stats_drops(PgStat_DroppedStatsItem **items)
 	return nitems;
 }
 
-static void
-pgstat_perform_drop(PgStat_DroppedStatsItem *drop)
-{
-	PgStatShmHashEntry *shent;
-	PgStatHashKey key;
-
-	key.kind = drop->kind;
-	key.dboid = drop->dboid;
-	key.objoid = drop->objoid;
-
-	if (pgStatSharedRefHash)
-	{
-		PgStatSharedRefHashEntry *lohashent;
-
-		lohashent = pgstat_shared_ref_hash_lookup(pgStatSharedRefHash, key);
-
-		if (lohashent)
-		{
-			if (lohashent->shared_ref && lohashent->shared_ref->pending)
-				pgstat_pending_delete(lohashent->shared_ref);
-
-			pgstat_shared_ref_release(lohashent->key, lohashent->shared_ref);
-		}
-	}
-
-	shent = dshash_find(pgStatSharedHash, &key, true);
-	if (shent)
-	{
-		dsa_pointer pdsa;
-
-		Assert(shent->body != InvalidDsaPointer);
-		pdsa = shent->body;
-
-		/*
-		 * Signal that the entry is dropped - this will eventually cause other
-		 * backends to release their references.
-		 */
-
-		if (shent->dropped)
-			elog(ERROR, "can only drop stats once");
-		shent->dropped = true;
-
-		if (pg_atomic_fetch_sub_u32(&shent->refcount, 1) == 1)
-		{
-			dshash_delete_entry(pgStatSharedHash, shent);
-			dsa_free(StatsDSA, pdsa);
-		}
-		else
-		{
-			dshash_release_lock(pgStatSharedHash, shent);
-		}
-	}
-}
-
-void
-pgstat_perform_drops(int ndrops, struct PgStat_DroppedStatsItem *items, bool is_redo)
-{
-	if (ndrops == 0)
-		return;
-
-	for (int i = 0; i < ndrops; i++)
-		pgstat_perform_drop(&items[i]);
-
-	pg_atomic_fetch_add_u64(&StatsShmem->gc_count, 1);
-}
-
-static void
-AtEOXact_PgStat_DroppedStats(PgStat_SubXactStatus *xact_state, bool isCommit)
-{
-	dlist_mutable_iter iter;
-
-	if (xact_state->pending_drops_count == 0)
-	{
-		Assert(dlist_is_empty(&xact_state->pending_drops));
-		return;
-	}
-
-	dlist_foreach_modify(iter, &xact_state->pending_drops)
-	{
-		PgStat_PendingDroppedStatsItem *pending =
-			dlist_container(PgStat_PendingDroppedStatsItem, node, iter.cur);
-
-		elog(DEBUG2, "dropping stats %u/%u/%u",
-			 pending->item.kind,
-			 pending->item.dboid,
-			 pending->item.objoid);
-
-		if (isCommit)
-		{
-			pgstat_perform_drop(&pending->item);
-		}
-
-		dlist_delete(&pending->node);
-		xact_state->pending_drops_count--;
-		pfree(pending);
-	}
-
-	pg_atomic_fetch_add_u64(&StatsShmem->gc_count, 1);
-}
-
 /* ----------
  * pgstat_drop_database() -
  *
@@ -875,6 +776,23 @@ pgstat_vacuum_stat(void)
 {
 }
 
+/*
+ * Execute scheduled drops post-commit. Called from xact_redo_commit() during
+ * recovery.
+ */
+void
+pgstat_perform_drops(int ndrops, struct PgStat_DroppedStatsItem *items, bool is_redo)
+{
+	Assert(is_redo);
+
+	if (ndrops == 0)
+		return;
+
+	for (int i = 0; i < ndrops; i++)
+		pgstat_perform_drop(&items[i]);
+
+	pg_atomic_fetch_add_u64(&StatsShmem->gc_count, 1);
+}
 
 /* ------------------------------------------------------------
  * Stats reset functions
@@ -2010,6 +1928,95 @@ pgstat_flush_object_stats(bool nowait)
 
 	return have_pending;
 }
+
+static void
+pgstat_perform_drop(PgStat_DroppedStatsItem *drop)
+{
+	PgStatShmHashEntry *shent;
+	PgStatHashKey key;
+
+	key.kind = drop->kind;
+	key.dboid = drop->dboid;
+	key.objoid = drop->objoid;
+
+	if (pgStatSharedRefHash)
+	{
+		PgStatSharedRefHashEntry *lohashent;
+
+		lohashent = pgstat_shared_ref_hash_lookup(pgStatSharedRefHash, key);
+
+		if (lohashent)
+		{
+			if (lohashent->shared_ref && lohashent->shared_ref->pending)
+				pgstat_pending_delete(lohashent->shared_ref);
+
+			pgstat_shared_ref_release(lohashent->key, lohashent->shared_ref);
+		}
+	}
+
+	shent = dshash_find(pgStatSharedHash, &key, true);
+	if (shent)
+	{
+		dsa_pointer pdsa;
+
+		Assert(shent->body != InvalidDsaPointer);
+		pdsa = shent->body;
+
+		/*
+		 * Signal that the entry is dropped - this will eventually cause other
+		 * backends to release their references.
+		 */
+
+		if (shent->dropped)
+			elog(ERROR, "can only drop stats once");
+		shent->dropped = true;
+
+		if (pg_atomic_fetch_sub_u32(&shent->refcount, 1) == 1)
+		{
+			dshash_delete_entry(pgStatSharedHash, shent);
+			dsa_free(StatsDSA, pdsa);
+		}
+		else
+		{
+			dshash_release_lock(pgStatSharedHash, shent);
+		}
+	}
+}
+
+static void
+AtEOXact_PgStat_DroppedStats(PgStat_SubXactStatus *xact_state, bool isCommit)
+{
+	dlist_mutable_iter iter;
+
+	if (xact_state->pending_drops_count == 0)
+	{
+		Assert(dlist_is_empty(&xact_state->pending_drops));
+		return;
+	}
+
+	dlist_foreach_modify(iter, &xact_state->pending_drops)
+	{
+		PgStat_PendingDroppedStatsItem *pending =
+			dlist_container(PgStat_PendingDroppedStatsItem, node, iter.cur);
+
+		elog(DEBUG2, "dropping stats %u/%u/%u",
+			 pending->item.kind,
+			 pending->item.dboid,
+			 pending->item.objoid);
+
+		if (isCommit)
+		{
+			pgstat_perform_drop(&pending->item);
+		}
+
+		dlist_delete(&pending->node);
+		xact_state->pending_drops_count--;
+		pfree(pending);
+	}
+
+	pg_atomic_fetch_add_u64(&StatsShmem->gc_count, 1);
+}
+
 
 /*
  * Ensure (sub)transaction stack entry for the given nest_level exists, adding
