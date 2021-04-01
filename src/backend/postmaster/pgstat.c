@@ -95,16 +95,6 @@ typedef struct PgStat_PendingDroppedStatsItem
 
 
 /* ----------
- * Shared memory struct for statistics
- * ----------
- */
-
-StaticAssertDecl(sizeof(TimestampTz) == sizeof(pg_atomic_uint64),
-				 "size of pg_atomic_uint64 doesn't match TimestampTz");
-
-
-
-/* ----------
  * Hash Table Types
  * ----------
  */
