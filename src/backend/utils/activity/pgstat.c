@@ -21,7 +21,7 @@
  * Copyright (c) 2001-2021, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *	  src/backend/postmaster/pgstat.c
+ *	  src/backend/utils/activity/pgstat.c
  * ----------
  */
 #include "postgres.h"

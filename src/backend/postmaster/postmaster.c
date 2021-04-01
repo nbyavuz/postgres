@@ -639,9 +639,8 @@ PostmasterMain(int argc, char *argv[])
 	 * CAUTION: when changing this list, check for side-effects on the signal
 	 * handling setup of child processes.  See tcop/postgres.c,
 	 * bootstrap/bootstrap.c, postmaster/bgwriter.c, postmaster/walwriter.c,
-	 * postmaster/autovacuum.c, postmaster/pgarch.c, postmaster/pgstat.c,
-	 * postmaster/syslogger.c, postmaster/bgworker.c and
-	 * postmaster/checkpointer.c.
+	 * postmaster/autovacuum.c, postmaster/pgarch.c, postmaster/syslogger.c,
+	 * postmaster/bgworker.c and postmaster/checkpointer.c.
 	 */
 	pqinitmask();
 	PG_SETMASK(&BlockSig);
