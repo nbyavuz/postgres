@@ -184,8 +184,6 @@ typedef struct PgStatShm_StatEntryHeader
  */
 typedef struct PgStatSharedRef
 {
-	PgStatHashKey key;
-
 	/*
 	 */
 	PgStatShm_StatEntryHeader *shared_stats;
@@ -525,7 +523,7 @@ static PgStatShm_StatEntryHeader *pgstat_shared_stat_entry_init(PgStatTypes stat
 static PgStatSharedRef *pgstat_shared_ref_get(PgStatTypes type,
 											   Oid dboid, Oid objoid,
 											   bool create);
-static void pgstat_shared_ref_release(PgStatSharedRef *shared_ref);
+static void pgstat_shared_ref_release(PgStatHashKey key, PgStatSharedRef *shared_ref);
 static PgStatSharedRef *pgstat_shared_stat_locked(PgStatTypes type,
 												  Oid dboid,
 												  Oid objoid,
@@ -1138,7 +1136,7 @@ pgstat_perform_drop(PgStat_DroppedStatsItem *drop)
 			if (lohashent->shared_ref && lohashent->shared_ref->pending)
 				pgstat_pending_delete(lohashent->shared_ref);
 
-			pgstat_shared_ref_release(lohashent->shared_ref);
+			pgstat_shared_ref_release(lohashent->key, lohashent->shared_ref);
 		}
 	}
 
@@ -2399,7 +2397,6 @@ pgstat_shared_ref_get_cached(PgStatHashKey key, PgStatSharedRef **shared_ref_p)
 		cache_entry->shared_ref = shared_ref =
 			MemoryContextAlloc(pgStatSharedRefContext,
 							   sizeof(PgStatSharedRef));
-		shared_ref->key = key;
 		shared_ref->shared_stats = NULL;
 		shared_ref->shared_entry = NULL;
 		shared_ref->pending = NULL;
@@ -2522,11 +2519,11 @@ pgstat_shared_ref_get(PgStatTypes type, Oid dboid, Oid objoid, bool create)
 }
 
 static void
-pgstat_shared_ref_release(PgStatSharedRef *shared_ref)
+pgstat_shared_ref_release(PgStatHashKey key, PgStatSharedRef *shared_ref)
 {
-	Assert(shared_ref->pending == NULL);
+	Assert(shared_ref == NULL || shared_ref->pending == NULL);
 
-	if (shared_ref->shared_stats)
+	if (shared_ref && shared_ref->shared_stats)
 	{
 		Assert(shared_ref->shared_stats->magic == 0xdeadbeef);
 		Assert(shared_ref->pending == NULL);
@@ -2547,8 +2544,9 @@ pgstat_shared_ref_release(PgStatSharedRef *shared_ref)
 			/* only dropped entries can reach a 0 refcount */
 			Assert(shared_ref->shared_entry->dropped);
 
-			shent = dshash_find(pgStatSharedHash, &shared_ref->key, true);
-
+			shent = dshash_find(pgStatSharedHash,
+								&shared_ref->shared_entry->key,
+								true);
 			if (!shent)
 				elog(PANIC, "could not find just referenced shared stats entry");
 
@@ -2570,10 +2568,11 @@ pgstat_shared_ref_release(PgStatSharedRef *shared_ref)
 		}
 	}
 
-	if (!pgstat_shared_ref_hash_delete(pgStatSharedRefHash, shared_ref->key))
+	if (!pgstat_shared_ref_hash_delete(pgStatSharedRefHash, key))
 		elog(PANIC, "something has gone wrong");
 
-	pfree(shared_ref);
+	if (shared_ref)
+		pfree(shared_ref);
 }
 
 static bool
@@ -2675,6 +2674,7 @@ pgstat_shared_refs_gc(void)
 	while ((ent = pgstat_shared_ref_hash_iterate(pgStatSharedRefHash, &i)) != NULL)
 	{
 		PgStatSharedRef *shared_ref = ent->shared_ref;
+
 		Assert(!shared_ref->shared_stats || shared_ref->shared_stats->magic == 0xdeadbeef);
 
 		/* cannot gc shared ref that has pending data */
@@ -2682,7 +2682,7 @@ pgstat_shared_refs_gc(void)
 			continue;
 
 		if (shared_ref->shared_stats && shared_ref->shared_entry->dropped)
-			pgstat_shared_ref_release(shared_ref);
+			pgstat_shared_ref_release(ent->key, shared_ref);
 	}
 
 	pgStatSharedRefAge = currage;
@@ -2738,7 +2738,7 @@ pgstat_pending_delete(PgStatSharedRef *shared_ref)
 
 	Assert(pending_data != NULL);
 
-	switch (shared_ref->key.type)
+	switch (shared_ref->shared_entry->key.type)
 	{
 		case PGSTAT_TYPE_TABLE:
 			pgstat_delinkstats(((PgStat_TableStatus *) pending_data)->relation);
@@ -2825,7 +2825,7 @@ pgstat_shared_refs_release_all(void)
 	{
 		Assert(ent->shared_ref != NULL);
 
-		pgstat_shared_ref_release(ent->shared_ref);
+		pgstat_shared_ref_release(ent->key, ent->shared_ref);
 	}
 
 	Assert(pgStatSharedRefHash->members == 0);
@@ -2878,7 +2878,8 @@ pgstat_drop_stats_entry(dshash_seq_status *hstat)
 		if (shared_ref_entry && shared_ref_entry->shared_ref)
 		{
 			Assert(shared_ref_entry->shared_ref->shared_entry == ent);
-			pgstat_shared_ref_release(shared_ref_entry->shared_ref);
+			pgstat_shared_ref_release(shared_ref_entry->key,
+									  shared_ref_entry->shared_ref);
 		}
 	}
 
@@ -3061,7 +3062,7 @@ pgstat_flush_object_stats(bool nowait)
 		bool		remove = false;
 		dlist_node *next;
 
-		switch (shared_ref->key.type)
+		switch (shared_ref->shared_entry->key.type)
 		{
 			case PGSTAT_TYPE_TABLE:
 				remove = pgstat_flush_table(shared_ref, nowait);
@@ -3124,9 +3125,9 @@ pgstat_flush_table(PgStatSharedRef *shared_ref, bool nowait)
 	PgStatShm_StatTabEntry *shtabstats;	/* table entry of shared stats */
 	PgStat_StatDBEntry *ldbstats;	/* pending database entry */
 
-	Assert(shared_ref->key.type == PGSTAT_TYPE_TABLE);
+	Assert(shared_ref->shared_entry->key.type == PGSTAT_TYPE_TABLE);
 	lstats = (PgStat_TableStatus *) shared_ref->pending;
-	dboid = shared_ref->key.dboid;
+	dboid = shared_ref->shared_entry->key.dboid;
 
 	/*
 	 * Ignore entries that didn't accumulate any actual counts, such as
@@ -3202,7 +3203,7 @@ pgstat_flush_function(PgStatSharedRef *shared_ref, bool nowait)
 	PgStat_BackendFunctionEntry *localent;	/* local stats entry */
 	PgStatShm_StatFuncEntry *shfuncent = NULL; /* shared stats entry */
 
-	Assert(shared_ref->key.type == PGSTAT_TYPE_FUNCTION);
+	Assert(shared_ref->shared_entry->key.type == PGSTAT_TYPE_FUNCTION);
 	localent = (PgStat_BackendFunctionEntry *) shared_ref->pending;
 
 	/* localent always has non-zero content */
