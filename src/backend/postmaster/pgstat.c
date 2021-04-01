@@ -1859,7 +1859,7 @@ pgstat_pending_delete(PgStatSharedRef *shared_ref)
 	switch (shared_ref->shared_entry->key.type)
 	{
 		case PGSTAT_TYPE_TABLE:
-			pgstat_delinkstats(((PgStat_TableStatus *) pending_data)->relation);
+			pgstat_relation_delink(((PgStat_TableStatus *) pending_data)->relation);
 			break;
 		case PGSTAT_TYPE_DB:
 		case PGSTAT_TYPE_FUNCTION:

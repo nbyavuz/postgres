@@ -1289,19 +1289,15 @@ pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu, bool finalize)
 
 
 
-/* ----------
- * pgstat_initstats() -
+/*
+ * Initialize a relcache entry to count access statistics.  Called whenever a
+ * relation is opened.
  *
- *	Initialize a relcache entry to count access statistics.
- *	Called whenever a relation is opened.
- *
- *	We assume that a relcache entry's pgstat_info field is zeroed by
- *	relcache.c when the relcache entry is made; thereafter it is long-lived
- *	data.
- * ----------
+ * We assume that a relcache entry's pgstat_info field is zeroed by relcache.c
+ * when the relcache entry is made; thereafter it is long-lived data.
  */
 void
-pgstat_initstats(Relation rel)
+pgstat_relation_init(Relation rel)
 {
 	char		relkind = rel->rd_rel->relkind;
 
@@ -1325,14 +1321,25 @@ pgstat_initstats(Relation rel)
 	return;
 }
 
+/*
+ * Prepare for statistics for this relation to be collected. This ensures we
+ * have a reference to the shared stats entry. That is important because a
+ * relation drop in another connection can otherwise lead to the shared stats
+ * entry being dropped, which we then later would re-create when flushing
+ * stats.
+ *
+ * This is separate from pgstat_relation_init() as it is not uncommon for
+ * relcache entries to be opened without ever getting stats reported.
+ */
 void
-pgstat_allocstats(Relation rel)
+pgstat_relation_assoc(Relation rel)
 {
 	Assert(rel->pgstat_enabled);
 	Assert(rel->pgstat_info == NULL);
 
 	/* Else find or make the PgStat_TableStatus entry, and update link */
-	rel->pgstat_info = pgstat_pending_tab_prepare(RelationGetRelid(rel), rel->rd_rel->relisshared);
+	rel->pgstat_info = pgstat_pending_tab_prepare(RelationGetRelid(rel),
+												  rel->rd_rel->relisshared);
 	/* mark this relation as the owner */
 
 	/* don't allow link a stats to multiple relcache entries */
@@ -1341,13 +1348,11 @@ pgstat_allocstats(Relation rel)
 }
 
 /*
- * pgstat_delinkstats() -
- *
- *  Break the mutual link between a relcache entry and a local stats entry.
- *  This must be called always when one end of the link is removed.
+ * Break the mutual link between a relcache entry and a local stats entry.
+ * This must be called always when one end of the link is removed.
  */
 void
-pgstat_delinkstats(Relation rel)
+pgstat_relation_delink(Relation rel)
 {
 	/* remove the link to stats info if any */
 	if (rel && rel->pgstat_info)

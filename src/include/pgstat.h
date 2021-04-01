@@ -491,9 +491,9 @@ extern void pgstat_twophase_postcommit(TransactionId xid, uint16 info,
 extern void pgstat_twophase_postabort(TransactionId xid, uint16 info,
 									  void *recdata, uint32 len);
 
-extern void pgstat_initstats(Relation rel);
-extern void pgstat_allocstats(Relation rel);
-extern void pgstat_delinkstats(Relation rel);
+extern void pgstat_relation_init(Relation rel);
+extern void pgstat_relation_assoc(Relation rel);
+extern void pgstat_relation_delink(Relation rel);
 
 
 /* ----------
@@ -549,7 +549,7 @@ extern void pgstat_report_replslot_drop(uint32 index, const char *slotname);
 
 #define pgstat_count_rel(rel)										\
 	(likely((rel)->pgstat_info != NULL) ? true :					\
-	 ((rel)->pgstat_enabled ? pgstat_allocstats(rel), true : false))
+	 ((rel)->pgstat_enabled ? pgstat_relation_assoc(rel), true : false))
 
 /* nontransactional event counts are simple enough to inline */
 
