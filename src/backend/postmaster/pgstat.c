@@ -1675,19 +1675,21 @@ pgstat_reset_shared_counters(const char *target)
 				 errhint("Target must be \"archiver\", \"bgwriter\" or \"wal\".")));
 
 	/* Reset statistics for the cluster. */
-	LWLockAcquire(StatsLock, LW_EXCLUSIVE);
 
 	switch (t)
 	{
 		case RESET_ARCHIVER:
+			LWLockAcquire(StatsLock, LW_EXCLUSIVE);
 			pgstat_copy_global_stats(&StatsShmem->archiver.reset_offset,
 									 &StatsShmem->archiver.stats,
 									 sizeof(PgStat_ArchiverStats),
 									 &StatsShmem->archiver.changecount);
 			StatsShmem->archiver.reset_offset.stat_reset_timestamp = now;
+			LWLockRelease(StatsLock);
 			break;
 
 		case RESET_BGWRITER:
+			LWLockAcquire(StatsLock, LW_EXCLUSIVE);
 			pgstat_copy_global_stats(&StatsShmem->bgwriter.reset_offset,
 									 &StatsShmem->bgwriter.stats,
 									 sizeof(PgStat_BgWriterStats),
@@ -1697,6 +1699,7 @@ pgstat_reset_shared_counters(const char *target)
 									 sizeof(PgStat_CheckPointerStats),
 									 &StatsShmem->checkpointer.changecount);
 			StatsShmem->bgwriter.reset_offset.stat_reset_timestamp = now;
+			LWLockRelease(StatsLock);
 			break;
 
 		case RESET_WAL:
@@ -1711,8 +1714,6 @@ pgstat_reset_shared_counters(const char *target)
 			LWLockRelease(&StatsShmem->wal.lock);
 			break;
 	}
-
-	LWLockRelease(StatsLock);
 }
 
 /* ----------
