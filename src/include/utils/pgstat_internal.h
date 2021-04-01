@@ -133,24 +133,35 @@ typedef struct PgStatSharedRef
 } PgStatSharedRef;
 
 
-
 /*
- * Tuple insertion/deletion counts for an open transaction can't be propagated
- * into PgStat_TableStatus counters until we know if it is going to commit
- * or abort.  Hence, we keep these counts in per-subxact structs that live
- * in TopTransactionContext.  This data structure is designed on the assumption
- * that subxacts won't usually modify very many tables.
- *
- * FIXME: Update comment.
+ * Some stats changes are transactional. To maintain those a stack of
+ * PgStat_SubXactStatus entries is maintained, which contain data pertaining
+ * to the current transaction and its active subtransactions.
  */
 typedef struct PgStat_SubXactStatus
 {
 	int			nest_level;		/* subtransaction nest level */
 
+	struct PgStat_SubXactStatus *prev;	/* higher-level subxact if any */
+
+	/*
+	 * Dropping the statistics for objects that dropped transactionally itself
+	 * needs to be transactional. Therefore we collect the stats dropped in
+	 * the current (sub-)transaction and only execute the stats drop when we
+	 * know if the transaction commits/aborts. To handle replicas and crashes,
+	 * stats drops are included in commit records.
+	 */
 	dlist_head	pending_drops;
 	int			pending_drops_count;
 
-	struct PgStat_SubXactStatus *prev;	/* higher-level subxact if any */
+	/*
+	 * Tuple insertion/deletion counts for an open transaction can't be
+	 * propagated into PgStat_TableStatus counters until we know if it is
+	 * going to commit or abort.  Hence, we keep these counts in per-subxact
+	 * structs that live in TopTransactionContext.  This data structure is
+	 * designed on the assumption that subxacts won't usually modify very many
+	 * tables.
+	 */
 	PgStat_TableXactStatus *first;	/* head of list for this subxact */
 } PgStat_SubXactStatus;
 
@@ -367,10 +378,6 @@ typedef struct PgStatSnapshot
 } PgStatSnapshot;
 
 
-
-extern PgStat_SubXactStatus *get_tabstat_stack_level(int nest_level);
-extern void add_tabstat_xact_level(PgStat_TableStatus *pgstat_info, int nest_level);
-
 extern PgStatSharedRef *pgstat_shared_ref_get(PgStatKind kind,
 											  Oid dboid, Oid objoid,
 											  bool create);
@@ -383,6 +390,8 @@ extern PgStatSharedRef *pgstat_shared_stat_locked(PgStatKind kind,
 
 extern PgStatSharedRef *pgstat_pending_prepare(PgStatKind kind, Oid dboid, Oid objoid);
 extern PgStatSharedRef *pgstat_pending_fetch(PgStatKind kind, Oid dboid, Oid objoid);
+
+extern PgStat_SubXactStatus *pgstat_xact_stack_level_get(int nest_level);
 
 extern void* pgstat_fetch_entry(PgStatKind kind, Oid dboid, Oid objoid);
 

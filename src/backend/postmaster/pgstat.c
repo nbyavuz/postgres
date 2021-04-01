@@ -502,7 +502,7 @@ pgstat_schedule_drop(PgStatKind kind, Oid dboid, Oid objoid)
 	PgStat_PendingDroppedStatsItem *drop = (PgStat_PendingDroppedStatsItem *)
 		MemoryContextAlloc(TopMemoryContext, sizeof(PgStat_PendingDroppedStatsItem));
 
-	xact_state = get_tabstat_stack_level(nest_level);
+	xact_state = pgstat_xact_stack_level_get(nest_level);
 
 	drop->item.kind = kind;
 	drop->item.dboid = dboid;
@@ -2037,10 +2037,11 @@ pgstat_flush_object_stats(bool nowait)
 }
 
 /*
- * get_tabstat_stack_level - add a new (sub)transaction stack entry if needed
+ * Ensure (sub)transaction stack entry for the given nest_level exists, adding
+ * it if needed.
  */
 PgStat_SubXactStatus *
-get_tabstat_stack_level(int nest_level)
+pgstat_xact_stack_level_get(int nest_level)
 {
 	PgStat_SubXactStatus *xact_state;
 
@@ -2058,33 +2059,6 @@ get_tabstat_stack_level(int nest_level)
 		pgStatXactStack = xact_state;
 	}
 	return xact_state;
-}
-
-/*
- * add_tabstat_xact_level - add a new (sub)transaction state record
- */
-void
-add_tabstat_xact_level(PgStat_TableStatus *pgstat_info, int nest_level)
-{
-	PgStat_SubXactStatus *xact_state;
-	PgStat_TableXactStatus *trans;
-
-	/*
-	 * If this is the first rel to be modified at the current nest level, we
-	 * first have to push a transaction stack entry.
-	 */
-	xact_state = get_tabstat_stack_level(nest_level);
-
-	/* Now make a per-table stack entry */
-	trans = (PgStat_TableXactStatus *)
-		MemoryContextAllocZero(TopTransactionContext,
-							   sizeof(PgStat_TableXactStatus));
-	trans->nest_level = nest_level;
-	trans->upper = pgstat_info->trans;
-	trans->parent = pgstat_info;
-	trans->next = xact_state->first;
-	xact_state->first = trans;
-	pgstat_info->trans = trans;
 }
 
 
@@ -2145,7 +2119,7 @@ AtEOSubXact_PgStat_DroppedStats(PgStat_SubXactStatus *xact_state,
 	if (xact_state->pending_drops_count == 0)
 		return;
 
-	parent_xact_state = get_tabstat_stack_level(nestDepth - 1);
+	parent_xact_state = pgstat_xact_stack_level_get(nestDepth - 1);
 
 	dlist_foreach_modify(iter, &xact_state->pending_drops)
 	{

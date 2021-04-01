@@ -1406,6 +1406,45 @@ find_tabstat_entry(Oid rel_id)
 	return NULL;
 }
 
+/*
+ * add_tabstat_xact_level - add a new (sub)transaction state record
+ */
+static void
+add_tabstat_xact_level(PgStat_TableStatus *pgstat_info, int nest_level)
+{
+	PgStat_SubXactStatus *xact_state;
+	PgStat_TableXactStatus *trans;
+
+	/*
+	 * If this is the first rel to be modified at the current nest level, we
+	 * first have to push a transaction stack entry.
+	 */
+	xact_state = pgstat_xact_stack_level_get(nest_level);
+
+	/* Now make a per-table stack entry */
+	trans = (PgStat_TableXactStatus *)
+		MemoryContextAllocZero(TopTransactionContext,
+							   sizeof(PgStat_TableXactStatus));
+	trans->nest_level = nest_level;
+	trans->upper = pgstat_info->trans;
+	trans->parent = pgstat_info;
+	trans->next = xact_state->first;
+	xact_state->first = trans;
+	pgstat_info->trans = trans;
+}
+
+/*
+ * Checks if a new (sub)transaction record needs to be added.
+ */
+static void
+ensure_tabstat_xact_level(PgStat_TableStatus *pgstat_info)
+{
+	int			nest_level = GetCurrentTransactionNestLevel();
+
+	if (pgstat_info->trans == NULL ||
+		pgstat_info->trans->nest_level != nest_level)
+		add_tabstat_xact_level(pgstat_info, nest_level);
+}
 
 /*
  * pgstat_count_heap_insert - count a tuple insertion of n tuples
@@ -1417,12 +1456,8 @@ pgstat_count_heap_insert(Relation rel, PgStat_Counter n)
 	{
 		/* We have to log the effect at the proper transactional level */
 		PgStat_TableStatus *pgstat_info = rel->pgstat_info;
-		int			nest_level = GetCurrentTransactionNestLevel();
 
-		if (pgstat_info->trans == NULL ||
-			pgstat_info->trans->nest_level != nest_level)
-			add_tabstat_xact_level(pgstat_info, nest_level);
-
+		ensure_tabstat_xact_level(pgstat_info);
 		pgstat_info->trans->tuples_inserted += n;
 	}
 }
@@ -1437,12 +1472,8 @@ pgstat_count_heap_update(Relation rel, bool hot)
 	{
 		/* We have to log the effect at the proper transactional level */
 		PgStat_TableStatus *pgstat_info = rel->pgstat_info;
-		int			nest_level = GetCurrentTransactionNestLevel();
 
-		if (pgstat_info->trans == NULL ||
-			pgstat_info->trans->nest_level != nest_level)
-			add_tabstat_xact_level(pgstat_info, nest_level);
-
+		ensure_tabstat_xact_level(pgstat_info);
 		pgstat_info->trans->tuples_updated++;
 
 		/* t_tuples_hot_updated is nontransactional, so just advance it */
@@ -1461,12 +1492,8 @@ pgstat_count_heap_delete(Relation rel)
 	{
 		/* We have to log the effect at the proper transactional level */
 		PgStat_TableStatus *pgstat_info = rel->pgstat_info;
-		int			nest_level = GetCurrentTransactionNestLevel();
 
-		if (pgstat_info->trans == NULL ||
-			pgstat_info->trans->nest_level != nest_level)
-			add_tabstat_xact_level(pgstat_info, nest_level);
-
+		ensure_tabstat_xact_level(pgstat_info);
 		pgstat_info->trans->tuples_deleted++;
 	}
 }
@@ -1517,12 +1544,8 @@ pgstat_count_truncate(Relation rel)
 	{
 		/* We have to log the effect at the proper transactional level */
 		PgStat_TableStatus *pgstat_info = rel->pgstat_info;
-		int			nest_level = GetCurrentTransactionNestLevel();
 
-		if (pgstat_info->trans == NULL ||
-			pgstat_info->trans->nest_level != nest_level)
-			add_tabstat_xact_level(pgstat_info, nest_level);
-
+		ensure_tabstat_xact_level(pgstat_info);
 		pgstat_truncdrop_save_counters(pgstat_info->trans, false);
 		pgstat_info->trans->tuples_inserted = 0;
 		pgstat_info->trans->tuples_updated = 0;
@@ -1666,7 +1689,7 @@ AtEOSubXact_PgStat_Relations(PgStat_SubXactStatus *xact_state, bool isCommit, in
 				 */
 				PgStat_SubXactStatus *upper_xact_state;
 
-				upper_xact_state = get_tabstat_stack_level(nestDepth - 1);
+				upper_xact_state = pgstat_xact_stack_level_get(nestDepth - 1);
 				trans->next = upper_xact_state->first;
 				upper_xact_state->first = trans;
 				trans->nest_level = nestDepth - 1;
