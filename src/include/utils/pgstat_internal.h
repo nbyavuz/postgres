@@ -169,8 +169,6 @@ typedef struct PgStat_SubXactStatus
 /*
  * Metadata for a specific kinds of statistics.
  */
-typedef void (PgStatKindSnapshotCB)(void);
-typedef bool (PgStatKindFlushCB)(PgStatSharedRef *sr, bool nowait);
 typedef struct pgstat_kind_info
 {
 	/*
@@ -210,12 +208,12 @@ typedef struct pgstat_kind_info
 	/*
 	 * For global statistics: Fetch a snapshot of appropriate global stats.
 	 */
-	PgStatKindSnapshotCB *snapshot_cb;
+	void (*snapshot_cb)(void);
 
 	/*
 	 * For variable number stats: flush pending stats.
 	 */
-	PgStatKindFlushCB *flush_pending_cb;
+	bool (*flush_pending_cb)(PgStatSharedRef *sr, bool nowait);
 } pgstat_kind_info;
 
 
