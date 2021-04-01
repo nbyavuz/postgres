@@ -27,14 +27,9 @@
 
 #include <unistd.h>
 
-#include "access/heapam.h"
-#include "access/htup_details.h"
-#include "access/tableam.h"
 #include "access/transam.h"
 #include "access/twophase_rmgr.h"
 #include "access/xact.h"
-#include "catalog/pg_database.h"
-#include "catalog/pg_proc.h"
 #include "common/hashfn.h"
 #include "lib/dshash.h"
 #include "libpq/libpq.h"
@@ -152,20 +147,6 @@ StaticAssertDecl(sizeof(TimestampTz) == sizeof(pg_atomic_uint64),
 #define SH_DECLARE
 #include "lib/simplehash.h"
 
-/* for OID hashes. */
-StaticAssertDecl(sizeof(Oid) == 4, "oid is not compatible with uint32");
-#define SH_PREFIX pgstat_oid
-#define SH_ELEMENT_TYPE pgstat_oident
-#define SH_KEY_TYPE Oid
-#define SH_KEY oid
-#define SH_HASH_KEY(tb, key) murmurhash32(key)
-#define SH_EQUAL(tb, a, b) (a == b)
-#define SH_SCOPE static inline
-#define SH_DEFINE
-#define SH_DECLARE
-#include "lib/simplehash.h"
-
-
 
 /* ----------
  * Local function forward declarations
@@ -192,8 +173,6 @@ static void pgstat_shared_refs_release_all(void);
 static bool pgstat_drop_stats_entry(dshash_seq_status *hstat);
 
 static void pgstat_pending_delete(PgStatSharedRef *shared_ref);
-
-static pgstat_oid_hash * collect_oids(Oid catalogid, AttrNumber anum_oid);
 
 static bool pgstat_flush_object_stats(bool nowait);
 
@@ -919,106 +898,13 @@ pgstat_force_next_flush(void)
 	pgStatForceNextFlush = true;
 }
 
-/* ----------
- * pgstat_vacuum_stat() -
- *
- *  Delete shared stat entries that are not in system catalogs.
- *
- *  To avoid holding exclusive lock on dshash for a long time, the process is
- *  performed in three steps.
- *
- *   1: Collect existent oids of every kind of object.
- *   2: Collect victim entries by scanning with shared lock.
- *   3: Try removing every nominated entry without waiting for lock.
- *
- *  As the consequence of the last step, some entries may be left alone due to
- *  lock failure, but as explained by the comment of pgstat_vacuum_stat, they
- *  will be deleted by later vacuums.
- * ----------
+/*
+ * FIXME: Probably need to handle "recently dropped but not yet removed" stats
+ * here.
  */
 void
 pgstat_vacuum_stat(void)
 {
-#ifdef NOT_USED
-	pgstat_oid_hash *dboids;		/* database ids */
-	pgstat_oid_hash *relids;	/* relation ids in the current database */
-	pgstat_oid_hash *funcids;	/* function ids in the current database */
-	uint64		not_freed_count = 0;
-	dshash_seq_status dshstat;
-	PgStatShmHashEntry *ent;
-
-	/* collect oids of existent objects */
-	dboids = collect_oids(DatabaseRelationId, Anum_pg_database_oid);
-	relids = collect_oids(RelationRelationId, Anum_pg_class_oid);
-	funcids = collect_oids(ProcedureRelationId, Anum_pg_proc_oid);
-
-	/* some of the dshash entries are to be removed, take exclusive lock. */
-	dshash_seq_init(&dshstat, pgStatSharedHash, true);
-	while ((ent = dshash_seq_next(&dshstat)) != NULL)
-	{
-		PgStatShm_StatEntryHeader *header;
-
-		CHECK_FOR_INTERRUPTS();
-
-		header = dsa_get_address(StatsDSA, ent->body);
-		if (header->dropped)
-			continue;
-
-		/*
-		 * Don't drop entries for other than database objects not of the
-		 * current database.
-		 */
-		if (ent->key.type != PGSTAT_TYPE_DB &&
-			ent->key.dboid != MyDatabaseId)
-			continue;
-
-		switch (ent->key.type)
-		{
-			case PGSTAT_TYPE_DB:
-				/*
-				 * don't remove database entry for shared tables and existing
-				 * tables
-				 */
-				if (ent->key.dboid == 0 ||
-					pgstat_oid_lookup(dboids, ent->key.dboid) != NULL)
-					continue;
-
-				break;
-
-			case PGSTAT_TYPE_TABLE:
-				/* don't remove existing relations */
-				if (pgstat_oid_lookup(relids, ent->key.objoid) != NULL)
-					continue;
-
-				break;
-
-			case PGSTAT_TYPE_FUNCTION:
-				/* don't remove existing functions  */
-				if (pgstat_oid_lookup(funcids, ent->key.objoid) != NULL)
-					continue;
-
-				break;
-			default:
-				elog(ERROR, "unexpected");
-				break;
-		}
-
-		/* drop this entry */
-		if (!pgstat_drop_stats_entry(&dshstat))
-			not_freed_count++;
-	}
-	dshash_seq_term(&dshstat);
-	pgstat_oid_destroy(dboids);
-	pgstat_oid_destroy(relids);
-	pgstat_oid_destroy(funcids);
-
-	/*
-	 * If some of the stats data could not be freed, signal the reference
-	 * holders to run garbage collection of their cached pgStatShmLookupCache.
-	 */
-	if (not_freed_count > 0)
-		pg_atomic_fetch_add_u64(&StatsShmem->gc_count, 1);
-#endif
 }
 
 
@@ -2098,50 +1984,6 @@ pgstat_drop_stats_entry(dshash_seq_status *hstat)
 	}
 
 	return did_free;
-}
-
-/* ----------
- * collect_oids() -
- *
- *	Collect the OIDs of all objects listed in the specified system catalog
- *	into a temporary hash table.  Caller should pgsstat_oid_destroy the result
- *	when done with it.  (However, we make the table in CurrentMemoryContext
- *	so that it will be freed properly in event of an error.)
- * ----------
- */
-static pgstat_oid_hash *
-collect_oids(Oid catalogid, AttrNumber anum_oid)
-{
-	pgstat_oid_hash *rethash;
-	Relation	rel;
-	TableScanDesc scan;
-	HeapTuple	tup;
-	Snapshot	snapshot;
-
-	rethash = pgstat_oid_create(CurrentMemoryContext,
-								PGSTAT_TABLE_HASH_SIZE, NULL);
-
-	rel = table_open(catalogid, AccessShareLock);
-	snapshot = RegisterSnapshot(GetLatestSnapshot());
-	scan = table_beginscan(rel, snapshot, 0, NULL);
-	while ((tup = heap_getnext(scan, ForwardScanDirection)) != NULL)
-	{
-		Oid			thisoid;
-		bool		isnull;
-		bool		found;
-
-		thisoid = heap_getattr(tup, anum_oid, RelationGetDescr(rel), &isnull);
-		Assert(!isnull);
-
-		CHECK_FOR_INTERRUPTS();
-
-		pgstat_oid_insert(rethash, thisoid, &found);
-	}
-	table_endscan(scan);
-	UnregisterSnapshot(snapshot);
-	table_close(rel, AccessShareLock);
-
-	return rethash;
 }
 
 /*
