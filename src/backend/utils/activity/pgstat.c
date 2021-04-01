@@ -1337,7 +1337,8 @@ pgstat_shutdown_hook(int code, Datum arg)
 	dshash_detach(pgStatSharedHash);
 	pgStatSharedHash = NULL;
 
-	/* We are going to exit. Don't bother destroying local hashes. */
+	/* there shouldn't be any pending changes left */
+	Assert(dlist_is_empty(&pgStatPending));
 	dlist_init(&pgStatPending);
 
 	dsa_detach(StatsDSA);
