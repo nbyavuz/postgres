@@ -673,6 +673,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 		 * Use before_shmem_exit() so that ShutdownXLOG() can rely on DSM
 		 * segments etc to work.
 		 */
+		before_shmem_exit(pgstat_before_shutdown, 0);
 		before_shmem_exit(ShutdownXLOG, 0);
 	}
 

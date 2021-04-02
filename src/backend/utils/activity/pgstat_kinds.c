@@ -696,6 +696,9 @@ pgstat_flush_wal(bool nowait)
 	PgStat_WalStats *l = &WalStats;
 	WalUsage	all_zeroes PG_USED_FOR_ASSERTS_ONLY = {0};
 
+	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
+	Assert(StatsShmem != NULL);
+
 	/*
 	 * We don't update the WAL usage portion of the local WalStats elsewhere.
 	 * Instead, fill in that portion with the difference of pgWalUsage since
@@ -1885,6 +1888,8 @@ pgstat_report_bgwriter(void)
 	PgStat_BgWriterStats *s = &StatsShmem->bgwriter.stats;
 	PgStat_BgWriterStats *l = &BgWriterStats;
 
+	Assert(!StatsShmem->is_shutdown);
+
 	/*
 	 * This function can be called even if nothing at all has happened. In
 	 * this case, avoid taking lock for a completely empty stats.
@@ -1955,6 +1960,8 @@ pgstat_report_checkpointer(void)
 void
 pgstat_report_wal(bool force)
 {
+	Assert(!StatsShmem->is_shutdown);
+
 	pgstat_flush_wal(force);
 }
 

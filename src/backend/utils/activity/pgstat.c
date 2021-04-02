@@ -437,12 +437,26 @@ pgstat_discard_stats(void)
 }
 
 /*
- * pgstat_write_stats() - write in-memory stats onto disk during shutdown.
+ * pgstat_before_shutdown() needs to be called by exactly one process during
+ * regular server shutdowns. Otherwise all stats will be lost.
+ *
+ * We currently only write out stats for proc_exit(0). We might want to change
+ * that at some point... But right now pgstat_discard_stats() would be called
+ * during the start after a disorderly shutdown, anyway.
  */
 void
-pgstat_write_stats(void)
+pgstat_before_shutdown(int code, Datum arg)
 {
-	pgstat_write_statsfile();
+	Assert(StatsShmem != 0);
+	Assert(!StatsShmem->is_shutdown);
+
+	/* flush out our own pending changes before writing out */
+	pgstat_report_stat(true);
+
+	StatsShmem->is_shutdown = true;
+
+	if (code == 0)
+		pgstat_write_statsfile();
 }
 
 /* ----------
@@ -630,6 +644,14 @@ pgstat_report_stat(bool force)
 	{
 		return 0;
 	}
+
+	/*
+	 * There should never be stats to report once stats are shut down. Can't
+	 * assert that before the checks above, as there is an unconditional
+	 * pgstat_report_stat() call in pgstat_shutdown_hook() - which at least
+	 * the process running pgstat_before_shutdown() will still call.
+	 */
+	Assert(!StatsShmem->is_shutdown);
 
 	now = GetCurrentTransactionStopTimestamp();
 
@@ -1460,6 +1482,7 @@ pgstat_shared_ref_get(PgStatKind type, Oid dboid, Oid objoid, bool create)
 	key.objoid = objoid;
 
 	Assert(pgStatSharedHash != NULL);
+	Assert(!StatsShmem->is_shutdown);
 
 	/*
 	 * First check the lookup cache hashtable in local memory. If we find a

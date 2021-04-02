@@ -470,7 +470,7 @@ extern void StatsShmemInit(void);
  */
 extern void pgstat_restore_stats(void);
 extern void pgstat_discard_stats(void);
-extern void pgstat_write_stats(void);
+extern void pgstat_before_shutdown(int code, Datum arg);
 
 
 /* ----------

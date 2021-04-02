@@ -7129,7 +7129,7 @@ StartupXLOG(void)
 		 * Reset pgstat data, because it may be invalid after recovery. It's
 		 * safe to do this here, because postmaster will not yet have started
 		 * any other processes. NB: This basically just skips loading the data
-		 * from disk, see pgstat_restore() call in clean-startup path.
+		 * from disk, see pgstat_restore_stats() call in clean-startup path.
 		 */
 		pgstat_discard_stats();
 
@@ -8674,13 +8674,6 @@ ShutdownXLOG(int code, Datum arg)
 			RequestXLogSwitch(false);
 
 		CreateCheckPoint(CHECKPOINT_IS_SHUTDOWN | CHECKPOINT_IMMEDIATE);
-
-		/*
-		 * XXX: We should find a better place to deal with this. Probably fine
-		 * to just put it into checkpointer, given that stats don't work in
-		 * single user mode anyway?
-		 */
-		pgstat_write_stats();
 	}
 }
 

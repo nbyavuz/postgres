@@ -247,6 +247,9 @@ typedef struct StatsShmemStruct
 	 */
 	dshash_table_handle hash_handle;	/* shared dbstat hash */
 
+	/* Has the stats system already been shut down? Just a debugging check. */
+	bool is_shutdown;
+
 	/*
 	 * Whenever the for a dropped stats entry could not be freed (because
 	 * backends still have references), this is incremented, causing backends
