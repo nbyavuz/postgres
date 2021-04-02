@@ -688,7 +688,6 @@ pgstat_read_current_status(void)
 #endif
 	int			i;
 
-	Assert(IsUnderPostmaster); // XXX?
 	if (localBackendStatusTable)
 		return;					/* already done */
 
