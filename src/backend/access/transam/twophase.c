@@ -205,6 +205,8 @@ static void RecordTransactionCommitPrepared(TransactionId xid,
 											TransactionId *children,
 											int nrels,
 											RelFileNode *rels,
+											int ndroppedstats,
+											PgStat_DroppedStatsItem *dropped_stats,
 											int ninvalmsgs,
 											SharedInvalidationMessage *invalmsgs,
 											bool initfileinval,
@@ -988,6 +990,7 @@ StartPrepare(GlobalTransaction gxact)
 	TransactionId *children;
 	RelFileNode *commitrels;
 	RelFileNode *abortrels;
+	PgStat_DroppedStatsItem *dropped_stats = NULL;
 	SharedInvalidationMessage *invalmsgs;
 
 	/* Initialize linked list */
@@ -1013,6 +1016,7 @@ StartPrepare(GlobalTransaction gxact)
 	hdr.nsubxacts = xactGetCommittedChildren(&children);
 	hdr.ncommitrels = smgrGetPendingDeletes(true, &commitrels);
 	hdr.nabortrels = smgrGetPendingDeletes(false, &abortrels);
+	hdr.ndroppedstats = pgstat_pending_stats_drops(&dropped_stats);
 	hdr.ninvalmsgs = xactGetCommittedInvalidationMessages(&invalmsgs,
 														  &hdr.initfileinval);
 	hdr.gidlen = strlen(gxact->gid) + 1;	/* Include '\0' */
@@ -1039,6 +1043,11 @@ StartPrepare(GlobalTransaction gxact)
 	{
 		save_state_data(abortrels, hdr.nabortrels * sizeof(RelFileNode));
 		pfree(abortrels);
+	}
+	if (hdr.ndroppedstats > 0)
+	{
+		save_state_data(dropped_stats, hdr.ndroppedstats * sizeof(PgStat_DroppedStatsItem));
+		pfree(dropped_stats);
 	}
 	if (hdr.ninvalmsgs > 0)
 	{
@@ -1420,6 +1429,7 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	RelFileNode *abortrels;
 	RelFileNode *delrels;
 	int			ndelrels;
+	PgStat_DroppedStatsItem *dropped_stats;
 	SharedInvalidationMessage *invalmsgs;
 
 	/*
@@ -1454,6 +1464,8 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	bufptr += MAXALIGN(hdr->ncommitrels * sizeof(RelFileNode));
 	abortrels = (RelFileNode *) bufptr;
 	bufptr += MAXALIGN(hdr->nabortrels * sizeof(RelFileNode));
+	dropped_stats = (PgStat_DroppedStatsItem*) bufptr;
+	bufptr += MAXALIGN(hdr->ndroppedstats * sizeof(PgStat_DroppedStatsItem));
 	invalmsgs = (SharedInvalidationMessage *) bufptr;
 	bufptr += MAXALIGN(hdr->ninvalmsgs * sizeof(SharedInvalidationMessage));
 
@@ -1475,6 +1487,7 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 		RecordTransactionCommitPrepared(xid,
 										hdr->nsubxacts, children,
 										hdr->ncommitrels, commitrels,
+										hdr->ndroppedstats, dropped_stats,
 										hdr->ninvalmsgs, invalmsgs,
 										hdr->initfileinval, gid);
 	else
@@ -1515,6 +1528,9 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 
 	/* Make sure files supposed to be dropped are dropped */
 	DropRelationFiles(delrels, ndelrels, false);
+
+	if (isCommit)
+		pgstat_perform_drops(hdr->ndroppedstats, dropped_stats, false);
 
 	/*
 	 * Handle cache invalidation messages.
@@ -2010,6 +2026,7 @@ RecoverPreparedTransactions(void)
 		bufptr += MAXALIGN(hdr->nsubxacts * sizeof(TransactionId));
 		bufptr += MAXALIGN(hdr->ncommitrels * sizeof(RelFileNode));
 		bufptr += MAXALIGN(hdr->nabortrels * sizeof(RelFileNode));
+		bufptr += MAXALIGN(hdr->ndroppedstats * sizeof(PgStat_DroppedStatsItem));
 		bufptr += MAXALIGN(hdr->ninvalmsgs * sizeof(SharedInvalidationMessage));
 
 		/*
@@ -2192,6 +2209,8 @@ RecordTransactionCommitPrepared(TransactionId xid,
 								TransactionId *children,
 								int nrels,
 								RelFileNode *rels,
+								int ndroppedstats,
+								PgStat_DroppedStatsItem *dropped_stats,
 								int ninvalmsgs,
 								SharedInvalidationMessage *invalmsgs,
 								bool initfileinval,
@@ -2220,7 +2239,7 @@ RecordTransactionCommitPrepared(TransactionId xid,
 	 */
 	recptr = XactLogCommitRecord(committs,
 								 nchildren, children, nrels, rels,
-								 /* FIXME */ 0, NULL,
+								 ndroppedstats, dropped_stats,
 								 ninvalmsgs, invalmsgs,
 								 initfileinval,
 								 MyXactFlags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,

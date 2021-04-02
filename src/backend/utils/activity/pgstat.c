@@ -766,13 +766,12 @@ pgstat_vacuum_stat(void)
 
 /*
  * Execute scheduled drops post-commit. Called from xact_redo_commit() during
- * recovery.
+ * recovery, and from FinishPreparedTransaction() during normal commit
+ * processing.
  */
 void
 pgstat_perform_drops(int ndrops, struct PgStat_DroppedStatsItem *items, bool is_redo)
 {
-	Assert(is_redo);
-
 	if (ndrops == 0)
 		return;
 

@@ -32,6 +32,9 @@ step "s1_fetch_consistency_snapshot" { SET stats_fetch_consistency = 'snapshot';
 step "s1_begin" { BEGIN; }
 step "s1_commit" { COMMIT; }
 step "s1_rollback" { ROLLBACK; }
+step "s1_prepare_a" { PREPARE TRANSACTION 'a'; }
+step "s1_commit_prepared_a" { COMMIT PREPARED 'a'; }
+step "s1_rollback_prepared_a" { ROLLBACK PREPARED 'a'; }
 step "s1_ff" { SELECT pg_stat_force_next_flush(); }
 step "s1_func_call" { SELECT test_stat_func(); }
 step "s1_func_drop" { DROP FUNCTION test_stat_func(); }
@@ -63,7 +66,8 @@ step "s2_track_funcs_all" { SET track_functions = 'all'; }
 step "s2_track_funcs_none" { SET track_functions = 'none'; }
 step "s2_begin" { BEGIN; }
 step "s2_commit" { COMMIT; }
-step "s2_rollback" { ROLLBACK; }
+step "s2_commit_prepared_a" { COMMIT PREPARED 'a'; }
+step "s2_rollback_prepared_a" { ROLLBACK PREPARED 'a'; }
 step "s2_ff" { SELECT pg_stat_force_next_flush(); }
 step "s2_func_call" { SELECT test_stat_func() }
 step "s2_func_call2" { SELECT test_stat_func2() }
@@ -201,3 +205,78 @@ permutation
   "s2_func_call" "s2_func_call2" "s2_ff"
   "s1_func_stats" "s1_func_stats2"
   "s1_commit"
+
+
+# Check 2PC handling of stat drops
+
+# S1 prepared, S1 commits prepared
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s1_begin"
+  "s1_func_call"
+  "s2_func_call"
+  "s1_func_drop"
+  "s2_func_call"
+  "s2_ff"
+  "s1_prepare_a"
+  "s2_func_call"
+  "s2_ff"
+  "s1_func_call"
+  "s1_ff"
+  "s1_func_stats"
+  "s1_commit_prepared_a"
+  "s1_func_stats"
+
+# S1 prepared, S1 aborts prepared
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s1_begin"
+  "s1_func_call"
+  "s2_func_call"
+  "s1_func_drop"
+  "s2_func_call"
+  "s2_ff"
+  "s1_prepare_a"
+  "s2_func_call"
+  "s2_ff"
+  "s1_func_call"
+  "s1_ff"
+  "s1_func_stats"
+  "s1_rollback_prepared_a"
+  "s1_func_stats"
+
+# S1 prepares, S2 commits prepared
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s1_begin"
+  "s1_func_call"
+  "s2_func_call"
+  "s1_func_drop"
+  "s2_func_call"
+  "s2_ff"
+  "s1_prepare_a"
+  "s2_func_call"
+  "s2_ff"
+  "s1_func_call"
+  "s1_ff"
+  "s1_func_stats"
+  "s2_commit_prepared_a"
+  "s1_func_stats"
+
+# S1 prepared, S2 aborts prepared
+permutation
+  "s1_track_funcs_all" "s2_track_funcs_all"
+  "s1_begin"
+  "s1_func_call"
+  "s2_func_call"
+  "s1_func_drop"
+  "s2_func_call"
+  "s2_ff"
+  "s1_prepare_a"
+  "s2_func_call"
+  "s2_ff"
+  "s1_func_call"
+  "s1_ff"
+  "s1_func_stats"
+  "s2_rollback_prepared_a"
+  "s1_func_stats"
