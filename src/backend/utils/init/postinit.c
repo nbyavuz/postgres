@@ -630,6 +630,13 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	InitBufferPoolBackend();
 
 	/*
+	 * Initialize stats collection --- must happen before first xact. The
+	 * autovac launcher already has done so.
+	 */
+	if (!IsAutoVacuumWorkerProcess() && !IsBackgroundWorker)
+		pgstat_initialize();
+
+	/*
 	 * Initialize local process's access to XLOG.
 	 */
 	if (IsUnderPostmaster)
@@ -680,10 +687,6 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 
 	/* Initialize portal manager */
 	EnablePortalManager();
-
-	/* Initialize stats collection --- must happen before first xact */
-	if (!bootstrap)
-		pgstat_initialize();
 
 	/* Initialize status reporting */
 	if (!bootstrap)
