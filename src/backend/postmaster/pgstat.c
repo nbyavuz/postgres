@@ -183,7 +183,7 @@ static bool pgStatRunningInCollector = false;
  * for the life of the backend.  Also, we zero out the t_id fields of the
  * contained PgStat_TableStatus structs whenever they are not actively in use.
  * This allows relcache pgstat_info pointers to be treated as long-lived data,
- * avoiding repeated searches in pgstat_initstats() when a relation is
+ * avoiding repeated searches in pgstat_relation_assoc() when a relation is
  * repeatedly opened during a transaction.
  */
 #define TABSTAT_QUANTUM		100 /* we alloc this many at a time */
@@ -1617,7 +1617,7 @@ pgstat_report_analyze(Relation rel,
 	 * collector ends up with the right numbers if we abort instead of
 	 * committing.)
 	 */
-	if (rel->pgstat_info != NULL)
+	if (pgstat_relation_should_count(rel))
 	{
 		PgStat_TableXactStatus *trans;
 
@@ -1943,7 +1943,7 @@ pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu, bool finalize)
 
 
 /* ----------
- * pgstat_initstats() -
+ * pgstat_relation_init() -
  *
  *	Initialize a relcache entry to count access statistics.
  *	Called whenever a relation is opened.
@@ -1955,7 +1955,7 @@ pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu, bool finalize)
  * ----------
  */
 void
-pgstat_initstats(Relation rel)
+pgstat_relation_init(Relation rel)
 {
 	Oid			rel_id = rel->rd_id;
 	char		relkind = rel->rd_rel->relkind;
@@ -1963,6 +1963,7 @@ pgstat_initstats(Relation rel)
 	/* We only count stats for things that have storage */
 	if (!RELKIND_HAS_STORAGE(relkind))
 	{
+		rel->pgstat_enabled = false;
 		rel->pgstat_info = NULL;
 		return;
 	}
@@ -1970,6 +1971,7 @@ pgstat_initstats(Relation rel)
 	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_counts)
 	{
 		/* We're not counting at all */
+		rel->pgstat_enabled = false;
 		rel->pgstat_info = NULL;
 		return;
 	}
@@ -1978,11 +1980,22 @@ pgstat_initstats(Relation rel)
 	 * If we already set up this relation in the current transaction, nothing
 	 * to do.
 	 */
-	if (rel->pgstat_info != NULL &&
+	if (rel->pgstat_info &&
 		rel->pgstat_info->t_id == rel_id)
 		return;
 
-	/* Else find or make the PgStat_TableStatus entry, and update link */
+	rel->pgstat_enabled = true;
+}
+
+void
+pgstat_relation_assoc(Relation rel)
+{
+	Oid			rel_id = rel->rd_id;
+
+	Assert(rel->pgstat_enabled);
+	Assert(rel->pgstat_info == NULL);
+
+	/* find or make the PgStat_TableStatus entry, and update link */
 	rel->pgstat_info = get_tabstat_entry(rel_id, rel->rd_rel->relisshared);
 }
 
@@ -2149,13 +2162,12 @@ add_tabstat_xact_level(PgStat_TableStatus *pgstat_info, int nest_level)
 void
 pgstat_count_heap_insert(Relation rel, PgStat_Counter n)
 {
-	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
-
-	if (pgstat_info != NULL)
+	if (pgstat_relation_should_count(rel))
 	{
-		/* We have to log the effect at the proper transactional level */
+		PgStat_TableStatus *pgstat_info = rel->pgstat_info;
 		int			nest_level = GetCurrentTransactionNestLevel();
 
+		/* We have to log the effect at the proper transactional level */
 		if (pgstat_info->trans == NULL ||
 			pgstat_info->trans->nest_level != nest_level)
 			add_tabstat_xact_level(pgstat_info, nest_level);
@@ -2170,13 +2182,12 @@ pgstat_count_heap_insert(Relation rel, PgStat_Counter n)
 void
 pgstat_count_heap_update(Relation rel, bool hot)
 {
-	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
-
-	if (pgstat_info != NULL)
+	if (pgstat_relation_should_count(rel))
 	{
-		/* We have to log the effect at the proper transactional level */
+		PgStat_TableStatus *pgstat_info = rel->pgstat_info;
 		int			nest_level = GetCurrentTransactionNestLevel();
 
+		/* We have to log the effect at the proper transactional level */
 		if (pgstat_info->trans == NULL ||
 			pgstat_info->trans->nest_level != nest_level)
 			add_tabstat_xact_level(pgstat_info, nest_level);
@@ -2195,13 +2206,12 @@ pgstat_count_heap_update(Relation rel, bool hot)
 void
 pgstat_count_heap_delete(Relation rel)
 {
-	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
-
-	if (pgstat_info != NULL)
+	if (pgstat_relation_should_count(rel))
 	{
-		/* We have to log the effect at the proper transactional level */
+		PgStat_TableStatus *pgstat_info = rel->pgstat_info;
 		int			nest_level = GetCurrentTransactionNestLevel();
 
+		/* We have to log the effect at the proper transactional level */
 		if (pgstat_info->trans == NULL ||
 			pgstat_info->trans->nest_level != nest_level)
 			add_tabstat_xact_level(pgstat_info, nest_level);
@@ -2253,13 +2263,12 @@ pgstat_truncdrop_restore_counters(PgStat_TableXactStatus *trans)
 void
 pgstat_count_truncate(Relation rel)
 {
-	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
-
-	if (pgstat_info != NULL)
+	if (pgstat_relation_should_count(rel))
 	{
-		/* We have to log the effect at the proper transactional level */
+		PgStat_TableStatus *pgstat_info = rel->pgstat_info;
 		int			nest_level = GetCurrentTransactionNestLevel();
 
+		/* We have to log the effect at the proper transactional level */
 		if (pgstat_info->trans == NULL ||
 			pgstat_info->trans->nest_level != nest_level)
 			add_tabstat_xact_level(pgstat_info, nest_level);
@@ -2282,10 +2291,12 @@ pgstat_count_truncate(Relation rel)
 void
 pgstat_update_heap_dead_tuples(Relation rel, int delta)
 {
-	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
+	if (pgstat_relation_should_count(rel))
+	{
+		PgStat_TableStatus *pgstat_info = rel->pgstat_info;
 
-	if (pgstat_info != NULL)
 		pgstat_info->t_counts.t_delta_dead_tuples -= delta;
+	}
 }
 
 /*
