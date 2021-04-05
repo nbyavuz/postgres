@@ -5725,13 +5725,6 @@ XactLogAbortRecord(TimestampTz abort_time,
 		info |= XLR_SPECIAL_REL_UPDATE;
 	}
 
-	if (nrels > 0)
-	{
-		xl_xinfo.xinfo |= XACT_XINFO_HAS_DROPPED_STATS;
-		xl_relfilenodes.nrels = nrels;
-		info |= XLR_SPECIAL_REL_UPDATE;
-	}
-
 	if (ndroppedstats > 0)
 	{
 		xl_xinfo.xinfo |= XACT_XINFO_HAS_DROPPED_STATS;
