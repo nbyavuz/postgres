@@ -367,6 +367,16 @@ static const struct config_enum_entry track_function_options[] = {
 StaticAssertDecl(lengthof(track_function_options) == (TRACK_FUNC_ALL + 2),
 				 "array length mismatch");
 
+static const struct config_enum_entry stats_fetch_consistency[] = {
+	{"none", STATS_FETCH_CONSISTENCY_NONE, false},
+	{"cache", STATS_FETCH_CONSISTENCY_CACHE, false},
+	{"snapshot", STATS_FETCH_CONSISTENCY_SNAPSHOT, false},
+	{NULL, 0, false}
+};
+
+StaticAssertDecl(lengthof(stats_fetch_consistency) == (STATS_FETCH_CONSISTENCY_SNAPSHOT + 2),
+				 "array length mismatch");
+
 static const struct config_enum_entry xmlbinary_options[] = {
 	{"base64", XMLBINARY_BASE64, false},
 	{"hex", XMLBINARY_HEX, false},
@@ -4781,6 +4791,16 @@ static struct config_enum ConfigureNamesEnum[] =
 		},
 		&pgstat_track_functions,
 		TRACK_FUNC_OFF, track_function_options,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"stats_fetch_consistency", PGC_SUSET, STATS_COLLECTOR,
+			gettext_noop("Stats consistency model XXXX"),
+			NULL
+		},
+		&pgstat_fetch_consistency,
+		STATS_FETCH_CONSISTENCY_NONE, stats_fetch_consistency,
 		NULL, NULL, NULL
 	},
 

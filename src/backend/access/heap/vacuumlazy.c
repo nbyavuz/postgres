@@ -642,7 +642,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 						new_min_multi,
 						false);
 
-	/* report results to the stats collector, too */
+	/* report results to the activity stats facility, too */
 	pgstat_report_vacuum(RelationGetRelid(rel),
 						 rel->rd_rel->relisshared,
 						 Max(new_live_tuples, 0),

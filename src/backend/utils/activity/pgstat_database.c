@@ -19,6 +19,7 @@
 
 #include "utils/pgstat_internal.h"
 #include "utils/timestamp.h"
+#include "storage/procsignal.h"
 
 
 int	pgStatXactCommit = 0;
@@ -33,89 +34,119 @@ SessionEndType pgStatSessionEndCause = DISCONNECT_NORMAL;
 /* ----------
  * pgstat_drop_database() -
  *
- *	Tell the collector that we just dropped a database.
- *	(If the message gets lost, we will still clean the dead DB eventually
- *	via future invocations of pgstat_vacuum_stat().)
- * ----------
+ * Remove entry for the database being dropped.
+ *
+ * Some entries might be left alone due to lock failure or some stats are
+ * flushed after this but we will still clean the dead DB eventually via
+ * future invocations of pgstat_vacuum_stat().
+ *	----------
  */
 void
-pgstat_drop_database(Oid databaseid)
+pgstat_drop_database(Oid dboid)
 {
-	PgStat_MsgDropdb msg;
-
-	if (pgStatSock == PGINVALID_SOCKET)
-		return;
-
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_DROPDB);
-	msg.m_databaseid = databaseid;
-	pgstat_send(&msg, sizeof(msg));
+	/*
+	 * FIXME: need to do this using the transactional mechanism. Not so much
+	 * because of rollbacks, but so the stats are removed on a standby
+	 * too. Maybe a dedicated drop type?
+	 */
+	pgstat_drop_database_and_contents(dboid);
 }
 
 /* --------
  * pgstat_report_recovery_conflict() -
  *
- *	Tell the collector about a Hot Standby recovery conflict.
+ * Report a Hot Standby recovery conflict.
  * --------
  */
 void
 pgstat_report_recovery_conflict(int reason)
 {
-	PgStat_MsgRecoveryConflict msg;
+	PgStat_StatDBEntry *dbentry;
 
-	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_counts)
+	Assert(IsUnderPostmaster);
+	if (!pgstat_track_counts)
 		return;
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_RECOVERYCONFLICT);
-	msg.m_databaseid = MyDatabaseId;
-	msg.m_reason = reason;
-	pgstat_send(&msg, sizeof(msg));
+	dbentry = pgstat_pending_db_prepare(MyDatabaseId);
+
+	switch (reason)
+	{
+		case PROCSIG_RECOVERY_CONFLICT_DATABASE:
+
+			/*
+			 * Since we drop the information about the database as soon as it
+			 * replicates, there is no point in counting these conflicts.
+			 */
+			break;
+		case PROCSIG_RECOVERY_CONFLICT_TABLESPACE:
+			dbentry->n_conflict_tablespace++;
+			break;
+		case PROCSIG_RECOVERY_CONFLICT_LOCK:
+			dbentry->n_conflict_lock++;
+			break;
+		case PROCSIG_RECOVERY_CONFLICT_SNAPSHOT:
+			dbentry->n_conflict_snapshot++;
+			break;
+		case PROCSIG_RECOVERY_CONFLICT_BUFFERPIN:
+			dbentry->n_conflict_bufferpin++;
+			break;
+		case PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK:
+			dbentry->n_conflict_startup_deadlock++;
+			break;
+	}
 }
+
 
 /* --------
  * pgstat_report_deadlock() -
  *
- *	Tell the collector about a deadlock detected.
+ * Report a detected deadlock.
  * --------
  */
 void
 pgstat_report_deadlock(void)
 {
-	PgStat_MsgDeadlock msg;
+	PgStat_StatDBEntry *dbent;
 
-	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_DEADLOCK);
-	msg.m_databaseid = MyDatabaseId;
-	pgstat_send(&msg, sizeof(msg));
+	dbent = pgstat_pending_db_prepare(MyDatabaseId);
+	dbent->n_deadlocks++;
 }
 
 /* --------
- * pgstat_report_checksum_failures_in_db() -
+ * pgstat_report_checksum_failures_in_db -
  *
- *	Tell the collector about one or more checksum failures.
+ * Report one or more checksum failures.
  * --------
  */
 void
 pgstat_report_checksum_failures_in_db(Oid dboid, int failurecount)
 {
-	PgStat_MsgChecksumFailure msg;
+	PgStatSharedRef *shared_ref;
+	PgStatShm_StatDBEntry *sharedent;
 
-	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_CHECKSUMFAILURE);
-	msg.m_databaseid = dboid;
-	msg.m_failurecount = failurecount;
-	msg.m_failure_time = GetCurrentTimestamp();
+	/*
+	 * Update the shared stats directly - checksum failures should never be
+	 * common enough for that to be a problem.
+	 */
+	shared_ref =
+		pgstat_shared_stat_locked(PGSTAT_KIND_DB, dboid, InvalidOid, false);
 
-	pgstat_send(&msg, sizeof(msg));
+	sharedent = (PgStatShm_StatDBEntry *) shared_ref->shared_stats;
+	sharedent->stats.n_checksum_failures += failurecount;
+
+	pgstat_shared_stat_unlock(shared_ref);
 }
 
 /* --------
  * pgstat_report_checksum_failure() -
  *
- *	Tell the collector about a checksum failure.
+ * Reports one checksum failure in the current database.
  * --------
  */
 void
@@ -127,62 +158,189 @@ pgstat_report_checksum_failure(void)
 /* --------
  * pgstat_report_tempfile() -
  *
- *	Tell the collector about a temporary file.
+ * Report a temporary file.
  * --------
  */
 void
 pgstat_report_tempfile(size_t filesize)
 {
-	PgStat_MsgTempFile msg;
+	PgStat_StatDBEntry *dbent;
 
-	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_TEMPFILE);
-	msg.m_databaseid = MyDatabaseId;
-	msg.m_filesize = filesize;
-	pgstat_send(&msg, sizeof(msg));
+	if (filesize == 0)			/* Is there a case where filesize is really 0? */
+		return;
+
+	dbent = pgstat_pending_db_prepare(MyDatabaseId);
+	dbent->n_temp_bytes += filesize; /* needs check overflow */
+	dbent->n_temp_files++;
 }
 
 /* ----------
- * pgstat_send_connstats() -
+ * pgstat_update_connstat() -
  *
- *	Tell the collector about session statistics.
- *	The parameter "disconnect" will be true when the backend exits.
- *	"last_report" is the last time we were called (0 if never).
+ * Update local connection stats. The parameter "disconnect" will be true
+ * when the backend exits.
  * ----------
  */
 void
-pgstat_send_connstats(bool disconnect, TimestampTz last_report)
+pgstat_update_connstats(bool disconnect)
 {
-	PgStat_MsgConn msg;
+	static TimestampTz last_report = 0;
+	SessionEndType session_end_type = DISCONNECT_NOT_YET;
+	TimestampTz now;
 	long		secs;
 	int			usecs;
+	PgStat_StatDBEntry *dbentry;
 
-	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_counts)
+	Assert(MyBackendType == B_BACKEND);
+
+	if (session_end_type != DISCONNECT_NOT_YET)
 		return;
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_CONNECTION);
-	msg.m_databaseid = MyDatabaseId;
+	now = GetCurrentTimestamp();
+	if (last_report == 0)
+		last_report = MyStartTimestamp;
+	TimestampDifference(last_report, now, &secs, &usecs);
+	last_report = now;
 
-	/* session time since the last report */
-	TimestampDifference(((last_report == 0) ? MyStartTimestamp : last_report),
-						GetCurrentTimestamp(),
-						&secs, &usecs);
-	msg.m_session_time = secs * 1000000 + usecs;
+	if (disconnect)
+		session_end_type = pgStatSessionEndCause;
 
-	msg.m_disconnect = disconnect ? pgStatSessionEndCause : DISCONNECT_NOT_YET;
+	dbentry = pgstat_pending_db_prepare(MyDatabaseId);
 
-	msg.m_active_time = pgStatActiveTime;
+	dbentry->n_sessions = (last_report == 0 ? 1 : 0);
+	dbentry->total_session_time += secs * 1000000 + usecs;
+	dbentry->total_active_time += pgStatActiveTime;
+	dbentry->total_idle_in_xact_time += pgStatTransactionIdleTime;
+
 	pgStatActiveTime = 0;
-
-	msg.m_idle_in_xact_time = pgStatTransactionIdleTime;
 	pgStatTransactionIdleTime = 0;
 
-	/* report a new session only the first time */
-	msg.m_count = (last_report == 0) ? 1 : 0;
+	switch (session_end_type)
+	{
+		case DISCONNECT_NOT_YET:
+		case DISCONNECT_NORMAL:
+			/* we don't collect these */
+			break;
+		case DISCONNECT_CLIENT_EOF:
+			dbentry->n_sessions_abandoned++;
+			break;
+		case DISCONNECT_FATAL:
+			dbentry->n_sessions_fatal++;
+			break;
+		case DISCONNECT_KILLED:
+			dbentry->n_sessions_killed++;
+			break;
+	}
+}
 
-	pgstat_send(&msg, sizeof(PgStat_MsgConn));
+/*
+ * pgstat_flush_db - flush out a local database stats entry
+ *
+ * If nowait is true, this function returns false on lock failure. Otherwise
+ * this function always returns true.
+ *
+ * Returns true if the entry is successfully flushed out.
+ */
+bool
+pgstat_flush_database(PgStatSharedRef *shared_ref, bool nowait)
+{
+	PgStatShm_StatDBEntry *sharedent;
+	PgStat_StatDBEntry *pendingent = (PgStat_StatDBEntry *) shared_ref->pending;
+
+	if (shared_ref == NULL)
+		return false;
+
+	if (!pgstat_shared_stat_lock(shared_ref, nowait))
+		return false;			/* failed to acquire lock, skip */
+
+	sharedent = (PgStatShm_StatDBEntry *) shared_ref->shared_stats;
+
+#define PGSTAT_ACCUM_DBCOUNT(item)		\
+	(sharedent)->stats.item += (pendingent)->item
+
+	PGSTAT_ACCUM_DBCOUNT(n_tuples_returned);
+	PGSTAT_ACCUM_DBCOUNT(n_tuples_fetched);
+	PGSTAT_ACCUM_DBCOUNT(n_tuples_inserted);
+	PGSTAT_ACCUM_DBCOUNT(n_tuples_updated);
+	PGSTAT_ACCUM_DBCOUNT(n_tuples_deleted);
+	PGSTAT_ACCUM_DBCOUNT(n_blocks_fetched);
+	PGSTAT_ACCUM_DBCOUNT(n_blocks_hit);
+
+	PGSTAT_ACCUM_DBCOUNT(n_deadlocks);
+	PGSTAT_ACCUM_DBCOUNT(n_temp_bytes);
+	PGSTAT_ACCUM_DBCOUNT(n_temp_files);
+	PGSTAT_ACCUM_DBCOUNT(n_checksum_failures);
+
+	PGSTAT_ACCUM_DBCOUNT(n_sessions);
+	PGSTAT_ACCUM_DBCOUNT(total_session_time);
+	PGSTAT_ACCUM_DBCOUNT(total_active_time);
+	PGSTAT_ACCUM_DBCOUNT(total_idle_in_xact_time);
+	PGSTAT_ACCUM_DBCOUNT(n_sessions_abandoned);
+	PGSTAT_ACCUM_DBCOUNT(n_sessions_fatal);
+	PGSTAT_ACCUM_DBCOUNT(n_sessions_killed);
+#undef PGSTAT_ACCUM_DBCOUNT
+
+	/*
+	 * Accumulate xact commit/rollback and I/O timings to stats entry of the
+	 * current database.
+	 */
+	if (OidIsValid(shared_ref->shared_entry->key.dboid))
+	{
+		sharedent->stats.n_xact_commit += pgStatXactCommit;
+		sharedent->stats.n_xact_rollback += pgStatXactRollback;
+		sharedent->stats.n_block_read_time += pgStatBlockReadTime;
+		sharedent->stats.n_block_write_time += pgStatBlockWriteTime;
+		pgStatXactCommit = 0;
+		pgStatXactRollback = 0;
+		pgStatBlockReadTime = 0;
+		pgStatBlockWriteTime = 0;
+	}
+	else
+	{
+		sharedent->stats.n_xact_commit = 0;
+		sharedent->stats.n_xact_rollback = 0;
+		sharedent->stats.n_block_read_time = 0;
+		sharedent->stats.n_block_write_time = 0;
+	}
+
+	pgstat_shared_stat_unlock(shared_ref);
+
+	memset(pendingent, 0, sizeof(*pendingent));
+
+	return true;
+}
+
+/*
+ * Find or create a local PgStat_StatDBEntry entry for dboid.
+ */
+PgStat_StatDBEntry *
+pgstat_pending_db_prepare(Oid dboid)
+{
+	PgStatSharedRef *shared_ref;
+
+	shared_ref = pgstat_pending_prepare(PGSTAT_KIND_DB, dboid, InvalidOid);
+
+	return shared_ref->pending;
+
+}
+
+/* ----------
+ * pgstat_fetch_stat_dbentry() -
+ *
+ * Support function for the SQL-callable pgstat* functions. Returns the
+ * collected statistics for one database or NULL. NULL doesn't necessarily
+ * mean that the database doesn't exist, just that there are no statistics,
+ * so the caller is better off to report ZERO instead.
+ * ----------
+ */
+PgStat_StatDBEntry *
+pgstat_fetch_stat_dbentry(Oid dboid)
+{
+	return (PgStat_StatDBEntry *)
+		pgstat_fetch_entry(PGSTAT_KIND_DB, dboid, InvalidOid);
 }
 
 void
