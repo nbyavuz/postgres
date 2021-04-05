@@ -86,6 +86,7 @@ extern void pgstat_send(void *msg, int len);
  * Functions in pgstat_database.c
  */
 
+extern void pgstat_send_connstats(bool disconnect, TimestampTz last_report);
 extern void AtEOXact_PgStat_Database(bool isCommit, bool parallel);
 
 
@@ -101,7 +102,6 @@ extern void pgstat_send_funcstats(void);
  */
 
 extern void pgstat_send_slru(void);
-extern void pgstat_send_connstats(bool disconnect, TimestampTz last_report);
 extern void pgstat_wal_initialize(void);
 
 
