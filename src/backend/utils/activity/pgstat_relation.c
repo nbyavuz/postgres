@@ -92,6 +92,40 @@ bool have_relation_stats;
 static HTAB *pgStatTabHash = NULL;
 
 
+/*
+ * Copy stats between relations. This is used for things like REINDEX
+ * CONCURRENTLY.
+ */
+void
+pgstat_copy_relation_stats(Relation dst, Relation src)
+{
+	PgStat_StatTabEntry *srcstats;
+
+	srcstats = pgstat_fetch_stat_tabentry(RelationGetRelid(src));
+
+	if (!srcstats)
+		return;
+
+	if (pgstat_relation_should_count(dst))
+	{
+		/*
+		 * XXX: temporarily this does not actually quite do what the name says,
+		 * and just copy index related fields. A subsequent commit will do more.
+		 */
+
+		dst->pgstat_info->t_counts.t_numscans = srcstats->numscans;
+		dst->pgstat_info->t_counts.t_tuples_returned = srcstats->tuples_returned;
+		dst->pgstat_info->t_counts.t_tuples_fetched = srcstats->tuples_fetched;
+		dst->pgstat_info->t_counts.t_blocks_fetched = srcstats->blocks_fetched;
+		dst->pgstat_info->t_counts.t_blocks_hit = srcstats->blocks_hit;
+
+		/*
+		 * The data will be sent by the next pgstat_report_stat()
+		 * call.
+		 */
+	}
+}
+
 /* ----------
  * pgstat_relation_init() -
  *
