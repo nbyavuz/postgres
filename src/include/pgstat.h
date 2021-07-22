@@ -1027,6 +1027,8 @@ extern void pgstat_report_stat(bool force);
 extern void pgstat_vacuum_stat(void);
 extern void pgstat_drop_database(Oid databaseid);
 
+extern void pgstat_copy_relation_stats(Relation dstrel, Relation srcrel);
+
 extern void pgstat_clear_snapshot(void);
 extern void pgstat_reset_counters(void);
 extern void pgstat_reset_shared_counters(const char *);
