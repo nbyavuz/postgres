@@ -799,8 +799,8 @@ const char *const config_group_names[] =
 	gettext_noop("Reporting and Logging / Process Title"),
 	/* STATS_MONITORING */
 	gettext_noop("Statistics / Monitoring"),
-	/* STATS_COLLECTOR */
-	gettext_noop("Statistics / Query and Index Statistics Collector"),
+	/* STATS_ACTIVITY */
+	gettext_noop("Statistics / Query and Index Activity Statistics"),
 	/* AUTOVACUUM */
 	gettext_noop("Autovacuum"),
 	/* CLIENT_CONN_STATEMENT */
@@ -1526,7 +1526,7 @@ static struct config_bool ConfigureNamesBool[] =
 #endif
 
 	{
-		{"track_activities", PGC_SUSET, STATS_COLLECTOR,
+		{"track_activities", PGC_SUSET, STATS_ACTIVITY,
 			gettext_noop("Collects information about executing commands."),
 			gettext_noop("Enables the collection of information on the currently "
 						 "executing command of each session, along with "
@@ -1537,7 +1537,7 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
-		{"track_counts", PGC_SUSET, STATS_COLLECTOR,
+		{"track_counts", PGC_SUSET, STATS_ACTIVITY,
 			gettext_noop("Collects statistics on database activity."),
 			NULL
 		},
@@ -1546,7 +1546,7 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
-		{"track_io_timing", PGC_SUSET, STATS_COLLECTOR,
+		{"track_io_timing", PGC_SUSET, STATS_ACTIVITY,
 			gettext_noop("Collects timing statistics for database I/O activity."),
 			NULL
 		},
@@ -1555,7 +1555,7 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
-		{"track_wal_io_timing", PGC_SUSET, STATS_COLLECTOR,
+		{"track_wal_io_timing", PGC_SUSET, STATS_ACTIVITY,
 			gettext_noop("Collects timing statistics for WAL I/O activity."),
 			NULL
 		},
@@ -3491,7 +3491,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"track_activity_query_size", PGC_POSTMASTER, STATS_COLLECTOR,
+		{"track_activity_query_size", PGC_POSTMASTER, STATS_ACTIVITY,
 			gettext_noop("Sets the size reserved for pg_stat_activity.query, in bytes."),
 			NULL,
 			GUC_UNIT_BYTE
@@ -4478,7 +4478,7 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
-		{"stats_temp_directory", PGC_SIGHUP, STATS_COLLECTOR,
+		{"stats_temp_directory", PGC_SIGHUP, STATS_ACTIVITY,
 			gettext_noop("Writes temporary statistics files to the specified directory."),
 			NULL,
 			GUC_SUPERUSER_ONLY
@@ -4835,7 +4835,7 @@ static struct config_enum ConfigureNamesEnum[] =
 	},
 
 	{
-		{"track_functions", PGC_SUSET, STATS_COLLECTOR,
+		{"track_functions", PGC_SUSET, STATS_ACTIVITY,
 			gettext_noop("Collects function-level statistics on database activity."),
 			NULL
 		},
@@ -4855,7 +4855,7 @@ static struct config_enum ConfigureNamesEnum[] =
 	},
 
 	{
-		{"stats_fetch_consistency", PGC_SUSET, STATS_COLLECTOR,
+		{"stats_fetch_consistency", PGC_SUSET, STATS_ACTIVITY,
 			gettext_noop("Stats consistency model XXXX"),
 			NULL
 		},
