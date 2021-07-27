@@ -40,6 +40,7 @@
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "utils/portal.h"
+#include "utils/builtins.h"
 
 
 /* ----------------
@@ -168,6 +169,8 @@ EndCommand(const QueryCompletion *qc, CommandDest dest, bool force_undecorated_o
 	char		completionTag[COMPLETION_TAG_BUFSIZE];
 	CommandTag	tag;
 	const char *tagname;
+	Size tagname_len;
+	char *b;
 
 	switch (dest)
 	{
@@ -187,16 +190,23 @@ EndCommand(const QueryCompletion *qc, CommandDest dest, bool force_undecorated_o
 			 * count, so just Assert that rather than having an extra test.
 			 */
 			tag = qc->commandTag;
-			tagname = GetCommandTagName(tag);
+			tagname = GetCommandTagNameLen(tag, &tagname_len);
 
+			memcpy(completionTag, tagname, tagname_len);
+			b = completionTag + tagname_len;
 			if (command_tag_display_rowcount(tag) && !force_undecorated_output)
-				snprintf(completionTag, COMPLETION_TAG_BUFSIZE,
-						 tag == CMDTAG_INSERT ?
-						 "%s 0 " UINT64_FORMAT : "%s " UINT64_FORMAT,
-						 tagname, qc->nprocessed);
-			else
-				snprintf(completionTag, COMPLETION_TAG_BUFSIZE, "%s", tagname);
-			pq_putmessage('C', completionTag, strlen(completionTag) + 1);
+			{
+				*b++ = ' ';
+				if (tag == CMDTAG_INSERT)
+				{
+					*b++ = '0';
+					*b++ = ' ';
+				}
+				b += pg_ulltoa_n(qc->nprocessed, b);
+			}
+
+			*b++ = 0;
+			pq_putmessage('C', completionTag, b - completionTag);
 
 		case DestNone:
 		case DestDebug:

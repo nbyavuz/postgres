@@ -387,6 +387,29 @@ static void LockRefindAndRelease(LockMethod lockMethodTable, PGPROC *proc,
 static void GetSingleProcBlockerStatusData(PGPROC *blocked_proc,
 										   BlockedProcsData *data);
 
+static void*
+lockmethod_copy_key(void *dest, const void *src, Size keysize)
+{
+	Assert(keysize == sizeof(LOCKTAG));
+	memcpy(dest, src, sizeof(LOCKTAG));
+	return NULL;
+}
+
+static void*
+locallock_copy_key(void *dest, const void *src, Size keysize)
+{
+	Assert(keysize == sizeof(LOCALLOCKTAG));
+	memcpy(dest, src, sizeof(LOCALLOCKTAG));
+	return NULL;
+}
+
+static void*
+proclock_copy_key(void *dest, const void *src, Size keysize)
+{
+	Assert(keysize == sizeof(PROCLOCKTAG));
+	memcpy(dest, src, sizeof(PROCLOCKTAG));
+	return NULL;
+}
 
 /*
  * InitLocks -- Initialize the lock manager's data structures.
@@ -421,13 +444,14 @@ InitLocks(void)
 	 */
 	info.keysize = sizeof(LOCKTAG);
 	info.entrysize = sizeof(LOCK);
+	info.keycopy = lockmethod_copy_key;
 	info.num_partitions = NUM_LOCK_PARTITIONS;
 
 	LockMethodLockHash = ShmemInitHash("LOCK hash",
 									   init_table_size,
 									   max_table_size,
 									   &info,
-									   HASH_ELEM | HASH_BLOBS | HASH_PARTITION);
+									   HASH_ELEM | HASH_BLOBS | HASH_PARTITION | HASH_KEYCOPY);
 
 	/* Assume an average of 2 holders per lock */
 	max_table_size *= 2;
@@ -441,12 +465,13 @@ InitLocks(void)
 	info.entrysize = sizeof(PROCLOCK);
 	info.hash = proclock_hash;
 	info.num_partitions = NUM_LOCK_PARTITIONS;
+	info.keycopy = proclock_copy_key;
 
 	LockMethodProcLockHash = ShmemInitHash("PROCLOCK hash",
 										   init_table_size,
 										   max_table_size,
 										   &info,
-										   HASH_ELEM | HASH_FUNCTION | HASH_PARTITION);
+										   HASH_ELEM | HASH_FUNCTION | HASH_PARTITION | HASH_KEYCOPY);
 
 	/*
 	 * Allocate fast-path structures.
@@ -471,11 +496,13 @@ InitLocks(void)
 
 	info.keysize = sizeof(LOCALLOCKTAG);
 	info.entrysize = sizeof(LOCALLOCK);
+	info.keycopy = proclock_copy_key;
+	info.keycopy = locallock_copy_key;
 
 	LockMethodLocalHash = hash_create("LOCALLOCK hash",
 									  16,
 									  &info,
-									  HASH_ELEM | HASH_BLOBS);
+									  HASH_ELEM | HASH_BLOBS | HASH_KEYCOPY);
 }
 
 

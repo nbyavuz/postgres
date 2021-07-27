@@ -30,8 +30,8 @@ struct PGPROC;
  */
 typedef struct LWLock
 {
-	uint16		tranche;		/* tranche ID */
 	pg_atomic_uint32 state;		/* state of exclusive/nonexclusive lockers */
+	uint16		tranche;		/* tranche ID */
 	proclist_head waiters;		/* list of waiting PGPROCs */
 #ifdef LOCK_DEBUG
 	pg_atomic_uint32 nwaiters;	/* number of waiters */
@@ -113,7 +113,18 @@ typedef enum LWLockMode
 extern bool Trace_lwlocks;
 #endif
 
-extern bool LWLockAcquire(LWLock *lock, LWLockMode mode);
+
+extern bool LWLockAcquireShared(LWLock *lock);
+extern bool LWLockAcquireExclusive(LWLock *lock);
+
+static inline bool LWLockAcquire(LWLock *lock, LWLockMode mode)
+{
+	if (mode == LW_SHARED)
+		return LWLockAcquireShared(lock);
+	else
+		return LWLockAcquireExclusive(lock);
+}
+
 extern bool LWLockConditionalAcquire(LWLock *lock, LWLockMode mode);
 extern bool LWLockAcquireOrWait(LWLock *lock, LWLockMode mode);
 extern void LWLockRelease(LWLock *lock);
@@ -198,5 +209,18 @@ typedef enum BuiltinTrancheIds
  * convenience of third-party code, we include the following typedef.
  */
 typedef LWLock *LWLockId;
+
+
+#define LW_FLAG_HAS_WAITERS			((uint32) 1 << 30)
+#define LW_FLAG_RELEASE_OK			((uint32) 1 << 29)
+#define LW_FLAG_LOCKED				((uint32) 1 << 28)
+
+#define LW_VAL_EXCLUSIVE			((uint32) 1 << 24)
+#define LW_VAL_SHARED				1
+
+#define LW_LOCK_MASK				((uint32) ((1 << 25)-1))
+/* Must be greater than MAX_BACKENDS - which is 2^23-1, so we're fine. */
+#define LW_SHARED_MASK				((uint32) ((1 << 24)-1))
+
 
 #endif							/* LWLOCK_H */

@@ -114,9 +114,9 @@ backend_src = $(top_srcdir)/src/backend
 # coding rule.
 libpq-refs-stamp: $(shlib)
 ifneq ($(enable_coverage), yes)
-ifeq (,$(filter aix solaris,$(PORTNAME)))
-	! nm -A -u $< 2>/dev/null | grep -v __cxa_atexit | grep exit
-endif
+#ifeq (,$(filter aix solaris,$(PORTNAME)))
+#	! nm -A -u $< 2>/dev/null | grep -v __cxa_atexit | grep exit
+#endif
 endif
 	touch $@
 

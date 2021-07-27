@@ -1717,8 +1717,8 @@ PinBuffer(BufferDesc *buf, BufferAccessStrategy strategy)
 					buf_state += BUF_USAGECOUNT_ONE;
 			}
 
-			if (pg_atomic_compare_exchange_u32(&buf->state, &old_buf_state,
-											   buf_state))
+			if (likely(pg_atomic_compare_exchange_u32(&buf->state, &old_buf_state,
+													  buf_state)))
 			{
 				result = (buf_state & BM_VALID) != 0;
 

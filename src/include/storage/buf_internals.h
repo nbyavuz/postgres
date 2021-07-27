@@ -184,6 +184,7 @@ typedef struct BufferDesc
 	BufferTag	tag;			/* ID of page contained in buffer */
 	int			buf_id;			/* buffer's index number (from 0) */
 
+	char pad[64-24];
 	/* state of the tag, containing flags, refcount and usagecount */
 	pg_atomic_uint32 state;
 
@@ -212,7 +213,7 @@ typedef struct BufferDesc
  * platform with either 32 or 128 byte line sizes, it's good to align to
  * boundaries and avoid false sharing.
  */
-#define BUFFERDESC_PAD_TO_SIZE	(SIZEOF_VOID_P == 8 ? 64 : 1)
+#define BUFFERDESC_PAD_TO_SIZE	(SIZEOF_VOID_P == 8 ? 128 : 1)
 
 typedef union BufferDescPadded
 {
@@ -223,7 +224,8 @@ typedef union BufferDescPadded
 #define GetBufferDescriptor(id) (&BufferDescriptors[(id)].bufferdesc)
 #define GetLocalBufferDescriptor(id) (&LocalBufferDescriptors[(id)])
 
-#define BufferDescriptorGetBuffer(bdesc) ((bdesc)->buf_id + 1)
+#define BufferDescriptorGetBuffer(bdesc) (((BufferDescPadded*)bdesc - BufferDescriptors) + 1)
+//#define BufferDescriptorGetBuffer(bdesc) ((bdesc)->buf_id + 1)
 
 #define BufferDescriptorGetIOCV(bdesc) \
 	(&(BufferIOCVArray[(bdesc)->buf_id]).cv)

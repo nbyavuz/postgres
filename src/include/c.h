@@ -1317,7 +1317,7 @@ extern unsigned long long strtoull(const char *str, char **endptr, int base);
 #define PGDLLIMPORT
 #endif
 #ifndef PGDLLEXPORT
-#define PGDLLEXPORT
+#define PGDLLEXPORT __attribute__((visibility("default")))
 #endif
 
 /*

@@ -2603,6 +2603,21 @@ PredicateLockPage(Relation relation, BlockNumber blkno, Snapshot snapshot)
 	PredicateLockAcquire(&tag);
 }
 
+void
+PredicateLockBuffer(Relation relation, Buffer buf, Snapshot snapshot)
+{
+	PREDICATELOCKTARGETTAG tag;
+
+	if (!SerializationNeededForRead(relation, snapshot))
+		return;
+
+	SET_PREDICATELOCKTARGETTAG_PAGE(tag,
+									relation->rd_node.dbNode,
+									relation->rd_id,
+									BufferGetBlockNumber(buf));
+	PredicateLockAcquire(&tag);
+}
+
 /*
  *		PredicateLockTID
  *

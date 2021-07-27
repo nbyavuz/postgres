@@ -177,8 +177,7 @@ pg_atomic_compare_exchange_u32_impl(volatile pg_atomic_uint32 *ptr,
 	__asm__ __volatile__(
 		"	lock				\n"
 		"	cmpxchgl	%4,%5	\n"
-		"   setz		%2		\n"
-:		"=a" (*expected), "=m"(ptr->value), "=q" (ret)
+:		"=a" (*expected), "=m"(ptr->value), "=@ccz" (ret)
 :		"a" (*expected), "r" (newval), "m"(ptr->value)
 :		"memory", "cc");
 	return (bool) ret;

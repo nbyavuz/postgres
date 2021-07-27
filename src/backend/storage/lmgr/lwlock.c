@@ -97,16 +97,6 @@
 /* We use the ShmemLock spinlock to protect LWLockCounter */
 extern slock_t *ShmemLock;
 
-#define LW_FLAG_HAS_WAITERS			((uint32) 1 << 30)
-#define LW_FLAG_RELEASE_OK			((uint32) 1 << 29)
-#define LW_FLAG_LOCKED				((uint32) 1 << 28)
-
-#define LW_VAL_EXCLUSIVE			((uint32) 1 << 24)
-#define LW_VAL_SHARED				1
-
-#define LW_LOCK_MASK				((uint32) ((1 << 25)-1))
-/* Must be greater than MAX_BACKENDS - which is 2^23-1, so we're fine. */
-#define LW_SHARED_MASK				((uint32) ((1 << 24)-1))
 
 /*
  * There are three sorts of LWLock "tranches":
@@ -207,14 +197,9 @@ LWLockPadded *MainLWLockArray = NULL;
 #define MAX_SIMUL_LWLOCKS	200
 
 /* struct representing the LWLocks we're holding */
-typedef struct LWLockHandle
-{
-	LWLock	   *lock;
-	LWLockMode	mode;
-} LWLockHandle;
-
 static int	num_held_lwlocks = 0;
-static LWLockHandle held_lwlocks[MAX_SIMUL_LWLOCKS];
+static LWLock *held_lwlocks[MAX_SIMUL_LWLOCKS];
+static LWLockMode held_lwlock_modes[MAX_SIMUL_LWLOCKS];
 
 /* struct representing the LWLock tranche request for named tranche */
 typedef struct NamedLWLockTrancheRequest
@@ -505,6 +490,8 @@ CreateLWLocks(void)
 							  NamedLWLockTrancheArray[i].trancheName);
 }
 
+static void print_stats(void);
+
 /*
  * Initialize LWLocks that are fixed and those belonging to named tranches.
  */
@@ -570,6 +557,8 @@ InitializeLWLocks(void)
 				LWLockInitialize(&lock->lock, tranche->trancheId);
 		}
 	}
+
+	atexit(print_stats);
 }
 
 /*
@@ -804,21 +793,23 @@ GetLWLockIdentifier(uint32 classId, uint16 eventId)
 	return GetLWTrancheName(eventId);
 }
 
-/*
- * Internal function that tries to atomically acquire the lwlock in the passed
- * in mode.
- *
- * This function will not block waiting for a lock to become free - that's the
- * callers job.
- *
- * Returns true if the lock isn't free and we need to wait.
- */
+static uint64 attempt_lock_success;
+static uint64 attempt_lock_fail;
+static uint64 attempt_lock_fail_locked;
+
+static void print_stats(void)
+{
+	fprintf(stdout, "acq2: success %lu, fail %lu, fail locked: %lu, rate: %.2f%%\n",
+			attempt_lock_success, attempt_lock_fail, attempt_lock_fail_locked,
+			attempt_lock_fail > 0 ?
+			(attempt_lock_fail / (double)(attempt_lock_success + attempt_lock_fail)) * 100 : 0);
+}
+
+#if 0
 static bool
-LWLockAttemptLock(LWLock *lock, LWLockMode mode)
+LWLockAttemptLockShared(LWLock *lock)
 {
 	uint32		old_state;
-
-	AssertArg(mode == LW_EXCLUSIVE || mode == LW_SHARED);
 
 	/*
 	 * Read once outside the loop, later iterations will get the newer value
@@ -834,18 +825,9 @@ LWLockAttemptLock(LWLock *lock, LWLockMode mode)
 
 		desired_state = old_state;
 
-		if (mode == LW_EXCLUSIVE)
-		{
-			lock_free = (old_state & LW_LOCK_MASK) == 0;
-			if (lock_free)
-				desired_state += LW_VAL_EXCLUSIVE;
-		}
-		else
-		{
-			lock_free = (old_state & LW_VAL_EXCLUSIVE) == 0;
-			if (lock_free)
-				desired_state += LW_VAL_SHARED;
-		}
+		lock_free = (old_state & LW_VAL_EXCLUSIVE) == 0;
+		if (lock_free)
+			desired_state += LW_VAL_SHARED;
 
 		/*
 		 * Attempt to swap in the state we are expecting. If we didn't see
@@ -857,23 +839,121 @@ LWLockAttemptLock(LWLock *lock, LWLockMode mode)
 		 *
 		 * Retry if the value changed since we last looked at it.
 		 */
-		if (pg_atomic_compare_exchange_u32(&lock->state,
-										   &old_state, desired_state))
+		if (likely(pg_atomic_compare_exchange_u32(&lock->state,
+												  &old_state, desired_state)))
 		{
+			attempt_lock_success++;
+			if (lock_free)
+				return false;	/* Great! Got the lock. */
+			else
+				return true;	/* somebody else has the lock */
+		}
+		else
+		{
+			attempt_lock_fail++;
+			if (!lock_free)
+				attempt_lock_fail_locked++;
+		}
+	}
+	pg_unreachable();
+
+}
+#else
+static bool
+LWLockAttemptLockShared(LWLock *lock)
+{
+	uint32		old_state;
+
+	old_state = pg_atomic_fetch_add_u32(&lock->state, LW_VAL_SHARED);
+
+	if (unlikely(old_state & LW_VAL_EXCLUSIVE))
+	{
+		attempt_lock_fail++;
+		/* FIXME: buggy, will cause waits that will not be woken up */
+		pg_atomic_fetch_sub_u32(&lock->state, LW_VAL_SHARED);
+		return true;
+	}
+	attempt_lock_success++;
+
+	return false;
+}
+#endif
+
+static bool
+LWLockAttemptLockExclusive(LWLock *lock)
+{
+	uint32		old_state;
+
+	/*
+	 * Read once outside the loop, later iterations will get the newer value
+	 * via compare & exchange.
+	 */
+	old_state = pg_atomic_read_u32(&lock->state);
+
+	/* loop until we've determined whether we could acquire the lock or not */
+	while (true)
+	{
+		uint32		desired_state;
+		bool		lock_free;
+
+		desired_state = old_state;
+
+		lock_free = (old_state & LW_LOCK_MASK) == 0;
+		if (lock_free)
+			desired_state += LW_VAL_EXCLUSIVE;
+
+		/*
+		 * Attempt to swap in the state we are expecting. If we didn't see
+		 * lock to be free, that's just the old value. If we saw it as free,
+		 * we'll attempt to mark it acquired. The reason that we always swap
+		 * in the value is that this doubles as a memory barrier. We could try
+		 * to be smarter and only swap in values if we saw the lock as free,
+		 * but benchmark haven't shown it as beneficial so far.
+		 *
+		 * Retry if the value changed since we last looked at it.
+		 */
+		if (likely(pg_atomic_compare_exchange_u32(&lock->state,
+												  &old_state, desired_state)))
+		{
+			attempt_lock_success++;
 			if (lock_free)
 			{
 				/* Great! Got the lock. */
 #ifdef LOCK_DEBUG
-				if (mode == LW_EXCLUSIVE)
-					lock->owner = MyProc;
+				lock->owner = MyProc;
 #endif
 				return false;
 			}
 			else
 				return true;	/* somebody else has the lock */
 		}
+		else
+		{
+			attempt_lock_fail++;
+		}
 	}
 	pg_unreachable();
+
+}
+
+/*
+ * Internal function that tries to atomically acquire the lwlock in the passed
+ * in mode.
+ *
+ * This function will not block waiting for a lock to become free - that's the
+ * callers job.
+ *
+ * Returns true if the lock isn't free and we need to wait.
+ */
+static bool
+LWLockAttemptLock(LWLock *lock, LWLockMode mode)
+{
+	AssertArg(mode == LW_EXCLUSIVE || mode == LW_SHARED);
+
+	if (mode == LW_EXCLUSIVE)
+		return LWLockAttemptLockExclusive(lock);
+	else
+		return LWLockAttemptLockShared(lock);
 }
 
 /*
@@ -949,7 +1029,7 @@ LWLockWaitListUnlock(LWLock *lock)
 /*
  * Wakeup all the lockers that currently have a chance to acquire the lock.
  */
-static void
+static void pg_noinline
 LWLockWakeup(LWLock *lock)
 {
 	bool		new_release_ok;
@@ -1187,55 +1267,12 @@ LWLockDequeueSelf(LWLock *lock)
 #endif
 }
 
-/*
- * LWLockAcquire - acquire a lightweight lock in the specified mode
- *
- * If the lock is not available, sleep until it is.  Returns true if the lock
- * was available immediately, false if we had to sleep.
- *
- * Side effect: cancel/die interrupts are held off until lock release.
- */
-bool
-LWLockAcquire(LWLock *lock, LWLockMode mode)
+static bool pg_noinline
+LWLockAcquireSlow(LWLock *lock, LWLockMode mode)
 {
 	PGPROC	   *proc = MyProc;
-	bool		result = true;
 	int			extraWaits = 0;
-#ifdef LWLOCK_STATS
-	lwlock_stats *lwstats;
-
-	lwstats = get_lwlock_stats_entry(lock);
-#endif
-
-	AssertArg(mode == LW_SHARED || mode == LW_EXCLUSIVE);
-
-	PRINT_LWDEBUG("LWLockAcquire", lock, mode);
-
-#ifdef LWLOCK_STATS
-	/* Count lock acquisition attempts */
-	if (mode == LW_EXCLUSIVE)
-		lwstats->ex_acquire_count++;
-	else
-		lwstats->sh_acquire_count++;
-#endif							/* LWLOCK_STATS */
-
-	/*
-	 * We can't wait if we haven't got a PGPROC.  This should only occur
-	 * during bootstrap or shared memory initialization.  Put an Assert here
-	 * to catch unsafe coding practices.
-	 */
-	Assert(!(proc == NULL && IsUnderPostmaster));
-
-	/* Ensure we will have room to remember the lock */
-	if (num_held_lwlocks >= MAX_SIMUL_LWLOCKS)
-		elog(ERROR, "too many LWLocks taken");
-
-	/*
-	 * Lock out cancel/die interrupts until we exit the code section protected
-	 * by the LWLock.  This ensures that interrupts will not interfere with
-	 * manipulations of data structures in shared memory.
-	 */
-	HOLD_INTERRUPTS();
+	bool		result = true;
 
 	/*
 	 * Loop here to try to acquire lock after each time we are signaled by
@@ -1263,7 +1300,7 @@ LWLockAcquire(LWLock *lock, LWLockMode mode)
 		 */
 		mustwait = LWLockAttemptLock(lock, mode);
 
-		if (!mustwait)
+		if (likely(!mustwait))
 		{
 			LOG_LWDEBUG("LWLockAcquire", lock, "immediately acquired lock");
 			break;				/* got the lock */
@@ -1347,16 +1384,90 @@ LWLockAcquire(LWLock *lock, LWLockMode mode)
 		TRACE_POSTGRESQL_LWLOCK_ACQUIRE(T_NAME(lock), mode);
 
 	/* Add lock to list of locks held by this backend */
-	held_lwlocks[num_held_lwlocks].lock = lock;
-	held_lwlocks[num_held_lwlocks++].mode = mode;
+	held_lwlocks[num_held_lwlocks] = lock;
+	held_lwlock_modes[num_held_lwlocks++] = mode;
 
 	/*
 	 * Fix the process wait semaphore's count for any absorbed wakeups.
 	 */
-	while (extraWaits-- > 0)
+	while (unlikely(extraWaits-- > 0))
 		PGSemaphoreUnlock(proc->sem);
 
 	return result;
+}
+
+/*
+ * LWLockAcquire - acquire a lightweight lock in the specified mode
+ *
+ * If the lock is not available, sleep until it is.  Returns true if the lock
+ * was available immediately, false if we had to sleep.
+ *
+ * Side effect: cancel/die interrupts are held off until lock release.
+ */
+pg_attribute_always_inline static bool
+LWLockAcquireInternal(LWLock *lock, LWLockMode mode)
+{
+	bool		mustwait;
+#ifdef LWLOCK_STATS
+	lwlock_stats *lwstats;
+
+	lwstats = get_lwlock_stats_entry(lock);
+#endif
+
+	AssertArg(mode == LW_SHARED || mode == LW_EXCLUSIVE);
+
+	/*
+	 * We can't wait if we haven't got a PGPROC.  This should only occur
+	 * during bootstrap or shared memory initialization.  Put an Assert here
+	 * to catch unsafe coding practices.
+	 */
+	Assert(!(MyProc == NULL && IsUnderPostmaster));
+
+	PRINT_LWDEBUG("LWLockAcquire", lock, mode);
+
+#ifdef LWLOCK_STATS
+	/* Count lock acquisition attempts */
+	if (mode == LW_EXCLUSIVE)
+		lwstats->ex_acquire_count++;
+	else
+		lwstats->sh_acquire_count++;
+#endif							/* LWLOCK_STATS */
+
+	/* Ensure we will have room to remember the lock */
+	if (unlikely(num_held_lwlocks >= MAX_SIMUL_LWLOCKS))
+		elog(ERROR, "too many LWLocks taken");
+
+	/*
+	 * Lock out cancel/die interrupts until we exit the code section protected
+	 * by the LWLock.  This ensures that interrupts will not interfere with
+	 * manipulations of data structures in shared memory.
+	 */
+	HOLD_INTERRUPTS();
+
+	mustwait = LWLockAttemptLock(lock, mode);
+	if (unlikely(mustwait))
+		return LWLockAcquireSlow(lock, mode);
+
+	if (TRACE_POSTGRESQL_LWLOCK_ACQUIRE_ENABLED())
+		TRACE_POSTGRESQL_LWLOCK_ACQUIRE(T_NAME(lock), mode);
+
+	/* Add lock to list of locks held by this backend */
+	held_lwlocks[num_held_lwlocks] = lock;
+	held_lwlock_modes[num_held_lwlocks++] = mode;
+
+	return false;
+}
+
+bool
+LWLockAcquireShared(LWLock *lock)
+{
+	return LWLockAcquireInternal(lock, LW_SHARED);
+}
+
+bool
+LWLockAcquireExclusive(LWLock *lock)
+{
+	return LWLockAcquireInternal(lock, LW_EXCLUSIVE);
 }
 
 /*
@@ -1401,8 +1512,8 @@ LWLockConditionalAcquire(LWLock *lock, LWLockMode mode)
 	else
 	{
 		/* Add lock to list of locks held by this backend */
-		held_lwlocks[num_held_lwlocks].lock = lock;
-		held_lwlocks[num_held_lwlocks++].mode = mode;
+		held_lwlocks[num_held_lwlocks] = lock;
+		held_lwlock_modes[num_held_lwlocks++] = mode;
 		if (TRACE_POSTGRESQL_LWLOCK_CONDACQUIRE_ENABLED())
 			TRACE_POSTGRESQL_LWLOCK_CONDACQUIRE(T_NAME(lock), mode);
 	}
@@ -1532,8 +1643,8 @@ LWLockAcquireOrWait(LWLock *lock, LWLockMode mode)
 	{
 		LOG_LWDEBUG("LWLockAcquireOrWait", lock, "succeeded");
 		/* Add lock to list of locks held by this backend */
-		held_lwlocks[num_held_lwlocks].lock = lock;
-		held_lwlocks[num_held_lwlocks++].mode = mode;
+		held_lwlocks[num_held_lwlocks] = lock;
+		held_lwlock_modes[num_held_lwlocks++] = mode;
 		if (TRACE_POSTGRESQL_LWLOCK_ACQUIRE_OR_WAIT_ENABLED())
 			TRACE_POSTGRESQL_LWLOCK_ACQUIRE_OR_WAIT(T_NAME(lock), mode);
 	}
@@ -1795,6 +1906,21 @@ LWLockUpdateVar(LWLock *lock, uint64 *valptr, uint64 val)
 	}
 }
 
+static void pg_noinline
+LWLockReleaseSlow(LWLock *lock)
+{
+	/* XXX: remove before commit? */
+	LOG_LWDEBUG("LWLockRelease", lock, "releasing waiters");
+	LWLockWakeup(lock);
+
+	RESUME_INTERRUPTS();
+}
+
+static void pg_noinline
+LWLockReleaseError(LWLock *lock)
+{
+	elog(ERROR, "lock %s is not held", T_NAME(lock));
+}
 
 /*
  * LWLockRelease - release a previously acquired lock
@@ -1804,7 +1930,6 @@ LWLockRelease(LWLock *lock)
 {
 	LWLockMode	mode;
 	uint32		oldstate;
-	bool		check_waiters;
 	int			i;
 
 	/*
@@ -1812,17 +1937,35 @@ LWLockRelease(LWLock *lock)
 	 * be the latest-acquired lock; so search array backwards.
 	 */
 	for (i = num_held_lwlocks; --i >= 0;)
-		if (lock == held_lwlocks[i].lock)
+	{
+		if (lock == held_lwlocks[i])
+		{
+			mode = held_lwlock_modes[i];
+#if 1
+			if (num_held_lwlocks > 1)
+			{
+				held_lwlocks[i] = held_lwlocks[num_held_lwlocks - 1];
+				held_lwlock_modes[i] = held_lwlock_modes[num_held_lwlocks - 1];
+			}
+			num_held_lwlocks--;
+#else
+			num_held_lwlocks--;
+			for (; i < num_held_lwlocks; i++)
+			{
+				held_lwlocks[i] = held_lwlocks[i + 1];
+				held_lwlock_modes[i] = held_lwlock_modes[i + 1];
+				__asm__("");
+			}
+#endif
 			break;
+		}
+	}
 
-	if (i < 0)
-		elog(ERROR, "lock %s is not held", T_NAME(lock));
-
-	mode = held_lwlocks[i].mode;
-
-	num_held_lwlocks--;
-	for (; i < num_held_lwlocks; i++)
-		held_lwlocks[i] = held_lwlocks[i + 1];
+	if (unlikely(i < 0))
+	{
+		LWLockReleaseError(lock);
+		return;
+	}
 
 	PRINT_LWDEBUG("LWLockRelease", lock, mode);
 
@@ -1845,28 +1988,24 @@ LWLockRelease(LWLock *lock)
 	 * We're still waiting for backends to get scheduled, don't wake them up
 	 * again.
 	 */
-	if ((oldstate & (LW_FLAG_HAS_WAITERS | LW_FLAG_RELEASE_OK)) ==
-		(LW_FLAG_HAS_WAITERS | LW_FLAG_RELEASE_OK) &&
-		(oldstate & LW_LOCK_MASK) == 0)
-		check_waiters = true;
-	else
-		check_waiters = false;
-
-	/*
-	 * As waking up waiters requires the spinlock to be acquired, only do so
-	 * if necessary.
-	 */
-	if (check_waiters)
+	if (unlikely((oldstate & (LW_FLAG_HAS_WAITERS | LW_FLAG_RELEASE_OK)) ==
+				 (LW_FLAG_HAS_WAITERS | LW_FLAG_RELEASE_OK) &&
+				 (oldstate & LW_LOCK_MASK) == 0))
 	{
-		/* XXX: remove before commit? */
-		LOG_LWDEBUG("LWLockRelease", lock, "releasing waiters");
-		LWLockWakeup(lock);
+		/*
+		 * As waking up waiters requires the spinlock to be acquired, only do so
+		 * if necessary.
+		 */
+		LWLockReleaseSlow(lock);
+		return;
 	}
-
-	/*
-	 * Now okay to allow cancel/die interrupts.
-	 */
-	RESUME_INTERRUPTS();
+	else
+	{
+		/*
+		 * Now okay to allow cancel/die interrupts.
+		 */
+		RESUME_INTERRUPTS();
+	}
 }
 
 /*
@@ -1905,7 +2044,7 @@ LWLockReleaseAll(void)
 	{
 		HOLD_INTERRUPTS();		/* match the upcoming RESUME_INTERRUPTS */
 
-		LWLockRelease(held_lwlocks[num_held_lwlocks - 1].lock);
+		LWLockRelease(held_lwlocks[num_held_lwlocks - 1]);
 	}
 }
 
@@ -1922,7 +2061,7 @@ LWLockHeldByMe(LWLock *l)
 
 	for (i = 0; i < num_held_lwlocks; i++)
 	{
-		if (held_lwlocks[i].lock == l)
+		if (held_lwlocks[i] == l)
 			return true;
 	}
 	return false;
@@ -1940,7 +2079,7 @@ LWLockHeldByMeInMode(LWLock *l, LWLockMode mode)
 
 	for (i = 0; i < num_held_lwlocks; i++)
 	{
-		if (held_lwlocks[i].lock == l && held_lwlocks[i].mode == mode)
+		if (held_lwlocks[i] == l && held_lwlock_modes[i] == mode)
 			return true;
 	}
 	return false;

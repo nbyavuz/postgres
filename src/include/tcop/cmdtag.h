@@ -50,6 +50,7 @@ CopyQueryCompletion(QueryCompletion *dst, const QueryCompletion *src)
 
 extern void InitializeQueryCompletion(QueryCompletion *qc);
 extern const char *GetCommandTagName(CommandTag commandTag);
+extern const char *GetCommandTagNameLen(CommandTag commandTag, Size *len);
 extern bool command_tag_display_rowcount(CommandTag commandTag);
 extern bool command_tag_event_trigger_ok(CommandTag commandTag);
 extern bool command_tag_table_rewrite_ok(CommandTag commandTag);

@@ -159,10 +159,13 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 		 * page one level down, it usually ends up inserting a new pivot
 		 * tuple/downlink immediately after the location recorded here.
 		 */
-		new_stack = (BTStack) palloc(sizeof(BTStackData));
-		new_stack->bts_blkno = BufferGetBlockNumber(*bufP);
-		new_stack->bts_offset = offnum;
-		new_stack->bts_parent = stack_in;
+		if (access == BT_WRITE)
+		{
+			new_stack = (BTStack) palloc(sizeof(BTStackData));
+			new_stack->bts_blkno = BufferGetBlockNumber(*bufP);
+			new_stack->bts_offset = offnum;
+			new_stack->bts_parent = stack_in;
+		}
 
 		/*
 		 * Page level 1 is lowest non-leaf page level prior to leaves.  So, if
@@ -176,7 +179,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
 		*bufP = _bt_relandgetbuf(rel, *bufP, child, page_access);
 
 		/* okay, all set to move down a level */
-		stack_in = new_stack;
+		if (access == BT_WRITE)
+			stack_in = new_stack;
 	}
 
 	/*
@@ -640,7 +644,7 @@ _bt_binsrch_posting(BTScanInsert key, Page page, OffsetNumber offnum)
  * key.  See backend/access/nbtree/README for details.
  *----------
  */
-int32
+inline int32
 _bt_compare(Relation rel,
 			BTScanInsert key,
 			Page page,
@@ -1354,7 +1358,8 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	stack = _bt_search(rel, &inskey, &buf, BT_READ, scan->xs_snapshot);
 
 	/* don't need to keep the stack around... */
-	_bt_freestack(stack);
+	if (stack)
+		_bt_freestack(stack);
 
 	if (!BufferIsValid(buf))
 	{
@@ -1374,8 +1379,7 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 		return false;
 	}
 	else
-		PredicateLockPage(rel, BufferGetBlockNumber(buf),
-						  scan->xs_snapshot);
+		PredicateLockBuffer(rel, buf, scan->xs_snapshot);
 
 	_bt_initialize_more_data(so, dir);
 
@@ -2101,7 +2105,7 @@ _bt_readnextpage(IndexScanDesc scan, BlockNumber blkno, ScanDirection dir)
 			opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 			if (!P_IGNORE(opaque))
 			{
-				PredicateLockPage(rel, BufferGetBlockNumber(so->currPos.buf), scan->xs_snapshot);
+				PredicateLockBuffer(rel, so->currPos.buf, scan->xs_snapshot);
 				/* see if there are any matches on this page */
 				/* note that this will clear moreLeft if we can stop */
 				if (_bt_readpage(scan, dir, PageGetMaxOffsetNumber(page)))
@@ -2404,7 +2408,7 @@ _bt_endpoint(IndexScanDesc scan, ScanDirection dir)
 		return false;
 	}
 
-	PredicateLockPage(rel, BufferGetBlockNumber(buf), scan->xs_snapshot);
+	PredicateLockBuffer(rel, buf, scan->xs_snapshot);
 	page = BufferGetPage(buf);
 	opaque = (BTPageOpaque) PageGetSpecialPointer(page);
 	Assert(P_ISLEAF(opaque));
