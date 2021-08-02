@@ -3915,40 +3915,28 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 }
 
 
-/* ----------------------------------------------------------------
- * PostgresMain
- *	   postgres main loop -- all backends, interactive or otherwise start here
+/*
+ * PostgresMainSingle
+ *     Entry point for single user mode. argc/argv are the command line
+ *     arguments to be used.
  *
- * argc/argv are the command line arguments to be used.  (When being forked
- * by the postmaster, these are not the original argv array of the process.)
- * dbname is the name of the database to connect to, or NULL if the database
- * name should be extracted from the command line arguments or defaulted.
- * username is the PostgreSQL user name to be used for the session.
- * ----------------------------------------------------------------
+ * FIXME: comments.
  */
 void
-PostgresMain(int argc, char *argv[],
-			 const char *dbname,
-			 const char *username)
+PostgresMainSingle(int argc, char *argv[],
+				   const char *username)
 {
-	int			firstchar;
-	StringInfoData input_message;
-	sigjmp_buf	local_sigjmp_buf;
-	volatile bool send_ready_for_query = true;
-	bool		idle_in_transaction_timeout_enabled = false;
-	bool		idle_session_timeout_enabled = false;
+	const char *dbname = NULL;
 
-	/* Initialize startup process environment if necessary. */
-	if (!IsUnderPostmaster)
-		InitStandaloneProcess(argv[0]);
+	Assert(!IsUnderPostmaster);
 
-	SetProcessingMode(InitProcessing);
+	/* Initialize startup process environment. */
+	InitStandaloneProcess(argv[0]);
 
 	/*
 	 * Set default values for command-line options.
 	 */
-	if (!IsUnderPostmaster)
-		InitializeGUCOptions();
+	InitializeGUCOptions();
 
 	/*
 	 * Parse command-line options.
@@ -3966,12 +3954,71 @@ PostgresMain(int argc, char *argv[],
 							progname)));
 	}
 
-	/* Acquire configuration parameters, unless inherited from postmaster */
-	if (!IsUnderPostmaster)
-	{
-		if (!SelectConfigFiles(userDoption, progname))
-			proc_exit(1);
-	}
+	/* Acquire configuration parameters */
+	if (!SelectConfigFiles(userDoption, progname))
+		proc_exit(1);
+
+	/*
+	 * Validate we have been given a reasonable-looking DataDir and change
+	 * into it.
+	 */
+	checkDataDir();
+	ChangeToDataDir();
+
+	/*
+	 * Create lockfile for data directory.
+	 */
+	CreateDataDirLockFile(false);
+
+	/* read control file (error checking and contains config ) */
+	LocalProcessControlFile(false);
+
+	/* Initialize MaxBackends (if under postmaster, was done already) */
+	InitializeMaxBackends();
+
+	CreateSharedMemoryAndSemaphores();
+
+	/*
+	 * Remember stand-alone backend startup time
+	 */
+	PgStartTime = GetCurrentTimestamp();
+
+	/*
+	 * Create a per-backend PGPROC struct in shared memory. We must do this
+	 * before we can use LWLocks.
+	 */
+	InitProcess();
+
+	/*
+	 * Now that sufficient infrastructure has been initialized, PostgresMain()
+	 * can do the rest.
+	 */
+	PostgresMain(dbname, username);
+}
+
+
+/* ----------------------------------------------------------------
+ * PostgresMain
+ *	   postgres main loop -- all backends, interactive or otherwise loop here
+ *
+ * dbname is the name of the database to connect to, username is the
+ * PostgreSQL user name to be used for the session.
+ * ----------------------------------------------------------------
+ */
+void
+PostgresMain(const char *dbname, const char *username)
+{
+	int			firstchar;
+	StringInfoData input_message;
+	sigjmp_buf	local_sigjmp_buf;
+	volatile bool send_ready_for_query = true;
+	bool		idle_in_transaction_timeout_enabled = false;
+	bool		idle_session_timeout_enabled = false;
+
+	AssertArg(dbname != NULL);
+	AssertArg(username != NULL);
+
+	SetProcessingMode(InitProcessing);
 
 	/*
 	 * Set up signal handlers.  (InitPostmasterChild or InitStandaloneProcess
@@ -4027,33 +4074,6 @@ PostgresMain(int argc, char *argv[],
 		 */
 		pqsignal(SIGCHLD, SIG_DFL); /* system() requires this on some
 									 * platforms */
-	}
-
-	if (!IsUnderPostmaster)
-	{
-		/*
-		 * Validate we have been given a reasonable-looking DataDir (if under
-		 * postmaster, assume postmaster did this already).
-		 */
-		checkDataDir();
-
-		/* Change into DataDir (if under postmaster, was done already) */
-		ChangeToDataDir();
-
-		/*
-		 * Create lockfile for data directory.
-		 */
-		CreateDataDirLockFile(false);
-
-		/* read control file (error checking and contains config ) */
-		LocalProcessControlFile(false);
-
-		/* Initialize MaxBackends (if under postmaster, was done already) */
-		InitializeMaxBackends();
-
-		CreateSharedMemoryAndSemaphores();
-
-		InitProcess();
 	}
 
 	/* Early initialization */
@@ -4149,12 +4169,6 @@ PostgresMain(int argc, char *argv[],
 	MemoryContextSwitchTo(row_description_context);
 	initStringInfo(&row_description_buf);
 	MemoryContextSwitchTo(TopMemoryContext);
-
-	/*
-	 * Remember stand-alone backend startup time
-	 */
-	if (!IsUnderPostmaster)
-		PgStartTime = GetCurrentTimestamp();
 
 	/*
 	 * POSTGRES main processing loop begins here
