@@ -325,9 +325,12 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 	 * stats for physical slots, so no need to create an entry for the same.
 	 * See ReplicationSlotDropPtr for why we need to do this before releasing
 	 * ReplicationSlotAllocationLock.
+	 *
+	 * XXX: lock nesting issues, comment update.
 	 */
 	if (SlotIsLogical(slot))
-		pgstat_report_replslot_create(NameStr(slot->data.name));
+		pgstat_report_replslot_create(NameStr(slot->data.name),
+									  slot - ReplicationSlotCtl->replication_slots);
 
 	/*
 	 * Now that the slot has been marked as in_use and active, it's safe to
@@ -677,23 +680,15 @@ ReplicationSlotDropPtr(ReplicationSlot *slot)
 				(errmsg("could not remove directory \"%s\"", tmppath)));
 
 	/*
-	 * Send a message to drop the replication slot to the stats collector.
-	 * Since there is no guarantee of the order of message transfer on a UDP
-	 * connection, it's possible that a message for creating a new slot
-	 * reaches before a message for removing the old slot. We send the drop
-	 * and create messages while holding ReplicationSlotAllocationLock to
-	 * reduce that possibility. If the messages reached in reverse, we would
-	 * lose one statistics update message. But the next update message will
-	 * create the statistics for the replication slot.
+	 * Drop the statistics entry for the replication slot.  Do this while
+	 * holding ReplicationSlotAllocationLock so that we don't drop a statistics
+	 * entry for another slot with the same name just created on another
+	 * session.
 	 *
-	 * XXX In case, the messages for creation and drop slot of the same name
-	 * get lost and create happens before (auto)vacuum cleans up the dead
-	 * slot, the stats will be accumulated into the old slot. One can imagine
-	 * having OIDs for each slot to avoid the accumulation of stats but that
-	 * doesn't seem worth doing as in practice this won't happen frequently.
+	 * XXX: lock nesting issues, comment update.
 	 */
 	if (SlotIsLogical(slot))
-		pgstat_report_replslot_drop(NameStr(slot->data.name));
+		pgstat_report_replslot_drop(slot - ReplicationSlotCtl->replication_slots);
 
 	/*
 	 * We release this at the very end, so that nobody starts trying to create

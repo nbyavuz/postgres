@@ -715,7 +715,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	/*
 	 * Report results to the stats collector, too.
 	 *
-	 * Deliberately avoid telling the stats collector about LP_DEAD items that
+	 * Deliberately avoid stats system about LP_DEAD items that
 	 * remain in the table due to VACUUM bypassing index and heap vacuuming.
 	 * ANALYZE will consider the remaining LP_DEAD items to be dead tuples. It
 	 * seems like a good idea to err on the side of not vacuuming again too

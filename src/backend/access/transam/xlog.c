@@ -2193,7 +2193,7 @@ AdvanceXLInsertBuffer(XLogRecPtr upto, bool opportunistic)
 					WriteRqst.Flush = 0;
 					XLogWrite(WriteRqst, false);
 					LWLockRelease(WALWriteLock);
-					WalStats.m_wal_buffers_full++;
+					WalStats.wal_buffers_full++;
 					TRACE_POSTGRESQL_WAL_BUFFER_WRITE_DIRTY_DONE();
 				}
 				/* Re-acquire WALBufMappingLock and retry */
@@ -2549,10 +2549,10 @@ XLogWrite(XLogwrtRqst WriteRqst, bool flexible)
 
 					INSTR_TIME_SET_CURRENT(duration);
 					INSTR_TIME_SUBTRACT(duration, start);
-					WalStats.m_wal_write_time += INSTR_TIME_GET_MICROSEC(duration);
+					WalStats.wal_write_time += INSTR_TIME_GET_MICROSEC(duration);
 				}
 
-				WalStats.m_wal_write++;
+				WalStats.wal_write++;
 
 				if (written <= 0)
 				{
@@ -7166,9 +7166,12 @@ StartupXLOG(void)
 		}
 
 		/*
-		 * Reset pgstat data, because it may be invalid after recovery.
+		 * Reset pgstat data, because it may be invalid after recovery. It's
+		 * safe to do this here, because postmaster will not yet have started
+		 * any other processes. NB: This basically just skips loading the data
+		 * from disk, see pgstat_restore_stats() call in clean-startup path.
 		 */
-		pgstat_reset_all();
+		pgstat_discard_stats();
 
 		/*
 		 * If there was a backup label file, it's done its job and the info
@@ -7642,6 +7645,10 @@ StartupXLOG(void)
 			!reachedRecoveryTarget)
 			ereport(FATAL,
 					(errmsg("recovery ended before configured recovery target was reached")));
+	}
+	else
+	{
+		pgstat_restore_stats();
 	}
 
 	/*
@@ -8721,8 +8728,8 @@ LogCheckpointEnd(bool restartpoint)
 												 CheckpointStats.ckpt_sync_end_t);
 
 	/* Accumulate checkpoint timing summary data, in milliseconds. */
-	PendingCheckpointerStats.m_checkpoint_write_time += write_msecs;
-	PendingCheckpointerStats.m_checkpoint_sync_time += sync_msecs;
+	PendingCheckpointerStats.checkpoint_write_time += write_msecs;
+	PendingCheckpointerStats.checkpoint_sync_time += sync_msecs;
 
 	/*
 	 * All of the published timing statistics are accounted for.  Only
@@ -10704,10 +10711,10 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 
 		INSTR_TIME_SET_CURRENT(duration);
 		INSTR_TIME_SUBTRACT(duration, start);
-		WalStats.m_wal_sync_time += INSTR_TIME_GET_MICROSEC(duration);
+		WalStats.wal_sync_time += INSTR_TIME_GET_MICROSEC(duration);
 	}
 
-	WalStats.m_wal_sync++;
+	WalStats.wal_sync++;
 }
 
 /*

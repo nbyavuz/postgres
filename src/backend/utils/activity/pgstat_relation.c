@@ -27,38 +27,6 @@
 #include "utils/timestamp.h"
 
 
-/*
- * Structures in which backends store per-table info that's waiting to be
- * sent to the collector.
- *
- * NOTE: once allocated, TabStatusArray structures are never moved or deleted
- * for the life of the backend.  Also, we zero out the t_id fields of the
- * contained PgStat_TableStatus structs whenever they are not actively in use.
- * This allows relcache pgstat_info pointers to be treated as long-lived data,
- * avoiding repeated searches in pgstat_relation_assoc() when a relation is
- * repeatedly opened during a transaction.
- */
-#define TABSTAT_QUANTUM		100 /* we alloc this many at a time */
-
-
-typedef struct TabStatusArray
-{
-	struct TabStatusArray *tsa_next;	/* link to next array, if any */
-	int			tsa_used;		/* # entries currently used */
-	PgStat_TableStatus tsa_entries[TABSTAT_QUANTUM];	/* per-table data */
-} TabStatusArray;
-
-static TabStatusArray *pgStatTabList = NULL;
-
-/*
- * pgStatTabHash entry: map from relation OID to PgStat_TableStatus pointer
- */
-typedef struct TabStatHashEntry
-{
-	Oid			t_id;
-	PgStat_TableStatus *tsa_entry;
-} TabStatHashEntry;
-
 /* Record that's written to 2PC state file when pgstat state is persisted */
 typedef struct TwoPhasePgStatRecord
 {
@@ -75,21 +43,11 @@ typedef struct TwoPhasePgStatRecord
 } TwoPhasePgStatRecord;
 
 
-static PgStat_TableStatus *get_tabstat_entry(Oid rel_id, bool isshared);
-static void pgstat_send_tabstat(PgStat_MsgTabstat *tsmsg);
+static PgStat_TableStatus *pgstat_pending_tab_prepare(Oid rel_id, bool isshared);
 static void add_tabstat_xact_level(PgStat_TableStatus *pgstat_info, int nest_level);
 static void ensure_tabstat_xact_level(PgStat_TableStatus *pgstat_info);
 static void pgstat_truncdrop_save_counters(PgStat_TableXactStatus *trans, bool is_drop);
 static void pgstat_truncdrop_restore_counters(PgStat_TableXactStatus *trans);
-
-
-bool have_relation_stats;
-
-
-/*
- * Hash table for O(1) t_id -> tsa_entry lookup
- */
-static HTAB *pgStatTabHash = NULL;
 
 
 /*
@@ -100,48 +58,41 @@ void
 pgstat_copy_relation_stats(Relation dst, Relation src)
 {
 	PgStat_StatTabEntry *srcstats;
+	PgStatShm_StatTabEntry *dstshstats;
+	PgStatSharedRef *dst_ref;
 
-	srcstats = pgstat_fetch_stat_tabentry(RelationGetRelid(src));
-
+	srcstats = pgstat_fetch_stat_tabentry_extended(src->rd_rel->relisshared,
+												   RelationGetRelid(src));
 	if (!srcstats)
 		return;
 
-	if (pgstat_relation_should_count(dst))
-	{
-		/*
-		 * XXX: temporarily this does not actually quite do what the name says,
-		 * and just copy index related fields. A subsequent commit will do more.
-		 */
+	/*
+	 * XXX: Is it actually correct to copy all stats here? Probably fine with
+	 * current uses of stats for indexes, but what we tracked bloat for
+	 * indexes via stats?
+	 */
+	dst_ref = pgstat_shared_ref_get(PGSTAT_KIND_TABLE,
+									dst->rd_rel->relisshared ? InvalidOid : MyDatabaseId,
+									RelationGetRelid(dst),
+									true);
+	pgstat_shared_stat_lock(dst_ref, false);
 
-		dst->pgstat_info->t_counts.t_numscans = srcstats->numscans;
-		dst->pgstat_info->t_counts.t_tuples_returned = srcstats->tuples_returned;
-		dst->pgstat_info->t_counts.t_tuples_fetched = srcstats->tuples_fetched;
-		dst->pgstat_info->t_counts.t_blocks_fetched = srcstats->blocks_fetched;
-		dst->pgstat_info->t_counts.t_blocks_hit = srcstats->blocks_hit;
+	dstshstats = (PgStatShm_StatTabEntry *) dst_ref->shared_stats;
+	dstshstats->stats = *srcstats;
 
-		/*
-		 * The data will be sent by the next pgstat_report_stat()
-		 * call.
-		 */
-	}
+	pgstat_shared_stat_unlock(dst_ref);
 }
 
-/* ----------
- * pgstat_relation_init() -
+/*
+ * Initialize a relcache entry to count access statistics.  Called whenever a
+ * relation is opened.
  *
- *	Initialize a relcache entry to count access statistics.
- *	Called whenever a relation is opened.
- *
- *	We assume that a relcache entry's pgstat_info field is zeroed by
- *	relcache.c when the relcache entry is made; thereafter it is long-lived
- *	data.  We can avoid repeated searches of the TabStatus arrays when the
- *	same relation is touched repeatedly within a transaction.
- * ----------
+ * We assume that a relcache entry's pgstat_info field is zeroed by relcache.c
+ * when the relcache entry is made; thereafter it is long-lived data.
  */
 void
 pgstat_relation_init(Relation rel)
 {
-	Oid			rel_id = rel->rd_id;
 	char		relkind = rel->rd_rel->relkind;
 
 	/* We only count stats for things that have storage */
@@ -153,7 +104,7 @@ pgstat_relation_init(Relation rel)
 		return;
 	}
 
-	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 	{
 		/* We're not counting at all */
 		rel->pgstat_enabled = false;
@@ -161,60 +112,89 @@ pgstat_relation_init(Relation rel)
 		return;
 	}
 
-	/*
-	 * If we already set up this relation in the current transaction, nothing
-	 * to do.
-	 */
-	if (rel->pgstat_info &&
-		rel->pgstat_info->t_id == rel_id)
-		return;
-
 	rel->pgstat_enabled = true;
 }
 
+/*
+ * Prepare for statistics for this relation to be collected. This ensures we
+ * have a reference to the shared stats entry. That is important because a
+ * relation drop in another connection can otherwise lead to the shared stats
+ * entry being dropped, which we then later would re-create when flushing
+ * stats.
+ *
+ * This is separate from pgstat_relation_init() as it is not uncommon for
+ * relcache entries to be opened without ever getting stats reported.
+ */
 void
 pgstat_relation_assoc(Relation rel)
 {
-	Oid			rel_id = rel->rd_id;
-
 	Assert(rel->pgstat_enabled);
 	Assert(rel->pgstat_info == NULL);
 
-	/* find or make the PgStat_TableStatus entry, and update link */
-	rel->pgstat_info = get_tabstat_entry(rel_id, rel->rd_rel->relisshared);
+	/* Else find or make the PgStat_TableStatus entry, and update link */
+	rel->pgstat_info = pgstat_pending_tab_prepare(RelationGetRelid(rel),
+												  rel->rd_rel->relisshared);
+	/* mark this relation as the owner */
+
+	/* don't allow link a stats to multiple relcache entries */
+	Assert(rel->pgstat_info->relation == NULL);
+	rel->pgstat_info->relation = rel;
+}
+
+/*
+ * Break the mutual link between a relcache entry and a local stats entry.
+ * This must be called always when one end of the link is removed.
+ */
+void
+pgstat_relation_delink(Relation rel)
+{
+	/* remove the link to stats info if any */
+	if (rel && rel->pgstat_info)
+	{
+		/* link sanity check */
+		Assert(rel->pgstat_info->relation == rel);
+		rel->pgstat_info->relation = NULL;
+		rel->pgstat_info = NULL;
+	}
+}
+
+/*
+ * Ensure that stats are dropped if transaction aborts.
+ */
+void
+pgstat_create_relation(Relation rel)
+{
+	pgstat_schedule_create(PGSTAT_KIND_TABLE,
+						   rel->rd_rel->relisshared ? InvalidOid : MyDatabaseId,
+						   RelationGetRelid(rel));
 }
 
 /* ----------
  * pgstat_drop_relation() -
  *
- *	Tell the collector that we just dropped a relation.
- *	(If the message gets lost, we will still clean the dead entry eventually
- *	via future invocations of pgstat_vacuum_stat().)
- *
- *	Currently not used for lack of any good place to call it; we rely
- *	entirely on pgstat_vacuum_stat() to clean out stats for dead rels.
+ * Ensure that stats are dropped if transaction commits.
  * ----------
  */
-#ifdef NOT_USED
 void
-pgstat_drop_relation(Oid relid)
+pgstat_drop_relation(Relation rel)
 {
-	PgStat_MsgTabpurge msg;
-	int			len;
+	int			nest_level = GetCurrentTransactionNestLevel();
+	PgStat_TableStatus *pgstat_info = rel->pgstat_info;
 
-	if (pgStatSock == PGINVALID_SOCKET)
-		return;
+	pgstat_schedule_drop(PGSTAT_KIND_TABLE,
+						 rel->rd_rel->relisshared ? InvalidOid : MyDatabaseId,
+						 RelationGetRelid(rel));
 
-	msg.m_tableid[0] = relid;
-	msg.m_nentries = 1;
-
-	len = offsetof(PgStat_MsgTabpurge, m_tableid[0]) + sizeof(Oid);
-
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_TABPURGE);
-	msg.m_databaseid = MyDatabaseId;
-	pgstat_send(&msg, len);
+	if (pgstat_info &&
+		pgstat_info->trans != NULL &&
+		pgstat_info->trans->nest_level == nest_level)
+	{
+		pgstat_truncdrop_save_counters(pgstat_info->trans, true);
+		pgstat_info->trans->tuples_inserted = 0;
+		pgstat_info->trans->tuples_updated = 0;
+		pgstat_info->trans->tuples_deleted = 0;
+	}
 }
-#endif							/* NOT_USED */
 
 /* ----------
  * pgstat_report_autovac() -
@@ -227,47 +207,97 @@ pgstat_drop_relation(Oid relid)
 void
 pgstat_report_autovac(Oid dboid)
 {
-	PgStat_MsgAutovacStart msg;
+	PgStatSharedRef *shared_ref;
+	PgStatShm_StatDBEntry *dbentry;
 
-	if (pgStatSock == PGINVALID_SOCKET)
-		return;
+	/* can't get here in single user mode */
+	Assert(IsUnderPostmaster);
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_AUTOVAC_START);
-	msg.m_databaseid = dboid;
-	msg.m_start_time = GetCurrentTimestamp();
+	/*
+	 * End-of-vacuum is reported instantly. Report the start the same way for
+	 * consistency. Vacuum doesn't run frequently and is a long-lasting
+	 * operation so it doesn't matter if we get blocked here a little.
+	 */
+	shared_ref =
+		pgstat_shared_ref_get(PGSTAT_KIND_DB, dboid, InvalidOid, true);
 
-	pgstat_send(&msg, sizeof(msg));
+	pgstat_shared_stat_lock(shared_ref, false);
+
+	dbentry = (PgStatShm_StatDBEntry *) shared_ref->shared_stats;
+	dbentry->stats.last_autovac_time = GetCurrentTimestamp();
+
+	pgstat_shared_stat_unlock(shared_ref);
 }
 
 /* ---------
  * pgstat_report_vacuum() -
  *
- *	Tell the collector about the table we just vacuumed.
+ * Report that the table was just vacuumed.
  * ---------
  */
 void
 pgstat_report_vacuum(Oid tableoid, bool shared,
 					 PgStat_Counter livetuples, PgStat_Counter deadtuples)
 {
-	PgStat_MsgVacuum msg;
+	PgStatSharedRef *shared_ref;
+	PgStatShm_StatTabEntry *shtabentry;
+	PgStat_StatTabEntry *tabentry;
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+	TimestampTz ts;
 
-	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_VACUUM);
-	msg.m_databaseid = shared ? InvalidOid : MyDatabaseId;
-	msg.m_tableoid = tableoid;
-	msg.m_autovacuum = IsAutoVacuumWorkerProcess();
-	msg.m_vacuumtime = GetCurrentTimestamp();
-	msg.m_live_tuples = livetuples;
-	msg.m_dead_tuples = deadtuples;
-	pgstat_send(&msg, sizeof(msg));
+	/* Store the data in the table's hash table entry. */
+	ts = GetCurrentTimestamp();
+
+	/*
+	 * Differently from ordinary operations, maintenance commands take longer
+	 * time and getting blocked at the end of work doesn't matter.
+	 * Furthermore, this can prevent the stats updates made by the
+	 * transactions that ends after this vacuum from being canceled by a
+	 * delayed vacuum report. Update shared stats entry directly for the above
+	 * reasons.
+	 */
+	shared_ref =
+		pgstat_shared_stat_locked(PGSTAT_KIND_TABLE, dboid, tableoid, false);
+
+	shtabentry = (PgStatShm_StatTabEntry *) shared_ref->shared_stats;
+	tabentry = &shtabentry->stats;
+
+	tabentry->n_live_tuples = livetuples;
+	tabentry->n_dead_tuples = deadtuples;
+
+	/*
+	 * It is quite possible that a non-aggressive VACUUM ended up skipping
+	 * various pages, however, we'll zero the insert counter here regardless.
+	 * It's currently used only to track when we need to perform an "insert"
+	 * autovacuum, which are mainly intended to freeze newly inserted tuples.
+	 * Zeroing this may just mean we'll not try to vacuum the table again
+	 * until enough tuples have been inserted to trigger another insert
+	 * autovacuum.  An anti-wraparound autovacuum will catch any persistent
+	 * stragglers.
+	 */
+	tabentry->inserts_since_vacuum = 0;
+
+	if (IsAutoVacuumWorkerProcess())
+	{
+		tabentry->autovac_vacuum_timestamp = ts;
+		tabentry->autovac_vacuum_count++;
+	}
+	else
+	{
+		tabentry->vacuum_timestamp = ts;
+		tabentry->vacuum_count++;
+	}
+
+	pgstat_shared_stat_unlock(shared_ref);
 }
 
 /* --------
  * pgstat_report_analyze() -
  *
- *	Tell the collector about the table we just analyzed.
+ * Report that the table was just analyzed.
  *
  * Caller must provide new live- and dead-tuples estimates, as well as a
  * flag indicating whether to reset the changes_since_analyze counter.
@@ -281,9 +311,12 @@ pgstat_report_analyze(Relation rel,
 					  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 					  bool resetcounter)
 {
-	PgStat_MsgAnalyze msg;
+	PgStatSharedRef *shared_ref;
+	PgStatShm_StatTabEntry *shtabentry;
+	PgStat_StatTabEntry *tabentry;
+	Oid			dboid = (rel->rd_rel->relisshared ? InvalidOid : MyDatabaseId);
 
-	if (pgStatSock == PGINVALID_SOCKET || !pgstat_track_counts)
+	if (!pgstat_track_counts)
 		return;
 
 	/*
@@ -291,10 +324,10 @@ pgstat_report_analyze(Relation rel,
 	 * already inserted and/or deleted rows in the target table. ANALYZE will
 	 * have counted such rows as live or dead respectively. Because we will
 	 * report our counts of such rows at transaction end, we should subtract
-	 * off these counts from what we send to the collector now, else they'll
-	 * be double-counted after commit.  (This approach also ensures that the
-	 * collector ends up with the right numbers if we abort instead of
-	 * committing.)
+	 * off these counts from what is already written to shared stats now, else
+	 * they'll be double-counted after commit.  (This approach also ensures
+	 * that the shared stats ends up with the right numbers if we abort
+	 * instead of committing.)
 	 *
 	 * For partitioned tables, we don't report live and dead tuples, because
 	 * such tables don't have any data.
@@ -322,15 +355,46 @@ pgstat_report_analyze(Relation rel,
 
 	}
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_ANALYZE);
-	msg.m_databaseid = rel->rd_rel->relisshared ? InvalidOid : MyDatabaseId;
-	msg.m_tableoid = RelationGetRelid(rel);
-	msg.m_autovacuum = IsAutoVacuumWorkerProcess();
-	msg.m_resetcounter = resetcounter;
-	msg.m_analyzetime = GetCurrentTimestamp();
-	msg.m_live_tuples = livetuples;
-	msg.m_dead_tuples = deadtuples;
-	pgstat_send(&msg, sizeof(msg));
+	/*
+	 * Differently from ordinary operations, maintenance commands take longer
+	 * time and getting blocked at the end of work doesn't matter.
+	 * Furthermore, this can prevent the stats updates made by the
+	 * transactions that ends after this analyze from being canceled by a
+	 * delayed analyze report. Update shared stats entry directly for the
+	 * above reasons.
+	 */
+	shared_ref = pgstat_shared_stat_locked(PGSTAT_KIND_TABLE, dboid,
+										   RelationGetRelid(rel),
+										   false);
+	/* can't get dropped while accessed */
+	Assert(shared_ref != NULL && shared_ref->shared_stats != NULL);
+
+	shtabentry = (PgStatShm_StatTabEntry *) shared_ref->shared_stats;
+	tabentry = &shtabentry->stats;
+
+	tabentry->n_live_tuples = livetuples;
+	tabentry->n_dead_tuples = deadtuples;
+
+	/*
+	 * If commanded, reset changes_since_analyze to zero.  This forgets any
+	 * changes that were committed while the ANALYZE was in progress, but we
+	 * have no good way to estimate how many of those there were.
+	 */
+	if (resetcounter)
+		tabentry->changes_since_analyze = 0;
+
+	if (IsAutoVacuumWorkerProcess())
+	{
+		tabentry->autovac_analyze_timestamp = GetCurrentTimestamp();
+		tabentry->autovac_analyze_count++;
+	}
+	else
+	{
+		tabentry->analyze_timestamp = GetCurrentTimestamp();
+		tabentry->analyze_count++;
+	}
+
+	pgstat_shared_stat_unlock(shared_ref);
 }
 
 /*
@@ -344,6 +408,7 @@ pgstat_report_analyze(Relation rel,
 void
 pgstat_report_anl_ancestors(Oid relid)
 {
+#if 0
 	PgStat_MsgAnlAncestors msg;
 	List	   *ancestors;
 	ListCell   *lc;
@@ -372,133 +437,94 @@ pgstat_report_anl_ancestors(Oid relid)
 					msg.m_nancestors * sizeof(Oid));
 
 	list_free(ancestors);
-}
-
-void
-pgstat_send_tabstats(void)
-{
-	/* we assume this inits to all zeroes: */
-	static const PgStat_TableCounts all_zeroes;
-	PgStat_MsgTabstat regular_msg;
-	PgStat_MsgTabstat shared_msg;
-	TabStatusArray *tsa;
-	int			i;
-
-	/*
-	 * Destroy pgStatTabHash before we start invalidating PgStat_TableEntry
-	 * entries it points to.  (Should we fail partway through the loop below,
-	 * it's okay to have removed the hashtable already --- the only
-	 * consequence is we'd get multiple entries for the same table in the
-	 * pgStatTabList, and that's safe.)
-	 */
-	if (pgStatTabHash)
-		hash_destroy(pgStatTabHash);
-	pgStatTabHash = NULL;
-
-	/*
-	 * Scan through the TabStatusArray struct(s) to find tables that actually
-	 * have counts, and build messages to send.  We have to separate shared
-	 * relations from regular ones because the databaseid field in the message
-	 * header has to depend on that.
-	 */
-	regular_msg.m_databaseid = MyDatabaseId;
-	shared_msg.m_databaseid = InvalidOid;
-	regular_msg.m_nentries = 0;
-	shared_msg.m_nentries = 0;
-
-	for (tsa = pgStatTabList; tsa != NULL; tsa = tsa->tsa_next)
-	{
-		for (i = 0; i < tsa->tsa_used; i++)
-		{
-			PgStat_TableStatus *entry = &tsa->tsa_entries[i];
-			PgStat_MsgTabstat *this_msg;
-			PgStat_TableEntry *this_ent;
-
-			/* Shouldn't have any pending transaction-dependent counts */
-			Assert(entry->trans == NULL);
-
-			/*
-			 * Ignore entries that didn't accumulate any actual counts, such
-			 * as indexes that were opened by the planner but not used.
-			 */
-			if (memcmp(&entry->t_counts, &all_zeroes,
-					   sizeof(PgStat_TableCounts)) == 0)
-				continue;
-
-			/*
-			 * OK, insert data into the appropriate message, and send if full.
-			 */
-			this_msg = entry->t_shared ? &shared_msg : &regular_msg;
-			this_ent = &this_msg->m_entry[this_msg->m_nentries];
-			this_ent->t_id = entry->t_id;
-			memcpy(&this_ent->t_counts, &entry->t_counts,
-				   sizeof(PgStat_TableCounts));
-			if (++this_msg->m_nentries >= PGSTAT_NUM_TABENTRIES)
-			{
-				pgstat_send_tabstat(this_msg);
-				this_msg->m_nentries = 0;
-			}
-		}
-		/* zero out PgStat_TableStatus structs after use */
-		MemSet(tsa->tsa_entries, 0,
-			   tsa->tsa_used * sizeof(PgStat_TableStatus));
-		tsa->tsa_used = 0;
-	}
-
-	/*
-	 * Send partial messages.  Make sure that any pending xact commit/abort
-	 * gets counted, even if there are no table stats to send.
-	 */
-	if (regular_msg.m_nentries > 0 ||
-		pgStatXactCommit > 0 || pgStatXactRollback > 0)
-		pgstat_send_tabstat(&regular_msg);
-	if (shared_msg.m_nentries > 0)
-		pgstat_send_tabstat(&shared_msg);
-
+#endif
 }
 
 /*
- * Subroutine for pgstat_report_stat: finish and send a tabstat message
+ * pgstat_flush_table - flush out a pending table stats entry
+ *
+ * Some of the stats numbers are copied to pending database stats entry after
+ * successful flush-out.
+ *
+ * If nowait is true, this function returns false on lock failure. Otherwise
+ * this function always returns true.
+ *
+ * Returns true if the entry is successfully flushed out.
  */
-static void
-pgstat_send_tabstat(PgStat_MsgTabstat *tsmsg)
+bool
+pgstat_flush_table(PgStatSharedRef *shared_ref, bool nowait)
 {
-	int			n;
-	int			len;
+	static const PgStat_TableCounts all_zeroes;
+	Oid			dboid;			/* database OID of the table */
+	PgStat_TableStatus *lstats; /* pending stats entry  */
+	PgStatShm_StatTabEntry *shtabstats;
+	PgStat_StatTabEntry *tabentry;	/* table entry of shared stats */
+	PgStat_StatDBEntry *dbentry;	/* pending database entry */
 
-	/* It's unlikely we'd get here with no socket, but maybe not impossible */
-	if (pgStatSock == PGINVALID_SOCKET)
-		return;
+	Assert(shared_ref->shared_entry->key.kind == PGSTAT_KIND_TABLE);
+	lstats = (PgStat_TableStatus *) shared_ref->pending;
+	dboid = shared_ref->shared_entry->key.dboid;
 
 	/*
-	 * Report and reset accumulated xact commit/rollback and I/O timings
-	 * whenever we send a normal tabstat message
+	 * Ignore entries that didn't accumulate any actual counts, such as
+	 * indexes that were opened by the planner but not used.
 	 */
-	if (OidIsValid(tsmsg->m_databaseid))
+	if (memcmp(&lstats->t_counts, &all_zeroes,
+			   sizeof(PgStat_TableCounts)) == 0)
 	{
-		tsmsg->m_xact_commit = pgStatXactCommit;
-		tsmsg->m_xact_rollback = pgStatXactRollback;
-		tsmsg->m_block_read_time = pgStatBlockReadTime;
-		tsmsg->m_block_write_time = pgStatBlockWriteTime;
-		pgStatXactCommit = 0;
-		pgStatXactRollback = 0;
-		pgStatBlockReadTime = 0;
-		pgStatBlockWriteTime = 0;
-	}
-	else
-	{
-		tsmsg->m_xact_commit = 0;
-		tsmsg->m_xact_rollback = 0;
-		tsmsg->m_block_read_time = 0;
-		tsmsg->m_block_write_time = 0;
+		return true;
 	}
 
-	n = tsmsg->m_nentries;
-	len = offsetof(PgStat_MsgTabstat, m_entry[0]) +
-		n * sizeof(PgStat_TableEntry);
+	if (!pgstat_shared_stat_lock(shared_ref, nowait))
+		return false;			/* failed to acquire lock, skip */
 
-	pgstat_setheader(&tsmsg->m_hdr, PGSTAT_MTYPE_TABSTAT);
-	pgstat_send(tsmsg, len);
+	/* add the values to the shared entry. */
+	shtabstats = (PgStatShm_StatTabEntry *) shared_ref->shared_stats;
+	tabentry = &shtabstats->stats;
+	tabentry->numscans += lstats->t_counts.t_numscans;
+	tabentry->tuples_returned += lstats->t_counts.t_tuples_returned;
+	tabentry->tuples_fetched += lstats->t_counts.t_tuples_fetched;
+	tabentry->tuples_inserted += lstats->t_counts.t_tuples_inserted;
+	tabentry->tuples_updated += lstats->t_counts.t_tuples_updated;
+	tabentry->tuples_deleted += lstats->t_counts.t_tuples_deleted;
+	tabentry->tuples_hot_updated += lstats->t_counts.t_tuples_hot_updated;
+
+	/*
+	 * If table was truncated or vacuum/analyze has ran, first reset the
+	 * live/dead counters.
+	 */
+	if (lstats->t_counts.t_truncdropped)
+	{
+		tabentry->n_live_tuples = 0;
+		tabentry->n_dead_tuples = 0;
+		/* AFIXME: Why is inserts_since_vacuum not reset anymore? */
+	}
+
+	tabentry->n_live_tuples += lstats->t_counts.t_delta_live_tuples;
+	tabentry->n_dead_tuples += lstats->t_counts.t_delta_dead_tuples;
+	tabentry->changes_since_analyze += lstats->t_counts.t_changed_tuples;
+	tabentry->inserts_since_vacuum += lstats->t_counts.t_tuples_inserted;
+	tabentry->blocks_fetched += lstats->t_counts.t_blocks_fetched;
+	tabentry->blocks_hit += lstats->t_counts.t_blocks_hit;
+
+	/* Clamp n_live_tuples in case of negative delta_live_tuples */
+	tabentry->n_live_tuples = Max(tabentry->n_live_tuples, 0);
+	/* Likewise for n_dead_tuples */
+	tabentry->n_dead_tuples = Max(tabentry->n_dead_tuples, 0);
+
+	pgstat_shared_stat_unlock(shared_ref);
+
+	/* The entry is successfully flushed so the same to add to database stats */
+	dbentry = pgstat_pending_db_prepare(dboid);
+	dbentry->n_tuples_returned += lstats->t_counts.t_tuples_returned;
+	dbentry->n_tuples_fetched += lstats->t_counts.t_tuples_fetched;
+	dbentry->n_tuples_inserted += lstats->t_counts.t_tuples_inserted;
+	dbentry->n_tuples_updated += lstats->t_counts.t_tuples_updated;
+	dbentry->n_tuples_deleted += lstats->t_counts.t_tuples_deleted;
+	dbentry->n_blocks_fetched += lstats->t_counts.t_blocks_fetched;
+	dbentry->n_blocks_hit += lstats->t_counts.t_blocks_hit;
+
+	return true;
 }
 
 /*
@@ -745,7 +771,7 @@ AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state)
 
 	for (trans = xact_state->first; trans != NULL; trans = trans->next)
 	{
-		PgStat_TableStatus *tabstat;
+		PgStat_TableStatus *tabstat PG_USED_FOR_ASSERTS_ONLY;
 		TwoPhasePgStatRecord record;
 
 		Assert(trans->nest_level == 1);
@@ -759,8 +785,6 @@ AtPrepare_PgStat_Relations(PgStat_SubXactStatus *xact_state)
 		record.inserted_pre_truncdrop = trans->inserted_pre_truncdrop;
 		record.updated_pre_truncdrop = trans->updated_pre_truncdrop;
 		record.deleted_pre_truncdrop = trans->deleted_pre_truncdrop;
-		record.t_id = tabstat->t_id;
-		record.t_shared = tabstat->t_shared;
 		record.t_truncdropped = trans->truncdropped;
 
 		RegisterTwoPhaseRecord(TWOPHASE_RM_PGSTAT_ID, 0,
@@ -803,7 +827,7 @@ pgstat_twophase_postcommit(TransactionId xid, uint16 info,
 	PgStat_TableStatus *pgstat_info;
 
 	/* Find or create a tabstat entry for the rel */
-	pgstat_info = get_tabstat_entry(rec->t_id, rec->t_shared);
+	pgstat_info = pgstat_pending_tab_prepare(rec->t_id, rec->t_shared);
 
 	/* Same math as in AtEOXact_PgStat, commit case */
 	pgstat_info->t_counts.t_tuples_inserted += rec->tuples_inserted;
@@ -839,7 +863,7 @@ pgstat_twophase_postabort(TransactionId xid, uint16 info,
 	PgStat_TableStatus *pgstat_info;
 
 	/* Find or create a tabstat entry for the rel */
-	pgstat_info = get_tabstat_entry(rec->t_id, rec->t_shared);
+	pgstat_info = pgstat_pending_tab_prepare(rec->t_id, rec->t_shared);
 
 	/* Same math as in AtEOXact_PgStat, abort case */
 	if (rec->t_truncdropped)
@@ -856,115 +880,80 @@ pgstat_twophase_postabort(TransactionId xid, uint16 info,
 }
 
 /*
- * get_tabstat_entry - find or create a PgStat_TableStatus entry for rel
- */
-static PgStat_TableStatus *
-get_tabstat_entry(Oid rel_id, bool isshared)
-{
-	TabStatHashEntry *hash_entry;
-	PgStat_TableStatus *entry;
-	TabStatusArray *tsa;
-	bool		found;
-
-	pgstat_assert_is_up();
-
-	have_relation_stats = true;
-
-	/*
-	 * Create hash table if we don't have it already.
-	 */
-	if (pgStatTabHash == NULL)
-	{
-		HASHCTL		ctl;
-
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(TabStatHashEntry);
-
-		pgStatTabHash = hash_create("pgstat TabStatusArray lookup hash table",
-									TABSTAT_QUANTUM,
-									&ctl,
-									HASH_ELEM | HASH_BLOBS);
-	}
-
-	/*
-	 * Find an entry or create a new one.
-	 */
-	hash_entry = hash_search(pgStatTabHash, &rel_id, HASH_ENTER, &found);
-	if (!found)
-	{
-		/* initialize new entry with null pointer */
-		hash_entry->tsa_entry = NULL;
-	}
-
-	/*
-	 * If entry is already valid, we're done.
-	 */
-	if (hash_entry->tsa_entry)
-		return hash_entry->tsa_entry;
-
-	/*
-	 * Locate the first pgStatTabList entry with free space, making a new list
-	 * entry if needed.  Note that we could get an OOM failure here, but if so
-	 * we have left the hashtable and the list in a consistent state.
-	 */
-	if (pgStatTabList == NULL)
-	{
-		/* Set up first pgStatTabList entry */
-		pgStatTabList = (TabStatusArray *)
-			MemoryContextAllocZero(TopMemoryContext,
-								   sizeof(TabStatusArray));
-	}
-
-	tsa = pgStatTabList;
-	while (tsa->tsa_used >= TABSTAT_QUANTUM)
-	{
-		if (tsa->tsa_next == NULL)
-			tsa->tsa_next = (TabStatusArray *)
-				MemoryContextAllocZero(TopMemoryContext,
-									   sizeof(TabStatusArray));
-		tsa = tsa->tsa_next;
-	}
-
-	/*
-	 * Allocate a PgStat_TableStatus entry within this list entry.  We assume
-	 * the entry was already zeroed, either at creation or after last use.
-	 */
-	entry = &tsa->tsa_entries[tsa->tsa_used++];
-	entry->t_id = rel_id;
-	entry->t_shared = isshared;
-
-	/*
-	 * Now we can fill the entry in pgStatTabHash.
-	 */
-	hash_entry->tsa_entry = entry;
-
-	return entry;
-}
-
-/*
  * find_tabstat_entry - find any existing PgStat_TableStatus entry for rel
  *
- * If no entry, return NULL, don't create a new one
+ * Find any existing PgStat_TableStatus entry for rel_id in the current
+ * database. If not found, try finding from shared tables.
  *
- * Note: if we got an error in the most recent execution of pgstat_report_stat,
- * it's possible that an entry exists but there's no hashtable entry for it.
- * That's okay, we'll treat this case as "doesn't exist".
+ * If no entry found, return NULL, don't create a new one
+ * ----------
  */
 PgStat_TableStatus *
 find_tabstat_entry(Oid rel_id)
 {
-	TabStatHashEntry *hash_entry;
+	PgStatSharedRef *shared_ref;
 
-	/* If hashtable doesn't exist, there are no entries at all */
-	if (!pgStatTabHash)
-		return NULL;
+	shared_ref = pgstat_pending_fetch(PGSTAT_KIND_TABLE, MyDatabaseId, rel_id);
+	if (!shared_ref)
+		shared_ref = pgstat_pending_fetch(PGSTAT_KIND_TABLE, InvalidOid, rel_id);
 
-	hash_entry = hash_search(pgStatTabHash, &rel_id, HASH_FIND, NULL);
-	if (!hash_entry)
-		return NULL;
+	if (shared_ref)
+		return shared_ref->pending;
+	return NULL;
+}
 
-	/* Note that this step could also return NULL, but that's correct */
-	return hash_entry->tsa_entry;
+/* ----------
+ * pgstat_fetch_stat_tabentry() -
+ *
+ *	Support function for the SQL-callable pgstat* functions. Returns the
+ *	collected statistics for one table or NULL. NULL doesn't necessarily mean
+ *	that the relation doesn't exist, just that there are no statistics, so the
+ *	caller is better off to report ZERO instead.
+ * ----------
+ */
+PgStat_StatTabEntry *
+pgstat_fetch_stat_tabentry(Oid relid)
+{
+	PgStat_StatTabEntry *tabentry;
+
+	tabentry = pgstat_fetch_stat_tabentry_extended(false, relid);
+	if (tabentry != NULL)
+		return tabentry;
+
+	/*
+	 * If we didn't find it, maybe it's a shared table.
+	 */
+	tabentry = pgstat_fetch_stat_tabentry_extended(true, relid);
+	return tabentry;
+}
+
+/*
+ * More efficient version of pgstat_fetch_stat_tabentry(), allowing to specify
+ * whether the to-be-accessed table is a shared relation or not.
+ */
+PgStat_StatTabEntry *
+pgstat_fetch_stat_tabentry_extended(bool shared, Oid reloid)
+{
+	Oid			dboid = (shared ? InvalidOid : MyDatabaseId);
+
+	return (PgStat_StatTabEntry *)
+		pgstat_fetch_entry(PGSTAT_KIND_TABLE, dboid, reloid);
+}
+
+/*
+ * Find or create a PgStat_TableStatus entry for rel. New entry is created and
+ * initialized if not exists.
+ */
+static PgStat_TableStatus *
+pgstat_pending_tab_prepare(Oid rel_id, bool isshared)
+{
+	PgStatSharedRef *shared_ref;
+
+	shared_ref = pgstat_pending_prepare(PGSTAT_KIND_TABLE,
+										isshared ? InvalidOid : MyDatabaseId,
+										rel_id);
+
+	return shared_ref->pending;
 }
 
 /*

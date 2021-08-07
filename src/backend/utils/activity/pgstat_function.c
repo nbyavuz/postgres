@@ -29,24 +29,49 @@ int			pgstat_track_functions = TRACK_FUNC_OFF;
 
 
 /*
- * Indicates if backend has some function stats that it hasn't yet
- * sent to the collector.
- */
-bool have_function_stats = false;
-
-/*
- * Backends store per-function info that's waiting to be sent to the collector
- * in this hash table (indexed by function OID).
- */
-static HTAB *pgStatFunctions = NULL;
-
-/*
  * Total time charged to functions so far in the current backend.
  * We use this to help separate "self" and "other" time charges.
  * (We assume this initializes to zero.)
  */
 static instr_time total_func_time;
 
+
+/*
+ * Ensure that stats are dropped if transaction aborts.
+ */
+void
+pgstat_create_function(Oid proid)
+{
+	pgstat_schedule_create(PGSTAT_KIND_FUNCTION,
+						   MyDatabaseId,
+						   proid);
+}
+
+/*
+ * Ensure that stats are dropped if transaction commits.
+ */
+void
+pgstat_drop_function(Oid proid)
+{
+	/*
+	 * AFIXME: This is not bulletproof, because functions are not locked, and
+	 * therefore no sinval processing occurs when calling a function. Which in
+	 * turn means that new stats entries might be created for stats whose
+	 * shared stats entry already has been dropped.
+	 *
+	 * A probably solution is to not allow dropping stats from
+	 * pgStatSharedHash until no transaction is alive that could potentially
+	 * still see the row. E.g. by adding an xid to PgStatShmHashEntry which
+	 * needs to be older than the horizon for the entry to be removed.
+	 *
+	 * Or we could decide not to care, and ensure that we reset stats in
+	 * pgstat_create_function() / pgstat_schedule_create().
+	 */
+
+	pgstat_schedule_drop(PGSTAT_KIND_FUNCTION,
+						 MyDatabaseId,
+						 proid);
+}
 
 /*
  * Initialize function call usage data.
@@ -56,8 +81,8 @@ void
 pgstat_init_function_usage(FunctionCallInfo fcinfo,
 						   PgStat_FunctionCallUsage *fcu)
 {
-	PgStat_BackendFunctionEntry *htabent;
-	bool		found;
+	PgStatSharedRef *shared_ref;
+	PgStat_BackendFunctionEntry *pending;
 
 	if (pgstat_track_functions <= fcinfo->flinfo->fn_stats)
 	{
@@ -66,29 +91,15 @@ pgstat_init_function_usage(FunctionCallInfo fcinfo,
 		return;
 	}
 
-	if (!pgStatFunctions)
-	{
-		/* First time through - initialize function stat table */
-		HASHCTL		hash_ctl;
+	shared_ref = pgstat_pending_prepare(PGSTAT_KIND_FUNCTION,
+											 MyDatabaseId,
+											 fcinfo->flinfo->fn_oid);
+	pending = shared_ref->pending;
 
-		hash_ctl.keysize = sizeof(Oid);
-		hash_ctl.entrysize = sizeof(PgStat_BackendFunctionEntry);
-		pgStatFunctions = hash_create("Function stat entries",
-									  PGSTAT_FUNCTION_HASH_SIZE,
-									  &hash_ctl,
-									  HASH_ELEM | HASH_BLOBS);
-	}
-
-	/* Get the stats entry for this function, create if necessary */
-	htabent = hash_search(pgStatFunctions, &fcinfo->flinfo->fn_oid,
-						  HASH_ENTER, &found);
-	if (!found)
-		MemSet(&htabent->f_counts, 0, sizeof(PgStat_FunctionCounts));
-
-	fcu->fs = &htabent->f_counts;
+	fcu->fs = &pending->f_counts;
 
 	/* save stats for this function, later used to compensate for recursion */
-	fcu->save_f_total_time = htabent->f_counts.f_total_time;
+	fcu->save_f_total_time = pending->f_counts.f_total_time;
 
 	/* save current backend-wide total time */
 	fcu->save_total = total_func_time;
@@ -145,81 +156,75 @@ pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu, bool finalize)
 		fs->f_numcalls++;
 	fs->f_total_time = f_total;
 	INSTR_TIME_ADD(fs->f_self_time, f_self);
-
-	/* indicate that we have something to send */
-	have_function_stats = true;
 }
 
 /*
- * Subroutine for pgstat_report_stat: populate and send a function stat message
+ * pgstat_flush_function - flush out a local function stats entry
+ *
+ * If nowait is true, this function returns false on lock failure. Otherwise
+ * this function always returns true.
+ *
+ * Returns true if the entry is successfully flushed out.
  */
-void
-pgstat_send_funcstats(void)
+bool
+pgstat_flush_function(PgStatSharedRef *shared_ref, bool nowait)
 {
-	/* we assume this inits to all zeroes: */
-	static const PgStat_FunctionCounts all_zeroes;
+	PgStat_BackendFunctionEntry *localent;	/* local stats entry */
+	PgStatShm_StatFuncEntry *shfuncent = NULL; /* shared stats entry */
 
-	PgStat_MsgFuncstat msg;
-	PgStat_BackendFunctionEntry *entry;
-	HASH_SEQ_STATUS fstat;
+	Assert(shared_ref->shared_entry->key.kind == PGSTAT_KIND_FUNCTION);
+	localent = (PgStat_BackendFunctionEntry *) shared_ref->pending;
 
-	if (pgStatFunctions == NULL)
-		return;
+	/* localent always has non-zero content */
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_FUNCSTAT);
-	msg.m_databaseid = MyDatabaseId;
-	msg.m_nentries = 0;
+	if (!pgstat_shared_stat_lock(shared_ref, nowait))
+		return false;			/* failed to acquire lock, skip */
 
-	hash_seq_init(&fstat, pgStatFunctions);
-	while ((entry = (PgStat_BackendFunctionEntry *) hash_seq_search(&fstat)) != NULL)
-	{
-		PgStat_FunctionEntry *m_ent;
+	shfuncent = (PgStatShm_StatFuncEntry *) shared_ref->shared_stats;
 
-		/* Skip it if no counts accumulated since last time */
-		if (memcmp(&entry->f_counts, &all_zeroes,
-				   sizeof(PgStat_FunctionCounts)) == 0)
-			continue;
+	shfuncent->stats.f_numcalls += localent->f_counts.f_numcalls;
+	shfuncent->stats.f_total_time +=
+		INSTR_TIME_GET_MICROSEC(localent->f_counts.f_total_time);
+	shfuncent->stats.f_self_time +=
+		INSTR_TIME_GET_MICROSEC(localent->f_counts.f_self_time);
 
-		/* need to convert format of time accumulators */
-		m_ent = &msg.m_entry[msg.m_nentries];
-		m_ent->f_id = entry->f_id;
-		m_ent->f_numcalls = entry->f_counts.f_numcalls;
-		m_ent->f_total_time = INSTR_TIME_GET_MICROSEC(entry->f_counts.f_total_time);
-		m_ent->f_self_time = INSTR_TIME_GET_MICROSEC(entry->f_counts.f_self_time);
+	pgstat_shared_stat_unlock(shared_ref);
 
-		if (++msg.m_nentries >= PGSTAT_NUM_FUNCENTRIES)
-		{
-			pgstat_send(&msg, offsetof(PgStat_MsgFuncstat, m_entry[0]) +
-						msg.m_nentries * sizeof(PgStat_FunctionEntry));
-			msg.m_nentries = 0;
-		}
-
-		/* reset the entry's counts */
-		MemSet(&entry->f_counts, 0, sizeof(PgStat_FunctionCounts));
-	}
-
-	if (msg.m_nentries > 0)
-		pgstat_send(&msg, offsetof(PgStat_MsgFuncstat, m_entry[0]) +
-					msg.m_nentries * sizeof(PgStat_FunctionEntry));
-
-	have_function_stats = false;
+	return true;
 }
 
-/*
+/* ----------
  * find_funcstat_entry - find any existing PgStat_BackendFunctionEntry entry
  *		for specified function
  *
  * If no entry, return NULL, don't create a new one
+ * ----------
  */
 PgStat_BackendFunctionEntry *
 find_funcstat_entry(Oid func_id)
 {
-	pgstat_assert_is_up();
+	PgStatSharedRef *shared_ref;
 
-	if (pgStatFunctions == NULL)
-		return NULL;
+	shared_ref = pgstat_pending_fetch(PGSTAT_KIND_FUNCTION, MyDatabaseId, func_id);
 
-	return (PgStat_BackendFunctionEntry *) hash_search(pgStatFunctions,
-													   (void *) &func_id,
-													   HASH_FIND, NULL);
+	if (shared_ref)
+		return shared_ref->pending;
+	return NULL;
+}
+
+/* ----------
+ * pgstat_fetch_stat_funcentry() -
+ *
+ *	Support function for the SQL-callable pgstat* functions. Returns
+ *	the collected statistics for one function or NULL.
+ *
+ *  The returned entry is stored in static memory so the content is valid until
+ *	the next call of the same function for the different function id.
+ * ----------
+ */
+PgStat_StatFuncEntry *
+pgstat_fetch_stat_funcentry(Oid func_id)
+{
+	return (PgStat_StatFuncEntry *)
+		pgstat_fetch_entry(PGSTAT_KIND_FUNCTION, MyDatabaseId, func_id);
 }

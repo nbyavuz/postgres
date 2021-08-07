@@ -72,6 +72,7 @@ static void StatementTimeoutHandler(void);
 static void LockTimeoutHandler(void);
 static void IdleInTransactionSessionTimeoutHandler(void);
 static void IdleSessionTimeoutHandler(void);
+static void IdleStatsUpdateTimeoutHandler(void);
 static void ClientCheckTimeoutHandler(void);
 static bool ThereIsAtLeastOneRole(void);
 static void process_startup_options(Port *port, bool am_superuser);
@@ -604,6 +605,8 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 						IdleInTransactionSessionTimeoutHandler);
 		RegisterTimeout(IDLE_SESSION_TIMEOUT, IdleSessionTimeoutHandler);
 		RegisterTimeout(CLIENT_CONNECTION_CHECK_TIMEOUT, ClientCheckTimeoutHandler);
+		RegisterTimeout(IDLE_STATS_UPDATE_TIMEOUT,
+						IdleStatsUpdateTimeoutHandler);
 	}
 
 	/*
@@ -642,6 +645,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 		 * Use before_shmem_exit() so that ShutdownXLOG() can rely on DSM
 		 * segments etc to work (which in turn is required for pgstats).
 		 */
+		before_shmem_exit(pgstat_before_server_shutdown, 0);
 		before_shmem_exit(ShutdownXLOG, 0);
 	}
 
@@ -1222,6 +1226,14 @@ static void
 IdleSessionTimeoutHandler(void)
 {
 	IdleSessionTimeoutPending = true;
+	InterruptPending = true;
+	SetLatch(MyLatch);
+}
+
+static void
+IdleStatsUpdateTimeoutHandler(void)
+{
+	IdleStatsUpdateTimeoutPending = true;
 	InterruptPending = true;
 	SetLatch(MyLatch);
 }
