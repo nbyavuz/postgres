@@ -99,6 +99,7 @@ task:
   install_script:
     - sudo chmod 777 /cores
     - uname -a
+    - brew update
     - brew install make coreutils
     - cpan -T IPC::Run
   build_script:
