@@ -96,8 +96,6 @@ task:
   name: macOS
   osx_instance:
     image: catalina-base
-  #env:
-  #  CHECK: check
   install_script:
     - sudo chmod 777 /cores
     - uname -a
@@ -108,7 +106,7 @@ task:
     - ./configure --prefix=$HOME/install --enable-cassert --enable-debug --enable-tap-tests --without-readline CFLAGS="-O0"
     - gmake -s -j12
     - gmake -s install
-  macos_test_script:
+  macos_test_script_basebackup:
     - ulimit -c unlimited
     - export PERL5LIB=~/perl5/lib/perl5
     - gtimeout -s KILL -v 30m gmake -s -j12 ${CHECK} ${CHECKFLAGS} -C src/bin/pg_basebackup/ check
