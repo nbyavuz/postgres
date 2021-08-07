@@ -855,7 +855,6 @@ pgstat_twophase_postabort(TransactionId xid, uint16 info,
 		rec->tuples_inserted + rec->tuples_updated;
 }
 
-
 /*
  * get_tabstat_entry - find or create a PgStat_TableStatus entry for rel
  */
