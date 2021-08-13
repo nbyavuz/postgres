@@ -23,6 +23,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "replication/walsender.h"
+#include "storage/aio.h"
 #include "storage/condition_variable.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -646,6 +647,11 @@ procsignal_sigusr1_handler(SIGNAL_ARGS)
 
 	if (CheckProcSignal(PROCSIG_BARRIER))
 		HandleProcSignalBarrierInterrupt();
+
+#ifdef USE_POSIX_AIO
+	if (CheckProcSignal(PROCSIG_POSIX_AIO))
+		HandlePosixAioInterrupt();
+#endif
 
 	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_DATABASE))
 		RecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_DATABASE);

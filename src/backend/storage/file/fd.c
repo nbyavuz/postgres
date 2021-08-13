@@ -3626,7 +3626,7 @@ pre_sync_fname(const char *fname, bool isdir, int elevel, uintptr_t state)
 	if (isdir)
 		return;
 
-	fd = OpenTransientFile(fname, O_RDONLY | PG_BINARY);
+	fd = OpenTransientFile(fname, O_RDWR | PG_BINARY);
 
 	if (fd < 0)
 	{
@@ -3673,6 +3673,27 @@ datadir_fsync_fname(const char *fname, bool isdir, int elevel, uintptr_t state)
 	entry->fd = fd;
 	entry->isdir = isdir;
 	strlcpy(entry->fname, fname, MAXPGPATH);
+
+#if __darwin__
+	if (io_method == IOMETHOD_POSIX && isdir)
+	{
+		/*
+		 * macOS aio_fsync() fails on directories with EAGAIN (!) due to an
+		 * internal check that the fd was opened O_RDWR (POSIX says
+		 * non-writable fds should report EBADF).  It also doesn't let you open
+		 * directories O_RDWR, so there is no way to synchronize a directory
+		 * asynchronously.  Do it synchronously instead.
+		 *
+		 * XXX Does any other OS really do this?  Why does POSIX have this
+		 * requirement for aio_fsync, but not fsync?  Should we take POSIX at
+		 * its word and do this on all OSes for directories?  Should we push
+		 * this down into the aio code?  It can't tell if it has a directory...
+		 */
+		fsync_fname_close(fd, pg_fsync(fd) < 0, fname, isdir, elevel);
+		pfree(entry);
+		return;
+	}
+#endif
 
 	aio = pg_streaming_write_get_io(sync_state->pgsw);
 	pgaio_io_start_fsync_raw(aio, fd, false);

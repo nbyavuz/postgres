@@ -232,6 +232,7 @@ extern char *pgaio_bounce_buffer_buffer(PgAioBounceBuffer *bb);
  */
 
 extern void IoWorkerMain(void);
+extern void HandlePosixAioInterrupt(void);
 
 /* --------------------------------------------------------------------------------
  * Helpers. In aio_util.c.

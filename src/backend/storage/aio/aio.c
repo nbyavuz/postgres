@@ -144,10 +144,6 @@ AioShmemSize(void)
 	sz = add_size(sz, AioUringShmemSize());
 #endif
 
-#ifdef USE_POSIX_AIO
-	sz = add_size(sz, AioPosixShmemSize());
-#endif
-
 	return sz;
 }
 
@@ -242,7 +238,7 @@ AioShmemInit(void)
 #endif
 #ifdef USE_POSIX_AIO
 		else if (io_method == IOMETHOD_POSIX)
-			AioPosixShmemInit();
+			AioPosixAioShmemInit();
 #endif
 	}
 }
@@ -267,7 +263,7 @@ pgaio_postmaster_child_init_local(void)
 #endif
 #ifdef USE_POSIX_AIO
 	else if (io_method == IOMETHOD_POSIX)
-		pgaio_posix_postmaster_child_init_local();
+		pgaio_posix_aio_postmaster_child_init_local();
 #endif
 }
 
@@ -517,23 +513,6 @@ pgaio_complete_ios(bool in_error)
 			dlist_push_tail(&aio_ctl->reaped_uncompleted, &io->io_node);
 			LWLockRelease(SharedAIOCtlLock);
 		}
-
-#ifdef USE_POSIX_AIO
-		if (io_method == IOMETHOD_POSIX)
-		{
-			/*
-			 * The owner may be blocked in pgail_posix_wait_one(), but we
-			 * managed to process the completion events.  Wake it up.
-			 *
-			 * XXX An alternative would be to have multiple completion queues
-			 * with locks (ie contexts, just like the uring code), and have
-			 * pgaio_posix_wait_one() hold the lock so that other backends
-			 * don't finish up processing these.
-			 */
-			if (io->submitter_id != my_aio_id)
-				SetLatch(&ProcGlobal->allProcs[io->submitter_id].procLatch);
-		}
-#endif
 	}
 
 	RESUME_INTERRUPTS();
@@ -742,7 +721,7 @@ pgaio_drain(PgAioContext *context, bool block, bool call_shared, bool call_local
 #endif
 #ifdef USE_POSIX_AIO
 	else if (io_method == IOMETHOD_POSIX)
-		ndrained = pgaio_posix_drain(context);
+		ndrained = pgaio_posix_aio_drain(block);
 #endif
 
 	if (call_shared)
@@ -846,12 +825,12 @@ pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, boo
 #endif /* COMBINE_ENABLED */
 
 	/*
-	 * FIXME: currently the pgaio_synchronous_submit() path is only compatible
-	 * with IOMETHOD_WORKER: There's e.g. a danger we'd wait for io_uring
+	 * FIXME: currently the pgaio_synchronous_submit() path is not compatible
+	 * with IOMETHOD_IO_URING: There's e.g. a danger we'd wait for io_uring
 	 * events, which could stall (or trigger asserts), as
 	 * pgaio_io_wait_ref_int() right now has no way of detecting that case.
 	 */
-	if (io_method != IOMETHOD_WORKER)
+	if (io_method == IOMETHOD_IO_URING)
 		will_wait = false;
 
 	/*
@@ -890,7 +869,7 @@ pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, boo
 #endif
 #ifdef USE_POSIX_AIO
 		else if (io_method == IOMETHOD_POSIX)
-			did_submit = pgaio_posix_submit(max_submit, drain);
+			did_submit = pgaio_posix_aio_submit(max_submit, drain);
 #endif
 		else
 			elog(ERROR, "unexpected io_method");
@@ -1730,23 +1709,16 @@ wait_ref_again:
 		else if (io_method != IOMETHOD_WORKER && (flags & PGAIOIP_INFLIGHT))
 		{
 			/* note that this is allowed to spuriously return */
-			if (io_method == IOMETHOD_WORKER)
-				ConditionVariableSleep(&io->cv, WAIT_EVENT_AIO_IO_COMPLETE_ONE);
 #ifdef USE_LIBURING
-			else if (io_method == IOMETHOD_IO_URING)
+			if (io_method == IOMETHOD_IO_URING)
 				pgaio_uring_wait_one(&aio_ctl->contexts[io->ring], io, ref_generation,
 									 WAIT_EVENT_AIO_IO_COMPLETE_ANY);
 #endif
 #ifdef USE_POSIX_AIO
-			else if (io_method == IOMETHOD_POSIX)
-				pgaio_posix_wait_one(io, ref_generation);
+			if (io_method == IOMETHOD_POSIX)
+				pgaio_posix_aio_wait_one(io, ref_generation);
 #endif
 		}
-#ifdef USE_POSIX_AIO
-		/* XXX untangle this */
-		else if (io_method == IOMETHOD_POSIX)
-			pgaio_posix_wait_one(io, ref_generation);
-#endif
 		else
 		{
 			/* shouldn't be reachable without concurrency */
@@ -1944,7 +1916,7 @@ pgaio_io_retry_common(PgAioInProgress *io)
 #endif
 #ifdef USE_POSIX_AIO
 	else if (io_method == IOMETHOD_POSIX)
-		pgaio_posix_io_retry(io);
+		pgaio_posix_aio_io_retry(io);
 #endif
 	else
 		elog(ERROR, "unexpected io_method");

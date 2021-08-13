@@ -307,12 +307,54 @@ struct PgAioInProgress
 		} flush_range_smgr;
 	} scb_data;
 
+	/*
+	 * Data that is specific to different IO methods.
+	 */
+	union
+	{
+		struct
+		{
+			/*
+			 * If worker mode ever needs any special data, it can go here.
+			 * For now, dummy member to avoid an empty struct and union.
+			 */
+			int unused;
+		} worker;
 #ifdef USE_POSIX_AIO
-	uint32 submitter_id;
-	struct aiocb posix_aiocb;
-	uint64 posix_returned_generation;
-	size_t inflight_slot;
+		struct
+		{
+			/*
+			 * The POSIX AIO control block doesn't need to be in shared
+			 * memory, but we'd waste more space if we had large private
+			 * arrays in every backend.
+			 *
+			 * XXX Should we move this into a separate mirror array, to
+			 * debloat the top level struct?
+			 */
+			struct aiocb iocb;
+
+			/* Index in pgaio_posix_aio_iocbs. */
+			int iocb_index;
+
+			/*
+			 * Atomic control flags used to negotiate handover from submitter
+			 * to completer.
+			 */
+			pg_atomic_uint64 flags;
+
+			/*
+			 * Which IO is the head of this IO's chain?  That's the only one
+			 * that the kernel knows about, so we need to be able to get our
+			 * hands on it to wrestle control from another backend.
+			 */
+			uint32 merge_head_idx;
+
+			/* Raw result from the kernel, if known. */
+			volatile int raw_result;
+#define PGAIO_POSIX_RESULT_INVALID INT_MIN
+		} posix_aio;
 #endif
+	} io_method_data;
 };
 
 #ifdef USE_LIBURING
@@ -506,11 +548,6 @@ typedef struct PgAioCtl
 	ConditionVariable worker_submission_queue_not_empty;
 	squeue32 *worker_submission_queue;
 
-#ifdef USE_POSIX_AIO
-	/* Queue for shared completion notifications in POSIX AIO mode. */
-	squeue32 *posix_completion_queue;
-#endif
-
 	int backend_state_count;
 	PgAioPerBackend *backend_state;
 
@@ -577,13 +614,12 @@ extern int pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared
 
 #ifdef USE_POSIX_AIO
 /* Declarations for functions in aio_posix.c that are visible to aio.c. */
-extern Size AioPosixShmemSize(void);
-extern void AioPosixShmemInit(void);
-extern void pgaio_posix_postmaster_child_init_local(void);
-extern int pgaio_posix_submit(int max_submit, bool drain);
-extern void pgaio_posix_wait_one(PgAioInProgress *io, uint64 ref_generation);
-extern void pgaio_posix_io_retry(PgAioInProgress *io);
-extern int pgaio_posix_drain(PgAioContext *context);
+extern void AioPosixAioShmemInit(void);
+extern void pgaio_posix_aio_postmaster_child_init_local(void);
+extern int pgaio_posix_aio_submit(int max_submit, bool drain);
+extern void pgaio_posix_aio_wait_one(PgAioInProgress *io, uint64 ref_generation);
+extern void pgaio_posix_aio_io_retry(PgAioInProgress *io);
+extern int pgaio_posix_aio_drain(bool block);
 
 #endif
 

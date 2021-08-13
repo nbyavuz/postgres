@@ -419,6 +419,7 @@ pgaio_process_io_completion(PgAioInProgress *io, int result)
 			case PGAIO_OP_FSYNC:
 			case PGAIO_OP_FLUSH_RANGE:
 			case PGAIO_OP_NOP:
+Assert(result <= 0);
 				cur->result = result;
 				if (result == -EAGAIN || result == -EINTR)
 					new_flags |= PGAIOIP_SOFT_FAILURE;
@@ -509,7 +510,7 @@ pgaio_io_matches_fd(PgAioInProgress *io, int fd)
 #ifdef USE_POSIX_AIO
 	/* XXX review sanity of this */
 	/* We only want to match IOs that were submitted by this process. */
-	if (io_method != IOMETHOD_POSIX || io->submitter_id != my_aio_id)
+	if (io_method != IOMETHOD_POSIX || io->owner_id != my_aio_id)
 		return false;
 #endif
 
