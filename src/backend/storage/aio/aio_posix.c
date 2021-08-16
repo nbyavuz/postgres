@@ -8,13 +8,13 @@
  * the runtime libraries of Linux (Glibc, Musl), illumos and Solaris.
  *
  * The main complication for PostgreSQL's current process-based architecture
- * is that it's not possible for one backend to consume the completions of an
+ * is that it's not possible for one backend to consume the completion of an
  * IO submitted by another.  To avoid deadlocks, any backend that is waiting
  * for an abitrary IO must be able to make progress, so this module has to
  * overcome that limitation.  It does that by sending a signal to the
  * submitting backend to ask it to collect the result and pass it on.
  *
- * XXX Set new value in lease while running synchronous IO
+ * XXX Set requester in flags while running synchronous IO to prevent signaling
  * XXX Tidy
  * XXX pgbench fails on macos with "buffer beyond EOF"
  *
@@ -102,7 +102,7 @@ static uint64
 #define PGAIO_POSIX_AIO_FLAG_COMPLETER_MASK		0x0000000000ffffff
 #define PGAIO_POSIX_AIO_FLAG_SUBMITTER_SHIFT	32
 
-/* Result values from pgaio_posix_lease_acquire(). */
+/* Result values from pgaio_posix_aio_take_baton(). */
 #define PGAIO_POSIX_AIO_BATON_GRANTED			0
 #define PGAIO_POSIX_AIO_BATON_DENIED			1
 #define PGAIO_POSIX_AIO_BATON_WOULDBLOCK		2
@@ -781,8 +781,8 @@ pgaio_posix_aio_kernel_io_done(PgAioInProgress * io,
 	{
 		/*
 		 * We can't do much in a signal handler.  Store the value for later,
-		 * for whoever manages to obtain the lease.  If someone is waiting,
-		 * give them the baton.
+		 * for whoever arrives first to take the baton.  If someone is waiting
+		 * already, give them the baton now.
 		 */
 		pgaio_posix_aio_give_baton(io, result);
 	}
@@ -896,10 +896,15 @@ pgaio_posix_aio_take_baton(PgAioInProgress * io, bool have_result)
 				/*
 				 * Interrupt the submitter to tell it we are waiting.  It will
 				 * see that the baton is requested.
+				 *
+				 * XXX Looking up the backendId would make this more
+				 * efficient, but it seems to be borked for the startup
+				 * process, which advertises a bogus backendId in its PGPROC.
+				 * *FIXME*
 				 */
 				SendProcSignal(ProcGlobal->allProcs[submitter_id].pid,
 							   PROCSIG_POSIX_AIO,
-							   ProcGlobal->allProcs[submitter_id].backendId);
+							   InvalidBackendId);
 
 				/* Go around again. */
 			}
@@ -1046,7 +1051,7 @@ pgaio_posix_aio_give_baton(PgAioInProgress * io, int result)
 
 			/*
 			 * There's no one to grant the baton to, but the next backend to
-			 * try to acquire the lease will succeed immediately.
+			 * try to take the baton will succeed immediately.
 			 */
 			break;
 		}
