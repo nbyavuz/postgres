@@ -129,18 +129,15 @@ AioPosixAioShmemInit(void)
 
 		pg_atomic_init_u64(&io->io_method_data.posix_aio.flags, 0);
 	}
-}
 
-/*
- * Intialize backend-local memory.
- */
-void
-pgaio_posix_aio_postmaster_child_init_local(void)
-{
-	/* Keep track of all iocbs submitted by this backend. */
-	pgaio_posix_aio_iocbs =
-		MemoryContextAlloc(TopMemoryContext,
-						   sizeof(struct aiocb *) * max_aio_in_flight);
+	/*
+	 * We need this array in every backend, including single process.
+	 * XXX It's not "shmem", so where should it go?
+	 */
+	if (!pgaio_posix_aio_iocbs)
+		pgaio_posix_aio_iocbs =
+			MemoryContextAlloc(TopMemoryContext,
+							   sizeof(struct aiocb *) * max_aio_in_flight);
 }
 
 

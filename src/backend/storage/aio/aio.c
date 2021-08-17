@@ -261,10 +261,6 @@ pgaio_postmaster_child_init_local(void)
 	else if (io_method == IOMETHOD_IO_URING)
 		pgaio_uring_postmaster_child_init_local();
 #endif
-#ifdef USE_POSIX_AIO
-	else if (io_method == IOMETHOD_POSIX)
-		pgaio_posix_aio_postmaster_child_init_local();
-#endif
 }
 
 static void

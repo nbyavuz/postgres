@@ -615,7 +615,6 @@ extern int pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared
 #ifdef USE_POSIX_AIO
 /* Declarations for functions in aio_posix.c that are visible to aio.c. */
 extern void AioPosixAioShmemInit(void);
-extern void pgaio_posix_aio_postmaster_child_init_local(void);
 extern int pgaio_posix_aio_submit(int max_submit, bool drain);
 extern void pgaio_posix_aio_wait_one(PgAioInProgress *io, uint64 ref_generation);
 extern void pgaio_posix_aio_io_retry(PgAioInProgress *io);
