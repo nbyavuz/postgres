@@ -111,20 +111,15 @@ pgaio_can_scatter_gather(void)
 		 */
 		return true;
 	}
-#ifdef USE_LIBURING
 	if (io_method == IOMETHOD_IO_URING)
 		return true;
-#endif
-#if defined(HAVE_AIO_READV) && defined(HAVE_AIO_WRITEV)
 	if (io_method == IOMETHOD_POSIX)
 	{
-		/*
-		 * aio_readv() and aio_writev() are non-standard extensions found in
-		 * FreeBSD 13.
-		 */
+#if (defined(LIO_READV) && defined(LIO_WRITEV))
+		/* FreeBSD has batched async scatter/gather. */
 		return true;
-	}
 #endif
+	}
 	return false;
 }
 

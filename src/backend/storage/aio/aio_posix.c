@@ -53,6 +53,9 @@ typedef struct pgaio_posix_aio_listio_buffer
 {
 	int			nios;
 	struct aiocb *cbs[AIO_LISTIO_MAX];
+#if defined(LIO_READV) && defined(LIO_WRITEV)
+	struct iovec iovecs[AIO_LISTIO_MAX][IOV_MAX];
+#endif
 }			pgaio_posix_aio_listio_buffer;
 
 /* Variables used by the interprocess interrupt system. */
@@ -418,6 +421,9 @@ pgaio_posix_aio_flush_listio(pgaio_posix_aio_listio_buffer * lb)
 static int
 pgaio_posix_aio_add_listio(pgaio_posix_aio_listio_buffer * lb, PgAioInProgress * io)
 {
+	struct aiocb *iocb;
+	int index;
+
 	if (lb->nios == AIO_LISTIO_MAX)
 	{
 		int			rc;
@@ -426,7 +432,21 @@ pgaio_posix_aio_add_listio(pgaio_posix_aio_listio_buffer * lb, PgAioInProgress *
 		if (rc < 0)
 			return rc;
 	}
-	lb->cbs[lb->nios] = iocb_for_io(io);
+
+	index = lb->nios;
+	iocb = iocb_for_io(io);
+	lb->cbs[index] = iocb;
+#if defined(LIO_READV) && defined(LIO_WRITEV)
+	if (iocb->aio_lio_opcode == LIO_READV || iocb->aio_lio_opcode == LIO_WRITEV) {
+		/* Copy the iovecs into a new buffer with the right lifetime. */
+		if (iocb->aio_iovcnt > IOV_MAX)
+			elog(ERROR, "too many iovecs");
+		memcpy(&lb->iovecs[index][0],
+			   unvolatize(void *, iocb->aio_iov),
+			   sizeof(struct iovec) * iocb->aio_iovcnt);
+		iocb->aio_iov = &lb->iovecs[index][0];
+	}
+#endif
 	++lb->nios;
 
 	return 0;
@@ -449,35 +469,31 @@ pgaio_posix_aio_start_rw(PgAioInProgress * io,
 
 	iovcnt = pgaio_fill_iov(iov, io);
 
-#if defined(HAVE_AIO_READV) && defined(HAVE_AIO_WRITEV)
 	if (iovcnt > 1)
 	{
-		/*
-		 * We can't do scatter/gather in a listio on any known OS, but it's
-		 * better to use FreeBSD's nonstandard separate system calls than pass
-		 * up the opportunity for scatter/gather IO.  Note that this case
-		 * should only be reachable if pgaio_can_scatter_gather() returned
-		 * true.
-		 */
-		cb->aio_iov = iov;
+#if defined(LIO_READV) && defined(LIO_WRITEV)
+		/* FreeBSD supports async readv/writev in an lio batch. */
+		cb->aio_iov = iov;	/* this will be copied */
 		cb->aio_iovcnt = iovcnt;
-		return lio_opcode == LIO_WRITE ? aio_writev(cb) : aio_readv(cb);
+		cb->aio_lio_opcode = lio_opcode == LIO_WRITE ? LIO_WRITEV : LIO_READV;
+		return pgaio_posix_aio_add_listio(lb, io);
+#endif
+
+		/* pgaio_can_scatter_gather() should not have allowed this. */
+		elog(ERROR, "unexpected vector read/write");
+		pg_unreachable();
 	}
 	else
-#endif
 	{
-		Assert(iovcnt == 1);
-
 		/*
-		 * This might be a single PG IO, or a chain of reads into contiguous
-		 * memory, so that it takes only a single iovec.  We'll batch it up
-		 * with other such single iovec requests, if lio_listio(2) works the
-		 * way we want it to on this platform.
+		 * Standard POSIX AIO doesn't have scatter/gather.  This IO might still
+		 * have been merged from multiple IOs that access adjacent regions of a
+		 * file, but only if the memory is also adjacent.
 		 */
+		Assert(iovcnt == 1);
 		cb->aio_buf = iov[0].iov_base;
 		cb->aio_nbytes = iov[0].iov_len;
 		cb->aio_lio_opcode = lio_opcode;
-
 		return pgaio_posix_aio_add_listio(lb, io);
 	}
 }
