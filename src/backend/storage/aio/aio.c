@@ -704,7 +704,8 @@ pgaio_drain(PgAioContext *context, bool block, bool call_shared, bool call_local
 {
 	int ndrained = 0;
 
-	ndrained = pgaio_impl->drain(context, block, call_shared);
+	if (pgaio_impl->drain)
+		ndrained = pgaio_impl->drain(context, block, call_shared);
 
 	if (call_shared)
 	{
@@ -1664,7 +1665,7 @@ wait_ref_again:
 			pgaio_submit_pending_internal(call_shared, call_shared, call_local,
 										  /* will_wait = */ false);
 		}
-		else if (io_method != IOMETHOD_WORKER && (flags & PGAIOIP_INFLIGHT))
+		else if (pgaio_impl->wait_one && (flags & PGAIOIP_INFLIGHT))
 		{
 			/* note that this is allowed to spuriously return */
 			pgaio_impl->wait_one(&aio_ctl->contexts[io->ring],

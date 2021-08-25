@@ -54,9 +54,7 @@ int MyIoWorkerId;
 static size_t pgaio_worker_shmem_size(void);
 static void pgaio_worker_shmem_init(void);
 static int pgaio_worker_submit(int max_submit, bool drain);
-static void pgaio_worker_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info);
 static void pgaio_worker_io_retry(PgAioInProgress *io);
-static int pgaio_worker_drain(PgAioContext *context, bool block, bool call_shared);
 
 typedef struct AioWorkerSubmissionQueue
 {
@@ -88,9 +86,7 @@ const IoMethodOps pgaio_worker_ops = {
 	.shmem_size = pgaio_worker_shmem_size,
 	.shmem_init = pgaio_worker_shmem_init,
 	.submit = pgaio_worker_submit,
-	.retry = pgaio_worker_io_retry,
-	.wait_one = pgaio_worker_wait_one,
-	.drain = pgaio_worker_drain
+	.retry = pgaio_worker_io_retry
 };
 
 static size_t
@@ -372,24 +368,4 @@ IoWorkerMain(void)
 	io_worker_control->idle_worker_mask &= ~(1 << MyIoWorkerId);
 	io_worker_control->workers[MyIoWorkerId].latch = NULL;
 	LWLockRelease(AioWorkerSubmissionQueueLock);
-}
-
-static void
-pgaio_worker_wait_one(PgAioContext *context,
-					  PgAioInProgress * io,
-					  uint64 ref_generation,
-					  uint32 wait_event_info)
-{
-	elog(ERROR, "not supported");
-}
-
-static int
-pgaio_worker_drain(PgAioContext *context, bool block, bool call_shared)
-{
-	/*
-	 * Worker mode has no completion queue to drain, because the worker
-	 * processes all completion work directly.  Regular backends wait on the
-	 * CV only.
-	 */
-	return 0;
 }
