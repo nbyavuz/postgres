@@ -85,6 +85,55 @@ const struct config_enum_entry io_method_options[] = {
 	{NULL, 0, false}
 };
 
+typedef struct IoMethodOps
+{
+	size_t (*shmem_size)(void);
+	void (*shmem_init)(void);
+
+	void (*postmaster_child_init_local)(void);
+
+	int (*submit)(int max_submit, bool drain);
+	void (*retry)(PgAioInProgress *io);
+	void (*wait_one)(PgAioContext *context,
+					 PgAioInProgress *io,
+					 uint64 ref_generation,
+					 uint32 wait_event_info);
+	int (*drain)(PgAioContext *context, bool block, bool call_shared);
+
+	void (*closing_fd)(int fd);
+} IoMethodOps;
+
+const static IoMethodOps pgaio_ops[] = {
+#ifdef USE_LIBURING
+	[IOMETHOD_IO_URING] = {
+		.shmem_size = AioUringShmemSize,
+		.shmem_init = AioUringShmemInit,
+		.postmaster_child_init_local = pgaio_uring_postmaster_child_init_local,
+		.submit = pgaio_uring_submit,
+		.retry = pgaio_uring_io_retry,
+		.wait_one = pgaio_uring_wait_one,
+		.drain = pgaio_uring_drain
+	},
+#endif
+#ifdef USE_POSIX_AIO
+	[IOMETHOD_POSIX] = {
+		.shmem_init = AioPosixAioShmemInit,
+		.submit = pgaio_posix_aio_submit,
+		.retry = pgaio_posix_aio_io_retry,
+		.wait_one = pgaio_posix_aio_wait_one,
+		.drain = pgaio_posix_aio_drain,
+		.closing_fd = pgaio_posix_aio_closing_fd
+	},
+#endif
+	[IOMETHOD_WORKER] = {
+		.shmem_size = AioWorkerShmemSize,
+		.shmem_init = AioWorkerShmemInit,
+		.submit = pgaio_worker_submit,
+		.retry = pgaio_worker_io_retry,
+		.wait_one = pgaio_worker_wait_one,
+		.drain = pgaio_worker_drain
+	}
+};
 
 /* --------------------------------------------------------------------------------
  * Initialization and shared memory management.
@@ -137,11 +186,8 @@ AioShmemSize(void)
 	sz = add_size(sz, AioCtlBackendShmemSize());
 	sz = add_size(sz, AioBounceShmemSize());
 
-	sz = add_size(sz, AioWorkerShmemSize());
-
-#ifdef USE_LIBURING
-	sz = add_size(sz, AioUringShmemSize());
-#endif
+	if (pgaio_ops[io_method].shmem_size)
+		sz = add_size(sz, pgaio_ops[io_method].shmem_size());
 
 	return sz;
 }
@@ -229,16 +275,7 @@ AioShmemInit(void)
 		}
 
 		/* Initialize IO-engine specific resources. */
-		if (io_method == IOMETHOD_WORKER)
-			AioWorkerShmemInit();
-#ifdef USE_LIBURING
-		else if (io_method == IOMETHOD_IO_URING)
-			AioUringShmemInit();
-#endif
-#ifdef USE_POSIX_AIO
-		else if (io_method == IOMETHOD_POSIX)
-			AioPosixAioShmemInit();
-#endif
+		pgaio_ops[io_method].shmem_init();
 	}
 }
 
@@ -254,12 +291,8 @@ pgaio_postmaster_init(void)
 void
 pgaio_postmaster_child_init_local(void)
 {
-	if (io_method == IOMETHOD_WORKER)
-		;
-#ifdef USE_LIBURING
-	else if (io_method == IOMETHOD_IO_URING)
-		pgaio_uring_postmaster_child_init_local();
-#endif
+	if (pgaio_ops[io_method].postmaster_child_init_local)
+		pgaio_ops[io_method].postmaster_child_init_local();
 }
 
 static void
@@ -703,21 +736,7 @@ pgaio_drain(PgAioContext *context, bool block, bool call_shared, bool call_local
 {
 	int ndrained = 0;
 
-	if (io_method == IOMETHOD_WORKER)
-	{
-		/*
-		 * Worker mode has no completion queue, because the worker processes
-		 * all completion work directly.
-		 */
-	}
-#ifdef USE_LIBURING
-	else if (io_method == IOMETHOD_IO_URING)
-		ndrained = pgaio_uring_drain(context, block, call_shared);
-#endif
-#ifdef USE_POSIX_AIO
-	else if (io_method == IOMETHOD_POSIX)
-		ndrained = pgaio_posix_aio_drain(block);
-#endif
+	ndrained = pgaio_ops[io_method].drain(context, block, call_shared);
 
 	if (call_shared)
 	{
@@ -856,18 +875,8 @@ pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, boo
 		START_CRIT_SECTION();
 		if (my_aio->pending_count == 1 && will_wait)
 			did_submit = pgaio_synchronous_submit();
-		else if (io_method == IOMETHOD_WORKER)
-			did_submit = pgaio_worker_submit(max_submit, drain);
-#ifdef USE_LIBURING
-		else if (io_method == IOMETHOD_IO_URING)
-			did_submit = pgaio_uring_submit(max_submit, drain);
-#endif
-#ifdef USE_POSIX_AIO
-		else if (io_method == IOMETHOD_POSIX)
-			did_submit = pgaio_posix_aio_submit(max_submit, drain);
-#endif
 		else
-			elog(ERROR, "unexpected io_method");
+			did_submit = pgaio_ops[io_method].submit(max_submit, drain);
 		total_submitted += did_submit;
 		Assert(did_submit > 0 && did_submit <= max_submit);
 		END_CRIT_SECTION();
@@ -938,10 +947,8 @@ pgaio_closing_possibly_referenced(void)
 void
 pgaio_closing_fd(int fd)
 {
-#ifdef USE_POSIX_AIO
-	if (io_method == IOMETHOD_POSIX)
-		pgaio_posix_aio_closing_fd(fd);
-#endif
+	if (pgaio_ops[io_method].closing_fd)
+		pgaio_ops[io_method].closing_fd(fd);
 }
 
 static void
@@ -1692,15 +1699,10 @@ wait_ref_again:
 		else if (io_method != IOMETHOD_WORKER && (flags & PGAIOIP_INFLIGHT))
 		{
 			/* note that this is allowed to spuriously return */
-#ifdef USE_LIBURING
-			if (io_method == IOMETHOD_IO_URING)
-				pgaio_uring_wait_one(&aio_ctl->contexts[io->ring], io, ref_generation,
-									 WAIT_EVENT_AIO_IO_COMPLETE_ANY);
-#endif
-#ifdef USE_POSIX_AIO
-			if (io_method == IOMETHOD_POSIX)
-				pgaio_posix_aio_wait_one(io, ref_generation);
-#endif
+			pgaio_ops[io_method].wait_one(&aio_ctl->contexts[io->ring],
+										  io,
+										  ref_generation,
+										  WAIT_EVENT_AIO_IO_COMPLETE_ANY);
 		}
 		else
 		{
@@ -1891,18 +1893,7 @@ pgaio_io_retry_common(PgAioInProgress *io)
 	my_aio->retry_total_count++;
 
 	START_CRIT_SECTION();
-	if (io_method == IOMETHOD_WORKER)
-		pgaio_worker_io_retry(io);
-#ifdef USE_LIBURING
-	else if (io_method == IOMETHOD_IO_URING)
-		pgaio_uring_io_retry(io);
-#endif
-#ifdef USE_POSIX_AIO
-	else if (io_method == IOMETHOD_POSIX)
-		pgaio_posix_aio_io_retry(io);
-#endif
-	else
-		elog(ERROR, "unexpected io_method");
+	pgaio_ops[io_method].retry(io);
 	END_CRIT_SECTION();
 }
 

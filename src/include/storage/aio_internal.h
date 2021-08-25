@@ -593,7 +593,9 @@ extern const char * pgaio_io_shared_callback_string(PgAioSharedCallback a);
 extern Size AioWorkerShmemSize(void);
 extern void AioWorkerShmemInit(void);
 extern int pgaio_worker_submit(int max_submit, bool drain);
+extern void pgaio_worker_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info);
 extern void pgaio_worker_io_retry(PgAioInProgress *io);
+extern int pgaio_worker_drain(PgAioContext *context, bool block, bool call_shared);
 
 #ifdef USE_LIBURING
 /* Declarations for functions in aio_uring.c that are visible to aio.c. */
@@ -610,11 +612,10 @@ extern int pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared
 /* Declarations for functions in aio_posix.c that are visible to aio.c. */
 extern void AioPosixAioShmemInit(void);
 extern int pgaio_posix_aio_submit(int max_submit, bool drain);
-extern void pgaio_posix_aio_wait_one(PgAioInProgress *io, uint64 ref_generation);
+extern void pgaio_posix_aio_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info);
 extern void pgaio_posix_aio_io_retry(PgAioInProgress *io);
-extern int pgaio_posix_aio_drain(bool block);
+extern int pgaio_posix_aio_drain(PgAioContext *context, bool block, bool call_shared);
 extern void pgaio_posix_aio_closing_fd(int fd);
-
 #endif
 
 

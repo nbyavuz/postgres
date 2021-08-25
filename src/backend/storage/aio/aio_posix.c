@@ -229,7 +229,7 @@ pgaio_posix_aio_io_retry(PgAioInProgress * io)
 		 * XXX If the problem is caused by other backends, we don't try to
 		 * wait for them to drain.  Hopefully they will do that.
 		 */
-		pgaio_posix_aio_drain(true);
+		pgaio_posix_aio_drain(NULL, true, false);
 	}
 
 	/* See comments in pgaio_posix_aio_submit(). */
@@ -503,7 +503,10 @@ pgaio_posix_aio_start_rw(PgAioInProgress * io,
  * Wait for a given IO/generation to complete.
  */
 void
-pgaio_posix_aio_wait_one(PgAioInProgress * io, uint64 ref_generation)
+pgaio_posix_aio_wait_one(PgAioContext *context,
+						 PgAioInProgress * io,
+						 uint64 ref_generation,
+						 uint32 wait_event_info)
 {
 	PgAioInProgress *last_merge_head_io = NULL;
 	PgAioInProgress *merge_head_io;
@@ -560,7 +563,7 @@ pgaio_posix_aio_wait_one(PgAioInProgress * io, uint64 ref_generation)
 				 * next loop.
 				 */
 				release_baton = true;
-				pgaio_posix_aio_drain(true);
+				pgaio_posix_aio_drain(NULL, true, false);
 				break;
 			case PGAIO_POSIX_AIO_BATON_DENIED:
 
@@ -597,7 +600,7 @@ pgaio_posix_aio_wait_one(PgAioInProgress * io, uint64 ref_generation)
  * flight.
  */
 int
-pgaio_posix_aio_drain(bool block)
+pgaio_posix_aio_drain(PgAioContext *context, bool block, bool call_shared)
 {
 	int			ndrained;
 

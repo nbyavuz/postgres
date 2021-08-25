@@ -356,3 +356,23 @@ IoWorkerMain(void)
 	io_worker_control->workers[MyIoWorkerId].latch = NULL;
 	LWLockRelease(AioWorkerSubmissionQueueLock);
 }
+
+void
+pgaio_worker_wait_one(PgAioContext *context,
+					  PgAioInProgress * io,
+					  uint64 ref_generation,
+					  uint32 wait_event_info)
+{
+	elog(ERROR, "not supported");
+}
+
+int
+pgaio_worker_drain(PgAioContext *context, bool block, bool call_shared)
+{
+	/*
+	 * Worker mode has no completion queue to drain, because the worker
+	 * processes all completion work directly.  Regular backends wait on the
+	 * CV only.
+	 */
+	return 0;
+}
