@@ -94,6 +94,14 @@ static uint64
 									   uint32 submitter_id,
 									   uint32 completer_id);
 
+/* Entry points for IoMethodOps. */
+static void pgaio_posix_aio_shmem_init(void);
+static int pgaio_posix_aio_submit(int max_submit, bool drain);
+static void pgaio_posix_aio_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info);
+static void pgaio_posix_aio_io_retry(PgAioInProgress *io);
+static int pgaio_posix_aio_drain(PgAioContext *context, bool block, bool call_shared);
+static void pgaio_posix_aio_closing_fd(int fd);
+
 /* Bits and masks for determining the completer for an IO. */
 #define PGAIO_POSIX_AIO_FLAG_AVAILABLE			0x0100000000000000
 #define PGAIO_POSIX_AIO_FLAG_REQUESTED			0x0200000000000000
@@ -116,14 +124,22 @@ static uint64
 #define PG_O_DSYNC O_SYNC
 #endif
 
+const IoMethodOps pgaio_posix_aio_ops = {
+	.shmem_init = pgaio_posix_aio_shmem_init,
+	.submit = pgaio_posix_aio_submit,
+	.retry = pgaio_posix_aio_io_retry,
+	.wait_one = pgaio_posix_aio_wait_one,
+	.drain = pgaio_posix_aio_drain,
+	.closing_fd = pgaio_posix_aio_closing_fd
+};
 
 /* Module initialization. */
 
 /*
  * Initialize shared memory data structures.
  */
-void
-AioPosixAioShmemInit(void)
+static void
+pgaio_posix_aio_shmem_init(void)
 {
 	for (int i = 0; i < max_aio_in_progress; i++)
 	{
@@ -149,7 +165,7 @@ AioPosixAioShmemInit(void)
  * Submit a given number of pending IOs to the kernel, and optionally drain
  * any results that have arrived, without waiting.
  */
-int
+static int
 pgaio_posix_aio_submit(int max_submit, bool drain)
 {
 	PgAioInProgress *ios[PGAIO_SUBMIT_BATCH_SIZE];
@@ -211,7 +227,7 @@ pgaio_posix_aio_submit(int max_submit, bool drain)
  * Resubmit an IO that was only partially completed (for example, a short
  * read) or that the kernel told us to retry.
  */
-void
+static void
 pgaio_posix_aio_io_retry(PgAioInProgress * io)
 {
 	pgaio_posix_aio_listio_buffer listio_buffer = {0};
@@ -502,7 +518,7 @@ pgaio_posix_aio_start_rw(PgAioInProgress * io,
 /*
  * Wait for a given IO/generation to complete.
  */
-void
+static void
 pgaio_posix_aio_wait_one(PgAioContext *context,
 						 PgAioInProgress * io,
 						 uint64 ref_generation,
@@ -599,7 +615,7 @@ pgaio_posix_aio_wait_one(PgAioContext *context,
  * block is true, wait for at least one to complete, unless there are none in
  * flight.
  */
-int
+static int
 pgaio_posix_aio_drain(PgAioContext *context, bool block, bool call_shared)
 {
 	int			ndrained;
@@ -1271,7 +1287,7 @@ pgaio_posix_aio_enable_interrupt(void)
  * Drain all in progress IOs from a file descriptor, if necessary on this
  * platform.
  */
-void
+static void
 pgaio_posix_aio_closing_fd(int fd)
 {
 #if defined(PGAIO_POSIX_AIO_DRAIN_FDS_BEFORE_CLOSING)

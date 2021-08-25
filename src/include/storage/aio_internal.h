@@ -552,6 +552,35 @@ typedef struct PgAioCtl
 	PgAioInProgress in_progress_io[FLEXIBLE_ARRAY_MEMBER];
 } PgAioCtl;
 
+/*
+ * The set of callbacks that each IO method must implement.
+ */
+typedef struct IoMethodOps
+{
+	size_t (*shmem_size)(void);
+	void (*shmem_init)(void);
+
+	void (*postmaster_child_init_local)(void);
+
+	int (*submit)(int max_submit, bool drain);
+	void (*retry)(PgAioInProgress *io);
+	void (*wait_one)(PgAioContext *context,
+					 PgAioInProgress *io,
+					 uint64 ref_generation,
+					 uint32 wait_event_info);
+	int (*drain)(PgAioContext *context, bool block, bool call_shared);
+
+	void (*closing_fd)(int fd);
+} IoMethodOps;
+
+/* Declarations for the tables of function pointers exposed by each IO method. */
+extern const IoMethodOps pgaio_worker_ops;
+#ifdef USE_LIBURING
+extern const IoMethodOps pgaio_uring_ops;
+#endif
+#ifdef USE_POSIX_AIO
+extern const IoMethodOps pgaio_posix_aio_ops;
+#endif
 
 /* global list of in-progress IO */
 extern PgAioCtl *aio_ctl;
@@ -588,35 +617,6 @@ extern void pgaio_io_call_shared_desc(PgAioInProgress *io, struct StringInfoData
 extern bool pgaio_io_has_shared_open(PgAioInProgress *io);
 extern PgAioOp pgaio_shared_callback_op(PgAioSharedCallback scb);
 extern const char * pgaio_io_shared_callback_string(PgAioSharedCallback a);
-
-/* Declarations for functions in aio_worker.c that are visible to aio.c. */
-extern Size AioWorkerShmemSize(void);
-extern void AioWorkerShmemInit(void);
-extern int pgaio_worker_submit(int max_submit, bool drain);
-extern void pgaio_worker_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info);
-extern void pgaio_worker_io_retry(PgAioInProgress *io);
-extern int pgaio_worker_drain(PgAioContext *context, bool block, bool call_shared);
-
-#ifdef USE_LIBURING
-/* Declarations for functions in aio_uring.c that are visible to aio.c. */
-extern Size AioUringShmemSize(void);
-extern void AioUringShmemInit(void);
-extern void pgaio_uring_postmaster_child_init_local(void);
-extern int pgaio_uring_submit(int max_submit, bool drain);
-extern void pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info);
-extern void pgaio_uring_io_retry(PgAioInProgress *io);
-extern int pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared);
-#endif
-
-#ifdef USE_POSIX_AIO
-/* Declarations for functions in aio_posix.c that are visible to aio.c. */
-extern void AioPosixAioShmemInit(void);
-extern int pgaio_posix_aio_submit(int max_submit, bool drain);
-extern void pgaio_posix_aio_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info);
-extern void pgaio_posix_aio_io_retry(PgAioInProgress *io);
-extern int pgaio_posix_aio_drain(PgAioContext *context, bool block, bool call_shared);
-extern void pgaio_posix_aio_closing_fd(int fd);
-#endif
 
 
 /*

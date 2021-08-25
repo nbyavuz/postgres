@@ -85,55 +85,23 @@ const struct config_enum_entry io_method_options[] = {
 	{NULL, 0, false}
 };
 
-typedef struct IoMethodOps
-{
-	size_t (*shmem_size)(void);
-	void (*shmem_init)(void);
-
-	void (*postmaster_child_init_local)(void);
-
-	int (*submit)(int max_submit, bool drain);
-	void (*retry)(PgAioInProgress *io);
-	void (*wait_one)(PgAioContext *context,
-					 PgAioInProgress *io,
-					 uint64 ref_generation,
-					 uint32 wait_event_info);
-	int (*drain)(PgAioContext *context, bool block, bool call_shared);
-
-	void (*closing_fd)(int fd);
-} IoMethodOps;
-
-const static IoMethodOps pgaio_ops[] = {
-#ifdef USE_LIBURING
-	[IOMETHOD_IO_URING] = {
-		.shmem_size = AioUringShmemSize,
-		.shmem_init = AioUringShmemInit,
-		.postmaster_child_init_local = pgaio_uring_postmaster_child_init_local,
-		.submit = pgaio_uring_submit,
-		.retry = pgaio_uring_io_retry,
-		.wait_one = pgaio_uring_wait_one,
-		.drain = pgaio_uring_drain
-	},
-#endif
+static const IoMethodOps *pgaio_ops_table[] = {
 #ifdef USE_POSIX_AIO
-	[IOMETHOD_POSIX] = {
-		.shmem_init = AioPosixAioShmemInit,
-		.submit = pgaio_posix_aio_submit,
-		.retry = pgaio_posix_aio_io_retry,
-		.wait_one = pgaio_posix_aio_wait_one,
-		.drain = pgaio_posix_aio_drain,
-		.closing_fd = pgaio_posix_aio_closing_fd
-	},
+	[IOMETHOD_POSIX] = &pgaio_posix_aio_ops,
 #endif
-	[IOMETHOD_WORKER] = {
-		.shmem_size = AioWorkerShmemSize,
-		.shmem_init = AioWorkerShmemInit,
-		.submit = pgaio_worker_submit,
-		.retry = pgaio_worker_io_retry,
-		.wait_one = pgaio_worker_wait_one,
-		.drain = pgaio_worker_drain
-	}
+#ifdef USE_LIBURING
+	[IOMETHOD_IO_URING] = &pgaio_uring_ops,
+#endif
+	[IOMETHOD_WORKER] = &pgaio_worker_ops
 };
+
+static const IoMethodOps *pgaio_impl;
+
+void
+assign_io_method(int newval, void *extra)
+{
+	pgaio_impl = pgaio_ops_table[newval];
+}
 
 /* --------------------------------------------------------------------------------
  * Initialization and shared memory management.
@@ -186,8 +154,8 @@ AioShmemSize(void)
 	sz = add_size(sz, AioCtlBackendShmemSize());
 	sz = add_size(sz, AioBounceShmemSize());
 
-	if (pgaio_ops[io_method].shmem_size)
-		sz = add_size(sz, pgaio_ops[io_method].shmem_size());
+	if (pgaio_impl->shmem_size)
+		sz = add_size(sz, pgaio_impl->shmem_size());
 
 	return sz;
 }
@@ -275,7 +243,7 @@ AioShmemInit(void)
 		}
 
 		/* Initialize IO-engine specific resources. */
-		pgaio_ops[io_method].shmem_init();
+		pgaio_impl->shmem_init();
 	}
 }
 
@@ -291,8 +259,8 @@ pgaio_postmaster_init(void)
 void
 pgaio_postmaster_child_init_local(void)
 {
-	if (pgaio_ops[io_method].postmaster_child_init_local)
-		pgaio_ops[io_method].postmaster_child_init_local();
+	if (pgaio_impl->postmaster_child_init_local)
+		pgaio_impl->postmaster_child_init_local();
 }
 
 static void
@@ -736,7 +704,7 @@ pgaio_drain(PgAioContext *context, bool block, bool call_shared, bool call_local
 {
 	int ndrained = 0;
 
-	ndrained = pgaio_ops[io_method].drain(context, block, call_shared);
+	ndrained = pgaio_impl->drain(context, block, call_shared);
 
 	if (call_shared)
 	{
@@ -876,7 +844,7 @@ pgaio_submit_pending_internal(bool drain, bool call_shared, bool call_local, boo
 		if (my_aio->pending_count == 1 && will_wait)
 			did_submit = pgaio_synchronous_submit();
 		else
-			did_submit = pgaio_ops[io_method].submit(max_submit, drain);
+			did_submit = pgaio_impl->submit(max_submit, drain);
 		total_submitted += did_submit;
 		Assert(did_submit > 0 && did_submit <= max_submit);
 		END_CRIT_SECTION();
@@ -947,8 +915,8 @@ pgaio_closing_possibly_referenced(void)
 void
 pgaio_closing_fd(int fd)
 {
-	if (pgaio_ops[io_method].closing_fd)
-		pgaio_ops[io_method].closing_fd(fd);
+	if (pgaio_impl->closing_fd)
+		pgaio_impl->closing_fd(fd);
 }
 
 static void
@@ -1699,10 +1667,10 @@ wait_ref_again:
 		else if (io_method != IOMETHOD_WORKER && (flags & PGAIOIP_INFLIGHT))
 		{
 			/* note that this is allowed to spuriously return */
-			pgaio_ops[io_method].wait_one(&aio_ctl->contexts[io->ring],
-										  io,
-										  ref_generation,
-										  WAIT_EVENT_AIO_IO_COMPLETE_ANY);
+			pgaio_impl->wait_one(&aio_ctl->contexts[io->ring],
+								 io,
+								 ref_generation,
+								 WAIT_EVENT_AIO_IO_COMPLETE_ANY);
 		}
 		else
 		{
@@ -1893,7 +1861,7 @@ pgaio_io_retry_common(PgAioInProgress *io)
 	my_aio->retry_total_count++;
 
 	START_CRIT_SECTION();
-	pgaio_ops[io_method].retry(io);
+	pgaio_impl->retry(io);
 	END_CRIT_SECTION();
 }
 

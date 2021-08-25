@@ -4941,7 +4941,7 @@ static struct config_enum ConfigureNamesEnum[] =
 		},
 		&io_method,
 		DEFAULT_IO_METHOD, io_method_options,
-		NULL, NULL, NULL
+		NULL, assign_io_method, NULL
 	},
 
 	/* End-of-list marker */

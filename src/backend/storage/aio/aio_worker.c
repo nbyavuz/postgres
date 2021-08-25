@@ -50,6 +50,14 @@ int MyIoWorkerId;
 /* How many workers should each worker wake up if needed? */
 #define IO_WORKER_WAKEUP_FANOUT 2
 
+/* Entry points for IoMethodOps. */
+static size_t pgaio_worker_shmem_size(void);
+static void pgaio_worker_shmem_init(void);
+static int pgaio_worker_submit(int max_submit, bool drain);
+static void pgaio_worker_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info);
+static void pgaio_worker_io_retry(PgAioInProgress *io);
+static int pgaio_worker_drain(PgAioContext *context, bool block, bool call_shared);
+
 typedef struct AioWorkerSubmissionQueue
 {
 	uint32		size;
@@ -76,8 +84,17 @@ StaticAssertDecl(sizeof(uint64) * CHAR_BIT >= MAX_IO_WORKERS,
 static AioWorkerSubmissionQueue *io_worker_submission_queue;
 static AioWorkerControl *io_worker_control;
 
-Size
-AioWorkerShmemSize(void)
+const IoMethodOps pgaio_worker_ops = {
+	.shmem_size = pgaio_worker_shmem_size,
+	.shmem_init = pgaio_worker_shmem_init,
+	.submit = pgaio_worker_submit,
+	.retry = pgaio_worker_io_retry,
+	.wait_one = pgaio_worker_wait_one,
+	.drain = pgaio_worker_drain
+};
+
+static size_t
+pgaio_worker_shmem_size(void)
 {
 	return
 		offsetof(AioWorkerSubmissionQueue, ios) +
@@ -86,8 +103,8 @@ AioWorkerShmemSize(void)
 		sizeof(AioWorkerSlot) * io_workers;
 }
 
-void
-AioWorkerShmemInit(void)
+static void
+pgaio_worker_shmem_init(void)
 {
 	bool found;
 	int size;
@@ -240,7 +257,7 @@ pgaio_worker_submit_internal(PgAioInProgress *ios[], int nios)
 	}
 }
 
-int
+static int
 pgaio_worker_submit(int max_submit, bool drain)
 {
 	PgAioInProgress *ios[PGAIO_SUBMIT_BATCH_SIZE];
@@ -266,7 +283,7 @@ pgaio_worker_submit(int max_submit, bool drain)
 	return nios;
 }
 
-void
+static void
 pgaio_worker_io_retry(PgAioInProgress *io)
 {
 	WRITE_ONCE_F(io->flags) |= PGAIOIP_INFLIGHT;
@@ -357,7 +374,7 @@ IoWorkerMain(void)
 	LWLockRelease(AioWorkerSubmissionQueueLock);
 }
 
-void
+static void
 pgaio_worker_wait_one(PgAioContext *context,
 					  PgAioInProgress * io,
 					  uint64 ref_generation,
@@ -366,7 +383,7 @@ pgaio_worker_wait_one(PgAioContext *context,
 	elog(ERROR, "not supported");
 }
 
-int
+static int
 pgaio_worker_drain(PgAioContext *context, bool block, bool call_shared)
 {
 	/*

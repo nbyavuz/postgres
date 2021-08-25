@@ -58,6 +58,8 @@ extern int io_max_concurrency;
 
 extern int MyIoWorkerId;
 
+extern void assign_io_method(int newval, void *extra);
+
 /* initialization */
 extern void pgaio_postmaster_init(void);
 extern Size AioShmemSize(void);

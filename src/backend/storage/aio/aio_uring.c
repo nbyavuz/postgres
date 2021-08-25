@@ -27,10 +27,27 @@ static void pgaio_uring_sq_from_io(PgAioContext *context, PgAioInProgress *io, s
 static void pgaio_uring_io_from_cqe(PgAioContext *context, struct io_uring_cqe *cqe);
 static void pgaio_uring_iovec_transfer(PgAioContext *context);
 
+/* Entry points for IoMethodOps. */
+static size_t pgaio_uring_shmem_size(void);
+static void pgaio_uring_shmem_init(void);
+static void pgaio_uring_postmaster_child_init_local(void);
+static int pgaio_uring_submit(int max_submit, bool drain);
+static void pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info);
+static void pgaio_uring_io_retry(PgAioInProgress *io);
+static int pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared);
 
 /* io_uring local state */
 struct io_uring local_ring;
 
+const IoMethodOps pgaio_uring_ops = {
+	.shmem_size = pgaio_uring_shmem_size,
+	.shmem_init = pgaio_uring_shmem_init,
+	.postmaster_child_init_local = pgaio_uring_postmaster_child_init_local,
+	.submit = pgaio_uring_submit,
+	.retry = pgaio_uring_io_retry,
+	.wait_one = pgaio_uring_wait_one,
+	.drain = pgaio_uring_drain
+};
 
 static Size
 AioContextShmemSize(void)
@@ -45,14 +62,14 @@ AioContextIovecsShmemSize(void)
 					mul_size(sizeof(PgAioIovec), max_aio_in_flight));
 }
 
-Size
-AioUringShmemSize(void)
+static size_t
+pgaio_uring_shmem_size(void)
 {
 	return add_size(AioContextShmemSize(), AioContextIovecsShmemSize());
 }
 
-void
-AioUringShmemInit(void)
+static void
+pgaio_uring_shmem_init(void)
 {
 	PgAioIovec *iovecs;
 	bool found;
@@ -99,7 +116,7 @@ AioUringShmemInit(void)
 	}
 }
 
-void
+static void
 pgaio_uring_postmaster_child_init_local(void)
 {
 	int ret;
@@ -148,7 +165,7 @@ pgaio_acquire_context(void)
 	return context;
 }
 
-int
+static int
 pgaio_uring_submit(int max_submit, bool drain)
 {
 	PgAioInProgress *ios[PGAIO_SUBMIT_BATCH_SIZE];
@@ -233,7 +250,7 @@ again:
 	return nios;
 }
 
-void
+static void
 pgaio_uring_io_retry(PgAioInProgress *io)
 {
 	PgAioContext *context;
@@ -390,7 +407,7 @@ pgaio_uring_completion_check_wake(LWLock *lock, LWLockMode mode, struct PGPROC *
 	}
 }
 
-int
+static int
 pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared)
 {
 	uint32 processed = 0;
@@ -440,7 +457,7 @@ pgaio_uring_drain(PgAioContext *context, bool block, bool call_shared)
 	return processed;
 }
 
-void
+static void
 pgaio_uring_wait_one(PgAioContext *context, PgAioInProgress *io, uint64 ref_generation, uint32 wait_event_info)
 {
 	PgAioIPFlags flags;
