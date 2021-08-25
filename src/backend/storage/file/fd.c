@@ -3675,7 +3675,7 @@ datadir_fsync_fname(const char *fname, bool isdir, int elevel, uintptr_t state)
 	strlcpy(entry->fname, fname, MAXPGPATH);
 
 #if __darwin__
-	if (io_method == IOMETHOD_POSIX && isdir)
+	if (io_method == IOMETHOD_POSIX_AIO && isdir)
 	{
 		/*
 		 * macOS aio_fsync() fails on directories with EAGAIN (!) due to an

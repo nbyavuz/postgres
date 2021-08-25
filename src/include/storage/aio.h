@@ -35,7 +35,7 @@ typedef enum IoMethod
 {
 	IOMETHOD_WORKER = 0,
 	IOMETHOD_IO_URING,
-	IOMETHOD_POSIX,
+	IOMETHOD_POSIX_AIO,
 } IoMethod;
 
 /* We'll default to bgworker. */

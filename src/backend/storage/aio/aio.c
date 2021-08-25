@@ -81,14 +81,14 @@ const struct config_enum_entry io_method_options[] = {
 	{"io_uring", IOMETHOD_IO_URING, false},
 #endif
 #ifdef USE_POSIX_AIO
-	{"posix", IOMETHOD_POSIX, false},
+	{"posix_aio", IOMETHOD_POSIX_AIO, false},
 #endif
 	{NULL, 0, false}
 };
 
 static const IoMethodOps *pgaio_ops_table[] = {
 #ifdef USE_POSIX_AIO
-	[IOMETHOD_POSIX] = &pgaio_posix_aio_ops,
+	[IOMETHOD_POSIX_AIO] = &pgaio_posix_aio_ops,
 #endif
 #ifdef USE_LIBURING
 	[IOMETHOD_IO_URING] = &pgaio_uring_ops,
