@@ -27,6 +27,7 @@
 #include "nodes/memnodes.h"
 #include "pgstat.h"
 #include "storage/aio_internal.h"
+#include "storage/bufmgr.h"			/* XXX for io_data_direct */
 #include "storage/condition_variable.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
@@ -2253,4 +2254,13 @@ pgaio_assoc_bounce_buffer(PgAioInProgress *io, PgAioBounceBuffer *bb)
 
 	io->bb_idx = bb - aio_ctl->bounce_buffers;
 	pg_atomic_fetch_add_u32(&bb->refcount, 1);
+}
+
+bool
+pgaio_can_scatter_gather(void)
+{
+	/* XXX Caller should only use this for data files!  FIXME */
+	if (io_data_direct)
+		return pgaio_impl->can_scatter_gather_direct;
+	return pgaio_impl->can_scatter_gather_buffered;
 }

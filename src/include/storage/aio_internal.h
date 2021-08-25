@@ -571,6 +571,9 @@ typedef struct IoMethodOps
 	int (*drain)(PgAioContext *context, bool block, bool call_shared);
 
 	void (*closing_fd)(int fd);
+
+	bool can_scatter_gather_direct;
+	bool can_scatter_gather_buffered;
 } IoMethodOps;
 
 /* Declarations for the tables of function pointers exposed by each IO method. */
@@ -601,6 +604,8 @@ extern void pgaio_io_stage(PgAioInProgress *io, PgAioSharedCallback scb);
 extern void pgaio_io_unprepare(PgAioInProgress *io, PgAioOp op);
 extern void pgaio_io_flag_string(PgAioIPFlags flags, struct StringInfoData *s);
 static inline bool pgaio_io_recycled(PgAioInProgress *io, uint64 ref_generation, PgAioIPFlags *flags);
+
+extern bool pgaio_can_scatter_gather(void);
 
 /* Declarations for aio_io.c */
 extern void pgaio_combine_pending(void);

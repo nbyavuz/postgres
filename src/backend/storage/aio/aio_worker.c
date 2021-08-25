@@ -86,7 +86,24 @@ const IoMethodOps pgaio_worker_ops = {
 	.shmem_size = pgaio_worker_shmem_size,
 	.shmem_init = pgaio_worker_shmem_init,
 	.submit = pgaio_worker_submit,
-	.retry = pgaio_worker_io_retry
+	.retry = pgaio_worker_io_retry,
+
+	/*
+	 * We may not have true scatter/gather on this platform (see fallback
+	 * emulation in pg_preadv()/pg_pwritev() which does a loop of single
+	 * segment IOs), but there may still be some advantage to keeping
+	 * sequential regions within the same process in buffered mode due to
+	 * kernel readahead, so we'll say yes in that case.  That does not apply
+	 * to direct I/O, so we'll only say yes here if we have real support.
+	 *
+	 * XXX For Windows in worker mode with direct IO on, we could teach our
+	 * pg_readv(), pg_writev() functions to use scatter gather and wait.
+	 */
+#if (defined(HAVE_PREADV) && defined(HAVE_PWRITEV)) || \
+	(defined(HAVE_READV) && defined(HAVE_WRITEV))
+	.can_scatter_gather_direct = true,
+#endif
+	.can_scatter_gather_buffered = true
 };
 
 static size_t

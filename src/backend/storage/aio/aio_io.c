@@ -94,35 +94,6 @@ pgaio_io_prep_nop(PgAioInProgress *io)
  * --------------------------------------------------------------------------------
  */
 
-/*
- * Some AIO modes lack scatter/gather support, which limits I/O combining to
- * contiguous ranges of memory.
- */
-static bool
-pgaio_can_scatter_gather(void)
-{
-	if (io_method == IOMETHOD_WORKER)
-	{
-		/*
-		 * We may not have true scatter/gather on this platform (see fallback
-		 * emulation in pg_preadv()/pg_pwritev()), but there may still be some
-		 * advantage to keeping sequential regions within the same process so
-		 * we'll say yes here.
-		 */
-		return true;
-	}
-	if (io_method == IOMETHOD_IO_URING)
-		return true;
-	if (io_method == IOMETHOD_POSIX)
-	{
-#if (defined(LIO_READV) && defined(LIO_WRITEV))
-		/* FreeBSD has batched async scatter/gather. */
-		return true;
-#endif
-	}
-	return false;
-}
-
 static bool
 pgaio_can_be_combined(PgAioInProgress *last, PgAioInProgress *cur)
 {

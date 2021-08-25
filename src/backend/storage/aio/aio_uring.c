@@ -46,7 +46,9 @@ const IoMethodOps pgaio_uring_ops = {
 	.submit = pgaio_uring_submit,
 	.retry = pgaio_uring_io_retry,
 	.wait_one = pgaio_uring_wait_one,
-	.drain = pgaio_uring_drain
+	.drain = pgaio_uring_drain,
+	.can_scatter_gather_direct = true,
+	.can_scatter_gather_buffered = true
 };
 
 static Size
