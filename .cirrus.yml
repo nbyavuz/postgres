@@ -227,7 +227,7 @@ task:
       path: "**/**.log"
       type: text/plain
     regress_log_artifacts:
-      path: "**/tmp_check/log/regress_log*"
+      path: "**/**.diffs"
       type: text/plain
 
 task:
