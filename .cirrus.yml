@@ -101,13 +101,13 @@ task:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/uring_buf.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
   linux_io_uring_dio_script:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/uring_dio.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
-  linux_io_worker_buf_script:
+  linux_worker_buf_script:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/worker_buf.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
-  linux_io_worker_dio_script:
+  linux_worker_dio_script:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/worker_dio.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
-  linux_io_posix_aio_buf_script:
+  linux_posix_aio_buf_script:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/posix_aio_buf.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
-  linux_io_posix_aio_dio_script:
+  linux_posix_aio_dio_script:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/posix_aio_dio.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
   on_failure:
     cores_script:
