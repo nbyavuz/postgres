@@ -130,7 +130,7 @@ const IoMethodOps pgaio_posix_aio_ops = {
 	.retry = pgaio_posix_aio_io_retry,
 	.wait_one = pgaio_posix_aio_wait_one,
 	.drain = pgaio_posix_aio_drain,
-	.closing_fd = pgaio_posix_aio_closing_fd
+	.closing_fd = pgaio_posix_aio_closing_fd,
 
 	/* FreeBSD has asynchronous scatter/gather as an extension. */
 #if defined(LIO_READV) && defined(LIO_WRITEV)
