@@ -234,7 +234,7 @@ task:
   name: CompilerWarnings
   depends_on:
   - FreeBSD
-  - Linux Debian Bullseye
+  - Linux
   - Linux Debian Sid New Kernel
   - Windows Worker Buf
   - macOS
