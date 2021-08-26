@@ -251,7 +251,7 @@ pgaio_posix_aio_io_retry(PgAioInProgress * io)
 		 * XXX If the problem is caused by other backends, we don't try to
 		 * wait for them to drain.  Hopefully they will do that.
 		 */
-		pgaio_posix_aio_drain(NULL, true, false);
+		pgaio_posix_aio_drain(NULL, true, true);
 	}
 
 	/* See comments in pgaio_posix_aio_submit(). */
@@ -356,7 +356,10 @@ pgaio_posix_aio_submit_one(PgAioInProgress * io,
 
 	/* If we failed to submit, then try to reap immediately. */
 	if (rc < 0)
+	{
 		pgaio_posix_aio_kernel_io_done(io, -errno, false);
+		pgaio_complete_ios(false);
+	}
 }
 
 /*
@@ -412,6 +415,7 @@ pgaio_posix_aio_flush_listio(pgaio_posix_aio_listio_buffer * lb)
 				}
 				pgaio_posix_aio_kernel_io_done(io, -error_status, false);
 			}
+			pgaio_complete_ios(false);
 		}
 		else
 		{
@@ -429,6 +433,7 @@ pgaio_posix_aio_flush_listio(pgaio_posix_aio_listio_buffer * lb)
 				io = io_for_iocb(lb->cbs[i]);
 				pgaio_posix_aio_kernel_io_done(io, -error_status, false);
 			}
+			pgaio_complete_ios(false);
 		}
 	}
 	lb->nios = 0;
@@ -594,6 +599,7 @@ pgaio_posix_aio_wait_one(PgAioContext *context,
 				 * chain, or this is a later generation and we'll detect that
 				 * in the next loop.  Wait on the IO.
 				 */
+				ConditionVariablePrepareToSleep(&io->cv);
 				if (pgaio_io_recycled(io, ref_generation, &flags) ||
 					!(flags & PGAIOIP_INFLIGHT))
 					break;
@@ -603,8 +609,10 @@ pgaio_posix_aio_wait_one(PgAioContext *context,
 			default:
 				elog(ERROR, "unexpected value");
 		}
-		pgaio_complete_ios(false);
 	}
+
+	/* Complete anything on our "reaped" list. */
+	pgaio_complete_ios(false);
 
 	/*
 	 * If we became the requester but then exited because it turned out the
@@ -626,9 +634,14 @@ pgaio_posix_aio_drain(PgAioContext *context, bool block, bool call_shared)
 {
 	int			ndrained;
 
+	START_CRIT_SECTION();
 	pgaio_posix_aio_disable_interrupt();
 	ndrained = pgaio_posix_aio_drain_internal(block, false);
 	pgaio_posix_aio_enable_interrupt();
+
+	if (call_shared)
+		pgaio_complete_ios(false);
+	END_CRIT_SECTION();
 
 	return ndrained;
 }
@@ -1322,6 +1335,8 @@ pgaio_posix_aio_closing_fd(int fd)
 									   false /* in_interrupt_handler */);
 	}
 	pgaio_posix_aio_enable_interrupt();
+	pgaio_complete_ios(false);
 	END_CRIT_SECTION();
+
 #endif
 }
