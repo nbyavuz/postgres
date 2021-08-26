@@ -130,20 +130,24 @@ pgaio_worker_shmem_init(void)
 						offsetof(AioWorkerSubmissionQueue, ios) +
 						sizeof(uint32) * size,
 						&found);
-	Assert(!found);
-	io_worker_submission_queue->size = size;
-	io_worker_submission_queue->head = 0;
-	io_worker_submission_queue->tail = 0;
+	if (!found)
+	{
+		io_worker_submission_queue->size = size;
+		io_worker_submission_queue->head = 0;
+		io_worker_submission_queue->tail = 0;
+	}
 
 	io_worker_control =
 		ShmemInitStruct("AioWorkerControl",
 						offsetof(AioWorkerControl, workers) +
 						sizeof(AioWorkerSlot) * io_workers,
 						&found);
-	Assert(!found);
-	io_worker_control->idle_worker_mask = 0;
-	for (int i = 0; i < io_workers; ++i)
-		io_worker_control->workers[i].latch = NULL;
+	if (!found)
+	{
+		io_worker_control->idle_worker_mask = 0;
+		for (int i = 0; i < io_workers; ++i)
+			io_worker_control->workers[i].latch = NULL;
+	}
 }
 
 static bool
