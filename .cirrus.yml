@@ -5,7 +5,7 @@ env:
   CIRRUS_CLONE_DEPTH: 1
   # target to test, for all but OSX and windows
   CHECK: check-world
-  #CHECKFLAGS: -Otarget
+  CHECKFLAGS: -Otarget
 
 task:
   use_compute_credits: true
@@ -46,6 +46,9 @@ task:
       - for F in ` find . -name initdb.log -o -name regression.diffs -o -name 'postmaster*.log'` ; do echo === $F === ; head -1000 $F ; done
     log_artifacts:
       path: "**/**.log"
+      type: text/plain
+    regress_artifacts:
+      path: "**/regress_log_*"
       type: text/plain
 
 
