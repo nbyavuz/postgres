@@ -6,6 +6,7 @@ env:
   # target to test, for all but OSX and windows
   CHECK: check-world
   CHECKFLAGS: -Otarget
+  PGCTLTIMEOUT: 120
 
 task:
   use_compute_credits: true
@@ -15,7 +16,7 @@ task:
     image: family/pg-aio-freebsd-12-2
     platform: freebsd
     cpu: 4
-    memory: 4G
+    memory: 8G
   env:
     CCACHE_SIZE: "500M"
     CCACHE_DIR: "/tmp/ccache_dir"
