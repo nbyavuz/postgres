@@ -13,7 +13,7 @@ task:
   name: FreeBSD
   compute_engine_instance:
     image_project: pg-vm-images-aio
-    image: family/pg-aio-freebsd-12-2
+    image: family/pg-aio-freebsd-13-0
     platform: freebsd
     cpu: 4
     memory: 8G
