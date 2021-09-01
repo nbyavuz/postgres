@@ -155,34 +155,54 @@ task:
 task:
   name: macOS
   osx_instance:
-    image: catalina-base
+    image: big-sur-base
   env:
-    CHECK: check
-  install_script:
+    CIRRUS_WORKING_DIR: ${HOME}/pgsql/
+    CCACHE_SIZE: "500M"
+    CCACHE_DIR: ${HOME}/ccache
+    HOMEBREW_CACHE: ${HOME}/homebrew-cache
+    PERL5LIB: ${HOME}/perl5/lib/perl5
+  ccache_cache:
+    folder: ${CCACHE_DIR}
+  homebrew_cache:
+    folder: ${HOMEBREW_CACHE}
+  perl_cache:
+    folder: ~/perl5
+  cpan_install_script:
+    - perl -mIPC::Run -e 1 || cpan -T IPC::Run
+  core_install_script:
     - sudo chmod 777 /cores
-    - uname -a
-    - brew install make coreutils
-    - cpan -T IPC::Run
+
+  # Unfortunately homebrew in the cirrus images contains an old version of
+  # homebrew, which references a mirror that doesn't exist anymore. Turns out
+  # to be faster to upgrade homebrow than to have homebrew fall back to
+  # building from source...
+  # https://github.com/cirruslabs/osx-images/issues/37
+  homebrew_install_script:
+    - unset HOMEBREW_NO_AUTO_UPDATE && brew install --verbose make coreutils ccache
+    - brew cleanup
+
   build_script:
     - export PERL5LIB=~/perl5/lib/perl5
-    - ./configure --prefix=$HOME/install --enable-cassert --enable-debug --enable-tap-tests --without-readline --with-posix-aio CFLAGS="-O0"
+    - ./configure --prefix=$HOME/install --enable-cassert --enable-debug --enable-tap-tests --without-readline --with-posix-aio CC="ccache gcc" CFLAGS="-O0"
     - gmake -s -j12 && gmake -s -j12 -C contrib
     - gmake -s install
+
+  macos_pg_upgrade_script:
+    - ulimit -c unlimited
+    - gtimeout -s KILL -v 30m gmake -s -j12 ${CHECKFLAGS} -C src/bin/pg_upgrade/ check
+
   macos_worker_buf_script:
     - ulimit -c unlimited
-    - export PERL5LIB=~/perl5/lib/perl5
     - TEMP_CONFIG=$(pwd)/ci/worker_buf.conf gtimeout -s KILL -v 15m gmake -s -j12 ${CHECK} ${CHECKFLAGS}
   macos_worker_dio_script:
     - ulimit -c unlimited
-    - export PERL5LIB=~/perl5/lib/perl5
     - TEMP_CONFIG=$(pwd)/ci/worker_dio.conf gmake -s -j12 ${CHECK} ${CHECKFLAGS}
   macos_posix_aio_buf_script:
     - ulimit -c unlimited
-    - export PERL5LIB=~/perl5/lib/perl5
     - TEMP_CONFIG=$(pwd)/ci/posix_aio_buf.conf gmake -s -j12 ${CHECK} ${CHECKFLAGS}
   macos_posix_aio_dio_script:
     - ulimit -c unlimited
-    - export PERL5LIB=~/perl5/lib/perl5
     - TEMP_CONFIG=$(pwd)/ci/posix_aio_dio.conf gmake -s -j12 ${CHECK} ${CHECKFLAGS}
   on_failure:
     cores_script:
