@@ -78,7 +78,19 @@ task:
         cpu: 4
         memory: 8G
         nested_virtualization: false
-    - name: Linux Debian Sid New Kernel
+    - name: Linux Uring Kernel
+      depends_on:
+        - Linux
+      compute_engine_instance:
+        image_project: pg-vm-images-aio
+        image: family/pg-aio-sid-newkernel-uring
+        platform: linux
+        cpu: 4
+        memory: 8G
+        nested_virtualization: false
+    - name: Linux Linus Kernel
+      depends_on:
+        - Linux
       compute_engine_instance:
         image_project: pg-vm-images-aio
         image: family/pg-aio-sid-newkernel
