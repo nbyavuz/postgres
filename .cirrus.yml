@@ -83,6 +83,8 @@ task:
         memory: 8G
         nested_virtualization: false
     - name: Linux Uring Kernel
+      depends_on:
+        - Linux
       compute_engine_instance:
         image_project: pg-vm-images-aio
         image: family/pg-aio-sid-newkernel-uring
