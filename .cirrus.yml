@@ -64,6 +64,9 @@ task:
     log_artifacts:
       path: "**/**.log"
       type: text/plain
+    regress_diffs_artifacts:
+      path: "**/**.diffs"
+      type: text/plain
     tap_artifacts:
       path: "**/regress_log_*"
       type: text/plain
