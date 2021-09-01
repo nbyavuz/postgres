@@ -186,13 +186,9 @@ task:
     - gmake -s -j12 && gmake -s -j12 -C contrib
     - gmake -s install
 
-  macos_pg_upgrade_script:
-    - ulimit -c unlimited
-    - gtimeout -s KILL -v 30m gmake -s -j12 ${CHECKFLAGS} -C src/bin/pg_upgrade/ check
-
   macos_worker_buf_script:
     - ulimit -c unlimited
-    - TEMP_CONFIG=$(pwd)/ci/worker_buf.conf gtimeout -s KILL -v 15m gmake -s -j12 ${CHECK} ${CHECKFLAGS}
+    - TEMP_CONFIG=$(pwd)/ci/worker_buf.conf gtimeout -s KILL -v 30m gmake -s -j12 ${CHECK} ${CHECKFLAGS}
   macos_worker_dio_script:
     - ulimit -c unlimited
     - TEMP_CONFIG=$(pwd)/ci/worker_dio.conf gmake -s -j12 ${CHECK} ${CHECKFLAGS}
