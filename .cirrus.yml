@@ -262,11 +262,7 @@ task:
 task:
   name: CompilerWarnings
   depends_on:
-  - FreeBSD
   - Linux
-  - Linux Debian Sid New Kernel
-  - Windows Worker Buf
-  - macOS
   container:
     dockerfile: ci/LinuxDockerfile
   env:
