@@ -3686,85 +3686,74 @@ static bool
 XLogWriteIssueFlushes(XLogWritePos *write_pos)
 {
 	/* shouldn't even get here */
+	Assert(enableFsync);
 	Assert(sync_method != SYNC_METHOD_OPEN &&
 		   sync_method != SYNC_METHOD_OPEN_DSYNC);
 
-	if (!enableFsync)
+	/*
+	 * Could get here without having written ourselves, in which case we might
+	 * have no open file or the wrong one.  However, we do not need to
+	 * initiate syncing more than one file.
+	 */
+	if (openLogFile >= 0 &&
+		!XLByteInPrevSeg(LogwrtResult.WriteDone, openLogSegNo,
+						 wal_segment_size))
 	{
+		XLogFileClose();
+	}
+
+	if (openLogFile < 0)
+	{
+		XLByteToPrevSeg(LogwrtResult.WriteDone, openLogSegNo,
+						wal_segment_size);
+		openLogFile = XLogFileOpen(openLogSegNo);
+		ReserveExternalFD();
+	}
+
+	if (XLogIOQueueEnsureOne(XLogCtl->flushes))
+		return true;
+
+	if (1)
+	{
+		PgAioInProgress *aio;
+		bool use_fdatasync = false;
+
+#ifdef HAVE_FDATASYNC
+		if (sync_method == SYNC_METHOD_FDATASYNC)
+			use_fdatasync = true;
+#endif
+
+		aio = pgaio_io_get();
+		pgaio_io_start_fsync_wal(aio, openLogFile,
+								 use_fdatasync,
+								 XLogCtl->flushes->next & XLogCtl->flushes->mask);
+
+		LogwrtResult.FlushInit = LogwrtResult.WriteDone;
+
+		LWLockAcquire(WALIOQueueLock, LW_EXCLUSIVE);
+
+		XLogIOQueueAdd(XLogCtl->flushes, aio, LogwrtResult.WriteDone);
+
+		LWLockRelease(WALIOQueueLock);
+
+		SpinLockAcquire(&XLogCtl->info_lck);
+		XLogCtl->LogwrtResult.WriteInit = LogwrtResult.WriteInit;
+		XLogCtl->LogwrtResult.FlushInit = LogwrtResult.FlushInit;
+		SpinLockRelease(&XLogCtl->info_lck);
+
+		pgaio_submit_pending(false);
+		pgaio_io_release(aio);
+	}
+	else
+	{
+		issue_xlog_fsync(openLogFile, openLogSegNo);
 		LogwrtResult.FlushDone = LogwrtResult.FlushInit = LogwrtResult.WriteDone;
 
 		SpinLockAcquire(&XLogCtl->info_lck);
 		XLogCtl->LogwrtResult.FlushInit = LogwrtResult.FlushInit;
 		XLogCtl->LogwrtResult.FlushDone = LogwrtResult.FlushDone;
 		SpinLockRelease(&XLogCtl->info_lck);
-	}
-	else
-	{
-		/*
-		 * Could get here without having written ourselves, in which case we might
-		 * have no open file or the wrong one.  However, we do not need to fsync
-		 * more than one file.
-		 */
-		if (openLogFile >= 0 &&
-			!XLByteInPrevSeg(LogwrtResult.WriteDone, openLogSegNo,
-							 wal_segment_size))
-		{
-			XLogFileClose();
-		}
 
-		if (openLogFile < 0)
-		{
-			XLByteToPrevSeg(LogwrtResult.WriteDone, openLogSegNo,
-							wal_segment_size);
-			openLogFile = XLogFileOpen(openLogSegNo);
-			ReserveExternalFD();
-		}
-
-		if (XLogIOQueueEnsureOne(XLogCtl->flushes))
-			return true;
-
-		if (1)
-		{
-			PgAioInProgress *aio;
-			bool use_fdatasync = false;
-
-#ifdef HAVE_FDATASYNC
-			if (sync_method == SYNC_METHOD_FDATASYNC)
-				use_fdatasync = true;
-#endif
-
-			aio = pgaio_io_get();
-			pgaio_io_start_fsync_wal(aio, openLogFile,
-									 use_fdatasync,
-									 XLogCtl->flushes->next & XLogCtl->flushes->mask);
-
-			LogwrtResult.FlushInit = LogwrtResult.WriteDone;
-
-			LWLockAcquire(WALIOQueueLock, LW_EXCLUSIVE);
-
-			XLogIOQueueAdd(XLogCtl->flushes, aio, LogwrtResult.WriteDone);
-
-			LWLockRelease(WALIOQueueLock);
-
-			SpinLockAcquire(&XLogCtl->info_lck);
-			XLogCtl->LogwrtResult.WriteInit = LogwrtResult.WriteInit;
-			XLogCtl->LogwrtResult.FlushInit = LogwrtResult.FlushInit;
-			SpinLockRelease(&XLogCtl->info_lck);
-
-			pgaio_submit_pending(false);
-			pgaio_io_release(aio);
-		}
-		else
-		{
-			issue_xlog_fsync(openLogFile, openLogSegNo);
-			LogwrtResult.FlushDone = LogwrtResult.FlushInit = LogwrtResult.WriteDone;
-
-			SpinLockAcquire(&XLogCtl->info_lck);
-			XLogCtl->LogwrtResult.FlushInit = LogwrtResult.FlushInit;
-			XLogCtl->LogwrtResult.FlushDone = LogwrtResult.FlushDone;
-			SpinLockRelease(&XLogCtl->info_lck);
-
-		}
 	}
 
 	return false;
