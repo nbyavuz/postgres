@@ -12411,11 +12411,6 @@ issue_xlog_fsync(int fd, XLogSegNo segno)
 	if (track_wal_io_timing)
 		INSTR_TIME_SET_CURRENT(start);
 
-	if (!enableFsync ||
-		sync_method == SYNC_METHOD_OPEN ||
-		sync_method == SYNC_METHOD_OPEN_DSYNC)
-		return;
-
 	pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
 
 	switch (sync_method)
