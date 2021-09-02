@@ -188,15 +188,19 @@ task:
 
   macos_worker_buf_script:
     - ulimit -c unlimited
+    - ulimit -n 1024
     - TEMP_CONFIG=$(pwd)/ci/worker_buf.conf gtimeout -s KILL -v 30m gmake -s -j12 ${CHECK} ${CHECKFLAGS}
   macos_worker_dio_script:
     - ulimit -c unlimited
+    - ulimit -n 1024
     - TEMP_CONFIG=$(pwd)/ci/worker_dio.conf gmake -s -j12 ${CHECK} ${CHECKFLAGS}
   macos_posix_aio_buf_script:
     - ulimit -c unlimited
+    - ulimit -n 1024
     - TEMP_CONFIG=$(pwd)/ci/posix_aio_buf.conf gmake -s -j12 ${CHECK} ${CHECKFLAGS}
   macos_posix_aio_dio_script:
     - ulimit -c unlimited
+    - ulimit -n 1024
     - TEMP_CONFIG=$(pwd)/ci/posix_aio_dio.conf gmake -s -j12 ${CHECK} ${CHECKFLAGS}
   on_failure:
     cores_script:
