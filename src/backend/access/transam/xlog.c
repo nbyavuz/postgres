@@ -2832,7 +2832,8 @@ XLogWriteComplete(PgAioInProgress *aio, uint32 write_no)
 			XLogCtl->LogwrtRqst.WriteDone = upto;
 
 		if (sync_method == SYNC_METHOD_OPEN ||
-			sync_method == SYNC_METHOD_OPEN_DSYNC)
+			sync_method == SYNC_METHOD_OPEN_DSYNC ||
+			!enableFsync)
 		{
 			Assert(upto <= XLogCtl->LogwrtResult.FlushInit);
 			Assert(upto > XLogCtl->LogwrtResult.FlushDone);
@@ -2851,9 +2852,25 @@ XLogWriteComplete(PgAioInProgress *aio, uint32 write_no)
 
 	LWLockRelease(WALIOQueueLock);
 
-	/* FIXME */
-	if (flush_increased && XLogArchivingActive())
-		NotifySegmentsReadyForArchive(XLogCtl->LogwrtResult.FlushDone);
+	if (flush_increased)
+	{
+		/*
+		 * FIXME: It's potentially problematic to do this from a completion
+		 * handler, running in some other context. But it's not clear from
+		 * where else to do this. Best fix is probably to make this work
+		 * closer to O(1), e.g. via a condition variable.
+		 *
+		 * We need to do do the WalSndWakeupProcessRequests() here, because
+		 * the completion might be executing in a different backend that's not
+		 * guaranteed to call ProcessRequests soon.
+		 */
+		WalSndWakeupRequest();
+		WalSndWakeupProcessRequests();
+
+		/* FIXME */
+		if (XLogArchivingActive())
+			NotifySegmentsReadyForArchive(XLogCtl->LogwrtResult.FlushDone);
+	}
 }
 
 void
@@ -2928,9 +2945,15 @@ XLogFlushComplete(struct PgAioInProgress *aio, uint32 flush_no)
 
 	LWLockRelease(WALIOQueueLock);
 
-	/* FIXME */
-	if (flush_increased && XLogArchivingActive())
-		NotifySegmentsReadyForArchive(XLogCtl->LogwrtResult.FlushDone);
+	/* see XLogWriteComplete() */
+	if (flush_increased)
+	{
+		WalSndWakeupRequest();
+		WalSndWakeupProcessRequests();
+
+		if (XLogArchivingActive())
+			NotifySegmentsReadyForArchive(XLogCtl->LogwrtResult.FlushDone);
+	}
 }
 
 static bool
@@ -3492,7 +3515,8 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 
 				LogwrtResult.WriteInit = write_upto;
 				if (sync_method == SYNC_METHOD_OPEN ||
-					sync_method == SYNC_METHOD_OPEN_DSYNC)
+					sync_method == SYNC_METHOD_OPEN_DSYNC ||
+					!enableFsync)
 				{
 					LogwrtResult.FlushInit = LogwrtResult.WriteInit;
 				}
@@ -3587,12 +3611,6 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 					}
 
 				}
-
-				/* signal that we need to wakeup walsenders later */
-				WalSndWakeupRequest();
-
-				if (XLogArchivingActive())
-					NotifySegmentsReadyForArchive(LogwrtResult.FlushDone);
 
 				XLogCtl->lastSegSwitchTime = (pg_time_t) time(NULL);
 				XLogCtl->lastSegSwitchLSN = LogwrtResult.FlushDone;
@@ -3748,11 +3766,6 @@ XLogWriteIssueFlushes(XLogWritePos *write_pos)
 
 		}
 	}
-
-
-	/* signal that we need to wakeup walsenders later */
-	// FIXME: also when using O_[D]SYNC?
-	WalSndWakeupRequest();
 
 	return false;
 }
