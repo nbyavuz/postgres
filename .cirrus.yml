@@ -45,16 +45,17 @@ task:
     - chown -R postgres:postgres .
     - mkdir -p /tmp/ccache_dir
     - chown -R postgres:postgres /tmp/ccache_dir
-  build_script:
+  configure_script:
     - su postgres -c './configure --enable-cassert --enable-debug --enable-tap-tests --with-posix-aio --with-includes=/usr/local/include --with-libs=/usr/local/lib CC="ccache cc"'
+  build_script:
     - su postgres -c 'gmake -s -j4 && gmake -s -j4 -C contrib'
-  freebsd_worker_buf_script:
+  worker_buf_script:
     - su postgres -c 'TEMP_CONFIG=$(realpath ci/worker_buf.conf) time gmake -s -j8 ${CHECK} ${CHECKFLAGS}' > worker_buf.log 2>&1
-  freebsd_worker_dio_script:
+  worker_dio_script:
     - su postgres -c 'TEMP_CONFIG=$(realpath ci/worker_dio.conf) time gmake -s -j8 ${CHECK} ${CHECKFLAGS}' > worker_dio.log 2>&1
-  freebsd_posix_aio_buf_script:
+  posix_aio_buf_script:
     - su postgres -c 'TEMP_CONFIG=$(realpath ci/posix_aio_buf.conf) time gmake -s -j8 ${CHECK} ${CHECKFLAGS}' > posix_aio_buf.log 2>&1
-  freebsd_posix_aio_dio_script:
+  posix_aio_dio_script:
     - su postgres -c 'TEMP_CONFIG=$(realpath ci/posix_aio_dio.conf) time gmake -s -j8 ${CHECK} ${CHECKFLAGS}' > posix_aio_dio.log 2>&1
   on_failure:
     core_script:
@@ -131,17 +132,17 @@ task:
     - su postgres -c './configure --enable-cassert --enable-debug --enable-tap-tests --with-posix-aio --with-liburing --with-tcl --with-python --with-perl --with-ldap --with-openssl --with-icu --with-llvm CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"'
   build_script:
     - su postgres -c 'make -s -j4 && make -s -j4 -C contrib'
-  linux_io_uring_buf_script:
+  io_uring_buf_script:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/uring_buf.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
-  linux_io_uring_dio_script:
+  io_uring_dio_script:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/uring_dio.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
-  linux_worker_buf_script:
+  worker_buf_script:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/worker_buf.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
-  linux_worker_dio_script:
+  worker_dio_script:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/worker_dio.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
-  linux_posix_aio_buf_script:
+  posix_aio_buf_script:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/posix_aio_buf.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
-  linux_posix_aio_dio_script:
+  posix_aio_dio_script:
     - su postgres -c 'ulimit -c unlimited ; TEMP_CONFIG=$(realpath ci/posix_aio_dio.conf) ${TIMEOUT_CMD} make -s ${CHECK} ${CHECKFLAGS} -j8'
   on_failure:
     cores_script:
@@ -177,34 +178,33 @@ task:
   core_install_script:
     - sudo chmod 777 /cores
 
-  # Unfortunately homebrew in the cirrus images contains an old version of
-  # homebrew, which references a mirror that doesn't exist anymore. Turns out
-  # to be faster to upgrade homebrow than to have homebrew fall back to
-  # building from source...
+  # Unfortunately the cirrus images contain an old version of homebrew, which
+  # references a mirror that doesn't exist anymore. Turns out to be faster to
+  # upgrade homebrew than to have it fall back to building from source...
   # https://github.com/cirruslabs/osx-images/issues/37
   homebrew_install_script:
     - unset HOMEBREW_NO_AUTO_UPDATE && brew install --verbose make coreutils ccache
     - brew cleanup
 
-  build_script:
-    - export PERL5LIB=~/perl5/lib/perl5
+  configure_script:
     - ./configure --prefix=$HOME/install --enable-cassert --enable-debug --enable-tap-tests --without-readline --with-posix-aio CC="ccache gcc" CFLAGS="-O0"
+  build_script:
     - gmake -s -j12 && gmake -s -j12 -C contrib
     - gmake -s install
 
-  macos_worker_buf_script:
+  worker_buf_script:
     - ulimit -c unlimited
     - ulimit -n 1024
     - TEMP_CONFIG=$(pwd)/ci/worker_buf.conf gtimeout -s KILL -v 30m gmake -s -j12 ${CHECK} ${CHECKFLAGS}
-  macos_worker_dio_script:
+  worker_dio_script:
     - ulimit -c unlimited
     - ulimit -n 1024
     - TEMP_CONFIG=$(pwd)/ci/worker_dio.conf gmake -s -j12 ${CHECK} ${CHECKFLAGS}
-  macos_posix_aio_buf_script:
+  posix_aio_buf_script:
     - ulimit -c unlimited
     - ulimit -n 1024
     - TEMP_CONFIG=$(pwd)/ci/posix_aio_buf.conf gmake -s -j12 ${CHECK} ${CHECKFLAGS}
-  macos_posix_aio_dio_script:
+  posix_aio_dio_script:
     - ulimit -c unlimited
     - ulimit -n 1024
     - TEMP_CONFIG=$(pwd)/ci/posix_aio_dio.conf gmake -s -j12 ${CHECK} ${CHECKFLAGS}
@@ -243,7 +243,7 @@ task:
     - powershell -Command get-psdrive -psprovider filesystem
     - set
 
-  config_script:
+  configure_script:
     - copy ci\windows_build_config.pl src\tools\msvc\config.pl
     - vcvarsall x64
     - perl src/tools/msvc/mkvcbuild.pl
