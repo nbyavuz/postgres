@@ -745,15 +745,14 @@ WHERE unique1 IN (1,42,7)
 ORDER BY unique1;
 
 -- Some temp debugging to try to track down randomly failing regression test
-create or replace function log_explain(tag text, query text) returns int
+create or replace function log_querytext(tag text, query text) returns int
 language plpgsql as
 $$
 declare
     ln text;
 begin
     for ln in
-        execute format('explain (analyze, costs on, summary off, timing off) %s',
-            query)
+        execute format('%s', query)
     loop
 	raise log '%: %', tag, ln;
     end loop;
@@ -761,11 +760,16 @@ begin
 end;
 $$;
 
-select log_explain('blahblah',
-'SELECT thousand, tenthous FROM tenk1
+select log_querytext('explain_output',
+'explain (analyze, costs on, summary off, timing off)
+SELECT thousand, tenthous FROM tenk1
 WHERE thousand < 2 AND tenthous IN (1001,3000)
 ORDER BY thousand;
 ');
+
+select log_querytext('pg_class_details',
+'select row(relname, relallvisible, reltuples, relpages)::text
+from pg_class where relname like $$tenk1%$$;');
 
 explain (costs off)
 SELECT thousand, tenthous FROM tenk1
