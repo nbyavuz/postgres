@@ -744,6 +744,29 @@ SELECT unique1 FROM tenk1
 WHERE unique1 IN (1,42,7)
 ORDER BY unique1;
 
+-- Some temp debugging to try to track down randomly failing regression test
+create or replace function log_explain(tag text, query text) returns int
+language plpgsql as
+$$
+declare
+    ln text;
+begin
+    for ln in
+        execute format('explain (analyze, costs on, summary off, timing off) %s',
+            query)
+    loop
+	raise log '%: %', tag, ln;
+    end loop;
+    return 1;
+end;
+$$;
+
+select log_explain('blahblah',
+'SELECT thousand, tenthous FROM tenk1
+WHERE thousand < 2 AND tenthous IN (1001,3000)
+ORDER BY thousand;
+');
+
 explain (costs off)
 SELECT thousand, tenthous FROM tenk1
 WHERE thousand < 2 AND tenthous IN (1001,3000)
