@@ -1,0 +1,90 @@
+# Data layout influencing options
+option('BLCKSZ', type : 'combo', choices : ['1', '2', '4', '8', '16', '32'], value : '8',
+  description: 'set table block size in kB')
+
+
+# You get it
+option('cassert', type : 'boolean', value: false,
+  description: 'enable assertion checks (for debugging)')
+
+option('atomics', type : 'boolean', value: true,
+  description: 'whether to use atomic operations')
+
+
+# Compilation options
+
+option('extra_include_dirs', type : 'array',
+  description: 'non-default directories to be searched for headers')
+option('extra_lib_dirs', type : 'array',
+  description: 'non-default directories to be searched for libs')
+
+
+# External dependencies
+
+option('gssapi', type : 'feature', value: 'auto',
+  description: 'GSSAPI support')
+
+option('ldap', type : 'feature', value: 'auto',
+  description: 'LDAP support')
+
+option('llvm', type : 'feature', value: 'disabled',
+  description: 'whether to use llvm')
+
+option('icu', type : 'feature', value: 'auto',
+  description: 'ICU support')
+
+option('libxml', type : 'feature', value: 'auto',
+  description: 'XML support')
+
+option('libxslt', type : 'feature', value: 'auto',
+  description: 'XSLT support in contrib/xml2')
+
+option('lz4', type : 'feature', value: 'auto',
+  description: 'LZ4 support')
+
+option('perl', type : 'feature', value: 'auto',
+  description: 'build Perl modules (PL/Perl)')
+
+option('python', type : 'feature', value: 'auto',
+  description: 'build Python modules (PL/Python)')
+
+option('readline', type : 'feature', value : 'auto',
+  description: 'use GNU Readline or BSD Libedit for editing')
+
+option('selinux', type : 'feature', value : 'disabled',
+  description: 'build with SELinux support')
+
+option('ssl', type : 'combo', choices : ['none', 'openssl'], value : 'none',
+  description: 'use LIB for SSL/TLS support (openssl)')
+
+option('systemd', type : 'feature', value: 'auto',
+  description: 'build with systemd support')
+
+option('uuid', type : 'combo', choices : ['none', 'bsd', 'e2fs', 'ossp'], value : 'none',
+  description: 'build contrib/uuid-ossp using LIB')
+
+option('zlib', type : 'feature', value: 'auto',
+  description: 'whether to use zlib')
+
+
+# Programs
+option('BISON', type : 'string', value: 'bison',
+  description: 'path to bison binary')
+
+option('FLEX', type : 'string', value: 'flex',
+  description: 'path to flex binary')
+
+option('GZIP', type : 'string', value: 'gzip',
+  description: 'path to gzip binary')
+
+option('PERL', type : 'string', value: 'perl',
+  description: 'path to perl binary')
+
+option('PROVE', type : 'string', value: 'prove',
+  description: 'path to prove binary')
+
+option('SED', type : 'string', value: 'gsed',
+  description: 'path to sed binary')
+
+option('TAR', type : 'string', value: 'tar',
+  description: 'path to tar binary')
