@@ -262,7 +262,6 @@ task:
     - vcvarsall x64
     - perl src/tools/msvc/mkvcbuild.pl
   build_script:
-    - set IgnoreWarnIntDirInTempDetected=true
     - vcvarsall x64
     - msbuild -m pgsql.sln
   install_script:
