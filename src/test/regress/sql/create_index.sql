@@ -771,6 +771,20 @@ select log_querytext('pg_class_details',
 'select row(relname, relallvisible, reltuples, relpages)::text
 from pg_class where relname like $$tenk1%$$;');
 
+select log_querytext('pg_stat_user_tables',
+'select ut::text from pg_stat_user_tables ut where relname = $$tenk1$$;');
+
+select log_querytext('shared_buffers_text', 'select current_setting($$shared_buffers$$);');
+
+select log_querytext('tenk1_check',
+'select row(
+	count(*),sum(unique1),sum(unique2),sum(two),sum(four),sum(ten),
+	sum(twenty),sum(hundred),sum(thousand),sum(twothousand),
+	sum(fivethous),sum(tenthous),sum(odd),sum(even),
+	sum(length(stringu1)),sum(length(stringu2)),
+	sum(length(string4)), pg_relation_size($$tenk1$$)
+)::text from tenk1;');
+
 explain (costs off)
 SELECT thousand, tenthous FROM tenk1
 WHERE thousand < 2 AND tenthous IN (1001,3000)
