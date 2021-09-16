@@ -196,14 +196,8 @@ task:
   core_install_script:
     - sudo chmod 777 /cores
 
-  # Unfortunately the cirrus images contain an old version of homebrew, which
-  # references a mirror that doesn't exist anymore. Turns out to be faster to
-  # upgrade homebrew than to have it fall back to building from source...
-  # https://github.com/cirruslabs/osx-images/issues/37
   homebrew_install_script:
-    - unset HOMEBREW_NO_AUTO_UPDATE && brew install --verbose make coreutils ccache
-    - brew cleanup
-
+    - brew install make coreutils ccache
   configure_script:
     - ./configure --prefix=$HOME/install --enable-cassert --enable-debug --enable-tap-tests --without-readline --with-posix-aio CC="ccache gcc" CFLAGS="-O0"
   build_script:
