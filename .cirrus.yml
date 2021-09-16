@@ -178,6 +178,19 @@ task:
     folder: ${HOMEBREW_CACHE}
   perl_cache:
     folder: ~/perl5
+  info_script:
+    - id
+    - ulimit -a
+    - export
+
+  # An update to the cirrus OSX image removed passwordless sudo. Try to allow
+  # it again. The existing sudoers uses env_reset without secure_path,
+  # which means that 'sudo su' fails because 'su' isn't on PATH anymore.
+  # https://github.com/cirruslabs/osx-images/issues/38
+  fix_sudo_script:
+    - echo admin | sudo -S /bin/bash -c 'echo "admin ALL=(ALL:ALL) NOPASSWD: ALL"|tee /etc/sudoers.d/admin'
+    - echo 'Defaults        secure_path="/bin:/usr/bin:/usr/ucb:/usr/local/bin"'|sudo /usr/bin/tee /etc/sudoers.d/path
+
   cpan_install_script:
     - perl -mIPC::Run -e 1 || cpan -T IPC::Run
   core_install_script:
