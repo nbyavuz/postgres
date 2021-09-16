@@ -265,7 +265,8 @@ task:
     - perl src/tools/msvc/mkvcbuild.pl
   build_script:
     - vcvarsall x64
-    - msbuild -m pgsql.sln
+    # Disable file tracker, we're never going to rebuild...
+    - msbuild -m /p:TrackFileAccess=false pgsql.sln
   install_script:
     - perl src\tools\msvc\install.pl tmp_install
 
