@@ -3,6 +3,8 @@
 env:
   # accelerate initial clone
   CIRRUS_CLONE_DEPTH: 1
+  # Useful to be able to analyse what in a script takes long
+  CIRRUS_LOG_TIMESTAMP: true
   # target to test, for all but OSX and windows
   CHECK: check-world
   CHECKFLAGS: -Otarget
