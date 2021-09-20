@@ -178,6 +178,37 @@ pgstat_send_checkpointer(void)
 }
 
 /* ----------
+ * pgstat_reset_replslot_counter() -
+ *
+ *	Tell the statistics collector to reset a single replication slot
+ *	counter, or all replication slots counters (when name is null).
+ *
+ *	Permission checking for this function is managed through the normal
+ *	GRANT system.
+ * ----------
+ */
+void
+pgstat_reset_replslot_counter(const char *name)
+{
+	PgStat_MsgResetreplslotcounter msg;
+
+	if (pgStatSock == PGINVALID_SOCKET)
+		return;
+
+	if (name)
+	{
+		namestrcpy(&msg.m_slotname, name);
+		msg.clearall = false;
+	}
+	else
+		msg.clearall = true;
+
+	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_RESETREPLSLOTCOUNTER);
+
+	pgstat_send(&msg, sizeof(msg));
+}
+
+/* ----------
  * pgstat_report_replslot() -
  *
  *	Tell the collector about replication slot statistics.
@@ -243,32 +274,25 @@ pgstat_report_replslot_drop(const char *slotname)
 }
 
 /* ----------
- * pgstat_reset_replslot_counter() -
+ * pgstat_reset_slru_counter() -
  *
- *	Tell the statistics collector to reset a single replication slot
- *	counter, or all replication slots counters (when name is null).
+ *	Tell the statistics collector to reset a single SLRU counter, or all
+ *	SLRU counters (when name is null).
  *
  *	Permission checking for this function is managed through the normal
  *	GRANT system.
  * ----------
  */
 void
-pgstat_reset_replslot_counter(const char *name)
+pgstat_reset_slru_counter(const char *name)
 {
-	PgStat_MsgResetreplslotcounter msg;
+	PgStat_MsgResetslrucounter msg;
 
 	if (pgStatSock == PGINVALID_SOCKET)
 		return;
 
-	if (name)
-	{
-		namestrcpy(&msg.m_slotname, name);
-		msg.clearall = false;
-	}
-	else
-		msg.clearall = true;
-
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_RESETREPLSLOTCOUNTER);
+	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_RESETSLRUCOUNTER);
+	msg.m_index = (name) ? pgstat_slru_index(name) : -1;
 
 	pgstat_send(&msg, sizeof(msg));
 }
@@ -309,68 +333,6 @@ pgstat_send_slru(void)
 		 */
 		MemSet(&SLRUStats[i], 0, sizeof(PgStat_MsgSLRU));
 	}
-}
-
-/* ----------
- * pgstat_reset_slru_counter() -
- *
- *	Tell the statistics collector to reset a single SLRU counter, or all
- *	SLRU counters (when name is null).
- *
- *	Permission checking for this function is managed through the normal
- *	GRANT system.
- * ----------
- */
-void
-pgstat_reset_slru_counter(const char *name)
-{
-	PgStat_MsgResetslrucounter msg;
-
-	if (pgStatSock == PGINVALID_SOCKET)
-		return;
-
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_RESETSLRUCOUNTER);
-	msg.m_index = (name) ? pgstat_slru_index(name) : -1;
-
-	pgstat_send(&msg, sizeof(msg));
-}
-
-/*
- * pgstat_slru_index
- *
- * Determine index of entry for a SLRU with a given name. If there's no exact
- * match, returns index of the last "other" entry used for SLRUs defined in
- * external projects.
- */
-int
-pgstat_slru_index(const char *name)
-{
-	int			i;
-
-	for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
-	{
-		if (strcmp(slru_names[i], name) == 0)
-			return i;
-	}
-
-	/* return index of the last entry (which is the "other" one) */
-	return (SLRU_NUM_ELEMENTS - 1);
-}
-
-/*
- * pgstat_slru_name
- *
- * Returns SLRU name for an index. The index may be above SLRU_NUM_ELEMENTS,
- * in which case this returns NULL. This allows writing code that does not
- * know the number of entries in advance.
- */
-const char *
-pgstat_slru_name(int slru_idx)
-{
-	if (slru_idx < 0 || slru_idx >= SLRU_NUM_ELEMENTS)
-		return NULL;
-
-	return slru_names[slru_idx];
 }
 
 /*
@@ -441,15 +403,42 @@ pgstat_count_slru_truncate(int slru_idx)
 	slru_entry(slru_idx)->m_truncate += 1;
 }
 
-void
-pgstat_wal_initialize(void)
+/*
+ * pgstat_slru_name
+ *
+ * Returns SLRU name for an index. The index may be above SLRU_NUM_ELEMENTS,
+ * in which case this returns NULL. This allows writing code that does not
+ * know the number of entries in advance.
+ */
+const char *
+pgstat_slru_name(int slru_idx)
 {
-	/*
-	 * Initialize prevWalUsage with pgWalUsage so that pgstat_send_wal() can
-	 * calculate how much pgWalUsage counters are increased by subtracting
-	 * prevWalUsage from pgWalUsage.
-	 */
-	prevWalUsage = pgWalUsage;
+	if (slru_idx < 0 || slru_idx >= SLRU_NUM_ELEMENTS)
+		return NULL;
+
+	return slru_names[slru_idx];
+}
+
+/*
+ * pgstat_slru_index
+ *
+ * Determine index of entry for a SLRU with a given name. If there's no exact
+ * match, returns index of the last "other" entry used for SLRUs defined in
+ * external projects.
+ */
+int
+pgstat_slru_index(const char *name)
+{
+	int			i;
+
+	for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
+	{
+		if (strcmp(slru_names[i], name) == 0)
+			return i;
+	}
+
+	/* return index of the last entry (which is the "other" one) */
+	return (SLRU_NUM_ELEMENTS - 1);
 }
 
 /* ----------
@@ -544,4 +533,15 @@ pgstat_send_wal(bool force)
 	 * Clear out the statistics buffer, so it can be re-used.
 	 */
 	MemSet(&WalStats, 0, sizeof(WalStats));
+}
+
+void
+pgstat_wal_initialize(void)
+{
+	/*
+	 * Initialize prevWalUsage with pgWalUsage so that pgstat_send_wal() can
+	 * calculate how much pgWalUsage counters are increased by subtracting
+	 * prevWalUsage from pgWalUsage.
+	 */
+	prevWalUsage = pgWalUsage;
 }
