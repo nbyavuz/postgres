@@ -20,6 +20,7 @@
 #include "executor/instrument.h"
 #include "replication/slot.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
 #include "utils/pgstat_internal.h"
 #include "utils/timestamp.h"
 
@@ -29,26 +30,25 @@
  * ----------
  */
 
-/*
- * Stored directly in a stats message structure so they can be sent
- * without needing to copy things around.  We assume these init to zeroes.
- */
-PgStat_MsgBgWriter PendingBgWriterStats;
-PgStat_MsgCheckpointer PendingCheckpointerStats;
-PgStat_MsgWal WalStats;
+PgStat_BgWriterStats PendingBgWriterStats = {0};
+PgStat_CheckpointerStats PendingCheckpointerStats = {0};
+PgStat_WalStats	WalStats = {0};
+
 
 /*
- * SLRU statistics counts waiting to be sent to the collector.  These are
- * stored directly in stats message format so they can be sent without needing
- * to copy things around.  We assume this variable inits to zeroes.  Entries
- * are one-to-one with slru_names[].
+ * SLRU statistics counts waiting to be written to the shared activity
+ * statistics.  We assume this variable inits to zeroes.  Entries are
+ * one-to-one with slru_names[].
+ * Changes of SLRU counters are reported within critical sections so we use
+ * static memory in order to avoid memory allocation.
  */
-static PgStat_MsgSLRU SLRUStats[SLRU_NUM_ELEMENTS];
+static PgStat_SLRUStats pending_SLRUStats[SLRU_NUM_ELEMENTS];
+bool have_slrustats = false;
 
 /*
  * WAL usage counters saved from pgWALUsage at the previous call to
- * pgstat_send_wal(). This is used to calculate how much WAL usage
- * happens between pgstat_send_wal() calls, by subtracting
+ * pgstat_report_wal(). This is used to calculate how much WAL usage
+ * happens between pgstat_report_wal() calls, by subtracting
  * the previous counters from the current ones.
  *
  * FIXME: It'd be better if this weren't global.
@@ -59,85 +59,181 @@ WalUsage prevWalUsage;
 /* ----------
  * pgstat_reset_shared_counters() -
  *
- *	Tell the statistics collector to reset cluster-wide shared counters.
+ *	Reset cluster-wide shared counters.
  *
  *	Permission checking for this function is managed through the normal
  *	GRANT system.
+ *
+ *  We don't scribble on shared stats while resetting to avoid locking on
+ *  shared stats struct. Instead, just record the current counters in another
+ *  shared struct, which is protected by StatsLock. See
+ *  pgstat_fetch_stat_(archiver|bgwriter|checkpointer) for the reader side.
  * ----------
  */
 void
 pgstat_reset_shared_counters(const char *target)
 {
-	PgStat_MsgResetsharedcounter msg;
-
-	if (pgStatSock == PGINVALID_SOCKET)
-		return;
+	TimestampTz now = GetCurrentTimestamp();
+	PgStat_Shared_Reset_Target t;
 
 	if (strcmp(target, "archiver") == 0)
-		msg.m_resettarget = RESET_ARCHIVER;
+		t = RESET_ARCHIVER;
 	else if (strcmp(target, "bgwriter") == 0)
-		msg.m_resettarget = RESET_BGWRITER;
+		t = RESET_BGWRITER;
 	else if (strcmp(target, "wal") == 0)
-		msg.m_resettarget = RESET_WAL;
+		t = RESET_WAL;
 	else
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("unrecognized reset target: \"%s\"", target),
 				 errhint("Target must be \"archiver\", \"bgwriter\", or \"wal\".")));
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_RESETSHAREDCOUNTER);
-	pgstat_send(&msg, sizeof(msg));
+	/* Reset statistics for the cluster. */
+
+	switch (t)
+	{
+		case RESET_ARCHIVER:
+			LWLockAcquire(StatsLock, LW_EXCLUSIVE);
+			pgstat_copy_global_stats(&pgStatShmem->archiver.reset_offset,
+									 &pgStatShmem->archiver.stats,
+									 sizeof(PgStat_ArchiverStats),
+									 &pgStatShmem->archiver.changecount);
+			pgStatShmem->archiver.reset_offset.stat_reset_timestamp = now;
+			LWLockRelease(StatsLock);
+			break;
+
+		case RESET_BGWRITER:
+			LWLockAcquire(StatsLock, LW_EXCLUSIVE);
+			pgstat_copy_global_stats(&pgStatShmem->bgwriter.reset_offset,
+									 &pgStatShmem->bgwriter.stats,
+									 sizeof(PgStat_BgWriterStats),
+									 &pgStatShmem->bgwriter.changecount);
+			pgstat_copy_global_stats(&pgStatShmem->checkpointer.reset_offset,
+									 &pgStatShmem->checkpointer.stats,
+									 sizeof(PgStat_CheckpointerStats),
+									 &pgStatShmem->checkpointer.changecount);
+			pgStatShmem->bgwriter.reset_offset.stat_reset_timestamp = now;
+			LWLockRelease(StatsLock);
+			break;
+
+		case RESET_WAL:
+
+			/*
+			 * Differently from the two cases above, WAL statistics has many
+			 * writer processes with the shared stats protected by
+			 * pgStatShmem->wal.lock.
+			 */
+			LWLockAcquire(&pgStatShmem->wal.lock, LW_EXCLUSIVE);
+			MemSet(&pgStatShmem->wal.stats, 0, sizeof(PgStat_WalStats));
+			pgStatShmem->wal.stats.stat_reset_timestamp = now;
+			LWLockRelease(&pgStatShmem->wal.lock);
+			break;
+	}
 }
 
 /* ----------
- * pgstat_send_archiver() -
+ * pgstat_report_archiver() -
  *
- *	Tell the collector about the WAL file that we successfully
- *	archived or failed to archive.
+ * Report archiver statistics
  * ----------
  */
 void
-pgstat_send_archiver(const char *xlog, bool failed)
+pgstat_report_archiver(const char *xlog, bool failed)
 {
-	PgStat_MsgArchiver msg;
+	TimestampTz now = GetCurrentTimestamp();
 
-	/*
-	 * Prepare and send the message
-	 */
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_ARCHIVER);
-	msg.m_failed = failed;
-	strlcpy(msg.m_xlog, xlog, sizeof(msg.m_xlog));
-	msg.m_timestamp = GetCurrentTimestamp();
-	pgstat_send(&msg, sizeof(msg));
+	changecount_before_write(&pgStatShmem->archiver.changecount);
+
+	if (failed)
+	{
+		++pgStatShmem->archiver.stats.failed_count;
+		memcpy(&pgStatShmem->archiver.stats.last_failed_wal, xlog,
+			   sizeof(pgStatShmem->archiver.stats.last_failed_wal));
+		pgStatShmem->archiver.stats.last_failed_timestamp = now;
+	}
+	else
+	{
+		++pgStatShmem->archiver.stats.archived_count;
+		memcpy(&pgStatShmem->archiver.stats.last_archived_wal, xlog,
+			   sizeof(pgStatShmem->archiver.stats.last_archived_wal));
+		pgStatShmem->archiver.stats.last_archived_timestamp = now;
+	}
+
+	changecount_after_write(&pgStatShmem->archiver.changecount);
+}
+
+PgStat_ArchiverStats *
+pgstat_fetch_stat_archiver(void)
+{
+	pgstat_snapshot_global(PGSTAT_KIND_ARCHIVER);
+
+	return &stats_snapshot.archiver;
+}
+
+void
+pgstat_snapshot_archiver(void)
+{
+	PgStat_ArchiverStats reset;
+	PgStat_ArchiverStats *reset_offset = &pgStatShmem->archiver.reset_offset;
+
+	pgstat_copy_global_stats(&stats_snapshot.archiver,
+							 &pgStatShmem->archiver.stats,
+							 sizeof(PgStat_ArchiverStats),
+							 &pgStatShmem->archiver.changecount);
+
+	LWLockAcquire(StatsLock, LW_SHARED);
+	memcpy(&reset, reset_offset, sizeof(PgStat_ArchiverStats));
+	LWLockRelease(StatsLock);
+
+	/* compensate by reset offsets */
+	if (stats_snapshot.archiver.archived_count == reset.archived_count)
+	{
+		stats_snapshot.archiver.last_archived_wal[0] = 0;
+		stats_snapshot.archiver.last_archived_timestamp = 0;
+	}
+	stats_snapshot.archiver.archived_count -= reset.archived_count;
+
+	if (stats_snapshot.archiver.failed_count == reset.failed_count)
+	{
+		stats_snapshot.archiver.last_failed_wal[0] = 0;
+		stats_snapshot.archiver.last_failed_timestamp = 0;
+	}
+	stats_snapshot.archiver.failed_count -= reset.failed_count;
+
+	stats_snapshot.archiver.stat_reset_timestamp = reset.stat_reset_timestamp;
 }
 
 /* ----------
- * pgstat_send_bgwriter() -
+ * pgstat_report_bgwriter() -
  *
- *		Send bgwriter statistics to the collector
+ * Report bgwriter statistics
  * ----------
  */
 void
-pgstat_send_bgwriter(void)
+pgstat_report_bgwriter(void)
 {
-	/* We assume this initializes to zeroes */
-	static const PgStat_MsgBgWriter all_zeroes;
+	static const PgStat_BgWriterStats all_zeroes;
+	PgStat_BgWriterStats *s = &pgStatShmem->bgwriter.stats;
+	PgStat_BgWriterStats *l = &PendingBgWriterStats;
+
+	Assert(!pgStatShmem->is_shutdown);
 
 	pgstat_assert_is_up();
 
 	/*
 	 * This function can be called even if nothing at all has happened. In
-	 * this case, avoid sending a completely empty message to the stats
-	 * collector.
+	 * this case, avoid taking lock for a completely empty stats.
 	 */
-	if (memcmp(&PendingBgWriterStats, &all_zeroes, sizeof(PgStat_MsgBgWriter)) == 0)
+	if (memcmp(&PendingBgWriterStats, &all_zeroes, sizeof(PgStat_BgWriterStats)) == 0)
 		return;
 
-	/*
-	 * Prepare and send the message
-	 */
-	pgstat_setheader(&PendingBgWriterStats.m_hdr, PGSTAT_MTYPE_BGWRITER);
-	pgstat_send(&PendingBgWriterStats, sizeof(PendingBgWriterStats));
+	changecount_before_write(&pgStatShmem->bgwriter.changecount);
+
+	s->buf_written_clean += l->buf_written_clean;
+	s->maxwritten_clean += l->maxwritten_clean;
+	s->buf_alloc += l->buf_alloc;
+
+	changecount_after_write(&pgStatShmem->bgwriter.changecount);
 
 	/*
 	 * Clear out the statistics buffer, so it can be re-used.
@@ -145,36 +241,107 @@ pgstat_send_bgwriter(void)
 	MemSet(&PendingBgWriterStats, 0, sizeof(PendingBgWriterStats));
 }
 
+PgStat_BgWriterStats *
+pgstat_fetch_stat_bgwriter(void)
+{
+	pgstat_snapshot_global(PGSTAT_KIND_BGWRITER);
+
+	return &stats_snapshot.bgwriter;
+}
+
+void
+pgstat_snapshot_bgwriter(void)
+{
+	PgStat_BgWriterStats reset;
+	PgStat_BgWriterStats *reset_offset = &pgStatShmem->bgwriter.reset_offset;
+
+	pgstat_copy_global_stats(&stats_snapshot.bgwriter,
+							 &pgStatShmem->bgwriter.stats,
+							 sizeof(PgStat_BgWriterStats),
+							 &pgStatShmem->bgwriter.changecount);
+
+	LWLockAcquire(StatsLock, LW_SHARED);
+	memcpy(&reset, reset_offset, sizeof(PgStat_BgWriterStats));
+	LWLockRelease(StatsLock);
+
+	/* compensate by reset offsets */
+	stats_snapshot.bgwriter.buf_written_clean -= reset.buf_written_clean;
+	stats_snapshot.bgwriter.maxwritten_clean -= reset.maxwritten_clean;
+	stats_snapshot.bgwriter.buf_alloc -= reset.buf_alloc;
+	stats_snapshot.bgwriter.stat_reset_timestamp = reset.stat_reset_timestamp;
+}
+
 /* ----------
- * pgstat_send_checkpointer() -
+ * pgstat_report_checkpointer() -
  *
- *		Send checkpointer statistics to the collector
+ * Report checkpointer statistics
  * ----------
  */
 void
-pgstat_send_checkpointer(void)
+pgstat_report_checkpointer(void)
 {
 	/* We assume this initializes to zeroes */
-	static const PgStat_MsgCheckpointer all_zeroes;
+	static const PgStat_CheckpointerStats all_zeroes;
+	PgStat_CheckpointerStats *s = &pgStatShmem->checkpointer.stats;
+	PgStat_CheckpointerStats *l = &PendingCheckpointerStats;
 
 	/*
 	 * This function can be called even if nothing at all has happened. In
-	 * this case, avoid sending a completely empty message to the stats
-	 * collector.
+	 * this case, avoid taking lock for a completely empty stats.
 	 */
-	if (memcmp(&PendingCheckpointerStats, &all_zeroes, sizeof(PgStat_MsgCheckpointer)) == 0)
+	if (memcmp(&PendingCheckpointerStats, &all_zeroes,
+			   sizeof(PgStat_CheckpointerStats)) == 0)
 		return;
 
-	/*
-	 * Prepare and send the message
-	 */
-	pgstat_setheader(&PendingCheckpointerStats.m_hdr, PGSTAT_MTYPE_CHECKPOINTER);
-	pgstat_send(&PendingCheckpointerStats, sizeof(PendingCheckpointerStats));
+	changecount_before_write(&pgStatShmem->checkpointer.changecount);
+
+	s->timed_checkpoints += l->timed_checkpoints;
+	s->requested_checkpoints += l->requested_checkpoints;
+	s->checkpoint_write_time += l->checkpoint_write_time;
+	s->checkpoint_sync_time += l->checkpoint_sync_time;
+	s->buf_written_checkpoints += l->buf_written_checkpoints;
+	s->buf_written_backend += l->buf_written_backend;
+	s->buf_fsync_backend += l->buf_fsync_backend;
+
+	changecount_after_write(&pgStatShmem->checkpointer.changecount);
 
 	/*
 	 * Clear out the statistics buffer, so it can be re-used.
 	 */
 	MemSet(&PendingCheckpointerStats, 0, sizeof(PendingCheckpointerStats));
+}
+
+PgStat_CheckpointerStats *
+pgstat_fetch_stat_checkpointer(void)
+{
+	pgstat_snapshot_global(PGSTAT_KIND_CHECKPOINTER);
+
+	return &stats_snapshot.checkpointer;
+}
+
+void
+pgstat_snapshot_checkpointer(void)
+{
+	PgStat_CheckpointerStats reset;
+	PgStat_CheckpointerStats *reset_offset = &pgStatShmem->checkpointer.reset_offset;
+
+	pgstat_copy_global_stats(&stats_snapshot.checkpointer,
+							 &pgStatShmem->checkpointer.stats,
+							 sizeof(PgStat_CheckpointerStats),
+							 &pgStatShmem->checkpointer.changecount);
+
+	LWLockAcquire(StatsLock, LW_SHARED);
+	memcpy(&reset, reset_offset, sizeof(PgStat_CheckpointerStats));
+	LWLockRelease(StatsLock);
+
+	/* compensate by reset offsets */
+	stats_snapshot.checkpointer.timed_checkpoints -= reset.timed_checkpoints;
+	stats_snapshot.checkpointer.requested_checkpoints -= reset.requested_checkpoints;
+	stats_snapshot.checkpointer.buf_written_checkpoints -= reset.buf_written_checkpoints;
+	stats_snapshot.checkpointer.buf_written_backend -= reset.buf_written_backend;
+	stats_snapshot.checkpointer.buf_fsync_backend -= reset.buf_fsync_backend;
+	stats_snapshot.checkpointer.checkpoint_write_time -= reset.checkpoint_write_time;
+	stats_snapshot.checkpointer.checkpoint_sync_time -= reset.checkpoint_sync_time;
 }
 
 /* ----------
@@ -190,87 +357,219 @@ pgstat_send_checkpointer(void)
 void
 pgstat_reset_replslot_counter(const char *name)
 {
-	PgStat_MsgResetreplslotcounter msg;
+	int			startidx;
+	int			endidx;
+	int			i;
+	TimestampTz ts;
 
-	if (pgStatSock == PGINVALID_SOCKET)
-		return;
+	/*
+	 * AFIXME: pgstats has business no looking into slot.c structures at
+	 * this level of detail.
+	 */
 
 	if (name)
 	{
-		namestrcpy(&msg.m_slotname, name);
-		msg.clearall = false;
+		ReplicationSlot *slot;
+
+		/* Check if the slot exits with the given name. */
+		slot = SearchNamedReplicationSlot(name, LW_SHARED);
+
+		if (!slot)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("replication slot \"%s\" does not exist",
+							name)));
+
+		/*
+		 * Nothing to do for physical slots as we collect stats only for
+		 * logical slots.
+		 */
+		if (SlotIsPhysical(slot))
+			return;
+
+		/* reset this one entry */
+		startidx = endidx = slot - ReplicationSlotCtl->replication_slots;
 	}
 	else
-		msg.clearall = true;
+	{
+		/* reset all existent entries */
+		startidx = 0;
+		endidx = max_replication_slots - 1;
+	}
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_RESETREPLSLOTCOUNTER);
+	ts = GetCurrentTimestamp();
+	LWLockAcquire(&pgStatShmem->replslot.lock, LW_EXCLUSIVE);
+	for (i = startidx; i <= endidx; i++)
+	{
+		PgStat_StatReplSlotEntry *statent = &pgStatShmem->replslot.stats[i];
+		size_t off;
 
-	pgstat_send(&msg, sizeof(msg));
+		off = offsetof(PgStat_StatReplSlotEntry, slotname) + sizeof(NameData);
+
+		memset(((char *) statent) + off, 0, sizeof(pgStatShmem->replslot.stats[i]) - off);
+		statent->stat_reset_timestamp = ts;
+	}
+	LWLockRelease(&pgStatShmem->replslot.lock);
 }
 
 /* ----------
  * pgstat_report_replslot() -
  *
- *	Tell the collector about replication slot statistics.
+ * Report replication slot activity.
  * ----------
  */
 void
-pgstat_report_replslot(const PgStat_StatReplSlotEntry *repSlotStat)
+pgstat_report_replslot(uint32 index, const PgStat_StatReplSlotEntry *repSlotStat)
 {
-	PgStat_MsgReplSlot msg;
+	PgStat_StatReplSlotEntry *statent;
 
-	/*
-	 * Prepare and send the message
-	 */
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_REPLSLOT);
-	namestrcpy(&msg.m_slotname, NameStr(repSlotStat->slotname));
-	msg.m_create = false;
-	msg.m_drop = false;
-	msg.m_spill_txns = repSlotStat->spill_txns;
-	msg.m_spill_count = repSlotStat->spill_count;
-	msg.m_spill_bytes = repSlotStat->spill_bytes;
-	msg.m_stream_txns = repSlotStat->stream_txns;
-	msg.m_stream_count = repSlotStat->stream_count;
-	msg.m_stream_bytes = repSlotStat->stream_bytes;
-	msg.m_total_txns = repSlotStat->total_txns;
-	msg.m_total_bytes = repSlotStat->total_bytes;
-	pgstat_send(&msg, sizeof(PgStat_MsgReplSlot));
+	Assert(index < max_replication_slots);
+
+	if (!pgstat_track_counts)
+		return;
+
+	statent = &pgStatShmem->replslot.stats[index];
+
+	LWLockAcquire(&pgStatShmem->replslot.lock, LW_EXCLUSIVE);
+
+	/* clear the counters if not used */
+	if (statent->index == -1)
+	{
+		memset(statent, 0, sizeof(*statent));
+		statent->index = index;
+		namestrcpy(&statent->slotname, NameStr(repSlotStat->slotname));
+	}
+	else if (namestrcmp(&statent->slotname, NameStr(statent->slotname)) != 0)
+	{
+		/* AFIXME: Is there a valid way this can happen? */
+		elog(ERROR, "stats out of sync");
+	}
+	else
+	{
+		Assert(statent->index == index);
+	}
+
+	/* Update the replication slot statistics */
+	statent->spill_txns += repSlotStat->spill_txns;
+	statent->spill_count += repSlotStat->spill_count;
+	statent->spill_bytes += repSlotStat->spill_bytes;
+	statent->stream_txns += repSlotStat->stream_txns;
+	statent->stream_count += repSlotStat->stream_count;
+	statent->stream_bytes += repSlotStat->stream_bytes;
+	statent->total_txns += repSlotStat->total_txns;
+	statent->total_bytes += repSlotStat->total_bytes;
+
+	LWLockRelease(&pgStatShmem->replslot.lock);
 }
 
+
 /* ----------
- * pgstat_report_replslot_create() -
+ * pgstat_report_replslot_drop() -
  *
- *	Tell the collector about creating the replication slot.
+ * Report replication slot drop.
  * ----------
  */
 void
-pgstat_report_replslot_create(const char *slotname)
+pgstat_report_replslot_create(const char *name, uint32 index)
 {
-	PgStat_MsgReplSlot msg;
+	PgStat_StatReplSlotEntry *statent;
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_REPLSLOT);
-	namestrcpy(&msg.m_slotname, slotname);
-	msg.m_create = true;
-	msg.m_drop = false;
-	pgstat_send(&msg, sizeof(PgStat_MsgReplSlot));
+	if (!pgstat_track_counts)
+		return;
+
+	statent = &pgStatShmem->replslot.stats[index];
+
+	LWLockAcquire(&pgStatShmem->replslot.lock, LW_EXCLUSIVE);
+	/*
+	 * NB: need to accept that there might be stats from an older slot,
+	 * e.g. if we previously crashed after dropping a slot.
+	 */
+	memset(statent, 0, sizeof(*statent));
+	statent->index = index;
+	namestrcpy(&statent->slotname, name);
+
+	LWLockRelease(&pgStatShmem->replslot.lock);
 }
 
 /* ----------
  * pgstat_report_replslot_drop() -
  *
- *	Tell the collector about dropping the replication slot.
+ * Report replication slot drop.
  * ----------
  */
 void
-pgstat_report_replslot_drop(const char *slotname)
+pgstat_report_replslot_drop(uint32 index)
 {
-	PgStat_MsgReplSlot msg;
+	PgStat_StatReplSlotEntry *statent;
 
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_REPLSLOT);
-	namestrcpy(&msg.m_slotname, slotname);
-	msg.m_create = false;
-	msg.m_drop = true;
-	pgstat_send(&msg, sizeof(PgStat_MsgReplSlot));
+	if (!pgstat_track_counts)
+		return;
+
+	statent = &pgStatShmem->replslot.stats[index];
+
+	LWLockAcquire(&pgStatShmem->replslot.lock, LW_EXCLUSIVE);
+	/*
+	 * NB: need to accept that there might not be any stats, e.g. if we threw
+	 * away stats after a crash restart.
+	 */
+	statent->index = -1;
+	LWLockRelease(&pgStatShmem->replslot.lock);
+}
+
+static void
+pgstat_reset_slru_counter_internal(int index, TimestampTz ts)
+{
+	LWLockAcquire(&pgStatShmem->slru.lock, LW_EXCLUSIVE);
+
+	memset(&pgStatShmem->slru.stats[index], 0, sizeof(PgStat_SLRUStats));
+	pgStatShmem->slru.stats[index].stat_reset_timestamp = ts;
+
+	LWLockRelease(&pgStatShmem->slru.lock);
+}
+
+PgStat_StatReplSlotEntry *
+pgstat_fetch_replslot(NameData slotname)
+{
+	pgstat_snapshot_global(PGSTAT_KIND_REPLSLOT);
+
+	for (int i = 0; i < stats_snapshot.replslot_count; i++)
+	{
+		PgStat_StatReplSlotEntry *statentry = &stats_snapshot.replslot[i];
+
+		if (namestrcmp(&statentry->slotname, NameStr(slotname)) == 0)
+		{
+			return statentry;
+		}
+	}
+
+	return NULL;
+}
+
+void
+pgstat_snapshot_replslot(void)
+{
+	if (stats_snapshot.replslot == NULL)
+	{
+		stats_snapshot.replslot = (PgStat_StatReplSlotEntry *)
+			MemoryContextAlloc(TopMemoryContext,
+							   sizeof(PgStat_StatReplSlotEntry) * max_replication_slots);
+	}
+
+	stats_snapshot.replslot_count = 0;
+
+	LWLockAcquire(&pgStatShmem->replslot.lock, LW_EXCLUSIVE);
+
+	for (int i = 0; i < max_replication_slots; i++)
+	{
+		PgStat_StatReplSlotEntry *statent = &pgStatShmem->replslot.stats[i];
+
+		if (statent->index != -1)
+		{
+			stats_snapshot.replslot[stats_snapshot.replslot_count++] = *statent;
+		}
+	}
+
+	LWLockRelease(&pgStatShmem->replslot.lock);
 }
 
 /* ----------
@@ -286,53 +585,69 @@ pgstat_report_replslot_drop(const char *slotname)
 void
 pgstat_reset_slru_counter(const char *name)
 {
-	PgStat_MsgResetslrucounter msg;
+	int			i;
+	TimestampTz ts = GetCurrentTimestamp();
 
-	if (pgStatSock == PGINVALID_SOCKET)
-		return;
-
-	pgstat_setheader(&msg.m_hdr, PGSTAT_MTYPE_RESETSLRUCOUNTER);
-	msg.m_index = (name) ? pgstat_slru_index(name) : -1;
-
-	pgstat_send(&msg, sizeof(msg));
+	if (name)
+	{
+		i = pgstat_slru_index(name);
+		pgstat_reset_slru_counter_internal(i, ts);
+	}
+	else
+	{
+		for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
+			pgstat_reset_slru_counter_internal(i, ts);
+	}
 }
 
-/* ----------
- * pgstat_send_slru() -
+/*
+ * pgstat_flush_slru - flush out locally pending SLRU stats entries
  *
- *		Send SLRU statistics to the collector
- * ----------
+ * If nowait is true, this function returns false on lock failure. Otherwise
+ * this function always returns true. Writer processes are mutually excluded
+ * using LWLock, but readers are expected to use change-count protocol to avoid
+ * interference with writers.
+ *
+ * Returns true if not all pending stats have been flushed out.
  */
-void
-pgstat_send_slru(void)
+bool
+pgstat_flush_slru(bool nowait)
 {
-	/* We assume this initializes to zeroes */
-	static const PgStat_MsgSLRU all_zeroes;
+	int			i;
 
-	for (int i = 0; i < SLRU_NUM_ELEMENTS; i++)
+	if (!have_slrustats)
+		return false;
+
+	/* lock the shared entry to protect the content, skip if failed */
+	if (!nowait)
+		LWLockAcquire(&pgStatShmem->slru.lock, LW_EXCLUSIVE);
+	else if (!LWLockConditionalAcquire(&pgStatShmem->slru.lock,
+									   LW_EXCLUSIVE))
+		return true;			/* failed to acquire lock, skip */
+
+
+	for (i = 0; i < SLRU_NUM_ELEMENTS; i++)
 	{
-		/*
-		 * This function can be called even if nothing at all has happened. In
-		 * this case, avoid sending a completely empty message to the stats
-		 * collector.
-		 */
-		if (memcmp(&SLRUStats[i], &all_zeroes, sizeof(PgStat_MsgSLRU)) == 0)
-			continue;
+		PgStat_SLRUStats *sharedent = &pgStatShmem->slru.stats[i];
+		PgStat_SLRUStats *pendingent = &pending_SLRUStats[i];
 
-		/* set the SLRU type before each send */
-		SLRUStats[i].m_index = i;
-
-		/*
-		 * Prepare and send the message
-		 */
-		pgstat_setheader(&SLRUStats[i].m_hdr, PGSTAT_MTYPE_SLRU);
-		pgstat_send(&SLRUStats[i], sizeof(PgStat_MsgSLRU));
-
-		/*
-		 * Clear out the statistics buffer, so it can be re-used.
-		 */
-		MemSet(&SLRUStats[i], 0, sizeof(PgStat_MsgSLRU));
+		sharedent->blocks_zeroed += pendingent->blocks_zeroed;
+		sharedent->blocks_hit += pendingent->blocks_hit;
+		sharedent->blocks_read += pendingent->blocks_read;
+		sharedent->blocks_written += pendingent->blocks_written;
+		sharedent->blocks_exists += pendingent->blocks_exists;
+		sharedent->flush += pendingent->flush;
+		sharedent->truncate += pendingent->truncate;
 	}
+
+	/* done, clear the pending entry */
+	MemSet(pending_SLRUStats, 0, SizeOfSlruStats);
+
+	LWLockRelease(&pgStatShmem->slru.lock);
+
+	have_slrustats = false;
+
+	return false;
 }
 
 /*
@@ -341,7 +656,7 @@ pgstat_send_slru(void)
  * Returns pointer to entry with counters for given SLRU (based on the name
  * stored in SlruCtl as lwlock tranche name).
  */
-static inline PgStat_MsgSLRU *
+static inline PgStat_SLRUStats *
 slru_entry(int slru_idx)
 {
 	pgstat_assert_is_up();
@@ -354,7 +669,9 @@ slru_entry(int slru_idx)
 
 	Assert((slru_idx >= 0) && (slru_idx < SLRU_NUM_ELEMENTS));
 
-	return &SLRUStats[slru_idx];
+	have_slrustats = true;
+
+	return &pending_SLRUStats[slru_idx];
 }
 
 /*
@@ -364,43 +681,43 @@ slru_entry(int slru_idx)
 void
 pgstat_count_slru_page_zeroed(int slru_idx)
 {
-	slru_entry(slru_idx)->m_blocks_zeroed += 1;
+	slru_entry(slru_idx)->blocks_zeroed += 1;
 }
 
 void
 pgstat_count_slru_page_hit(int slru_idx)
 {
-	slru_entry(slru_idx)->m_blocks_hit += 1;
+	slru_entry(slru_idx)->blocks_hit += 1;
 }
 
 void
 pgstat_count_slru_page_exists(int slru_idx)
 {
-	slru_entry(slru_idx)->m_blocks_exists += 1;
+	slru_entry(slru_idx)->blocks_exists += 1;
 }
 
 void
 pgstat_count_slru_page_read(int slru_idx)
 {
-	slru_entry(slru_idx)->m_blocks_read += 1;
+	slru_entry(slru_idx)->blocks_read += 1;
 }
 
 void
 pgstat_count_slru_page_written(int slru_idx)
 {
-	slru_entry(slru_idx)->m_blocks_written += 1;
+	slru_entry(slru_idx)->blocks_written += 1;
 }
 
 void
 pgstat_count_slru_flush(int slru_idx)
 {
-	slru_entry(slru_idx)->m_flush += 1;
+	slru_entry(slru_idx)->flush += 1;
 }
 
 void
 pgstat_count_slru_truncate(int slru_idx)
 {
-	slru_entry(slru_idx)->m_truncate += 1;
+	slru_entry(slru_idx)->truncate += 1;
 }
 
 /*
@@ -441,25 +758,126 @@ pgstat_slru_index(const char *name)
 	return (SLRU_NUM_ELEMENTS - 1);
 }
 
+void
+pgstat_snapshot_slru(void)
+{
+	LWLockAcquire(&pgStatShmem->slru.lock, LW_SHARED);
+
+	memcpy(stats_snapshot.slru, &pgStatShmem->slru.stats, SizeOfSlruStats);
+
+	LWLockRelease(&pgStatShmem->slru.lock);
+}
+
+PgStat_SLRUStats *
+pgstat_fetch_slru(void)
+{
+	pgstat_snapshot_global(PGSTAT_KIND_SLRU);
+
+	return stats_snapshot.slru;
+}
+
 /* ----------
- * pgstat_send_wal() -
+ * pgstat_report_wal() -
  *
- *	Send WAL statistics to the collector.
+ * Calculate how much WAL usage counters have increased and update
+ * shared statistics.
  *
- * If 'force' is not set, WAL stats message is only sent if enough time has
- * passed since last one was sent to reach PGSTAT_STAT_INTERVAL.
+ * Must be called by processes that generate WAL.
  * ----------
  */
 void
-pgstat_send_wal(bool force)
+pgstat_report_wal(bool force)
 {
-	static TimestampTz sendTime = 0;
+	Assert(!pgStatShmem->is_shutdown);
+
+	pgstat_flush_wal(force);
+}
+
+/*
+ * Calculate how much WAL usage counters have increased by substracting the
+ * previous counters from the current ones.
+ *
+ * If nowait is true, this function returns true if the lock could not be
+ * acquired. Otherwise return false.
+ */
+bool
+pgstat_flush_wal(bool nowait)
+{
+	PgStat_WalStats *s = &pgStatShmem->wal.stats;
+	PgStat_WalStats *l = &WalStats;
+	WalUsage	all_zeroes PG_USED_FOR_ASSERTS_ONLY = {0};
+
+	Assert(IsUnderPostmaster || !IsPostmasterEnvironment);
+	Assert(pgStatShmem != NULL);
 
 	/*
-	 * This function can be called even if nothing at all has happened. In
-	 * this case, avoid sending a completely empty message to the stats
-	 * collector.
-	 *
+	 * We don't update the WAL usage portion of the local WalStats elsewhere.
+	 * Instead, fill in that portion with the difference of pgWalUsage since
+	 * the previous call.
+	 */
+	Assert(memcmp(&l->wal_usage, &all_zeroes, sizeof(WalUsage)) == 0);
+	WalUsageAccumDiff(&l->wal_usage, &pgWalUsage, &prevWalUsage);
+
+	/*
+	 * This function can be called even if nothing at all has happened. Avoid
+	 * taking lock for nothing in that case.
+	 */
+	if (!walstats_pending())
+		return false;
+
+	/* lock the shared entry to protect the content, skip if failed */
+	if (!nowait)
+		LWLockAcquire(&pgStatShmem->wal.lock, LW_EXCLUSIVE);
+	else if (!LWLockConditionalAcquire(&pgStatShmem->wal.lock,
+									   LW_EXCLUSIVE))
+	{
+		MemSet(l, 0, sizeof(WalStats));
+		return true;			/* failed to acquire lock, skip */
+	}
+
+	s->wal_usage.wal_records += l->wal_usage.wal_records;
+	s->wal_usage.wal_fpi += l->wal_usage.wal_fpi;
+	s->wal_usage.wal_bytes += l->wal_usage.wal_bytes;
+	s->wal_buffers_full += l->wal_buffers_full;
+	s->wal_write += l->wal_write;
+	s->wal_write_time += l->wal_write_time;
+	s->wal_sync += l->wal_sync;
+	s->wal_sync_time += l->wal_sync_time;
+	LWLockRelease(&pgStatShmem->wal.lock);
+
+	/*
+	 * Save the current counters for the subsequent calculation of WAL usage.
+	 */
+	prevWalUsage = pgWalUsage;
+
+	/*
+	 * Clear out the statistics buffer, so it can be re-used.
+	 */
+	MemSet(&WalStats, 0, sizeof(WalStats));
+
+	return false;
+}
+
+void
+pgstat_wal_initialize(void)
+{
+	/*
+	 * Initialize prevWalUsage with pgWalUsage so that pgstat_flush_wal() can
+	 * calculate how much pgWalUsage counters are increased by subtracting
+	 * prevWalUsage from pgWalUsage.
+	 */
+	prevWalUsage = pgWalUsage;
+}
+
+/*
+ * XXXX: always try to flush WAL stats. We don't want to manipulate another
+ * counter during XLogInsert so we don't have an effecient short cut to know
+ * whether any counter gets incremented.
+ */
+bool
+walstats_pending(void)
+{
+	/*
 	 * Check wal_records counter to determine whether any WAL activity has
 	 * happened since last time. Note that other WalUsage counters don't need
 	 * to be checked because they are incremented always together with
@@ -476,72 +894,27 @@ pgstat_send_wal(bool force)
 	 * and syncs are also checked.
 	 */
 	if (pgWalUsage.wal_records == prevWalUsage.wal_records &&
-		WalStats.m_wal_write == 0 && WalStats.m_wal_sync == 0)
+		WalStats.wal_write == 0 && WalStats.wal_sync == 0)
 	{
-		Assert(WalStats.m_wal_buffers_full == 0);
-		return;
+		Assert(WalStats.wal_buffers_full == 0);
+		return false;
 	}
 
-	if (!force)
-	{
-		TimestampTz now = GetCurrentTimestamp();
+	return true;
+}
 
-		/*
-		 * Don't send a message unless it's been at least PGSTAT_STAT_INTERVAL
-		 * msec since we last sent one to avoid overloading the stats
-		 * collector.
-		 */
-		if (!TimestampDifferenceExceeds(sendTime, now, PGSTAT_STAT_INTERVAL))
-			return;
-		sendTime = now;
-	}
+PgStat_WalStats *
+pgstat_fetch_stat_wal(void)
+{
+	pgstat_snapshot_global(PGSTAT_KIND_WAL);
 
-	/*
-	 * Set the counters related to generated WAL data if the counters were
-	 * updated.
-	 */
-	if (pgWalUsage.wal_records != prevWalUsage.wal_records)
-	{
-		WalUsage	walusage;
-
-		/*
-		 * Calculate how much WAL usage counters were increased by
-		 * subtracting the previous counters from the current ones. Fill the
-		 * results in WAL stats message.
-		 */
-		MemSet(&walusage, 0, sizeof(WalUsage));
-		WalUsageAccumDiff(&walusage, &pgWalUsage, &prevWalUsage);
-
-		WalStats.m_wal_records = walusage.wal_records;
-		WalStats.m_wal_fpi = walusage.wal_fpi;
-		WalStats.m_wal_bytes = walusage.wal_bytes;
-
-		/*
-		 * Save the current counters for the subsequent calculation of WAL
-		 * usage.
-		 */
-		prevWalUsage = pgWalUsage;
-	}
-
-	/*
-	 * Prepare and send the message
-	 */
-	pgstat_setheader(&WalStats.m_hdr, PGSTAT_MTYPE_WAL);
-	pgstat_send(&WalStats, sizeof(WalStats));
-
-	/*
-	 * Clear out the statistics buffer, so it can be re-used.
-	 */
-	MemSet(&WalStats, 0, sizeof(WalStats));
+	return &stats_snapshot.wal;
 }
 
 void
-pgstat_wal_initialize(void)
+pgstat_snapshot_wal(void)
 {
-	/*
-	 * Initialize prevWalUsage with pgWalUsage so that pgstat_send_wal() can
-	 * calculate how much pgWalUsage counters are increased by subtracting
-	 * prevWalUsage from pgWalUsage.
-	 */
-	prevWalUsage = pgWalUsage;
+	LWLockAcquire(StatsLock, LW_SHARED);
+	memcpy(&stats_snapshot.wal, &pgStatShmem->wal.stats, sizeof(PgStat_WalStats));
+	LWLockRelease(StatsLock);
 }
