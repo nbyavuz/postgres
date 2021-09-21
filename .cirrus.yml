@@ -202,14 +202,6 @@ task:
   test_script:
     - powershell -Command get-psdrive -psprovider filesystem
     - ps: Get-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug'
-    - echo include '%CIRRUS_WORKING_DIR%/ci/base.conf' >> test1.conf
-    - echo include '$CIRRUS_WORKING_DIR/ci/base.conf' >> test2.conf
-    - echo include $CIRRUS_WORKING_DIR/ci/base.conf' >> test3.conf
-    - echo include ${CIRRUS_WORKING_DIR}/ci/base.conf' >> test4.conf
-    - type test1.conf
-    - type test2.conf
-    - type test3.conf
-    - type test4.conf
     - set
   configure_script:
     - copy ci\windows_build_config.pl src\tools\msvc\config.pl
@@ -234,7 +226,7 @@ task:
 
   startcreate_script:
     - tmp_install\bin\pg_ctl.exe initdb -D tmp_check\db -l tmp_check\initdb.log
-    - echo include '%CIRRUS_WORKING_DIR%/ci/base.conf' >> tmp_check\db\postgresql.conf
+    - echo include 'c:/cirrus/ci/base.conf' >> tmp_check\db\postgresql.conf
     - tmp_install\bin\pg_ctl.exe start -D tmp_check\db -l tmp_check\postmaster.log
   modulescheck_script:
     - timeout -k60s 30m perl src/tools/msvc/vcregress.pl modulescheck
