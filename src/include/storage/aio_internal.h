@@ -343,15 +343,6 @@ struct PgAioInProgress
 		struct
 		{
 			OVERLAPPED overlapped;
-
-			/* Atomic control flags used to negotiate completer. */
-			pg_atomic_uint64 flags;
-
-			uint32 merge_head_idx;
-
-			/* Raw result from the kernel, if known. */
-			volatile int raw_result;
-#define PGAIO_IOCP_RESULT_INVALID INT_MIN
 		} iocp;
 #endif
 	} io_method_data;
