@@ -85,8 +85,6 @@ pgaio_iocp_submit(int max_submit, bool drain)
 	pgaio_iocp_submit_internal(ios, nios);
 	END_CRIT_SECTION();
 
-	/* XXXX copied from uring submit */
-
 	/*
 	 * Others might have been waiting for this IO. Because it wasn't marked as
 	 * in-flight until now, they might be waiting for the CV. Wake'em up.
@@ -347,40 +345,46 @@ pgaio_iocp_drain_in_interrupt_handler(void)
 static int
 pgaio_iocp_drain_internal(bool block, bool in_interrupt_handler)
 {
-	int			ndrained = 0;
+	OVERLAPPED_ENTRY completions[128];
+	ULONG			ndrained;
 
-	for (;;)
+	if (!GetQueuedCompletionStatusEx(pgaio_iocp_completion_port,
+									 completions,
+									 lengthof(completions),
+									 &ndrained,
+									 block ? INFINITE : 0,
+									 false))
 	{
-		PgAioInProgress *io;
-		OVERLAPPED *overlapped;
+		if (GetLastError() == WAIT_TIMEOUT)
+			return 0;
+
+		/* Call failed? */
+		_dosmaperr(GetLastError());
+		fprintf(stderr, "could not drain IOCP: %m\n");
+		abort();
+	}
+
+	for (unsigned i = 0; i < ndrained; ++i)
+	{
+		HANDLE file_handle = (HANDLE) completions[i].lpCompletionKey;
+		OVERLAPPED *overlapped = completions[i].lpOverlapped;
+		PgAioInProgress *io = io_for_overlapped(overlapped);
 		DWORD nbytes;
-		ULONG_PTR completion_key = 0; /* not used */
 
 		/*
-		 * XXX Need to use GetQueuedCompletionStatusEx() to consume
-		 * multiple results at once (hard to understand how to get errors...).
+		 * This shouldn't need to enter the kernel, it just reads values out of
+		 * the OVERLAPPED struct that we aren't supposed to read directly
+		 * ourselves.
 		 */
-
-		if (!GetQueuedCompletionStatus(pgaio_iocp_completion_port,
-									   &nbytes,
-									   &completion_key,
-									   &overlapped,
-									   ndrained == 0 && block ? INFINITE : 0))
+		if (GetOverlappedResult(file_handle, overlapped, &nbytes, TRUE))
 		{
-			if (!overlapped)
-				break;
-
-			io = io_for_overlapped(overlapped);
-			_dosmaperr(GetLastError());
-			pgaio_iocp_process_completion(io, -errno, in_interrupt_handler);
+			pgaio_iocp_process_completion(io, nbytes, in_interrupt_handler);
 		}
 		else
 		{
-			io = io_for_overlapped(overlapped);
-			pgaio_iocp_process_completion(io, nbytes, in_interrupt_handler);
+			_dosmaperr(GetLastError());
+			pgaio_iocp_process_completion(io, -errno, in_interrupt_handler);
 		}
-
-		ndrained++;
 	}
 
 	return ndrained;
@@ -437,17 +441,12 @@ pgaio_iocp_closing_fd(int fd)
 static void
 pgaio_iocp_postmaster_child_init_local(void)
 {
-	ULONG_PTR		CompletionKey = 0;
-
 	/*
 	 * Create an IO completion port that will be used to receive all I/O
 	 * completions for this process.
 	 */
 	pgaio_iocp_completion_port =
-		CreateIoCompletionPort(INVALID_HANDLE_VALUE,
-							   NULL,
-							   CompletionKey,
-							   1);
+		CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
 	if (pgaio_iocp_completion_port == NULL)
 	{
 		_dosmaperr(GetLastError());
@@ -463,12 +462,18 @@ pgaio_iocp_postmaster_child_init_local(void)
 void
 pgaio_iocp_register_file_handle(HANDLE file_handle)
 {
-	ULONG_PTR		CompletionKey = 0;
+	/*
+	 * For each file handle, we'll use the handle itself as the "completion
+	 * key".  That's an arbitrary value that will be written into
+	 * OVERLAPPED_ENTRY on completion, and since we need the file handle to
+	 * call GetOverlappedResult(), it's good to have it available then without
+	 * adding it to our IO object.
+	 */
 
 	if (CreateIoCompletionPort(file_handle,
-								pgaio_iocp_completion_port,
-								CompletionKey,
-								0) != pgaio_iocp_completion_port)
+							   pgaio_iocp_completion_port,
+							   (ULONG_PTR) file_handle,
+							   0) != pgaio_iocp_completion_port)
 	{
 		_dosmaperr(GetLastError());
 		elog(PANIC, "could not associate file handle with completion port: %m");
