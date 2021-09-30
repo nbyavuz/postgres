@@ -195,6 +195,7 @@ sub mkvcbuild
 		'syncrep_gram.y');
 	$postgres->AddFiles('src/backend/utils/adt', 'jsonpath_scan.l',
 		'jsonpath_gram.y');
+	$postgres->AddDefine('DLSUFFIX=".dll"');
 	$postgres->AddDefine('BUILDING_DLL');
 	$postgres->AddLibrary('secur32.lib');
 	$postgres->AddLibrary('ws2_32.lib');
@@ -298,6 +299,7 @@ sub mkvcbuild
 	my $libecpg = $solution->AddProject('libecpg', 'dll', 'interfaces',
 		'src/interfaces/ecpg/ecpglib');
 	$libecpg->AddDefine('FRONTEND');
+	$libecpg->AddDefine('DLSUFFIX=".dll"');
 	$libecpg->AddIncludeDir('src/interfaces/ecpg/include');
 	$libecpg->AddIncludeDir('src/interfaces/libpq');
 	$libecpg->AddIncludeDir('src/port');
@@ -814,6 +816,7 @@ sub mkvcbuild
 	$pgregress->AddFile('src/test/regress/pg_regress.c');
 	$pgregress->AddFile('src/test/regress/pg_regress_main.c');
 	$pgregress->AddIncludeDir('src/port');
+	$pgregress->AddDefine('DLSUFFIX=".dll"');
 	$pgregress->AddDefine('HOST_TUPLE="i686-pc-win32vc"');
 	$pgregress->AddLibrary('ws2_32.lib');
 	$pgregress->AddDirResourceFile('src/test/regress');
