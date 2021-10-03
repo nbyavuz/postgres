@@ -51,6 +51,7 @@
  */
 #ifdef _MSC_VER
 #define __inline__ inline
+#define __builtin_expect(a, b)  (a == b)
 #ifdef isnan
 #undef isnan
 #endif

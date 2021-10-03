@@ -299,7 +299,11 @@ static OP  *pp_require_safe(pTHX);
 static void activate_interpreter(plperl_interp_desc *interp_desc);
 
 #ifdef WIN32
+#if PERL_VERSION >= 28
+#define setlocale_perl(a,b)  Perl_setlocale(a,b)
+#else
 static char *setlocale_perl(int category, char *locale);
+#endif
 #endif
 
 /*
@@ -4132,6 +4136,7 @@ plperl_inline_callback(void *arg)
  * (needed because of the calls to new_*())
  */
 #ifdef WIN32
+#if PERL_VERSION < 28
 static char *
 setlocale_perl(int category, char *locale)
 {
@@ -4199,5 +4204,6 @@ setlocale_perl(int category, char *locale)
 
 	return RETVAL;
 }
+#endif 							/* PERL_VERSION < 28 */
 
 #endif							/* WIN32 */
