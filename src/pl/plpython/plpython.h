@@ -69,26 +69,21 @@
  * compatibility layer for Python 3 that when asked to convert a C
  * string to a Python string it converts the C string from the
  * PostgreSQL server encoding to a Python Unicode object.
+ *
+ * FIXME
  */
-#if PY_MAJOR_VERSION >= 3
 #define PyString_Check(x) 0
 #define PyString_AsString(x) PLyUnicode_AsString(x)
 #define PyString_FromString(x) PLyUnicode_FromString(x)
 #define PyString_FromStringAndSize(x, size) PLyUnicode_FromStringAndSize(x, size)
-#endif
 
 /*
  * Python 3 only has long.
+ *
+ * FIXME
  */
-#if PY_MAJOR_VERSION >= 3
 #define PyInt_FromLong(x) PyLong_FromLong(x)
 #define PyInt_AsLong(x) PyLong_AsLong(x)
-#endif
-
-/* Python 3 removed the Py_TPFLAGS_HAVE_ITER flag */
-#if PY_MAJOR_VERSION >= 3
-#define Py_TPFLAGS_HAVE_ITER 0
-#endif
 
 /* define our text domain for translations */
 #undef TEXTDOMAIN

@@ -240,7 +240,8 @@ task:
       --with-tcl --with-tclconfig=/usr/local/opt/tcl-tk/lib/ \
       --with-uuid=e2fs \
       \
-      CC="ccache gcc" CFLAGS="-O0 -ggdb"
+      CC="ccache gcc" CFLAGS="-O0 -ggdb" \
+      PYTHON=python3
   build_script:
     - gmake -s -j12 && gmake -s -j12 -C contrib
   upload_caches:

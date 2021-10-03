@@ -1032,25 +1032,17 @@ PLyObject_AsString(PyObject *plrv)
 	else if (PyFloat_Check(plrv))
 	{
 		/* use repr() for floats, str() is lossy */
-#if PY_MAJOR_VERSION >= 3
 		PyObject   *s = PyObject_Repr(plrv);
 
 		plrv_bo = PLyUnicode_Bytes(s);
 		Py_XDECREF(s);
-#else
-		plrv_bo = PyObject_Repr(plrv);
-#endif
 	}
 	else
 	{
-#if PY_MAJOR_VERSION >= 3
 		PyObject   *s = PyObject_Str(plrv);
 
 		plrv_bo = PLyUnicode_Bytes(s);
 		Py_XDECREF(s);
-#else
-		plrv_bo = PyObject_Str(plrv);
-#endif
 	}
 	if (!plrv_bo)
 		PLy_elog(ERROR, "could not create string representation of Python object");

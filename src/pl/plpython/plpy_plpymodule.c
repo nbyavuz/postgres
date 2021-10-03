@@ -109,7 +109,6 @@ static PyMethodDef PLy_exc_methods[] = {
 	{NULL, NULL, 0, NULL}
 };
 
-#if PY_MAJOR_VERSION >= 3
 static PyModuleDef PLy_module = {
 	PyModuleDef_HEAD_INIT,
 	.m_name = "plpy",
@@ -141,7 +140,6 @@ PyInit_plpy(void)
 
 	return m;
 }
-#endif							/* PY_MAJOR_VERSION >= 3 */
 
 void
 PLy_init_plpy(void)
@@ -149,10 +147,6 @@ PLy_init_plpy(void)
 	PyObject   *main_mod,
 			   *main_dict,
 			   *plpy_mod;
-
-#if PY_MAJOR_VERSION < 3
-	PyObject   *plpy;
-#endif
 
 	/*
 	 * initialize plpy module
@@ -162,13 +156,7 @@ PLy_init_plpy(void)
 	PLy_subtransaction_init_type();
 	PLy_cursor_init_type();
 
-#if PY_MAJOR_VERSION >= 3
 	PyModule_Create(&PLy_module);
-	/* for Python 3 we initialized the exceptions in PyInit_plpy */
-#else
-	plpy = Py_InitModule("plpy", PLy_methods);
-	PLy_add_exceptions(plpy);
-#endif
 
 	/* PyDict_SetItemString(plpy, "PlanType", (PyObject *) &PLy_PlanType); */
 
@@ -191,11 +179,7 @@ PLy_add_exceptions(PyObject *plpy)
 	PyObject   *excmod;
 	HASHCTL		hash_ctl;
 
-#if PY_MAJOR_VERSION < 3
-	excmod = Py_InitModule("spiexceptions", PLy_exc_methods);
-#else
 	excmod = PyModule_Create(&PLy_exc_module);
-#endif
 	if (excmod == NULL)
 		PLy_elog(ERROR, "could not create the spiexceptions module");
 
