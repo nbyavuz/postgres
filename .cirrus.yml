@@ -42,6 +42,7 @@ task:
   configure_script: |
     su postgres -c './configure \
       --enable-cassert --enable-debug --enable-tap-tests \
+      --with-perl \
       --with-ssl=openssl \
       --with-includes=/usr/local/include --with-libs=/usr/local/lib \
       CC="ccache cc"'
@@ -176,6 +177,7 @@ task:
     ./configure \
       --prefix=$HOME/install \
       --enable-cassert --enable-debug --enable-tap-tests \
+      --with-perl \
       --with-ssl=openssl \
       --with-includes=/usr/local/include:/usr/local/opt/openssl/include \
       --with-libs=/usr/local/libs:/usr/local/opt/openssl/lib \
@@ -256,8 +258,6 @@ task:
     - perl src/tools/msvc/vcregress.pl modulescheck
   contribcheck_script:
     - perl src/tools/msvc/vcregress.pl contribcheck
-  plcheck_script:
-    - perl src/tools/msvc/vcregress.pl plcheck
   stop_script:
     - tmp_install\bin\pg_ctl.exe stop -D tmp_check\db -l tmp_check\postmaster.log
   subscriptioncheck_script:
