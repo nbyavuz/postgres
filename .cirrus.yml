@@ -239,12 +239,17 @@ task:
   tempinstall_script:
     - perl src\tools\msvc\install.pl tmp_install
 
+  ssl_script:
+    - set with_ssl=openssl
+    - perl src/tools/msvc/vcregress.pl taptest .\src\test\ssl\
   check_script:
     - perl src/tools/msvc/vcregress.pl check parallel
   startcreate_script:
     - tmp_install\bin\pg_ctl.exe initdb -D tmp_check\db -l tmp_check\initdb.log
     - echo include '%TEMP_CONFIG%' >> tmp_check\db\postgresql.conf
     - tmp_install\bin\pg_ctl.exe start -D tmp_check\db -l tmp_check\postmaster.log
+  plcheck_script:
+    - perl src/tools/msvc/vcregress.pl plcheck
   isolationcheck_script:
     - perl src/tools/msvc/vcregress.pl isolationcheck
   modulescheck_script:
