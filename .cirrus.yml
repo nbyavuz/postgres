@@ -204,11 +204,27 @@ task:
     - homebrew
 
   configure_script: |
-    export PKG_CONFIG_PATH=/usr/local/opt/icu4c/lib/pkgconfig
+    set -x
+
+    LIBS="/usr/local/lib:$LIBS"
+    INCLUDES="/usr/local/include:$INCLUDES"
+
+    INCLUDES="/usr/local/opt/openssl/include:$INCLUDES"
+    LIBS="/usr/local/opt/openssl/lib:$LIBS"
+
+    PKG_CONFIG_PATH="/usr/local/opt/icu4c/lib/pkgconfig:$PKG_CONFIG_PATH"
+    INCLUDES="/usr/local/opt/icu4c/include:$INCLUDES"
+    LIBS="/usr/local/opt/icu4c/lib:$LIBS"
+
+    LIBS="/usr/local/opt/openldap/lib:$LIBS"
+    INCLUDES="/usr/local/opt/openldap/include:$INCLUDES"
+
+    export PKG_CONFIG_PATH
+
     ./configure \
       --prefix=$HOME/install \
-      --with-includes=/usr/local/opt/openldap/include:/usr/local/opt/icu4c/include:/usr/local/include:/usr/local/opt/openssl/include \
-      --with-libs=/usr/local/opt/openldap/lib:/usr/local/opt/icu4c/lib:/usr/local/lib:/usr/local/opt/openssl/lib \
+      --with-includes="$INCLUDES" \
+      --with-libs="$LIBS" \
       \
       --enable-cassert --enable-debug --enable-tap-tests \
       --enable-nls \
