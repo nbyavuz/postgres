@@ -42,8 +42,21 @@ task:
   configure_script: |
     su postgres -c './configure \
       --enable-cassert --enable-debug --enable-tap-tests \
+      --enable-nls \
+      \
+      --with-icu \
+      --with-ldap \
+      --with-libxml \
+      --with-libxslt \
+      \
+      --with-lz4 \
+      --with-pam \
       --with-perl \
+      --with-python \
       --with-ssl=openssl \
+      --with-tcl --with-tclconfig=/usr/local/lib/tcl8.6/ \
+      --with-uuid=bsd \
+      \
       --with-includes=/usr/local/include --with-libs=/usr/local/lib \
       CC="ccache cc"'
   build_script:
@@ -110,9 +123,24 @@ task:
   configure_script: |
     su postgres -c './configure \
       --enable-cassert --enable-debug --enable-tap-tests \
-      --with-tcl --with-python --with-perl \
-      --with-ldap --with-ssl=openssl --with-icu --with-llvm \
-      CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"' CFLAGS="-O0 -ggdb"
+      --enable-nls \
+      \
+      --with-gssapi \
+      --with-icu \
+      --with-ldap \
+      --with-libxml \
+      --with-libxslt \
+      --with-llvm \
+      --with-lz4 \
+      --with-pam \
+      --with-perl \
+      --with-python \
+      --with-ssl=openssl \
+      --with-systemd \
+      --with-tcl --with-tclconfig=/usr/lib/tcl8.6/ \
+      --with-uuid=e2fs \
+      \
+      CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang" CFLAGS="-O0 -ggdb"'
   build_script:
     - su postgres -c 'make -s -j4 && make -s -j4 -C contrib'
   upload_caches:
@@ -170,18 +198,34 @@ task:
     - sudo chmod 777 /cores
   homebrew_install_script:
     - brew install make coreutils ccache
+  homebrew_install_additional_script:
+    - brew install icu4c lz4 tcl-tk openldap
   upload_caches:
     - homebrew
 
   configure_script: |
+    export PKG_CONFIG_PATH=/usr/local/opt/icu4c/lib/pkgconfig
     ./configure \
       --prefix=$HOME/install \
+      --with-includes=/usr/local/opt/openldap/include:/usr/local/opt/icu4c/include:/usr/local/include:/usr/local/opt/openssl/include \
+      --with-libs=/usr/local/opt/openldap/lib:/usr/local/opt/icu4c/lib:/usr/local/lib:/usr/local/opt/openssl/lib \
+      \
       --enable-cassert --enable-debug --enable-tap-tests \
+      --enable-nls \
+      \
+      --with-icu \
+      --with-ldap \
+      --with-libxml \
+      --with-libxslt \
+      \
+      --with-lz4 \
       --with-perl \
+      --with-python \
       --with-ssl=openssl \
-      --with-includes=/usr/local/include:/usr/local/opt/openssl/include \
-      --with-libs=/usr/local/libs:/usr/local/opt/openssl/lib \
-      CC="ccache gcc" CFLAGS="-O0"
+      --with-tcl --with-tclconfig=/usr/local/opt/tcl-tk/lib/ \
+      --with-uuid=e2fs \
+      \
+      CC="ccache gcc" CFLAGS="-O0 -ggdb"
   build_script:
     - gmake -s -j12 && gmake -s -j12 -C contrib
   upload_caches:
