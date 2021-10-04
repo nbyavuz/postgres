@@ -269,12 +269,24 @@ task:
 
 
 task:
-  name: Windows
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*windows.*'
   windows_container:
     dockerfile: ci/docker/windows_vs_2019
     cpu: 4
     memory: 4G
+
+  matrix:
+    - env:
+        PERL_VERSION: 5.28.2.1
+    - env:
+        PERL_VERSION: 5.26.3.1
+    - env:
+        PERL_VERSION: 5.24.4.1
+    - env:
+        PERL_VERSION: 5.30.3.1
+    - env:
+        PERL_VERSION: 5.32.1.1
+
   env:
     PROVE_FLAGS: -j10
     # The default working dir is in a directory msbuild complains about
@@ -282,13 +294,27 @@ task:
     TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/ci/pg_ci_base.conf
     # Avoid re-installing over and over
     NO_TEMP_INSTALL: 1
+    PATH: C:\perl\strawberry-${PERL_VERSION}-64bit\perl\bin;${PATH}
+
+
+  name: Windows Perl Test $PERL_VERSION
 
   sysinfo_script:
+    - echo %PATH%
     - chcp
     - systeminfo
     - powershell -Command get-psdrive -psprovider filesystem
     - ps: Get-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug'
     - set
+
+  old_perl_script:
+    - curl.exe -O -L "https://strawberryperl.com/download/%PERL_VERSION%/strawberry-perl-%PERL_VERSION%-64bit-portable.zip"
+    - mkdir c:\perl || true
+    - 7z.exe x "strawberry-perl-%PERL_VERSION%-64bit-portable.zip" "-oc:\perl\strawberry-%PERL_VERSION%-64bit"
+
+  perl_test_script:
+    - where perl
+    - perl --version
 
   configure_script:
     - copy ci\windows_build_config.pl src\tools\msvc\config.pl
@@ -299,19 +325,19 @@ task:
     # Disable file tracker, we're never going to rebuild...
     - msbuild -m /p:TrackFileAccess=false pgsql.sln
   tempinstall_script:
-    - perl src\tools\msvc\install.pl tmp_install
+    - cd src\tools\msvc && perl .\install.pl %CIRRUS_WORKING_DIR%\tmp_install
 
-  ssl_script:
-    - set with_ssl=openssl
-    - perl src/tools/msvc/vcregress.pl taptest .\src\test\ssl\
-  check_script:
-    - perl src/tools/msvc/vcregress.pl check parallel
   startcreate_script:
     - tmp_install\bin\pg_ctl.exe initdb -D tmp_check\db -l tmp_check\initdb.log
     - echo include '%TEMP_CONFIG%' >> tmp_check\db\postgresql.conf
     - tmp_install\bin\pg_ctl.exe start -D tmp_check\db -l tmp_check\postmaster.log
   plcheck_script:
     - perl src/tools/msvc/vcregress.pl plcheck
+  ssl_script:
+    - set with_ssl=openssl
+    - perl src/tools/msvc/vcregress.pl taptest .\src\test\ssl\
+  check_script:
+    - perl src/tools/msvc/vcregress.pl check parallel
   isolationcheck_script:
     - perl src/tools/msvc/vcregress.pl isolationcheck
   modulescheck_script:
