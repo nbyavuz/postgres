@@ -289,6 +289,12 @@ task:
     - ps: Get-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug'
     - set
 
+  dll_script:
+    - choco install -y sysinternals
+    - reg.exe ADD HKCU\Software\Sysinternals /v EulaAccepted /t REG_DWORD /d 1 /f
+    - reg.exe ADD HKU\.DEFAULT\Software\Sysinternals /v EulaAccepted /t REG_DWORD /d 1 /f
+    - sigcheck.exe -q -n C:\Windows\system32\ucrtbased.dll || true
+
   configure_script:
     - copy ci\windows_build_config.pl src\tools\msvc\config.pl
     - vcvarsall x64
@@ -301,15 +307,17 @@ task:
     # Installation on windows currently only completely works from src\tools\msvc
     - cd src\tools\msvc && perl .\install.pl %CIRRUS_WORKING_DIR%\tmp_install
 
+  startcreate_test_script:
+    - tmp_install\bin\pg_ctl.exe initdb -D tmp_check\db -l tmp_check\initdb.log
+    - echo include '%TEMP_CONFIG%' >> tmp_check\db\postgresql.conf
+    - tmp_install\bin\pg_ctl.exe start -D tmp_check\db -l tmp_check\postmaster.log
+    - Listdlls64.exe postgres.exe
+
   ssl_test_script:
     - set with_ssl=openssl
     - perl src/tools/msvc/vcregress.pl taptest .\src\test\ssl\
   check_test_script:
     - perl src/tools/msvc/vcregress.pl check parallel
-  startcreate_test_script:
-    - tmp_install\bin\pg_ctl.exe initdb -D tmp_check\db -l tmp_check\initdb.log
-    - echo include '%TEMP_CONFIG%' >> tmp_check\db\postgresql.conf
-    - tmp_install\bin\pg_ctl.exe start -D tmp_check\db -l tmp_check\postmaster.log
   plcheck_test_script:
     - perl src/tools/msvc/vcregress.pl plcheck
   isolationcheck_test_script:
