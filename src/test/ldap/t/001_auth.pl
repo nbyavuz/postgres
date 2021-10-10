@@ -6,6 +6,13 @@ use warnings;
 use PostgreSQL::Test::Utils;
 use PostgreSQL::Test::Cluster;
 use Test::More;
+use Config;
+
+if ($Config{osname} eq 'MSWin32')
+{
+	plan skip_all => 'ldap tests ';
+	exit;
+}
 
 if ($ENV{with_ldap} eq 'yes')
 {
