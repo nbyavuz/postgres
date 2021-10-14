@@ -787,6 +787,8 @@ LockErrorCleanup(void)
  * At subtransaction abort, we release all locks held by the subtransaction;
  * this is implemented by retail releasing of the locks under control of
  * the ResourceOwner mechanism.
+ *
+ * FIXME
  */
 void
 ProcReleaseLocks(bool isCommit)
@@ -795,10 +797,23 @@ ProcReleaseLocks(bool isCommit)
 		return;
 	/* If waiting, get off wait queue (should only be needed after error) */
 	LockErrorCleanup();
-	/* Release standard locks, including session-level if aborting */
-	LockReleaseAll(DEFAULT_LOCKMETHOD, !isCommit);
+
+	//LockReleaseXXX(isCommit);
+	VirtualXactLockTableCleanup();
+
+	/* Release session-level locks if aborting */
+	if (!isCommit)
+		LockReleaseSession(DEFAULT_LOCKMETHOD);
+
+	/*
+	 * XXX: an assert-only crosscheck that no transaction scope locks are held
+	 * anymore would be good, this isn't quite that.
+	 */
+	LockReleaseXXX(isCommit);
+
 	/* Release transaction-level advisory locks */
-	LockReleaseAll(USER_LOCKMETHOD, false);
+	//LockReleaseSession(USER_LOCKMETHOD);
+	//LockReleaseAll(USER_LOCKMETHOD, false);
 }
 
 
@@ -886,6 +901,8 @@ ProcKill(int code, Datum arg)
 			MyProc->lockGroupLeader = NULL;
 		LWLockRelease(leader_lwlock);
 	}
+
+	Assert(MyProc->fpLockBits == 0);
 
 	/*
 	 * Reset MyLatch to the process local one.  This is so that signal
