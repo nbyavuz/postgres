@@ -2024,6 +2024,7 @@ LockRelease(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 	{
 		ResourceOwner owner;
 		dlist_iter iter;
+		bool		found = false;
 
 		/* Identify owner for lock */
 		if (sessionLock)
@@ -2038,6 +2039,8 @@ LockRelease(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 			if (locallockowner->owner != owner)
 				continue;
 
+			found = true;
+
 			if (--locallockowner->nLocks == 0)
 			{
 				dlist_delete(&locallockowner->locallock_node);
@@ -2049,6 +2052,14 @@ LockRelease(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 			}
 
 			Assert(locallockowner->nLocks >= 0);
+		}
+
+		if (!found)
+		{
+			/* don't release a lock belonging to another owner */
+			elog(WARNING, "you don't own a lock of type %s",
+				 lockMethodTable->lockModeNames[lockmode]);
+			return false;
 		}
 	}
 
