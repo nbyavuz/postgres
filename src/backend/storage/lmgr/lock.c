@@ -3235,8 +3235,6 @@ LockRefindAndRelease(LockMethod lockMethodTable, PGPROC *proc,
 static void
 CheckForSessionAndXactLocks(void)
 {
-	elog(ERROR, "CheckForSessionAndXactLocks isn't ready for you");
-#if 0
 	typedef struct
 	{
 		LOCKTAG		lock;		/* identifies the lockable object */
@@ -3264,10 +3262,9 @@ CheckForSessionAndXactLocks(void)
 
 	while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
 	{
-		LOCALLOCKOWNER *lockOwners = locallock->lockOwners;
 		PerLockTagEntry *hentry;
 		bool		found;
-		int			i;
+		dlist_iter iter;
 
 		/*
 		 * Ignore VXID locks.  We don't want those to be held by prepared
@@ -3288,9 +3285,13 @@ CheckForSessionAndXactLocks(void)
 			hentry->sessLock = hentry->xactLock = false;
 
 		/* Scan to see if we hold lock at session or xact level or both */
-		for (i = locallock->numLockOwners - 1; i >= 0; i--)
+		dlist_foreach(iter, &locallock->locallockowners)
 		{
-			if (lockOwners[i].owner == NULL)
+			LOCALLOCKOWNER *locallockowner = dlist_container(LOCALLOCKOWNER,
+															 locallock_node,
+															 iter.cur);
+
+			if (locallockowner->owner == NULL)
 				hentry->sessLock = true;
 			else
 				hentry->xactLock = true;
@@ -3308,8 +3309,6 @@ CheckForSessionAndXactLocks(void)
 
 	/* Success, so clean up */
 	hash_destroy(lockhtab);
-
-#endif
 }
 
 /*
@@ -3327,8 +3326,6 @@ CheckForSessionAndXactLocks(void)
 void
 AtPrepare_Locks(void)
 {
-	elog(ERROR, "broken");
-#if 0
 	HASH_SEQ_STATUS status;
 	LOCALLOCK  *locallock;
 
@@ -3341,10 +3338,9 @@ AtPrepare_Locks(void)
 	while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
 	{
 		TwoPhaseLockRecord record;
-		LOCALLOCKOWNER *lockOwners = locallock->lockOwners;
 		bool		haveSessionLock;
 		bool		haveXactLock;
-		int			i;
+		dlist_iter iter;
 
 		/*
 		 * Ignore VXID locks.  We don't want those to be held by prepared
@@ -3359,9 +3355,13 @@ AtPrepare_Locks(void)
 
 		/* Scan to see whether we hold it at session or transaction level */
 		haveSessionLock = haveXactLock = false;
-		for (i = locallock->numLockOwners - 1; i >= 0; i--)
+		dlist_foreach(iter, &locallock->locallockowners)
 		{
-			if (lockOwners[i].owner == NULL)
+			LOCALLOCKOWNER *locallockowner = dlist_container(LOCALLOCKOWNER,
+															 locallock_node,
+															 iter.cur);
+
+			if (locallockowner->owner == NULL)
 				haveSessionLock = true;
 			else
 				haveXactLock = true;
@@ -3405,7 +3405,6 @@ AtPrepare_Locks(void)
 		RegisterTwoPhaseRecord(TWOPHASE_RM_LOCK_ID, 0,
 							   &record, sizeof(TwoPhaseLockRecord));
 	}
-#endif
 }
 
 /*
@@ -3426,8 +3425,6 @@ AtPrepare_Locks(void)
 void
 PostPrepare_Locks(TransactionId xid)
 {
-	elog(ERROR, "PostPrepare_Locks");
-#if 0
 	PGPROC	   *newproc = TwoPhaseGetDummyProc(xid, false);
 	HASH_SEQ_STATUS status;
 	LOCALLOCK  *locallock;
@@ -3456,10 +3453,9 @@ PostPrepare_Locks(TransactionId xid)
 
 	while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
 	{
-		LOCALLOCKOWNER *lockOwners = locallock->lockOwners;
 		bool		haveSessionLock;
 		bool		haveXactLock;
-		int			i;
+		dlist_iter iter;
 
 		if (locallock->proclock == NULL || locallock->lock == NULL)
 		{
@@ -3478,9 +3474,13 @@ PostPrepare_Locks(TransactionId xid)
 
 		/* Scan to see whether we hold it at session or transaction level */
 		haveSessionLock = haveXactLock = false;
-		for (i = locallock->numLockOwners - 1; i >= 0; i--)
+		dlist_foreach(iter, &locallock->locallockowners)
 		{
-			if (lockOwners[i].owner == NULL)
+			LOCALLOCKOWNER *locallockowner = dlist_container(LOCALLOCKOWNER,
+															 locallock_node,
+															 iter.cur);
+
+			if (locallockowner->owner == NULL)
 				haveSessionLock = true;
 			else
 				haveXactLock = true;
@@ -3612,7 +3612,6 @@ PostPrepare_Locks(TransactionId xid)
 
 	END_CRIT_SECTION();
 
-#endif
 }
 
 
