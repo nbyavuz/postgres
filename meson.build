@@ -596,6 +596,9 @@ if not pyopt.disabled()
   pm = import('python')
   python3_inst = pm.find_installation(required: pyopt.enabled())
   python3 = python3_inst.dependency(embed: true, required: pyopt.enabled())
+  if not cc.has_header('Python.h', dependencies: python3, required: pyopt.enabled())
+    python3 = dependency('', required: false)
+  endif
 else
   python3 = dependency('', required: false)
 endif
