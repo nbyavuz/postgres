@@ -16,6 +16,8 @@
 
 #include "executor/nodeAgg.h"
 #include "nodes/execnodes.h"
+#include "nodes/params.h"
+#include "nodes/subscripting.h"
 
 /* forward references to avoid circularity */
 struct ExprEvalStep;
@@ -28,15 +30,6 @@ struct ScalarArrayOpExprHashTable;
 /* jump-threading is in use */
 #define EEO_FLAG_DIRECT_THREADED			(1 << 2)
 
-/* Typical API for out-of-line evaluation subroutines */
-typedef void (*ExecEvalSubroutine) (ExprState *state,
-									struct ExprEvalStep *op,
-									ExprContext *econtext);
-
-/* API for out-of-line evaluation subroutines returning bool */
-typedef bool (*ExecEvalBoolSubroutine) (ExprState *state,
-										struct ExprEvalStep *op,
-										ExprContext *econtext);
 
 /* ExprEvalSteps that cache a composite type's tupdesc need one of these */
 /* (it fits in-line in some step types, otherwise allocate out-of-line) */
@@ -285,6 +278,7 @@ typedef struct ExprEvalStep
 	 * no more than 40 bytes on 64-bit systems (so that the entire struct is
 	 * no more than 64 bytes, a single cacheline on common systems).
 	 */
+#define FIELDNO_EXPREVALSTEP_D 3
 	union
 	{
 		/* for EEOP_INNER/OUTER/SCAN_FETCHSOME */
@@ -387,12 +381,14 @@ typedef struct ExprEvalStep
 		}			param;
 
 		/* for EEOP_PARAM_CALLBACK */
-		struct
+		struct ExprEvalStepParamCallback
 		{
-			ExecEvalSubroutine paramfunc;	/* add-on evaluation subroutine */
+#define FIELDNO_EXPREVALSTEPPARAMCALLBACK_PARAM 0
+			Param		param;
+#define FIELDNO_EXPREVALSTEPPARAMCALLBACK_PARAMFUNC 1
+			ExecEvalParamCallback paramfunc;	/* callback returning value */
+#define FIELDNO_EXPREVALSTEPPARAMCALLBACK_PARAMARG 2
 			void	   *paramarg;	/* private data for same */
-			int			paramid;	/* numeric ID for parameter */
-			Oid			paramtype;	/* OID of parameter's datatype */
 		}			cparam;
 
 		/* for EEOP_CASE_TESTVAL/DOMAIN_TESTVAL */
@@ -523,18 +519,22 @@ typedef struct ExprEvalStep
 		}			fieldstore;
 
 		/* for EEOP_SBSREF_SUBSCRIPTS */
-		struct
+		struct ExprEvalStepSubscriptsCheck
 		{
-			ExecEvalBoolSubroutine subscriptfunc;	/* evaluation subroutine */
+#define FIELDNO_EXPREVALSTEPSUBSCRIPTS_CHECK_FUNC 0
+			ExecEvalSubscriptCheckCallback subscriptfunc;	/* evaluation subroutine */
+#define FIELDNO_EXPREVALSTEPSUBSCRIPTS_CHECK_STATE 1
 			/* too big to have inline */
 			struct SubscriptingRefState *state;
 			int			jumpdone;	/* jump here on null */
 		}			sbsref_subscript;
 
 		/* for EEOP_SBSREF_OLD / ASSIGN / FETCH */
-		struct
+		struct ExprEvalStepSubscripts
 		{
-			ExecEvalSubroutine subscriptfunc;	/* evaluation subroutine */
+#define FIELDNO_EXPREVALSTEPSUBSCRIPTS_FUNC 0
+			ExecEvalSubscriptCallback subscriptfunc;	/* evaluation subroutine */
+#define FIELDNO_EXPREVALSTEPSUBSCRIPTS_STATE 1
 			/* too big to have inline */
 			struct SubscriptingRefState *state;
 		}			sbsref;
@@ -711,19 +711,7 @@ typedef struct SubscriptingRefState
 	bool		prevnull;
 } SubscriptingRefState;
 
-/* Execution step methods used for SubscriptingRef */
-typedef struct SubscriptExecSteps
-{
-	/* See nodes/subscripting.h for more detail about these */
-	ExecEvalBoolSubroutine sbs_check_subscripts;	/* process subscripts */
-	ExecEvalSubroutine sbs_fetch;	/* fetch an element */
-	ExecEvalSubroutine sbs_assign;	/* assign to an element */
-	ExecEvalSubroutine sbs_fetch_old;	/* fetch old value for assignment */
-} SubscriptExecSteps;
 
-
-/* functions in execExpr.c */
-extern void ExprEvalPushStep(ExprState *es, const ExprEvalStep *s);
 
 /* functions in execExprInterp.c */
 extern void ExecReadyInterpretedExpr(ExprState *state);

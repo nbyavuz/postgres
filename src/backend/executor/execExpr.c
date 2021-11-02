@@ -65,6 +65,7 @@ static void ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args,
 						 Oid funcid, Oid inputcollid,
 						 ExprState *state);
 static void ExecInitExprSlots(ExprState *state, Node *node);
+static void ExprEvalPushStep(ExprState *es, const ExprEvalStep *s);
 static void ExecPushExprSlots(ExprState *state, LastAttnumInfo *info);
 static bool get_last_attnums_walker(Node *node, LastAttnumInfo *info);
 static bool ExecComputeSlotInfo(ExprState *state, ExprEvalStep *op);
@@ -1011,8 +1012,12 @@ ExecInitExprRec(Expr *node, ExprState *state,
 							params = NULL;
 						if (params && params->paramCompile)
 						{
-							params->paramCompile(params, param, state,
-												 resv, resnull);
+							scratch.opcode = EEOP_PARAM_CALLBACK;
+							scratch.d.cparam.param = *param;
+							scratch.d.cparam.paramarg = NULL;
+							scratch.d.cparam.paramfunc =
+								params->paramCompile(params, param, &scratch.d.cparam.paramarg);
+							ExprEvalPushStep(state, &scratch);
 						}
 						else
 						{
@@ -2444,7 +2449,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
  * Note that this potentially re-allocates es->steps, therefore no pointer
  * into that array may be used while the expression is still being built.
  */
-void
+static void
 ExprEvalPushStep(ExprState *es, const ExprEvalStep *s)
 {
 	if (es->steps_alloc == 0)
