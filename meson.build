@@ -8,6 +8,7 @@ project('postgresql',
     'b_pie=true',
     'b_pch=false',
     'buildtype=release',
+    'c_std=c99',
   ]
 )
 
