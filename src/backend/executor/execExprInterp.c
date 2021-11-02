@@ -171,11 +171,13 @@ static pg_attribute_always_inline void ExecAggPlainTransByVal(AggState *aggstate
 															  AggStatePerTrans pertrans,
 															  AggStatePerGroup pergroup,
 															  ExprContext *aggcontext,
+															  PGFunction fn_addr,
 															  int setno);
 static pg_attribute_always_inline void ExecAggPlainTransByRef(AggState *aggstate,
 															  AggStatePerTrans pertrans,
 															  AggStatePerGroup pergroup,
 															  ExprContext *aggcontext,
+															  PGFunction fn_addr,
 															  int setno);
 
 /*
@@ -1153,22 +1155,24 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			else
 			{
 				FunctionCallInfo fcinfo_out;
+				PGFunction fn_addr_out = op->d.iocoerce.fn_addr_out;
 
 				fcinfo_out = op->d.iocoerce.fcinfo_data_out;
 				fcinfo_out->args[0].value = *op->resvalue;
 				fcinfo_out->args[0].isnull = false;
 
 				fcinfo_out->isnull = false;
-				str = DatumGetCString(FunctionCallInvoke(fcinfo_out));
+				str = DatumGetCString(fn_addr_out(fcinfo_out));
 
 				/* OutputFunctionCall assumes result isn't null */
 				Assert(!fcinfo_out->isnull);
 			}
 
 			/* call input function (similar to InputFunctionCall) */
-			if (!op->d.iocoerce.finfo_in->fn_strict || str != NULL)
+			if (!op->d.iocoerce.fn_strict_in || str != NULL)
 			{
 				FunctionCallInfo fcinfo_in;
+				PGFunction fn_addr_in = op->d.iocoerce.fn_addr_in;
 				Datum		d;
 
 				fcinfo_in = op->d.iocoerce.fcinfo_data_in;
@@ -1177,7 +1181,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 				/* second and third arguments are already set up */
 
 				fcinfo_in->isnull = false;
-				d = FunctionCallInvoke(fcinfo_in);
+				d = fn_addr_in(fcinfo_in);
 				*op->resvalue = d;
 
 				/* Should get null result if and only if str is NULL */
@@ -1357,7 +1361,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			Datum		d;
 
 			/* force NULL result if strict fn and NULL input */
-			if (op->d.rowcompare_step.finfo->fn_strict &&
+			if (op->d.rowcompare_step.fn_strict &&
 				(fcinfo->args[0].isnull || fcinfo->args[1].isnull))
 			{
 				*op->resnull = true;
@@ -1589,7 +1593,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			 */
 			oldContext = MemoryContextSwitchTo(aggstate->tmpcontext->ecxt_per_tuple_memory);
 			fcinfo->isnull = false;
-			*op->resvalue = FunctionCallInvoke(fcinfo);
+			*op->resvalue = op->d.agg_deserialize.fn_addr(fcinfo);
 			*op->resnull = fcinfo->isnull;
 			MemoryContextSwitchTo(oldContext);
 
@@ -1676,6 +1680,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 				/* invoke transition function, unless prevented by strictness */
 				ExecAggPlainTransByVal(aggstate, pertrans, pergroup,
 									   op->d.agg_trans.aggcontext,
+									   op->d.agg_trans.fn_addr,
 									   op->d.agg_trans.setno);
 			}
 
@@ -1695,6 +1700,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			if (likely(!pergroup->transValueIsNull))
 				ExecAggPlainTransByVal(aggstate, pertrans, pergroup,
 									   op->d.agg_trans.aggcontext,
+									   op->d.agg_trans.fn_addr,
 									   op->d.agg_trans.setno);
 
 			EEO_NEXT();
@@ -1712,6 +1718,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 			ExecAggPlainTransByVal(aggstate, pertrans, pergroup,
 								   op->d.agg_trans.aggcontext,
+								   op->d.agg_trans.fn_addr,
 								   op->d.agg_trans.setno);
 
 			EEO_NEXT();
@@ -1733,6 +1740,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			else if (likely(!pergroup->transValueIsNull))
 				ExecAggPlainTransByRef(aggstate, pertrans, pergroup,
 									   op->d.agg_trans.aggcontext,
+									   op->d.agg_trans.fn_addr,
 									   op->d.agg_trans.setno);
 
 			EEO_NEXT();
@@ -1751,6 +1759,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 			if (likely(!pergroup->transValueIsNull))
 				ExecAggPlainTransByRef(aggstate, pertrans, pergroup,
 									   op->d.agg_trans.aggcontext,
+									   op->d.agg_trans.fn_addr,
 									   op->d.agg_trans.setno);
 			EEO_NEXT();
 		}
@@ -1767,6 +1776,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 
 			ExecAggPlainTransByRef(aggstate, pertrans, pergroup,
 								   op->d.agg_trans.aggcontext,
+								   op->d.agg_trans.fn_addr,
 								   op->d.agg_trans.setno);
 
 			EEO_NEXT();
@@ -2949,6 +2959,7 @@ ExecEvalMinMax(ExprState *state, ExprEvalStep *op)
 	bool	   *nulls = op->d.minmax.nulls;
 	FunctionCallInfo fcinfo = op->d.minmax.fcinfo_data;
 	MinMaxOp	operator = op->d.minmax.op;
+	PGFunction	fn_addr = op->d.minmax.fn_addr;
 
 	/* set at initialization */
 	Assert(fcinfo->args[0].isnull == false);
@@ -2978,7 +2989,7 @@ ExecEvalMinMax(ExprState *state, ExprEvalStep *op)
 			fcinfo->args[1].value = values[off];
 
 			fcinfo->isnull = false;
-			cmpresult = DatumGetInt32(FunctionCallInvoke(fcinfo));
+			cmpresult = DatumGetInt32(fn_addr(fcinfo));
 			if (fcinfo->isnull) /* probably should not happen */
 				continue;
 
@@ -3290,7 +3301,7 @@ ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
 {
 	FunctionCallInfo fcinfo = op->d.scalararrayop.fcinfo_data;
 	bool		useOr = op->d.scalararrayop.useOr;
-	bool		strictfunc = op->d.scalararrayop.finfo->fn_strict;
+	bool		strictfunc = op->d.scalararrayop.fn_strict;
 	ArrayType  *arr;
 	int			nitems;
 	Datum		result;
@@ -4304,8 +4315,8 @@ ExecEvalAggOrderedTransTuple(ExprState *state, ExprEvalStep *op,
 /* implementation of transition function invocation for byval types */
 static pg_attribute_always_inline void
 ExecAggPlainTransByVal(AggState *aggstate, AggStatePerTrans pertrans,
-					   AggStatePerGroup pergroup,
-					   ExprContext *aggcontext, int setno)
+					   AggStatePerGroup pergroup, ExprContext *aggcontext,
+					   PGFunction fn_addr, int setno)
 {
 	FunctionCallInfo fcinfo = pertrans->transfn_fcinfo;
 	MemoryContext oldContext;
@@ -4325,7 +4336,7 @@ ExecAggPlainTransByVal(AggState *aggstate, AggStatePerTrans pertrans,
 	fcinfo->args[0].isnull = pergroup->transValueIsNull;
 	fcinfo->isnull = false;		/* just in case transfn doesn't set it */
 
-	newVal = FunctionCallInvoke(fcinfo);
+	newVal = fn_addr(fcinfo);
 
 	pergroup->transValue = newVal;
 	pergroup->transValueIsNull = fcinfo->isnull;
@@ -4336,8 +4347,8 @@ ExecAggPlainTransByVal(AggState *aggstate, AggStatePerTrans pertrans,
 /* implementation of transition function invocation for byref types */
 static pg_attribute_always_inline void
 ExecAggPlainTransByRef(AggState *aggstate, AggStatePerTrans pertrans,
-					   AggStatePerGroup pergroup,
-					   ExprContext *aggcontext, int setno)
+					   AggStatePerGroup pergroup,ExprContext *aggcontext,
+					   PGFunction fn_addr, int setno)
 {
 	FunctionCallInfo fcinfo = pertrans->transfn_fcinfo;
 	MemoryContext oldContext;
@@ -4357,7 +4368,7 @@ ExecAggPlainTransByRef(AggState *aggstate, AggStatePerTrans pertrans,
 	fcinfo->args[0].isnull = pergroup->transValueIsNull;
 	fcinfo->isnull = false;		/* just in case transfn doesn't set it */
 
-	newVal = FunctionCallInvoke(fcinfo);
+	newVal = fn_addr(fcinfo);
 
 	/*
 	 * For pass-by-ref datatype, must copy the new value into aggcontext and
