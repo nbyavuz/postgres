@@ -8,7 +8,6 @@ project('postgresql',
     'b_pie=true',
     'b_pch=false',
     'buildtype=release',
-    'c_std=c99',
   ]
 )
 
@@ -864,6 +863,47 @@ endif
 ###############################################################
 # Compiler tests
 ###############################################################
+
+# Do we need -std=c99 to compile C99 code?
+c99_test = '''
+#include <stdbool.h>
+#include <complex.h>
+#include <tgmath.h>
+#include <inttypes.h>
+
+struct named_init_test {
+  int a;
+  int b;
+};
+
+extern void structfunc(struct named_init_test);
+
+int main(int argc, char **argv)
+{
+  struct named_init_test nit = {
+    .a = 3,
+    .b = 5,
+  };
+
+  for (int loop_var = 0; loop_var < 3; loop_var++)
+  {
+    nit.a += nit.b;
+  }
+
+  structfunc((struct named_init_test){1, 0});
+
+  return nit.a != 0;
+}
+'''
+
+if not cc.compiles(c99_test, name: 'c99', args: g_c_args)
+  if cc.compiles(c99_test, name: 'c99 with -std=c99', args: g_c_args + ['-std=c99'])
+    g_c_args += '-std=c99'
+    add_project_arguments('-std=c99', language: ['c', 'cpp'])
+  else
+    error('C compiler does not support C99')
+  endif
+endif
 
 sizeof_long = cc.sizeof('long', args: g_c_args)
 cdata.set('SIZEOF_LONG', sizeof_long)
