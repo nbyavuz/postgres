@@ -13,9 +13,9 @@ option('atomics', type : 'boolean', value: true,
 
 # Compilation options
 
-option('extra_include_dirs', type : 'array',
+option('extra_include_dirs', type : 'array', value: [],
   description: 'non-default directories to be searched for headers')
-option('extra_lib_dirs', type : 'array',
+option('extra_lib_dirs', type : 'array', value: [],
   description: 'non-default directories to be searched for libs')
 
 

@@ -871,7 +871,7 @@ elif sizeof_long == 4 and cc.sizeof('long long', args: g_c_args) == 8
   cdata.set('HAVE_LONG_LONG_INT_64', 1)
   cdata.set('PG_INT64_TYPE', 'long long int')
   cdata.set_quoted('INT64_MODIFIER', 'll')
-elif
+else
   error('do not know how to get a 64bit int')
 endif
 
