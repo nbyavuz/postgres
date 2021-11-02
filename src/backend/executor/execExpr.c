@@ -142,7 +142,7 @@ ExecInitExpr(Expr *node, PlanState *parent)
 	ExecInitExprRec(node, state, &state->resvalue, &state->resnull);
 
 	/* Finally, append a DONE step */
-	scratch.opcode = EEOP_DONE;
+	scratch.opcode = EEOP_DONE_RETURN;
 	ExprEvalPushStep(state, &scratch);
 
 	ExecReadyExpr(state);
@@ -179,7 +179,7 @@ ExecInitExprWithParams(Expr *node, ParamListInfo ext_params)
 	ExecInitExprRec(node, state, &state->resvalue, &state->resnull);
 
 	/* Finally, append a DONE step */
-	scratch.opcode = EEOP_DONE;
+	scratch.opcode = EEOP_DONE_RETURN;
 	ExprEvalPushStep(state, &scratch);
 
 	ExecReadyExpr(state);
@@ -274,7 +274,7 @@ ExecInitQual(List *qual, PlanState *parent)
 	 * have yielded TRUE, and since its result is stored in the desired output
 	 * location, we're done.
 	 */
-	scratch.opcode = EEOP_DONE;
+	scratch.opcode = EEOP_DONE_RETURN;
 	ExprEvalPushStep(state, &scratch);
 
 	ExecReadyExpr(state);
@@ -469,7 +469,7 @@ ExecBuildProjectionInfo(List *targetList,
 		}
 	}
 
-	scratch.opcode = EEOP_DONE;
+	scratch.opcode = EEOP_DONE_NO_RETURN;
 	ExprEvalPushStep(state, &scratch);
 
 	ExecReadyExpr(state);
@@ -723,7 +723,7 @@ ExecBuildUpdateProjection(List *targetList,
 		}
 	}
 
-	scratch.opcode = EEOP_DONE;
+	scratch.opcode = EEOP_DONE_NO_RETURN;
 	ExprEvalPushStep(state, &scratch);
 
 	ExecReadyExpr(state);
@@ -1659,7 +1659,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				else
 				{
 					/* Not trivial, so append a DONE step */
-					scratch.opcode = EEOP_DONE;
+					scratch.opcode = EEOP_DONE_RETURN;
 					ExprEvalPushStep(elemstate, &scratch);
 					/* and ready the subexpression */
 					ExecReadyExpr(elemstate);
@@ -2558,7 +2558,15 @@ ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args, Oid funcid,
 	if (pgstat_track_functions <= flinfo->fn_stats)
 	{
 		if (flinfo->fn_strict && nargs > 0)
-			scratch->opcode = EEOP_FUNCEXPR_STRICT;
+		{
+			/* Choose nargs optimized implementation if available. */
+			if (nargs == 1)
+				scratch->opcode = EEOP_FUNCEXPR_STRICT_1;
+			else if (nargs == 2)
+				scratch->opcode = EEOP_FUNCEXPR_STRICT_2;
+			else
+				scratch->opcode = EEOP_FUNCEXPR_STRICT;
+		}
 		else
 			scratch->opcode = EEOP_FUNCEXPR;
 	}
@@ -3502,6 +3510,8 @@ ExecBuildAggTrans(AggState *aggstate, AggStatePerPhase phase,
 		{
 			if (strictnulls)
 				scratch.opcode = EEOP_AGG_STRICT_INPUT_CHECK_NULLS;
+			else if (strictargs && pertrans->numTransInputs == 1)
+				scratch.opcode = EEOP_AGG_STRICT_INPUT_CHECK_ARGS_1;
 			else
 				scratch.opcode = EEOP_AGG_STRICT_INPUT_CHECK_ARGS;
 			scratch.d.agg_strict_input_check.nulls = strictnulls;
@@ -3563,7 +3573,9 @@ ExecBuildAggTrans(AggState *aggstate, AggStatePerPhase phase,
 				as->d.jump.jumpdone = state->steps_len;
 			}
 			else if (as->opcode == EEOP_AGG_STRICT_INPUT_CHECK_ARGS ||
+					 as->opcode == EEOP_AGG_STRICT_INPUT_CHECK_ARGS_1 ||
 					 as->opcode == EEOP_AGG_STRICT_INPUT_CHECK_NULLS)
+
 			{
 				Assert(as->d.agg_strict_input_check.jumpnull == -1);
 				as->d.agg_strict_input_check.jumpnull = state->steps_len;
@@ -3580,7 +3592,7 @@ ExecBuildAggTrans(AggState *aggstate, AggStatePerPhase phase,
 
 	scratch.resvalue = NULL;
 	scratch.resnull = NULL;
-	scratch.opcode = EEOP_DONE;
+	scratch.opcode = EEOP_DONE_NO_RETURN;
 	ExprEvalPushStep(state, &scratch);
 
 	ExecReadyExpr(state);
@@ -3844,7 +3856,7 @@ ExecBuildGroupingEqual(TupleDesc ldesc, TupleDesc rdesc,
 
 	scratch.resvalue = NULL;
 	scratch.resnull = NULL;
-	scratch.opcode = EEOP_DONE;
+	scratch.opcode = EEOP_DONE_RETURN;
 	ExprEvalPushStep(state, &scratch);
 
 	ExecReadyExpr(state);
@@ -3978,7 +3990,7 @@ ExecBuildParamSetEqual(TupleDesc desc,
 
 	scratch.resvalue = NULL;
 	scratch.resnull = NULL;
-	scratch.opcode = EEOP_DONE;
+	scratch.opcode = EEOP_DONE_RETURN;
 	ExprEvalPushStep(state, &scratch);
 
 	ExecReadyExpr(state);
