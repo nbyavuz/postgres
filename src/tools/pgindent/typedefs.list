@@ -670,6 +670,7 @@ ExplainStmt
 ExplainWorkersState
 ExportedSnapshot
 Expr
+ExprCompileState
 ExprContext
 ExprContextCallbackFunction
 ExprContext_CB
