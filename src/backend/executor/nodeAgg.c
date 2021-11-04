@@ -391,12 +391,12 @@ static void finalize_aggregate(AggState *aggstate,
 							   AggStatePerAgg peragg,
 							   AggStatePerGroup pergroupstate,
 							   AggStatePerCallContext *percall,
-							   Datum *resultVal, bool *resultIsNull);
+							   NullableDatum *result);
 static void finalize_partialaggregate(AggState *aggstate,
 									  AggStatePerAgg peragg,
 									  AggStatePerGroup pergroupstate,
 									  AggStatePerCallContext *percall,
-									  Datum *resultVal, bool *resultIsNull);
+									  NullableDatum *result);
 static inline void prepare_hash_slot(AggStatePerHash perhash,
 									 TupleTableSlot *inputslot,
 									 TupleTableSlot *hashslot);
@@ -455,8 +455,9 @@ static void build_pertrans_for_aggref(AggStatePerTrans pertrans,
 									  AggState *aggstate, EState *estate,
 									  Aggref *aggref, Oid transfn_oid,
 									  Oid aggtranstype, Oid aggserialfn,
-									  Oid aggdeserialfn, Datum initValue,
-									  bool initValueIsNull, Oid *inputTypes,
+									  Oid aggdeserialfn,
+									  NullableDatum *initValue,
+									  Oid *inputTypes,
 									  int numArguments);
 
 
@@ -616,19 +617,20 @@ initialize_aggregate(AggState *aggstate, AggStatePerTrans pertrans,
 	 * Note that when the initial value is pass-by-ref, we must copy it (into
 	 * the aggcontext) since we will pfree the transValue later.
 	 */
-	if (pertrans->initValueIsNull)
+	if (pertrans->initValue.isnull)
 		pergroupstate->transValue = pertrans->initValue;
 	else
 	{
 		MemoryContext oldContext;
 
 		oldContext = MemoryContextSwitchTo(aggcontext->ecxt_per_tuple_memory);
-		pergroupstate->transValue = datumCopy(pertrans->initValue,
-											  pertrans->transtypeByVal,
-											  pertrans->transtypeLen);
+		pergroupstate->transValue.value =
+			datumCopy(pertrans->initValue.value,
+					  pertrans->transtypeByVal,
+					  pertrans->transtypeLen);
 		MemoryContextSwitchTo(oldContext);
 	}
-	pergroupstate->transValueIsNull = pertrans->initValueIsNull;
+	pergroupstate->transValue.isnull = pertrans->initValue.isnull;
 
 	/*
 	 * If the initial value for the transition state doesn't exist in the
@@ -637,7 +639,7 @@ initialize_aggregate(AggState *aggstate, AggStatePerTrans pertrans,
 	 * aggregates like max() and min().) The noTransValue flag signals that we
 	 * still need to do this.
 	 */
-	pergroupstate->noTransValue = pertrans->initValueIsNull;
+	pergroupstate->noTransValue = pertrans->initValue.isnull;
 }
 
 /*
@@ -730,15 +732,16 @@ advance_ordered_transition_function(AggState *aggstate,
 			 * do not need to pfree the old transValue, since it's NULL.
 			 */
 			oldContext = MemoryContextSwitchTo(aggcontext->ecxt_per_tuple_memory);
-			pergroupstate->transValue = datumCopy(fcinfo->args[1].value,
-												  pertrans->transtypeByVal,
-												  pertrans->transtypeLen);
-			pergroupstate->transValueIsNull = false;
+			pergroupstate->transValue.value =
+				datumCopy(fcinfo->args[1].value,
+						  pertrans->transtypeByVal,
+						  pertrans->transtypeLen);
+			pergroupstate->transValue.isnull = false;
 			pergroupstate->noTransValue = false;
 			MemoryContextSwitchTo(oldContext);
 			return;
 		}
-		if (pergroupstate->transValueIsNull)
+		if (pergroupstate->transValue.isnull)
 		{
 			/*
 			 * Don't call a strict function with NULL inputs.  Note it is
@@ -756,8 +759,7 @@ advance_ordered_transition_function(AggState *aggstate,
 	/*
 	 * OK to call the transition function
 	 */
-	fcinfo->args[0].value = pergroupstate->transValue;
-	fcinfo->args[0].isnull = pergroupstate->transValueIsNull;
+	fcinfo->args[0] = pergroupstate->transValue;
 	fcinfo->isnull = false;		/* just in case transfn doesn't set it */
 
 	newVal = FunctionCallInvoke(fcinfo);
@@ -779,14 +781,13 @@ advance_ordered_transition_function(AggState *aggstate,
 	 * argument.
 	 */
 	if (!pertrans->transtypeByVal &&
-		DatumGetPointer(newVal) != DatumGetPointer(pergroupstate->transValue))
+		DatumGetPointer(newVal) != DatumGetPointer(pergroupstate->transValue.value))
 		newVal = ExecAggTransReparent(percall,
 									  newVal, fcinfo->isnull,
-									  pergroupstate->transValue,
-									  pergroupstate->transValueIsNull);
+									  &pergroupstate->transValue);
 
-	pergroupstate->transValue = newVal;
-	pergroupstate->transValueIsNull = fcinfo->isnull;
+	pergroupstate->transValue.value = newVal;
+	pergroupstate->transValue.isnull = fcinfo->isnull;
 
 	MemoryContextSwitchTo(oldContext);
 }
@@ -989,8 +990,7 @@ process_ordered_aggregate_multi(AggState *aggstate,
 			/* Start from 1, since the 0th arg will be the transition value */
 			for (i = 0; i < numTransInputs; i++)
 			{
-				fcinfo->args[i + 1].value = slot1->tts_values[i];
-				fcinfo->args[i + 1].isnull = slot1->tts_isnull[i];
+				fcinfo->args[i + 1] = slot1->tts_values[i];
 			}
 
 			advance_ordered_transition_function(aggstate, percall, pertrans,
@@ -1044,7 +1044,7 @@ finalize_aggregate(AggState *aggstate,
 				   AggStatePerAgg peragg,
 				   AggStatePerGroup pergroupstate,
 				   AggStatePerCallContext *percall,
-				   Datum *resultVal, bool *resultIsNull)
+				   NullableDatum *result)
 {
 	LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS);
 	bool		anynull = false;
@@ -1087,48 +1087,45 @@ finalize_aggregate(AggState *aggstate,
 
 		/* Fill in the transition state value */
 		fcinfo->args[0].value =
-			MakeExpandedObjectReadOnly(pergroupstate->transValue,
-									   pergroupstate->transValueIsNull,
+			MakeExpandedObjectReadOnly(pergroupstate->transValue.value,
+									   pergroupstate->transValue.isnull,
 									   pertrans->transtypeLen);
-		fcinfo->args[0].isnull = pergroupstate->transValueIsNull;
-		anynull |= pergroupstate->transValueIsNull;
+		fcinfo->args[0].isnull = pergroupstate->transValue.isnull;
+		anynull |= pergroupstate->transValue.isnull;
 
 		/* Fill any remaining argument positions with nulls */
 		for (; i < numFinalArgs; i++)
 		{
-			fcinfo->args[i].value = (Datum) 0;
-			fcinfo->args[i].isnull = true;
+			fcinfo->args[i] = NULL_DATUM;
 			anynull = true;
 		}
 
 		if (fcinfo->flinfo->fn_strict && anynull)
 		{
 			/* don't call a strict function with NULL inputs */
-			*resultVal = (Datum) 0;
-			*resultIsNull = true;
+			*result = NULL_DATUM;
 		}
 		else
 		{
-			*resultVal = FunctionCallInvoke(fcinfo);
-			*resultIsNull = fcinfo->isnull;
+			result->value = FunctionCallInvoke(fcinfo);
+			result->isnull = fcinfo->isnull;
 		}
 	}
 	else
 	{
 		/* Don't need MakeExpandedObjectReadOnly; datumCopy will copy it */
-		*resultVal = pergroupstate->transValue;
-		*resultIsNull = pergroupstate->transValueIsNull;
+		*result = pergroupstate->transValue;
 	}
 
 	/*
 	 * If result is pass-by-ref, make sure it is in the right context.
 	 */
-	if (!peragg->resulttypeByVal && !*resultIsNull &&
+	if (!peragg->resulttypeByVal && !result->isnull &&
 		!MemoryContextContains(CurrentMemoryContext,
-							   DatumGetPointer(*resultVal)))
-		*resultVal = datumCopy(*resultVal,
-							   peragg->resulttypeByVal,
-							   peragg->resulttypeLen);
+							   DatumGetPointer(result->value)))
+		result->value = datumCopy(result->value,
+								  peragg->resulttypeByVal,
+								  peragg->resulttypeLen);
 
 	MemoryContextSwitchTo(oldContext);
 }
@@ -1144,7 +1141,7 @@ finalize_partialaggregate(AggState *aggstate,
 						  AggStatePerAgg peragg,
 						  AggStatePerGroup pergroupstate,
 						  AggStatePerCallContext *percall,
-						  Datum *resultVal, bool *resultIsNull)
+						  NullableDatum *result)
 {
 	AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
 	MemoryContext oldContext;
@@ -1158,42 +1155,38 @@ finalize_partialaggregate(AggState *aggstate,
 	if (OidIsValid(pertrans->serialfn_oid))
 	{
 		/* Don't call a strict serialization function with NULL input. */
-		if (pertrans->serialfn.fn_strict && pergroupstate->transValueIsNull)
-		{
-			*resultVal = (Datum) 0;
-			*resultIsNull = true;
-		}
+		if (pertrans->serialfn.fn_strict && pergroupstate->transValue.isnull)
+			*result = NULL_DATUM;
 		else
 		{
 			FunctionCallInfo fcinfo = pertrans->serialfn_fcinfo;
 
 			fcinfo->args[0].value =
-				MakeExpandedObjectReadOnly(pergroupstate->transValue,
-										   pergroupstate->transValueIsNull,
+				MakeExpandedObjectReadOnly(pergroupstate->transValue.value,
+										   pergroupstate->transValue.isnull,
 										   pertrans->transtypeLen);
 			fcinfo->context = (Node *) percall;
-			fcinfo->args[0].isnull = pergroupstate->transValueIsNull;
+			fcinfo->args[0].isnull = pergroupstate->transValue.isnull;
 			fcinfo->isnull = false;
 
-			*resultVal = FunctionCallInvoke(fcinfo);
-			*resultIsNull = fcinfo->isnull;
+			result->value = FunctionCallInvoke(fcinfo);
+			result->isnull = fcinfo->isnull;
 			fcinfo->context = NULL;
 		}
 	}
 	else
 	{
 		/* Don't need MakeExpandedObjectReadOnly; datumCopy will copy it */
-		*resultVal = pergroupstate->transValue;
-		*resultIsNull = pergroupstate->transValueIsNull;
+		*result = pergroupstate->transValue;
 	}
 
 	/* If result is pass-by-ref, make sure it is in the right context. */
-	if (!peragg->resulttypeByVal && !*resultIsNull &&
+	if (!peragg->resulttypeByVal && !result->isnull &&
 		!MemoryContextContains(CurrentMemoryContext,
-							   DatumGetPointer(*resultVal)))
-		*resultVal = datumCopy(*resultVal,
-							   peragg->resulttypeByVal,
-							   peragg->resulttypeLen);
+							   DatumGetPointer(result->value)))
+		result->value = datumCopy(result->value,
+								  peragg->resulttypeByVal,
+								  peragg->resulttypeLen);
 
 	MemoryContextSwitchTo(oldContext);
 }
@@ -1218,7 +1211,6 @@ prepare_hash_slot(AggStatePerHash perhash,
 		int			varNumber = perhash->hashGrpColIdxInput[i] - 1;
 
 		hashslot->tts_values[i] = inputslot->tts_values[varNumber];
-		hashslot->tts_isnull[i] = inputslot->tts_isnull[varNumber];
 	}
 	ExecStoreVirtualTuple(hashslot);
 }
@@ -1277,7 +1269,7 @@ prepare_projection_slot(AggState *aggstate, TupleTableSlot *slot, int currentSet
 				int			attnum = lfirst_int(lc);
 
 				if (!bms_is_member(attnum, grouped_cols))
-					slot->tts_isnull[attnum - 1] = true;
+					slot->tts_values[attnum - 1].isnull = true;
 			}
 		}
 	}
@@ -1289,7 +1281,7 @@ prepare_projection_slot(AggState *aggstate, TupleTableSlot *slot, int currentSet
  * It's the the caller's responsibility to adjust the supplied pergroup
  * parameter to point to the current grouping set's transvalues.
  *
- * Results are stored in the output econtext aggvalues/aggnulls.
+ * Results are stored in the output econtext aggvalues.
  */
 static void
 finalize_aggregates(AggState *aggstate,
@@ -1299,8 +1291,7 @@ finalize_aggregates(AggState *aggstate,
 					int setno)
 {
 	ExprContext *econtext = aggstate->ss.ps.ps_ExprContext;
-	Datum	   *aggvalues = econtext->ecxt_aggvalues;
-	bool	   *aggnulls = econtext->ecxt_aggnulls;
+	NullableDatum *aggvalues = econtext->ecxt_aggvalues;
 	int			aggno;
 	int			transno;
 	AggStatePerCallContext percall = {.type = T_AggStatePerCallContext,
@@ -1358,10 +1349,10 @@ finalize_aggregates(AggState *aggstate,
 		if (DO_AGGSPLIT_SKIPFINAL(aggstate->aggsplit))
 			finalize_partialaggregate(aggstate, peragg, pergroupstate,
 									  &percall,
-									  &aggvalues[aggno], &aggnulls[aggno]);
+									  &aggvalues[aggno]);
 		else
 			finalize_aggregate(aggstate, peragg, pergroupstate, &percall,
-							   &aggvalues[aggno], &aggnulls[aggno]);
+							   &aggvalues[aggno]);
 	}
 }
 
@@ -2799,7 +2790,6 @@ agg_retrieve_hash_table_in_memory(AggState *aggstate)
 	for (;;)
 	{
 		TupleTableSlot *hashslot = perhash->hashslot;
-		int			i;
 
 		CHECK_FOR_INTERRUPTS();
 
@@ -2846,15 +2836,14 @@ agg_retrieve_hash_table_in_memory(AggState *aggstate)
 		slot_getallattrs(hashslot);
 
 		ExecClearTuple(firstSlot);
-		memset(firstSlot->tts_isnull, true,
-			   firstSlot->tts_tupleDescriptor->natts * sizeof(bool));
+		for (int i = 0; i < firstSlot->tts_tupleDescriptor->natts; i++)
+			firstSlot->tts_values[i].isnull = true;
 
-		for (i = 0; i < perhash->numhashGrpCols; i++)
+		for (int i = 0; i < perhash->numhashGrpCols; i++)
 		{
 			int			varNumber = perhash->hashGrpColIdxInput[i] - 1;
 
 			firstSlot->tts_values[varNumber] = hashslot->tts_values[i];
-			firstSlot->tts_isnull[varNumber] = hashslot->tts_isnull[i];
 		}
 		ExecStoreVirtualTuple(firstSlot);
 
@@ -2942,12 +2931,9 @@ hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 		for (int i = 0; i < spillslot->tts_tupleDescriptor->natts; i++)
 		{
 			if (bms_is_member(i + 1, aggstate->colnos_needed))
-			{
 				spillslot->tts_values[i] = inputslot->tts_values[i];
-				spillslot->tts_isnull[i] = inputslot->tts_isnull[i];
-			}
 			else
-				spillslot->tts_isnull[i] = true;
+				spillslot->tts_values[i].isnull = true;
 		}
 		ExecStoreVirtualTuple(spillslot);
 	}
@@ -3543,8 +3529,8 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * allocate my private per-agg working storage
 	 */
 	econtext = aggstate->ss.ps.ps_ExprContext;
-	econtext->ecxt_aggvalues = (Datum *) palloc0(sizeof(Datum) * numaggs);
-	econtext->ecxt_aggnulls = (bool *) palloc0(sizeof(bool) * numaggs);
+	econtext->ecxt_aggvalues =
+		(NullableDatum *) palloc0(sizeof(NullableDatum) * numaggs);
 
 	peraggs = (AggStatePerAgg) palloc0(sizeof(AggStatePerAggData) * numaggs);
 	pertransstates = (AggStatePerTrans) palloc0(sizeof(AggStatePerTransData) * numtrans);
@@ -3828,8 +3814,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 		if (pertrans->aggref == NULL)
 		{
 			Datum		textInitVal;
-			Datum		initValue;
-			bool		initValueIsNull;
+			NullableDatum initValue;
 			Oid			transfn_oid;
 
 			/*
@@ -3860,11 +3845,11 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 			 */
 			textInitVal = SysCacheGetAttr(AGGFNOID, aggTuple,
 										  Anum_pg_aggregate_agginitval,
-										  &initValueIsNull);
-			if (initValueIsNull)
-				initValue = (Datum) 0;
+										  &initValue.isnull);
+			if (initValue.isnull)
+				initValue.value = (Datum) 0;
 			else
-				initValue = GetAggInitVal(textInitVal, aggtranstype);
+				initValue.value = GetAggInitVal(textInitVal, aggtranstype);
 
 			if (DO_AGGSPLIT_COMBINE(aggstate->aggsplit))
 			{
@@ -3882,7 +3867,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 				build_pertrans_for_aggref(pertrans, aggstate, estate,
 										  aggref, transfn_oid, aggtranstype,
 										  serialfn_oid, deserialfn_oid,
-										  initValue, initValueIsNull,
+										  &initValue,
 										  combineFnInputTypes, 2);
 
 				/*
@@ -3908,7 +3893,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 				build_pertrans_for_aggref(pertrans, aggstate, estate,
 										  aggref, transfn_oid, aggtranstype,
 										  serialfn_oid, deserialfn_oid,
-										  initValue, initValueIsNull,
+										  &initValue,
 										  aggTransFnInputTypes,
 										  numAggTransFnArgs);
 
@@ -3921,7 +3906,7 @@ ExecInitAgg(Agg *node, EState *estate, int eflags)
 				 * must check again in case the transfn's strictness property
 				 * has been changed.
 				 */
-				if (pertrans->transfn.fn_strict && pertrans->initValueIsNull)
+				if (pertrans->transfn.fn_strict && pertrans->initValue.isnull)
 				{
 					if (numAggTransFnArgs <= numDirectArgs ||
 						!IsBinaryCoercible(aggTransFnInputTypes[numDirectArgs],
@@ -4035,7 +4020,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 						  Aggref *aggref,
 						  Oid transfn_oid, Oid aggtranstype,
 						  Oid aggserialfn, Oid aggdeserialfn,
-						  Datum initValue, bool initValueIsNull,
+						  NullableDatum *initValue,
 						  Oid *inputTypes, int numArguments)
 {
 	int			numGroupingSets = Max(aggstate->maxsets, 1);
@@ -4057,8 +4042,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 	pertrans->transfn_oid = transfn_oid;
 	pertrans->serialfn_oid = aggserialfn;
 	pertrans->deserialfn_oid = aggdeserialfn;
-	pertrans->initValue = initValue;
-	pertrans->initValueIsNull = initValueIsNull;
+	pertrans->initValue = *initValue;
 
 	/* Count the "direct" arguments, if any */
 	numDirectArgs = list_length(aggref->aggdirectargs);
@@ -4409,8 +4393,7 @@ ExecReScanAgg(AggState *node)
 	ExecClearTuple(node->ss.ss_ScanTupleSlot);
 
 	/* Forget current agg values */
-	MemSet(econtext->ecxt_aggvalues, 0, sizeof(Datum) * node->numaggs);
-	MemSet(econtext->ecxt_aggnulls, 0, sizeof(bool) * node->numaggs);
+	MemSet(econtext->ecxt_aggvalues, 0, sizeof(NullableDatum) * node->numaggs);
 
 	/*
 	 * With AGG_HASHED/MIXED, the hash table is allocated in a sub-context of

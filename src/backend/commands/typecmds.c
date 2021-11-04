@@ -3182,8 +3182,7 @@ validateDomainConstraint(Oid domainoid, char *ccbin)
 
 				d = slot_getattr(slot, attnum, &isNull);
 
-				econtext->domainValue_datum = d;
-				econtext->domainValue_isNull = isNull;
+				econtext->domainValue = (NullableDatum){d, isNull};
 
 				conResult = ExecEvalExprSwitchContext(exprstate,
 													  econtext,

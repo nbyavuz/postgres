@@ -576,8 +576,8 @@ slot_fill_defaults(LogicalRepRelMapEntry *rel, EState *estate,
 	}
 
 	for (i = 0; i < num_defaults; i++)
-		slot->tts_values[defmap[i]] =
-			ExecEvalExpr(defexprs[i], econtext, &slot->tts_isnull[defmap[i]]);
+		slot->tts_values[defmap[i]].value =
+			ExecEvalExpr(defexprs[i], econtext, &slot->tts_values[defmap[i]].isnull);
 }
 
 /*
@@ -616,10 +616,10 @@ slot_store_data(TupleTableSlot *slot, LogicalRepRelMapEntry *rel,
 				Oid			typioparam;
 
 				getTypeInputInfo(att->atttypid, &typinput, &typioparam);
-				slot->tts_values[i] =
+				slot->tts_values[i].value =
 					OidInputFunctionCall(typinput, colvalue->data,
 										 typioparam, att->atttypmod);
-				slot->tts_isnull[i] = false;
+				slot->tts_values[i].isnull = false;
 			}
 			else if (tupleData->colstatus[remoteattnum] == LOGICALREP_COLUMN_BINARY)
 			{
@@ -633,7 +633,7 @@ slot_store_data(TupleTableSlot *slot, LogicalRepRelMapEntry *rel,
 				colvalue->cursor = 0;
 
 				getTypeBinaryInputInfo(att->atttypid, &typreceive, &typioparam);
-				slot->tts_values[i] =
+				slot->tts_values[i].value =
 					OidReceiveFunctionCall(typreceive, colvalue,
 										   typioparam, att->atttypmod);
 
@@ -643,7 +643,7 @@ slot_store_data(TupleTableSlot *slot, LogicalRepRelMapEntry *rel,
 							(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
 							 errmsg("incorrect binary data format in logical replication column %d",
 									remoteattnum + 1)));
-				slot->tts_isnull[i] = false;
+				slot->tts_values[i].isnull = false;
 			}
 			else
 			{
@@ -652,8 +652,8 @@ slot_store_data(TupleTableSlot *slot, LogicalRepRelMapEntry *rel,
 				 * LOGICALREP_COLUMN_UNCHANGED here, but if we do, treat it as
 				 * NULL.)
 				 */
-				slot->tts_values[i] = (Datum) 0;
-				slot->tts_isnull[i] = true;
+				slot->tts_values[i].value = (Datum) 0;
+				slot->tts_values[i].isnull = true;
 			}
 
 			/* Reset attnum for error callback */
@@ -666,8 +666,7 @@ slot_store_data(TupleTableSlot *slot, LogicalRepRelMapEntry *rel,
 			 * (missing values should be later filled using
 			 * slot_fill_defaults).
 			 */
-			slot->tts_values[i] = (Datum) 0;
-			slot->tts_isnull[i] = true;
+			slot->tts_values[i] = NULL_DATUM;
 		}
 	}
 
@@ -703,8 +702,7 @@ slot_modify_data(TupleTableSlot *slot, TupleTableSlot *srcslot,
 	 */
 	Assert(natts == srcslot->tts_tupleDescriptor->natts);
 	slot_getallattrs(srcslot);
-	memcpy(slot->tts_values, srcslot->tts_values, natts * sizeof(Datum));
-	memcpy(slot->tts_isnull, srcslot->tts_isnull, natts * sizeof(bool));
+	memcpy(slot->tts_values, srcslot->tts_values, natts * sizeof(NullableDatum));
 
 	/* Call the "in" function for each replaced attribute */
 	Assert(natts == rel->attrmap->maplen);
@@ -731,10 +729,10 @@ slot_modify_data(TupleTableSlot *slot, TupleTableSlot *srcslot,
 				Oid			typioparam;
 
 				getTypeInputInfo(att->atttypid, &typinput, &typioparam);
-				slot->tts_values[i] =
+				slot->tts_values[i].value =
 					OidInputFunctionCall(typinput, colvalue->data,
 										 typioparam, att->atttypmod);
-				slot->tts_isnull[i] = false;
+				slot->tts_values[i].isnull = false;
 			}
 			else if (tupleData->colstatus[remoteattnum] == LOGICALREP_COLUMN_BINARY)
 			{
@@ -748,7 +746,7 @@ slot_modify_data(TupleTableSlot *slot, TupleTableSlot *srcslot,
 				colvalue->cursor = 0;
 
 				getTypeBinaryInputInfo(att->atttypid, &typreceive, &typioparam);
-				slot->tts_values[i] =
+				slot->tts_values[i].value =
 					OidReceiveFunctionCall(typreceive, colvalue,
 										   typioparam, att->atttypmod);
 
@@ -758,13 +756,13 @@ slot_modify_data(TupleTableSlot *slot, TupleTableSlot *srcslot,
 							(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
 							 errmsg("incorrect binary data format in logical replication column %d",
 									remoteattnum + 1)));
-				slot->tts_isnull[i] = false;
+				slot->tts_values[i].isnull = false;
 			}
 			else
 			{
 				/* must be LOGICALREP_COLUMN_NULL */
-				slot->tts_values[i] = (Datum) 0;
-				slot->tts_isnull[i] = true;
+				slot->tts_values[i].value = (Datum) 0;
+				slot->tts_values[i].isnull = true;
 			}
 
 			/* Reset attnum for error callback */

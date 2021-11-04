@@ -132,8 +132,8 @@ ExecSort(PlanState *pstate)
 					break;
 				slot_getsomeattrs(slot, 1);
 				tuplesort_putdatum(tuplesortstate,
-								   slot->tts_values[0],
-								   slot->tts_isnull[0]);
+								   slot->tts_values[0].value,
+								   slot->tts_values[0].isnull);
 			}
 		}
 		else
@@ -192,7 +192,7 @@ ExecSort(PlanState *pstate)
 	{
 		ExecClearTuple(slot);
 		if (tuplesort_getdatum(tuplesortstate, ScanDirectionIsForward(dir),
-							   &(slot->tts_values[0]), &(slot->tts_isnull[0]), NULL))
+							   &(slot->tts_values[0].value), &(slot->tts_values[0].isnull), NULL))
 			ExecStoreVirtualTuple(slot);
 	}
 	else

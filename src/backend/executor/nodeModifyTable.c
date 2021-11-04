@@ -262,8 +262,7 @@ ExecComputeStoredGenerated(ResultRelInfo *resultRelInfo,
 	TupleDesc	tupdesc = RelationGetDescr(rel);
 	int			natts = tupdesc->natts;
 	MemoryContext oldContext;
-	Datum	   *values;
-	bool	   *nulls;
+	NullableDatum *values;
 
 	Assert(tupdesc->constr && tupdesc->constr->has_generated_stored);
 
@@ -324,10 +323,8 @@ ExecComputeStoredGenerated(ResultRelInfo *resultRelInfo,
 	oldContext = MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
 
 	values = palloc(sizeof(*values) * natts);
-	nulls = palloc(sizeof(*nulls) * natts);
 
 	slot_getallattrs(slot);
-	memcpy(nulls, slot->tts_isnull, sizeof(*nulls) * natts);
 
 	for (int i = 0; i < natts; i++)
 	{
@@ -337,34 +334,33 @@ ExecComputeStoredGenerated(ResultRelInfo *resultRelInfo,
 			resultRelInfo->ri_GeneratedExprs[i])
 		{
 			ExprContext *econtext;
-			Datum		val;
-			bool		isnull;
+			NullableDatum val;
 
 			econtext = GetPerTupleExprContext(estate);
 			econtext->ecxt_scantuple = slot;
 
-			val = ExecEvalExpr(resultRelInfo->ri_GeneratedExprs[i], econtext, &isnull);
+			val.value = ExecEvalExpr(resultRelInfo->ri_GeneratedExprs[i], econtext, &val.isnull);
 
 			/*
 			 * We must make a copy of val as we have no guarantees about where
 			 * memory for a pass-by-reference Datum is located.
 			 */
-			if (!isnull)
-				val = datumCopy(val, attr->attbyval, attr->attlen);
+			if (!val.isnull)
+				val.value = datumCopy(val.value, attr->attbyval, attr->attlen);
 
 			values[i] = val;
-			nulls[i] = isnull;
 		}
 		else
 		{
-			if (!nulls[i])
-				values[i] = datumCopy(slot->tts_values[i], attr->attbyval, attr->attlen);
+			values[i].isnull = slot->tts_values[i].isnull;
+			if (!values[i].isnull)
+				values[i].value = datumCopy(slot->tts_values[i].value,
+											attr->attbyval, attr->attlen);
 		}
 	}
 
 	ExecClearTuple(slot);
 	memcpy(slot->tts_values, values, sizeof(*values) * natts);
-	memcpy(slot->tts_isnull, nulls, sizeof(*nulls) * natts);
 	ExecStoreVirtualTuple(slot);
 	ExecMaterializeSlot(slot);
 

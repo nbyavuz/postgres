@@ -123,14 +123,12 @@ typedef struct WindowStatePerAggData
 	/*
 	 * initial value from pg_aggregate entry
 	 */
-	Datum		initValue;
-	bool		initValueIsNull;
+	NullableDatum initValue;
 
 	/*
 	 * cached value for current frame boundaries
 	 */
-	Datum		resultValue;
-	bool		resultValueIsNull;
+	NullableDatum resultValue;
 
 	/*
 	 * We need the len and byval info for the agg's input, result, and
@@ -149,8 +147,7 @@ typedef struct WindowStatePerAggData
 	MemoryContext aggcontext;	/* may be private, or winstate->aggcontext */
 
 	/* Current transition value */
-	Datum		transValue;		/* current transition value */
-	bool		transValueIsNull;
+	NullableDatum transValue;		/* current transition value */
 
 	int64		transValueCount;	/* number of currently-aggregated rows */
 
@@ -170,12 +167,12 @@ static bool advance_windowaggregate_base(WindowAggState *winstate,
 static void finalize_windowaggregate(WindowAggState *winstate,
 									 WindowStatePerFunc perfuncstate,
 									 WindowStatePerAgg peraggstate,
-									 Datum *result, bool *isnull);
+									 NullableDatum *result);
 
 static void eval_windowaggregates(WindowAggState *winstate);
 static void eval_windowfunction(WindowAggState *winstate,
 								WindowStatePerFunc perfuncstate,
-								Datum *result, bool *isnull);
+								NullableDatum *result);
 
 static void begin_partition(WindowAggState *winstate);
 static void spool_tuples(WindowAggState *winstate, int64 pos);
@@ -217,20 +214,20 @@ initialize_windowaggregate(WindowAggState *winstate,
 	if (peraggstate->aggcontext != winstate->aggcontext)
 		MemoryContextResetAndDeleteChildren(peraggstate->aggcontext);
 
-	if (peraggstate->initValueIsNull)
+	if (peraggstate->initValue.isnull)
 		peraggstate->transValue = peraggstate->initValue;
 	else
 	{
 		oldContext = MemoryContextSwitchTo(peraggstate->aggcontext);
-		peraggstate->transValue = datumCopy(peraggstate->initValue,
-											peraggstate->transtypeByVal,
-											peraggstate->transtypeLen);
+		peraggstate->transValue.value =
+			datumCopy(peraggstate->initValue.value,
+					  peraggstate->transtypeByVal,
+					  peraggstate->transtypeLen);
 		MemoryContextSwitchTo(oldContext);
 	}
-	peraggstate->transValueIsNull = peraggstate->initValueIsNull;
+	peraggstate->transValue.isnull = peraggstate->initValue.isnull;
 	peraggstate->transValueCount = 0;
-	peraggstate->resultValue = (Datum) 0;
-	peraggstate->resultValueIsNull = true;
+	peraggstate->resultValue = NULL_DATUM;
 }
 
 /*
@@ -303,19 +300,20 @@ advance_windowaggregate(WindowAggState *winstate,
 		 * We must copy the datum into aggcontext if it is pass-by-ref.  We do
 		 * not need to pfree the old transValue, since it's NULL.
 		 */
-		if (peraggstate->transValueCount == 0 && peraggstate->transValueIsNull)
+		if (peraggstate->transValueCount == 0 && peraggstate->transValue.isnull)
 		{
 			MemoryContextSwitchTo(peraggstate->aggcontext);
-			peraggstate->transValue = datumCopy(fcinfo->args[1].value,
-												peraggstate->transtypeByVal,
-												peraggstate->transtypeLen);
-			peraggstate->transValueIsNull = false;
+			peraggstate->transValue.value =
+				datumCopy(fcinfo->args[1].value,
+						  peraggstate->transtypeByVal,
+						  peraggstate->transtypeLen);
+			peraggstate->transValue.isnull = false;
 			peraggstate->transValueCount = 1;
 			MemoryContextSwitchTo(oldContext);
 			return;
 		}
 
-		if (peraggstate->transValueIsNull)
+		if (peraggstate->transValue.isnull)
 		{
 			/*
 			 * Don't call a strict function with NULL inputs.  Note it is
@@ -339,8 +337,7 @@ advance_windowaggregate(WindowAggState *winstate,
 							 numArguments + 1,
 							 perfuncstate->winCollation,
 							 (void *) winstate, NULL);
-	fcinfo->args[0].value = peraggstate->transValue;
-	fcinfo->args[0].isnull = peraggstate->transValueIsNull;
+	fcinfo->args[0] = peraggstate->transValue;
 	winstate->curaggcontext = peraggstate->aggcontext;
 	newVal = FunctionCallInvoke(fcinfo);
 	winstate->curaggcontext = NULL;
@@ -370,7 +367,7 @@ advance_windowaggregate(WindowAggState *winstate,
 	 * aggcontext, assume we can adopt that value without copying it.
 	 */
 	if (!peraggstate->transtypeByVal &&
-		DatumGetPointer(newVal) != DatumGetPointer(peraggstate->transValue))
+		DatumGetPointer(newVal) != DatumGetPointer(peraggstate->transValue.value))
 	{
 		if (!fcinfo->isnull)
 		{
@@ -385,20 +382,20 @@ advance_windowaggregate(WindowAggState *winstate,
 								   peraggstate->transtypeByVal,
 								   peraggstate->transtypeLen);
 		}
-		if (!peraggstate->transValueIsNull)
+		if (!peraggstate->transValue.isnull)
 		{
-			if (DatumIsReadWriteExpandedObject(peraggstate->transValue,
+			if (DatumIsReadWriteExpandedObject(peraggstate->transValue.value,
 											   false,
 											   peraggstate->transtypeLen))
-				DeleteExpandedObject(peraggstate->transValue);
+				DeleteExpandedObject(peraggstate->transValue.value);
 			else
-				pfree(DatumGetPointer(peraggstate->transValue));
+				pfree(DatumGetPointer(peraggstate->transValue.value));
 		}
 	}
 
 	MemoryContextSwitchTo(oldContext);
-	peraggstate->transValue = newVal;
-	peraggstate->transValueIsNull = fcinfo->isnull;
+	peraggstate->transValue.value = newVal;
+	peraggstate->transValue.isnull = fcinfo->isnull;
 }
 
 /*
@@ -482,7 +479,7 @@ advance_windowaggregate_base(WindowAggState *winstate,
 	 * transition in this case".  We already checked this in
 	 * advance_windowaggregate, but just for safety, check again.
 	 */
-	if (peraggstate->transValueIsNull)
+	if (peraggstate->transValue.isnull)
 		elog(ERROR, "aggregate transition value is NULL before inverse transition");
 
 	/*
@@ -509,8 +506,7 @@ advance_windowaggregate_base(WindowAggState *winstate,
 							 numArguments + 1,
 							 perfuncstate->winCollation,
 							 (void *) winstate, NULL);
-	fcinfo->args[0].value = peraggstate->transValue;
-	fcinfo->args[0].isnull = peraggstate->transValueIsNull;
+	fcinfo->args[0] = peraggstate->transValue;
 	winstate->curaggcontext = peraggstate->aggcontext;
 	newVal = FunctionCallInvoke(fcinfo);
 	winstate->curaggcontext = NULL;
@@ -538,7 +534,7 @@ advance_windowaggregate_base(WindowAggState *winstate,
 	 * best to have this stanza look just like advance_windowaggregate.
 	 */
 	if (!peraggstate->transtypeByVal &&
-		DatumGetPointer(newVal) != DatumGetPointer(peraggstate->transValue))
+		DatumGetPointer(newVal) != DatumGetPointer(peraggstate->transValue.value))
 	{
 		if (!fcinfo->isnull)
 		{
@@ -553,20 +549,20 @@ advance_windowaggregate_base(WindowAggState *winstate,
 								   peraggstate->transtypeByVal,
 								   peraggstate->transtypeLen);
 		}
-		if (!peraggstate->transValueIsNull)
+		if (!peraggstate->transValue.isnull)
 		{
-			if (DatumIsReadWriteExpandedObject(peraggstate->transValue,
+			if (DatumIsReadWriteExpandedObject(peraggstate->transValue.value,
 											   false,
 											   peraggstate->transtypeLen))
-				DeleteExpandedObject(peraggstate->transValue);
+				DeleteExpandedObject(peraggstate->transValue.value);
 			else
-				pfree(DatumGetPointer(peraggstate->transValue));
+				pfree(DatumGetPointer(peraggstate->transValue.value));
 		}
 	}
 
 	MemoryContextSwitchTo(oldContext);
-	peraggstate->transValue = newVal;
-	peraggstate->transValueIsNull = fcinfo->isnull;
+	peraggstate->transValue.value = newVal;
+	peraggstate->transValue.isnull = fcinfo->isnull;
 
 	return true;
 }
@@ -579,7 +575,7 @@ static void
 finalize_windowaggregate(WindowAggState *winstate,
 						 WindowStatePerFunc perfuncstate,
 						 WindowStatePerAgg peraggstate,
-						 Datum *result, bool *isnull)
+						 NullableDatum *result)
 {
 	MemoryContext oldContext;
 
@@ -600,50 +596,47 @@ finalize_windowaggregate(WindowAggState *winstate,
 								 perfuncstate->winCollation,
 								 (void *) winstate, NULL);
 		fcinfo->args[0].value =
-			MakeExpandedObjectReadOnly(peraggstate->transValue,
-									   peraggstate->transValueIsNull,
+			MakeExpandedObjectReadOnly(peraggstate->transValue.value,
+									   peraggstate->transValue.isnull,
 									   peraggstate->transtypeLen);
-		fcinfo->args[0].isnull = peraggstate->transValueIsNull;
-		anynull = peraggstate->transValueIsNull;
+		fcinfo->args[0].isnull = peraggstate->transValue.isnull;
+		anynull = peraggstate->transValue.isnull;
 
 		/* Fill any remaining argument positions with nulls */
 		for (i = 1; i < numFinalArgs; i++)
 		{
-			fcinfo->args[i].value = (Datum) 0;
-			fcinfo->args[i].isnull = true;
+			fcinfo->args[i] = NULL_DATUM;
 			anynull = true;
 		}
 
 		if (fcinfo->flinfo->fn_strict && anynull)
 		{
 			/* don't call a strict function with NULL inputs */
-			*result = (Datum) 0;
-			*isnull = true;
+			*result = NULL_DATUM;
 		}
 		else
 		{
 			winstate->curaggcontext = peraggstate->aggcontext;
-			*result = FunctionCallInvoke(fcinfo);
+			result->value = FunctionCallInvoke(fcinfo);
 			winstate->curaggcontext = NULL;
-			*isnull = fcinfo->isnull;
+			result->isnull = fcinfo->isnull;
 		}
 	}
 	else
 	{
 		/* Don't need MakeExpandedObjectReadOnly; datumCopy will copy it */
 		*result = peraggstate->transValue;
-		*isnull = peraggstate->transValueIsNull;
 	}
 
 	/*
 	 * If result is pass-by-ref, make sure it is in the right context.
 	 */
-	if (!peraggstate->resulttypeByVal && !*isnull &&
+	if (!peraggstate->resulttypeByVal && !result->isnull &&
 		!MemoryContextContains(CurrentMemoryContext,
-							   DatumGetPointer(*result)))
-		*result = datumCopy(*result,
-							peraggstate->resulttypeByVal,
-							peraggstate->resulttypeLen);
+							   DatumGetPointer(result->value)))
+		result->value = datumCopy(result->value,
+								  peraggstate->resulttypeByVal,
+								  peraggstate->resulttypeLen);
 	MemoryContextSwitchTo(oldContext);
 }
 
@@ -759,7 +752,6 @@ eval_windowaggregates(WindowAggState *winstate)
 			peraggstate = &winstate->peragg[i];
 			wfuncno = peraggstate->wfuncno;
 			econtext->ecxt_aggvalues[wfuncno] = peraggstate->resultValue;
-			econtext->ecxt_aggnulls[wfuncno] = peraggstate->resultValueIsNull;
 		}
 		return;
 	}
@@ -891,12 +883,11 @@ eval_windowaggregates(WindowAggState *winstate)
 									   &winstate->perfunc[wfuncno],
 									   peraggstate);
 		}
-		else if (!peraggstate->resultValueIsNull)
+		else if (!peraggstate->resultValue.isnull)
 		{
 			if (!peraggstate->resulttypeByVal)
-				pfree(DatumGetPointer(peraggstate->resultValue));
-			peraggstate->resultValue = (Datum) 0;
-			peraggstate->resultValueIsNull = true;
+				pfree(DatumGetPointer(peraggstate->resultValue.value));
+			peraggstate->resultValue = NULL_DATUM;
 		}
 	}
 
@@ -983,17 +974,15 @@ next_tuple:
 	 */
 	for (i = 0; i < numaggs; i++)
 	{
-		Datum	   *result;
-		bool	   *isnull;
+		NullableDatum *result;
 
 		peraggstate = &winstate->peragg[i];
 		wfuncno = peraggstate->wfuncno;
 		result = &econtext->ecxt_aggvalues[wfuncno];
-		isnull = &econtext->ecxt_aggnulls[wfuncno];
 		finalize_windowaggregate(winstate,
 								 &winstate->perfunc[wfuncno],
 								 peraggstate,
-								 result, isnull);
+								 result);
 
 		/*
 		 * save the result in case next row shares the same frame.
@@ -1002,20 +991,20 @@ next_tuple:
 		 * advance that the next row can't possibly share the same frame. Is
 		 * it worth detecting that and skipping this code?
 		 */
-		if (!peraggstate->resulttypeByVal && !*isnull)
+		if (!peraggstate->resulttypeByVal && !result->isnull)
 		{
 			oldContext = MemoryContextSwitchTo(peraggstate->aggcontext);
-			peraggstate->resultValue =
-				datumCopy(*result,
+			peraggstate->resultValue.value =
+				datumCopy(result->value,
 						  peraggstate->resulttypeByVal,
 						  peraggstate->resulttypeLen);
 			MemoryContextSwitchTo(oldContext);
 		}
 		else
 		{
-			peraggstate->resultValue = *result;
+			peraggstate->resultValue.value = result->value;
 		}
-		peraggstate->resultValueIsNull = *isnull;
+		peraggstate->resultValue.isnull = result->isnull;
 	}
 }
 
@@ -1030,7 +1019,7 @@ next_tuple:
  */
 static void
 eval_windowfunction(WindowAggState *winstate, WindowStatePerFunc perfuncstate,
-					Datum *result, bool *isnull)
+					NullableDatum *result)
 {
 	LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS);
 	MemoryContext oldContext;
@@ -1053,8 +1042,8 @@ eval_windowfunction(WindowAggState *winstate, WindowStatePerFunc perfuncstate,
 	/* Window functions don't have a current aggregate context, either */
 	winstate->curaggcontext = NULL;
 
-	*result = FunctionCallInvoke(fcinfo);
-	*isnull = fcinfo->isnull;
+	result->value = FunctionCallInvoke(fcinfo);
+	result->isnull = fcinfo->isnull;
 
 	/*
 	 * Make sure pass-by-ref data is allocated in the appropriate context. (We
@@ -1063,10 +1052,10 @@ eval_windowfunction(WindowAggState *winstate, WindowStatePerFunc perfuncstate,
 	 */
 	if (!perfuncstate->resulttypeByVal && !fcinfo->isnull &&
 		!MemoryContextContains(CurrentMemoryContext,
-							   DatumGetPointer(*result)))
-		*result = datumCopy(*result,
-							perfuncstate->resulttypeByVal,
-							perfuncstate->resulttypeLen);
+							   DatumGetPointer(result->value)))
+		result->value = datumCopy(result->value,
+								  perfuncstate->resulttypeByVal,
+								  perfuncstate->resulttypeLen);
 
 	MemoryContextSwitchTo(oldContext);
 }
@@ -2196,8 +2185,7 @@ ExecWindowAgg(PlanState *pstate)
 		if (perfuncstate->plain_agg)
 			continue;
 		eval_windowfunction(winstate, perfuncstate,
-							&(econtext->ecxt_aggvalues[perfuncstate->wfuncstate->wfuncno]),
-							&(econtext->ecxt_aggnulls[perfuncstate->wfuncstate->wfuncno]));
+							&(econtext->ecxt_aggvalues[perfuncstate->wfuncstate->wfuncno]));
 	}
 
 	/*
@@ -2384,13 +2372,13 @@ ExecInitWindowAgg(WindowAgg *node, EState *estate, int eflags)
 								   &winstate->ss.ps);
 
 	/*
-	 * WindowAgg nodes use aggvalues and aggnulls as well as Agg nodes.
+	 * WindowAgg nodes use aggvalues as well as Agg nodes.
 	 */
 	numfuncs = winstate->numfuncs;
 	numaggs = winstate->numaggs;
 	econtext = winstate->ss.ps.ps_ExprContext;
-	econtext->ecxt_aggvalues = (Datum *) palloc0(sizeof(Datum) * numfuncs);
-	econtext->ecxt_aggnulls = (bool *) palloc0(sizeof(bool) * numfuncs);
+	econtext->ecxt_aggvalues =
+		(NullableDatum *) palloc0(sizeof(NullableDatum) * numfuncs);
 
 	/*
 	 * allocate per-wfunc/per-agg state information.
@@ -2597,8 +2585,7 @@ ExecReScanWindowAgg(WindowAggState *node)
 		ExecClearTuple(node->frametail_slot);
 
 	/* Forget current wfunc values */
-	MemSet(econtext->ecxt_aggvalues, 0, sizeof(Datum) * node->numfuncs);
-	MemSet(econtext->ecxt_aggnulls, 0, sizeof(bool) * node->numfuncs);
+	MemSet(econtext->ecxt_aggvalues, 0, sizeof(NullableDatum) * node->numfuncs);
 
 	/*
 	 * if chgParam of subnode is not null then plan will be re-scanned by
@@ -2812,13 +2799,13 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 	 * field. Must do it the hard way with SysCacheGetAttr.
 	 */
 	textInitVal = SysCacheGetAttr(AGGFNOID, aggTuple, initvalAttNo,
-								  &peraggstate->initValueIsNull);
+								  &peraggstate->initValue.isnull);
 
-	if (peraggstate->initValueIsNull)
-		peraggstate->initValue = (Datum) 0;
+	if (peraggstate->initValue.isnull)
+		peraggstate->initValue.value = (Datum) 0;
 	else
-		peraggstate->initValue = GetAggInitVal(textInitVal,
-											   aggtranstype);
+		peraggstate->initValue.value =
+			GetAggInitVal(textInitVal, aggtranstype);
 
 	/*
 	 * If the transfn is strict and the initval is NULL, make sure input type
@@ -2827,7 +2814,7 @@ initialize_peragg(WindowAggState *winstate, WindowFunc *wfunc,
 	 * should have been checked at agg definition time, but we must check
 	 * again in case the transfn's strictness property has been changed.
 	 */
-	if (peraggstate->transfn.fn_strict && peraggstate->initValueIsNull)
+	if (peraggstate->transfn.fn_strict && peraggstate->initValue.isnull)
 	{
 		if (numArguments < 1 ||
 			!IsBinaryCoercible(inputTypes[0], aggtranstype))

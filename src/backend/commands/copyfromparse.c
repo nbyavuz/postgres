@@ -802,7 +802,7 @@ NextCopyFromRawFields(CopyFromState cstate, char ***fields, int *nfields)
  */
 bool
 NextCopyFrom(CopyFromState cstate, ExprContext *econtext,
-			 Datum *values, bool *nulls)
+			 NullableDatum *values)
 {
 	TupleDesc	tupDesc;
 	AttrNumber	num_phys_attrs,
@@ -819,8 +819,11 @@ NextCopyFrom(CopyFromState cstate, ExprContext *econtext,
 	attr_count = list_length(cstate->attnumlist);
 
 	/* Initialize all values for row to NULL */
-	MemSet(values, 0, num_phys_attrs * sizeof(Datum));
-	MemSet(nulls, true, num_phys_attrs * sizeof(bool));
+	for (int i = 0; i < num_phys_attrs; i++)
+	{
+		values[i].value = (Datum) 0;
+		values[i].isnull = true;
+	}
 
 	if (!cstate->opts.binary)
 	{
@@ -889,12 +892,12 @@ NextCopyFrom(CopyFromState cstate, ExprContext *econtext,
 
 			cstate->cur_attname = NameStr(att->attname);
 			cstate->cur_attval = string;
-			values[m] = InputFunctionCall(&in_functions[m],
-										  string,
-										  typioparams[m],
-										  att->atttypmod);
+			values[m].value = InputFunctionCall(&in_functions[m],
+												string,
+												typioparams[m],
+												att->atttypmod);
 			if (string != NULL)
-				nulls[m] = false;
+				values[m].isnull = false;
 			cstate->cur_attname = NULL;
 			cstate->cur_attval = NULL;
 		}
@@ -947,11 +950,11 @@ NextCopyFrom(CopyFromState cstate, ExprContext *econtext,
 			Form_pg_attribute att = TupleDescAttr(tupDesc, m);
 
 			cstate->cur_attname = NameStr(att->attname);
-			values[m] = CopyReadBinaryAttribute(cstate,
-												&in_functions[m],
-												typioparams[m],
-												att->atttypmod,
-												&nulls[m]);
+			values[m].value = CopyReadBinaryAttribute(cstate,
+													  &in_functions[m],
+													  typioparams[m],
+													  att->atttypmod,
+													  &values[m].isnull);
 			cstate->cur_attname = NULL;
 		}
 	}
@@ -970,8 +973,8 @@ NextCopyFrom(CopyFromState cstate, ExprContext *econtext,
 		Assert(econtext != NULL);
 		Assert(CurrentMemoryContext == econtext->ecxt_per_tuple_memory);
 
-		values[defmap[i]] = ExecEvalExpr(defexprs[i], econtext,
-										 &nulls[defmap[i]]);
+		values[defmap[i]].value = ExecEvalExpr(defexprs[i], econtext,
+											   &values[defmap[i]].isnull);
 	}
 
 	return true;

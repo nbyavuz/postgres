@@ -853,7 +853,7 @@ CopyFrom(CopyFromState cstate)
 		ExecClearTuple(myslot);
 
 		/* Directly store the values/nulls array in the slot */
-		if (!NextCopyFrom(cstate, econtext, myslot->tts_values, myslot->tts_isnull))
+		if (!NextCopyFrom(cstate, econtext, myslot->tts_values))
 			break;
 
 		ExecStoreVirtualTuple(myslot);

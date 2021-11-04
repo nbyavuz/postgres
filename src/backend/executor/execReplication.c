@@ -95,12 +95,12 @@ build_replindex_scan_key(ScanKey skey, Relation rel, Relation idxrel,
 					pkattno,
 					BTEqualStrategyNumber,
 					regop,
-					searchslot->tts_values[mainattno - 1]);
+					searchslot->tts_values[mainattno - 1].value);
 
 		skey[attoff].sk_collation = idxrel->rd_indcollation[attoff];
 
 		/* Check for null value. */
-		if (searchslot->tts_isnull[mainattno - 1])
+		if (searchslot->tts_values[mainattno - 1].isnull)
 		{
 			hasnulls = true;
 			skey[attoff].sk_flags |= SK_ISNULL;
@@ -242,18 +242,20 @@ tuples_equal(TupleTableSlot *slot1, TupleTableSlot *slot2,
 	{
 		Form_pg_attribute att;
 		TypeCacheEntry *typentry;
+		NullableDatum *val1 = &slot1->tts_values[attrnum];
+		NullableDatum *val2 = &slot2->tts_values[attrnum];
 
 		/*
 		 * If one value is NULL and other is not, then they are certainly not
 		 * equal
 		 */
-		if (slot1->tts_isnull[attrnum] != slot2->tts_isnull[attrnum])
+		if (val1->isnull != val2->isnull)
 			return false;
 
 		/*
 		 * If both are NULL, they can be considered equal.
 		 */
-		if (slot1->tts_isnull[attrnum] || slot2->tts_isnull[attrnum])
+		if (val1->isnull || val2->isnull)
 			continue;
 
 		att = TupleDescAttr(slot1->tts_tupleDescriptor, attrnum);
@@ -273,8 +275,7 @@ tuples_equal(TupleTableSlot *slot1, TupleTableSlot *slot2,
 
 		if (!DatumGetBool(FunctionCall2Coll(&typentry->eq_opr_finfo,
 											att->attcollation,
-											slot1->tts_values[attrnum],
-											slot2->tts_values[attrnum])))
+											val1->value, val2->value)))
 			return false;
 	}
 

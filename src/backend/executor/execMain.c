@@ -2184,7 +2184,7 @@ ExecBuildSlotValueDescription(Oid reloid,
 
 		if (table_perm || column_perm)
 		{
-			if (slot->tts_isnull[i])
+			if (slot->tts_values[i].isnull)
 				val = "null";
 			else
 			{
@@ -2193,7 +2193,7 @@ ExecBuildSlotValueDescription(Oid reloid,
 
 				getTypeOutputInfo(att->atttypid,
 								  &foutoid, &typisvarlena);
-				val = OidOutputFunctionCall(foutoid, slot->tts_values[i]);
+				val = OidOutputFunctionCall(foutoid, slot->tts_values[i].value);
 			}
 
 			if (write_comma)

@@ -1516,8 +1516,7 @@ RI_Initial_Check(Trigger *trigger, Relation fk_rel, Relation pk_rel)
 
 		slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 
-		heap_deform_tuple(tuple, tupdesc,
-						  slot->tts_values, slot->tts_isnull);
+		heap_deform_tuple_s(tuple, tupdesc, slot->tts_values);
 		ExecStoreVirtualTuple(slot);
 
 		/*
@@ -1756,8 +1755,7 @@ RI_PartitionRemove_Check(Trigger *trigger, Relation fk_rel, Relation pk_rel)
 
 		slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
 
-		heap_deform_tuple(tuple, tupdesc,
-						  slot->tts_values, slot->tts_isnull);
+		heap_deform_tuple_s(tuple, tupdesc, slot->tts_values);
 		ExecStoreVirtualTuple(slot);
 
 		/*
