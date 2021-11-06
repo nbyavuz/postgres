@@ -1376,14 +1376,9 @@ else
   cdata.set('HAVE_STRUCT_CMSGCRED', false)
 endif
 
-if cc.has_function('getopt', args: g_c_args) and \
-   cc.has_function('getopt_long', args: g_c_args) and \
-   cc.has_type('struct option', args: g_c_args, prefix: '#include <getopt.h>')
-  cdata.set('HAVE_GETOPT', 1)
-  cdata.set('HAVE_GETOPT_LONG', 1)
+if cc.has_type('struct option', args: g_c_args,
+  prefix: '@0@'.format(cdata.get('HAVE_GETOPT_H')) == '1' ? '#include <getopt.h>' : '')
   cdata.set('HAVE_STRUCT_OPTION', 1)
-else
-  warning('not yet implemented')
 endif
 
 
