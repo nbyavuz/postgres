@@ -10,6 +10,9 @@ option('cassert', type : 'boolean', value: false,
 option('atomics', type : 'boolean', value: true,
   description: 'whether to use atomic operations')
 
+option('spinlocks', type : 'boolean', value: true,
+  description: 'whether to use spinlocks')
+
 
 # Compilation options
 

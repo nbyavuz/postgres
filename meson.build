@@ -1136,10 +1136,18 @@ endif
 ###############################################################
 
 # FIXME
-cdata.set('HAVE_SPINLOCKS', 1)
 
-if get_option('atomics')
-  # FIXME
+if not get_option('spinlocks')
+  warning('Not using spinlocks will cause poor performance')
+else
+  cdata.set('HAVE_SPINLOCKS', 1)
+endif
+
+if not get_option('atomics')
+  warning('Not using atomics will cause poor performance')
+else
+  # XXX: perhaps we should require some atomics support in this case these
+  # days?
   cdata.set('HAVE_ATOMICS', 1)
 
   atomic_checks = [
