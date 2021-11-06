@@ -34,7 +34,7 @@ export_file = custom_target('libpq_exports.list',
   input: [files('exports.txt')],
   output: ['@BASENAME@.list'],
   command: [perl, files('../../tools/gen_versioning_script.pl'),
-    host_machine.system() == 'darwin' ? 'darwin' : 'gnu',
+    export_file_format,
     '@INPUT0@', '@OUTPUT0@'],
   build_by_default: false,
   install: false,
@@ -58,7 +58,13 @@ libpq_kwargs = default_lib_args + {
 }
 
 
-if host_machine.system() == 'darwin'
+if host_machine.system() == 'aix'
+  libpq_kwargs = libpq_kwargs + {
+    'link_args': ['-Wl,-bE:' + export_file.full_path()],
+    'link_depends': export_file,
+    'soversion': '5',
+  }
+elif host_machine.system() == 'darwin'
   libpq_kwargs = libpq_kwargs + {
     'link_args': ['-exported_symbols_list', export_file.full_path()],
     'link_depends': export_file,

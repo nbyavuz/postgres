@@ -1641,14 +1641,18 @@ endforeach
 
 
 
-if host_machine.system() == 'linux' or host_machine.system() == 'freebsd'
+if host_machine.system() == 'aix'
   dlsuffix = '.so'
+  export_file_format = 'aix'
 elif host_machine.system() == 'darwin'
   dlsuffix = '.dylib'
+  export_file_format = 'darwin'
 elif host_machine.system() == 'windows'
   dlsuffix = '.dll'
+  export_file_format = ''
 else
-  error('not yet')
+  dlsuffix = '.so'
+  export_file_format = 'gnu'
 endif
 
 cdata.set_quoted('DLSUFFIX', dlsuffix)
