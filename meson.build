@@ -1314,12 +1314,13 @@ header_checks = [
 ]
 
 foreach c : header_checks
-  varname = 'HAVE_'+c.get(0).underscorify().to_upper()
+  header = c.get(0)
+  varname = 'HAVE_'+header.underscorify().to_upper()
 
   # Emulate autoconf behaviour of not-found->undef, found->1
-  found = cc.has_header(c.get(0), include_directories: g_inc, args: g_c_args)
+  found = cc.has_header(header, include_directories: g_inc, args: g_c_args)
   cdata.set(varname, found ? 1 : false,
-            description: 'Define to 1 if you have the <@0@> header file.'.format(c))
+            description: 'Define to 1 if you have the <@0@> header file.'.format(header))
 endforeach
 
 
@@ -1347,12 +1348,15 @@ decl_checks += [
 ]
 
 foreach c : decl_checks
-  varname = 'HAVE_DECL_'+c.get(0).underscorify().to_upper()
+  func = c.get(0)
+  header = c.get(1)
+  args = c.get(2, {})
+  varname = 'HAVE_DECL_'+func.underscorify().to_upper()
 
-  found = cc.has_header_symbol(c.get(1), c.get(0), args: g_c_args, kwargs: c.get(2, {}))
+  found = cc.has_header_symbol(header, func, args: g_c_args, kwargs: args)
   cdata.set10(varname, found, description:
-'''Define to 1 if you have the declaration of `@0@\', and to 0 if you
-  don't.'''.format(c))
+'''Define to 1 if you have the declaration of `@0@', and to 0 if you
+  don't.'''.format(func))
 endforeach
 
 
@@ -1634,7 +1638,7 @@ foreach c : func_checks
 
   # Emulate autoconf behaviour of not-found->undef, found->1
   cdata.set(varname, found  ? 1 : false,
-            description: 'Define to 1 if you have the `@0@\' function.'.format(c))
+            description: 'Define to 1 if you have the `@0@\' function.'.format(func))
 endforeach
 
 
