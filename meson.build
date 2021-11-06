@@ -919,6 +919,9 @@ else
   error('do not know how to get a 64bit int')
 endif
 
+if host_machine.endian() == 'big'
+  cdata.set('WORDS_BIGENDIAN', 1)
+endif
 
 cdata.set('MAXIMUM_ALIGNOF', 8)
 cdata.set('ALIGNOF_SHORT', cc.alignment('short', args: g_c_args))
