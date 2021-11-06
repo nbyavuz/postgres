@@ -52,7 +52,6 @@ replace_funcs_neg = [
     ['getopt'],
     ['getopt_long'],
     ['getpeereid'],
-    ['getpeereid'],
     ['getrusage'],
     ['gettimeofday'],
     ['inet_aton'],
