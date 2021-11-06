@@ -23,7 +23,7 @@ executable('pg_basebackup',
 executable('pg_receivewal',
   'pg_receivewal.c',
   link_with: [pg_basebackup_common],
-  dependencies: [frontend_code, libpq],
+  dependencies: [frontend_code, libpq, lz4],
   kwargs: default_bin_args,
 )
 
