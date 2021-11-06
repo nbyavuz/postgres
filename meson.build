@@ -1489,7 +1489,16 @@ else
   cdata.set('STRERROR_R_INT', false)
 endif
 
-# FIXME
+# MSVC doesn't cope well with defining restrict to __restrict, the
+# spelling it understands, because it conflicts with
+# __declspec(restrict). Therefore we define pg_restrict to the
+# appropriate definition, which presumably won't conflict.
+#
+# FIXME: We used to check if restrict is available, but it really should these
+# days?
+#
+# FIXME: Historically we allowed platforms to disable restrict in template
+# files. Is that really still necessary?
 cdata.set('pg_restrict', '__restrict')
 
 # FIXME
