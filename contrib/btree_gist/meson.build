@@ -1,5 +1,6 @@
 btree_gist_sources = files(
   'btree_bit.c',
+  'btree_bool.c',
   'btree_bytea.c',
   'btree_cash.c',
   'btree_date.c',
@@ -39,6 +40,7 @@ install_data(
   'btree_gist--1.3--1.4.sql',
   'btree_gist--1.4--1.5.sql',
   'btree_gist--1.5--1.6.sql',
+  'btree_gist--1.6--1.7.sql',
   kwargs: contrib_data_args,
 )
 
@@ -75,5 +77,6 @@ regress_tests += {
     'uuid',
     'not_equal',
     'enum',
+    'bool',
   ],
 }

@@ -1,6 +1,10 @@
 backend_sources += files(
   'backup_manifest.c',
   'basebackup.c',
+  'basebackup_copy.c',
+  'basebackup_progress.c',
+  'basebackup_sink.c',
+  'basebackup_throttle.c',
   'slot.c',
   'slotfuncs.c',
   'syncrep.c',

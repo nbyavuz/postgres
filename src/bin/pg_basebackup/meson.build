@@ -1,12 +1,15 @@
 common_sources = files(
   'receivelog.c',
+  'bbstreamer_file.c',
+  'bbstreamer_inject.c',
+  'bbstreamer_tar.c',
   'streamutil.c',
   'walmethods.c',
 )
 
 pg_basebackup_common = static_library('pg_basebackup_common',
   common_sources,
-  dependencies: [frontend_code, libpq, zlib],
+  dependencies: [frontend_code, libpq, zlib, lz4],
   kwargs: internal_lib_args,
 )
 

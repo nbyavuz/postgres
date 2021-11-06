@@ -1,3 +1,7 @@
+if not ssl.found()
+  subdir_done()
+endif
+
 pgcrypto_sources = files(
   'crypt-blowfish.c',
   'crypt-des.c',
@@ -31,6 +35,10 @@ pgcrypto_regress = [
   'hmac-sha1',
   'blowfish',
   'rijndael',
+  'sha2',
+  'des',
+  '3des',
+  'cast5',
   'crypt-des',
   'crypt-md5',
   'crypt-blowfish',
@@ -43,58 +51,16 @@ pgcrypto_regress = [
   'pgp-info',
 ]
 
-
-pgcrypto_internal_sources = files(
-  'internal.c',
-  'internal-sha2.c',
-  'blf.c',
-  'rijndael.c',
-  'pgp-mpi-internal.c',
-)
-
-pgcrypto_internal_regress = [
-  'sha2',
-]
-
-
 pgcrypto_openssl_sources = files(
   'openssl.c',
   'pgp-mpi-openssl.c',
 )
-pgcrypto_openssl_regress = [
-  'sha2',
-  'des',
-  '3des',
-  'cast5',
-]
-
-imath_cflags = []
-if using_declaration_after_statement_warning
-  imath_cflags += ['-Wno-declaration-after-statement']
-endif
-
-imath_internal = static_library('internal_imath',
-  sources: 'imath.c',
-  kwargs: contrib_mod_args + {
-    'c_args': c_args + contrib_mod_args.get('c_args', []),
-    'install': false,
-    'build_by_default': false,
-  },
-)
-
-# TODO: implement rijndael.c generation
 
 pgcrypto_deps = []
 pgcrypto_link_with = []
-if ssl.found()
-  pgcrypto_deps += ssl
-  pgcrypto_sources += pgcrypto_openssl_sources
-  pgcrypto_regress += pgcrypto_openssl_regress
-else
-  pgcrypto_link_with += imath_internal
-  pgcrypto_sources += pgcrypto_internal_sources
-  pgcrypto_regress += pgcrypto_internal_regress
-endif
+
+pgcrypto_deps += ssl
+pgcrypto_sources += pgcrypto_openssl_sources
 
 if zlib.found()
   pgcrypto_deps += zlib
