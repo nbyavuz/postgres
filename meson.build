@@ -1160,11 +1160,10 @@ __sync_lock_release(&lock);'''},
 int val = 0;
 __sync_val_compare_and_swap(&val, 0, 37);'''},
 
-# FIXME: int64 reference
     {'name': 'HAVE_GCC__SYNC_INT64_CAS',
      'desc': '__sync_val_compare_and_swap(int64)',
      'test': '''
-long val = 0;
+INT64 val = 0;
 __sync_val_compare_and_swap(&val, 0, 37);'''},
 
     {'name': 'HAVE_GCC__ATOMIC_INT32_CAS',
@@ -1174,12 +1173,11 @@ int val = 0;
 int expect = 0;
 __atomic_compare_exchange_n(&val, &expect, 37, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);'''},
 
-# FIXME: int64 reference
     {'name': 'HAVE_GCC__ATOMIC_INT64_CAS',
      'desc': ' __atomic_compare_exchange_n(int64)',
      'test': '''
-long val = 0;
-int expect = 0;
+INT64 val = 0;
+INT64 expect = 0;
 __atomic_compare_exchange_n(&val, &expect, 37, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);'''},
   ]
 
@@ -1191,7 +1189,10 @@ int main(void)
 }'''.format(check['test'])
 
     cdata.set(check['name'],
-      cc.links(test, name: check['desc'], args: g_c_args))
+      cc.links(test,
+        name: check['desc'],
+        args: g_c_args + ['-DINT64=@0@'.format(cdata.get('PG_INT64_TYPE'))])
+    )
   endforeach
 
 endif
