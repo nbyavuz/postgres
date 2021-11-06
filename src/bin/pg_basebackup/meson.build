@@ -16,21 +16,21 @@ pg_basebackup_common = static_library('pg_basebackup_common',
 executable('pg_basebackup',
   'pg_basebackup.c',
   link_with: [pg_basebackup_common],
-  dependencies: [frontend_code, libpq, zlib],
+  dependencies: [frontend_code, libpq, zlib, lz4],
   kwargs: default_bin_args,
 )
 
 executable('pg_receivewal',
   'pg_receivewal.c',
   link_with: [pg_basebackup_common],
-  dependencies: [frontend_code, libpq, lz4],
+  dependencies: [frontend_code, libpq, zlib, lz4],
   kwargs: default_bin_args,
 )
 
 executable('pg_recvlogical',
   'pg_recvlogical.c',
   link_with: [pg_basebackup_common],
-  dependencies: [frontend_code, libpq],
+  dependencies: [frontend_code, libpq, zlib, lz4],
   kwargs: default_bin_args,
 )
 
