@@ -1676,15 +1676,20 @@ endif
 
 cdata.set_quoted('DLSUFFIX', dlsuffix)
 
-if host_machine.system() == 'windows'
-   cdata.set('USE_WIN32_SEMAPHORES', 1)
-   cdata.set('USE_WIN32_SHARED_MEMORY', 1)
-elif host_machine.system() == 'darwin'
-   cdata.set('USE_SYSV_SEMAPHORES', 1)
-   cdata.set('USE_SYSV_SHARED_MEMORY', 1)
+if host_machine.system() == 'darwin'
+  cdata.set('USE_SYSV_SEMAPHORES', 1)
+  cdata.set('USE_SYSV_SHARED_MEMORY', 1)
+elif host_machine.system() == 'openbsd'
+  # FIXME: This likely defaulted to sysv, but the defaults for sysv semas on
+  # openbsd are so low that tap tests don't pass.
+  cdata.set('USE_NAMED_POSIX_SEMAPHORES', 1)
+  cdata.set('USE_SYSV_SHARED_MEMORY', 1)
+elif host_machine.system() == 'windows'
+  cdata.set('USE_WIN32_SEMAPHORES', 1)
+  cdata.set('USE_WIN32_SHARED_MEMORY', 1)
 else
-   cdata.set('USE_UNNAMED_POSIX_SEMAPHORES', 1)
-   cdata.set('USE_SYSV_SHARED_MEMORY', 1)
+  cdata.set('USE_UNNAMED_POSIX_SEMAPHORES', 1)
+  cdata.set('USE_SYSV_SHARED_MEMORY', 1)
 endif
 
 
