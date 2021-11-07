@@ -8,7 +8,7 @@
 basedir=$1
 builddir=$2
 testgroup=$3
-testname=$(basename -s .pl $4)
+testname=$(echo "$4"|sed -e 's/.pl$//')
 shift 4
 
 testdir="$basedir/testrun/$testgroup/$testname"
