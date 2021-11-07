@@ -1776,8 +1776,15 @@ default_mod_args = default_lib_args + {
 default_bin_args = default_target_args + {
 }
 
+library_path_var = ''
+
 if host_machine.system() == 'windows'
   # nothing to do
+elif host_machine.system() == 'openbsd'
+  # openbsd's $ORIGIN doesn't use an absolute path to the binary, but argv[0]
+  # (i.e. absolute when invoked with an absolute name, but e.g. not absolute
+  # when invoked via PATH search).
+  library_path_var = 'LD_LIBRARY_PATH'
 else
   if host_machine.system() == 'darwin'
     rpath_var = '@loader_path'
@@ -1976,6 +1983,11 @@ test_env.prepend('PATH', test_install_location / get_option('bindir'))
 test_env.set('PG_REGRESS', meson.build_root() / 'src/test/regress/pg_regress')
 test_env.set('REGRESS_SHLIB', regress_module.full_path())
 
+# On platforms without $ORIGIN support we need to add the temporary
+# installation to the library search path.
+if library_path_var != ''
+  test_env.prepend(library_path_var, test_install_location / get_option('libdir'))
+endif
 
 
 ###############################################################
