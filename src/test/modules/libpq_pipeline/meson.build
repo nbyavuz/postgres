@@ -12,9 +12,6 @@ tap_tests += {
   'name': 'libpq_pipeline',
   'sd': meson.current_source_dir(),
   'bd': meson.current_build_dir(),
-  'env': {
-    'PATH': meson.current_build_dir(),
-  },
   'tests': [
     't/001_libpq_pipeline.pl',
   ]

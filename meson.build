@@ -1979,8 +1979,8 @@ testport=40000
 
 test_env = environment()
 
-test_env.prepend('PATH', test_install_location / get_option('bindir'))
-test_env.set('PG_REGRESS', meson.build_root() / 'src/test/regress/pg_regress')
+temp_install_bindir = test_install_location / get_option('bindir')
+test_env.set('PG_REGRESS', pg_regress.full_path())
 test_env.set('REGRESS_SHLIB', regress_module.full_path())
 
 # On platforms without $ORIGIN support we need to add the temporary
@@ -1997,7 +1997,7 @@ endif
 # Define all 'pg_regress' style tests
 foreach t : regress_tests
   test_command = [
-    pg_regress,
+    pg_regress.full_path(),
     '--temp-instance', test_result_dir / t['name'] / 'pg_regress' / 'tmp_check',
     '--inputdir', t['sd'],
     '--outputdir', test_result_dir / t['name'] / 'pg_regress',
@@ -2017,14 +2017,17 @@ foreach t : regress_tests
      test_command += t['sql']
   endif
 
+  env = test_env
+  env.prepend('PATH', temp_install_bindir, t['bd'])
+
   test_kwargs = {
     'suite': ['pg_regress', t['name']],
     'priority': 10,
     'timeout': 300,
     'depends': test_deps + t.get('deps', []),
-    'env': test_env,
-    'workdir': t['sd'],
+    'env': env,
     'args': [
+      t['sd'],
       meson.build_root(),
       t['bd'],
       t['name'],
@@ -2050,7 +2053,7 @@ endforeach
 # Define all 'isolationtester' style tests
 foreach t : isolation_tests
   test_command = [
-    pg_isolation_regress,
+    pg_isolation_regress.full_path(),
     '--temp-instance', test_result_dir / t['name'] / 'isolation' / 'tmp_check',
     '--inputdir', t['sd'],
     '--outputdir', test_result_dir / t['name'] / 'isolation',
@@ -2070,14 +2073,17 @@ foreach t : isolation_tests
      test_command += t['specs']
   endif
 
+  env = test_env
+  env.prepend('PATH', temp_install_bindir, t['bd'])
+
   test_kwargs = {
     'suite': ['isolation', t['name']],
     'priority': 20,
     'timeout': 300,
     'depends': test_deps + t.get('deps', []),
-    'workdir': t['sd'],
-    'env': test_env,
+    'env': env,
     'args': [
+      t['sd'],
       meson.build_root(),
       t['bd'],
       t['name'],
@@ -2103,38 +2109,41 @@ endforeach
 # Define all 'tap' style tests
 # FIXME: dependencies for each test
 foreach t : tap_tests
+  test_command = [
+    perl.path(),
+    '-I', meson.source_root() / 'src/test/perl',
+    '-I', t['sd'],
+  ]
+
   env = test_env
+  env.prepend('PATH', temp_install_bindir, t['bd'])
 
   foreach name, value : t.get('env', {})
-    if name == 'PATH'
-      # FIXME: manually setting PATH again, because repeated prepend didn't work
-      # before meson 0.58.
-      env.prepend('PATH', value, test_install_location / get_option('bindir'))
-    else
-      env.set(name, value)
-    endif
+    env.set(name, value)
   endforeach
+
+  test_kwargs = {
+    'protocol': 'tap',
+    'suite': ['tap', t['name']],
+    'timeout': 300,
+    'depends': test_deps + t.get('deps', []),
+    'env': env,
+  }
 
   foreach onetap : t['tests']
     test(t['name'] / onetap,
       testwrap,
-      workdir: t['sd'],
+      kwargs: test_kwargs,
       args: [
+        t['sd'],
         meson.build_root(),
         t['bd'],
         t['name'],
         onetap,
-        'perl',
-        '-I', meson.source_root() / 'src/test/perl',
-        '-I', t['sd'],
-        t['sd'] / onetap
-      ],
-      protocol: 'tap',
-      suite: ['tap', t['name']],
-      env: env,
-      depends: test_deps + t.get('deps', []),
-      timeout: 300,
-      )
+        test_command,
+        t['sd'] / onetap,
+      ]
+    )
   endforeach
 endforeach
 

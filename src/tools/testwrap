@@ -5,16 +5,19 @@
 
 # FIXME: argument parsing
 
-basedir=$1
-builddir=$2
-testgroup=$3
-testname=$(echo "$4"|sed -e 's/.pl$//')
-shift 4
+srcdir=$1
+basedir=$2
+builddir=$3
+testgroup=$4
+testname=$(echo "$5"|sed -e 's/.pl$//')
+shift 5
 
 testdir="$basedir/testrun/$testgroup/$testname"
 echo "# executing test in $testdir group $testgroup test $testname, builddir $builddir"
 rm -rf "$testdir/"
 mkdir -p "$testdir"
+
+cd "$srcdir"
 
 export TESTOUTDIR="$testdir"
 export TESTDIR="$builddir"
