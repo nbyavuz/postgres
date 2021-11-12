@@ -1415,6 +1415,12 @@ int main(void)
   endif
 endforeach
 
+if cc.has_type('socklen_t', args: g_c_args,
+  include_directories: postgres_inc,
+  prefix: '''
+#include <sys/socket.h>''')
+  cdata.set('HAVE_SOCKLEN_T', 1)
+endif
 
 if cc.has_type('struct sockaddr_storage', args: g_c_args, prefix: '''
 #include <sys/types.h>
