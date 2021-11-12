@@ -923,11 +923,17 @@ if host_machine.endian() == 'big'
   cdata.set('WORDS_BIGENDIAN', 1)
 endif
 
-cdata.set('MAXIMUM_ALIGNOF', 8)
-cdata.set('ALIGNOF_SHORT', cc.alignment('short', args: g_c_args))
-cdata.set('ALIGNOF_INT', cc.alignment('int', args: g_c_args))
-cdata.set('ALIGNOF_LONG', cc.alignment('long', args: g_c_args))
-cdata.set('ALIGNOF_DOUBLE', cc.alignment('double', args: g_c_args))
+alignof_types = ['short', 'int', 'long', 'double']
+maxalign = 0
+foreach t: alignof_types
+  align = cc.alignment(t, args: g_c_args)
+  if maxalign < align
+    maxalign = align
+  endif
+  cdata.set('ALIGNOF_@0@'.format(t.to_upper()), align)
+endforeach
+cdata.set('MAXIMUM_ALIGNOF', maxalign)
+
 cdata.set('SIZEOF_VOID_P', cc.sizeof('void *', args: g_c_args))
 cdata.set('SIZEOF_SIZE_T', cc.sizeof('size_t', args: g_c_args))
 
