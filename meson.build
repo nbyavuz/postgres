@@ -435,7 +435,7 @@ endif
 # Library: Perl (for plperl)
 ###############################################################
 
-perlopt = get_option('perl')
+perlopt = get_option('plperl')
 perl_dep = dependency('', required: false)
 
 if perlopt.disabled()
@@ -589,16 +589,16 @@ endif
 # Library: Python (for plpython)
 ###############################################################
 
-pyopt = get_option('python')
+pyopt = get_option('plpython')
 if not pyopt.disabled()
   pm = import('python')
   python3_inst = pm.find_installation(required: pyopt.enabled())
-  python3 = python3_inst.dependency(embed: true, required: pyopt.enabled())
-  if not cc.has_header('Python.h', dependencies: python3, required: pyopt.enabled())
-    python3 = dependency('', required: false)
+  python3_dep = python3_inst.dependency(embed: true, required: pyopt.enabled())
+  if not cc.has_header('Python.h', dependencies: python3_dep, required: pyopt.enabled())
+    python3_dep = dependency('', required: false)
   endif
 else
-  python3 = dependency('', required: false)
+  python3_dep = dependency('', required: false)
 endif
 
 
@@ -2200,7 +2200,7 @@ if meson.version().version_compare('>=0.57')
       'libxslt': libxslt,
       'lz4': lz4,
       'perl': perl_dep,
-      'python3': python3,
+      'python3': python3_dep,
       'readline': readline,
       'selinux': selinux,
       'ssl': ssl,

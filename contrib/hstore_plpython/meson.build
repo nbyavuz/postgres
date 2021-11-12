@@ -1,4 +1,4 @@
-if not python3.found()
+if not python3_dep.found()
   subdir_done()
 endif
 
@@ -11,7 +11,7 @@ hstore_plpython = shared_module('hstore_plpython3',
   include_directories: [plpython_inc, hstore_inc, ],
   kwargs: pg_mod_args + {
     'c_args': ['-DPLPYTHON_LIBNAME="plpython3"'] + contrib_mod_args['c_args'],
-    'dependencies': [python3, contrib_mod_args['dependencies']],
+    'dependencies': [python3_dep, contrib_mod_args['dependencies']],
   },
 )
 

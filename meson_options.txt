@@ -45,10 +45,10 @@ option('libxslt', type : 'feature', value: 'auto',
 option('lz4', type : 'feature', value: 'auto',
   description: 'LZ4 support')
 
-option('perl', type : 'feature', value: 'auto',
+option('plperl', type : 'feature', value: 'auto',
   description: 'build Perl modules (PL/Perl)')
 
-option('python', type : 'feature', value: 'auto',
+option('plpython', type : 'feature', value: 'auto',
   description: 'build Python modules (PL/Python)')
 
 option('readline', type : 'feature', value : 'auto',

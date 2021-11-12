@@ -1,4 +1,4 @@
-if not python3.found()
+if not python3_dep.found()
   subdir_done()
 endif
 
@@ -33,7 +33,7 @@ shared_module('plpython3',
   c_pch: '../../include/pch/postgres_pch.h',
   include_directories: [plpython_inc, postgres_inc],
   kwargs: pg_mod_args + {
-    'dependencies': [python3, pg_mod_args['dependencies']],
+    'dependencies': [python3_dep, pg_mod_args['dependencies']],
   },
 )
 
