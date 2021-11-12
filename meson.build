@@ -1509,21 +1509,6 @@ endif
 # files. Is that really still necessary?
 cdata.set('pg_restrict', '__restrict')
 
-# FIXME
-if host_machine.system() == 'windows'
-  cdata.set('ACCEPT_TYPE_ARG1', 'unsigned int')
-  cdata.set('ACCEPT_TYPE_ARG2', 'struct sockaddr *')
-  cdata.set('ACCEPT_TYPE_ARG3', 'int')
-  cdata.set('ACCEPT_TYPE_RETURN', 'unsigned int PASCAL')
-else
-  cdata.set('ACCEPT_TYPE_ARG1', 'int')
-  cdata.set('ACCEPT_TYPE_ARG2', 'struct sockaddr')
-  cdata.set('ACCEPT_TYPE_ARG3', 'socklen_t')
-  cdata.set('ACCEPT_TYPE_RETURN', 'int')
-endif
-
-cdata.set('HAVE_STRUCT_ADDRINFO', 1)
-
 
 cdata.set('MEMSET_LOOP_LIMIT', 1024)
 
