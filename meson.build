@@ -129,6 +129,7 @@ add_project_link_arguments(g_l_args, language: ['c', 'cpp'])
 
 # External programs
 perl = find_program(get_option('PERL'), required: true)
+python = find_program(get_option('PYTHON'), required: true)
 flex = find_program(get_option('FLEX'), native: true)
 bison = find_program(get_option('BISON'), native: true, version: '>= 1.875')
 sed = find_program(get_option('SED'), 'sed', native: true)
@@ -138,9 +139,7 @@ gzip = find_program(get_option('GZIP'), native: true)
 touch = find_program('touch', native: true)
 
 # Internal programs
-find_meson = find_program('src/tools/find_meson', native: true)
 testwrap = find_program('src/tools/testwrap', native: true)
-relpath = find_program('src/tools/relpath.py', native: true)
 
 bisonflags = []
 if bison.found()
@@ -164,7 +163,7 @@ wget_flags = ['-O', '@OUTPUT0@', '--no-use-server-timestamps']
 
 # FIXME: this should really be part of meson, see
 # https://github.com/mesonbuild/meson/issues/8511
-meson_binpath_r = run_command(find_meson, check: true)
+meson_binpath_r = run_command(python, 'src/tools/find_meson', check: true)
 
 if meson_binpath_r.returncode() != 0 or meson_binpath_r.stdout() == ''
   error('huh, could not run find_meson.\nerrcode: @0@\nstdout: @1@\nstderr: @2@'.format(
@@ -1784,13 +1783,13 @@ else
   endif
 
   # PG binaries might need to link to libpq, use relative path to reference
-  bin_to_lib = run_command(relpath,
+  bin_to_lib = run_command(python, files('src/tools/relpath.py'),
     get_option('bindir'), get_option('libdir'), check: true).stdout().strip()
   default_bin_args += {'install_rpath':  rpath_var / bin_to_lib}
 
   # PG extensions might need to link to libpq, use relative path to reference
   # (often just .)
-  mod_to_lib = run_command(relpath,
+  mod_to_lib = run_command(python, files('src/tools/relpath.py'),
     get_option('libdir'), get_option('libdir'), check: true).stdout().strip()
   default_mod_args += {'install_rpath': rpath_var}
 endif

@@ -83,6 +83,9 @@ option('GZIP', type : 'string', value: 'gzip',
 option('PERL', type : 'string', value: 'perl',
   description: 'path to perl binary')
 
+option('PYTHON', type : 'array', value: ['python3', 'python'],
+  description: 'path to python binary')
+
 option('PROVE', type : 'string', value: 'prove',
   description: 'path to prove binary')
 
