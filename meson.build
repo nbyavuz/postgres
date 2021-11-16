@@ -121,6 +121,15 @@ g_c_lib = get_option('extra_lib_dirs')
 add_project_arguments(g_c_args, language: ['c', 'cpp'])
 add_project_link_arguments(g_l_args, language: ['c', 'cpp'])
 
+postgres_inc = [include_directories('src/include')]
+
+if host_machine.system() == 'windows'
+  postgres_inc += include_directories('src/include/port/win32')
+
+  if cc.get_id() == 'msvc'
+    postgres_inc += include_directories('src/include/port/win32_msvc')
+  endif
+endif
 
 
 ###############################################################
@@ -1422,32 +1431,40 @@ if cc.has_type('socklen_t', args: g_c_args,
   cdata.set('HAVE_SOCKLEN_T', 1)
 endif
 
-if cc.has_type('struct sockaddr_storage', args: g_c_args, prefix: '''
+if cc.has_type('struct sockaddr_storage', args: g_c_args,
+  include_directories: postgres_inc,
+  prefix: '''
 #include <sys/types.h>
 #include <sys/socket.h>''')
   cdata.set('HAVE_STRUCT_SOCKADDR_STORAGE', 1)
 endif
 
 if cc.has_member('struct sockaddr_storage', 'ss_family', args: g_c_args,
+  include_directories: postgres_inc,
   prefix: '''#include <sys/types.h>
 #include <sys/socket.h>''')
   cdata.set('HAVE_STRUCT_SOCKADDR_STORAGE_SS_FAMILY', 1)
 endif
 
 if cc.has_member('struct sockaddr_storage', '__ss_family', args: g_c_args,
+  include_directories: postgres_inc,
   prefix: '''
 #include <sys/types.h>
 #include <sys/socket.h>''')
   cdata.set('HAVE_STRUCT_SOCKADDR_STORAGE___SS_FAMILY', 1)
 endif
 
-if cc.has_type('struct sockaddr_un', args: g_c_args, prefix: '''
+if cc.has_type('struct sockaddr_un', args: g_c_args,
+  include_directories: postgres_inc,
+  prefix: '''
 #include <sys/types.h>
 #include <sys/un.h>''')
   cdata.set('HAVE_STRUCT_SOCKADDR_UN', 1)
 endif
 
-if cc.has_type('struct addrinfo', args: g_c_args, prefix: '''
+if cc.has_type('struct addrinfo', args: g_c_args,
+  include_directories: postgres_inc,
+  prefix: '''
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -1455,10 +1472,10 @@ if cc.has_type('struct addrinfo', args: g_c_args, prefix: '''
   cdata.set('HAVE_STRUCT_ADDRINFO', 1)
 endif
 
-if host_machine.system() == 'windows'
-  cdata.set('HAVE_STRUCT_SOCKADDR_STORAGE', 1)
-  cdata.set('HAVE_STRUCT_SOCKADDR_STORAGE_SS_FAMILY', 1)
-endif
+#if host_machine.system() == 'windows'
+#  cdata.set('HAVE_STRUCT_SOCKADDR_STORAGE', 1)
+#  cdata.set('HAVE_STRUCT_SOCKADDR_STORAGE_SS_FAMILY', 1)
+#endif
 
 if cc.has_type('struct sockaddr_in6', args: g_c_args, prefix: '''
 #include <netinet/in.h>''')
@@ -1824,15 +1841,6 @@ win32ver_rc_in = files('src/port/win32ver.rc.in')
 generated_headers = []
 generated_backend_headers = []
 
-postgres_inc = [include_directories('src/include')]
-
-if host_machine.system() == 'windows'
-  postgres_inc += include_directories('src/include/port/win32')
-
-  if cc.get_id() == 'msvc'
-    postgres_inc += include_directories('src/include/port/win32_msvc')
-  endif
-endif
 
 subdir('src/include')
 
