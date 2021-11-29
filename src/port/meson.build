@@ -1,7 +1,6 @@
 pgport_sources = [
   'bsearch_arg.c',
   'chklocale.c',
-  'erand48.c',
   'inet_net_ntop.c',
   'noblock.c',
   'path.c',
@@ -61,8 +60,6 @@ replace_funcs_neg = [
     ['preadv', 'HAVE_DECL_PREADV'],
     ['pwrite'],
     ['pwritev', 'HAVE_DECL_PWRITEV'],
-    ['random'],
-    ['srandom'],
     ['strlcat'],
     ['strlcpy'],
     ['strnlen'],

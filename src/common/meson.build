@@ -17,6 +17,7 @@ common_sources = files(
   'md5_common.c',
   'pg_get_line.c',
   'pg_lzcompress.c',
+  'pg_prng.c',
   'pgfnames.c',
   'psprintf.c',
   'relpath.c',
