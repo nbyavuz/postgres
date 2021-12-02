@@ -29,6 +29,7 @@ tap_tests += {
     't/023_twophase_stream.pl',
     't/024_add_drop_pub.pl',
     't/025_rep_changes_for_schema.pl',
+    't/026_worker_stats.pl',
     't/100_bugs.pl',
   ],
 }
