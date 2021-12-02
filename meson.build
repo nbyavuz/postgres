@@ -657,11 +657,12 @@ Use -Dreadline=false to disable readline support.''')
     endif
 
     check_funcs = [
+      'append_history',
+      'history_truncate_file',
       'rl_completion_matches',
       'rl_filename_completion_function',
       'rl_reset_screen_size',
-      'append_history',
-      'history_truncate_file',
+      'rl_variable_bind',
     ]
 
     foreach func : check_funcs
