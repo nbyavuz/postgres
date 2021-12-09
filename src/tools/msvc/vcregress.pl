@@ -70,7 +70,10 @@ $ENV{with_readline} = 'no';
 # These values are defaults that can be overridden by the calling environment
 # (see buildenv.pl processing above).
 # c.f. src/Makefile.global.in and configure.ac
-$ENV{TAR} ||= 'tar';
+#
+# For tar default to the tar shipped with windows. It's common to have git's
+# tar in PATH, and that doesn't handle drive letters.
+$ENV{TAR} ||= "$ENV{SYSTEMROOT}/system32/tar.exe";
 $ENV{LZ4} ||= 'lz4';
 $ENV{GZIP_PROGRAM} ||= 'gzip';
 

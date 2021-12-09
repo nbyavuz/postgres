@@ -267,9 +267,6 @@ task:
     TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/ci/pg_ci_base.conf
     # Avoid re-installing over and over
     NO_TEMP_INSTALL: 1
-    # git's tar doesn't deal with drive letters see
-    # https://postgr.es/m/b6782dc3-a7b0-ed56-175f-f8f54cb08d67%40dunslane.net
-    TAR: "c:/windows/system32/tar.exe"
     # Avoids port conflicts
     PG_TEST_USE_UNIX_SOCKETS: 1
     PG_REGRESS_SOCK_DIR: "c:/cirrus/"
