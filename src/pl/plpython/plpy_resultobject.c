@@ -226,19 +226,11 @@ PLy_result_str(PyObject *arg)
 {
 	PLyResultObject *ob = (PLyResultObject *) arg;
 
-#if PY_MAJOR_VERSION >= 3
 	return PyUnicode_FromFormat("<%s status=%S nrows=%S rows=%S>",
 								Py_TYPE(ob)->tp_name,
 								ob->status,
 								ob->nrows,
 								ob->rows);
-#else
-	return PyString_FromFormat("<%s status=%ld nrows=%ld rows=%s>",
-							   ob->ob_type->tp_name,
-							   PyInt_AsLong(ob->status),
-							   PyInt_AsLong(ob->nrows),
-							   PyString_AsString(PyObject_Str(ob->rows)));
-#endif
 }
 
 static PyObject *

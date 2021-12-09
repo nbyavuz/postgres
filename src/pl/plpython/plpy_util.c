@@ -95,7 +95,6 @@ PLyUnicode_AsString(PyObject *unicode)
 	return rv;
 }
 
-#if PY_MAJOR_VERSION >= 3
 /*
  * Convert a C string in the PostgreSQL server encoding to a Python
  * unicode object.  Reference ownership is passed to the caller.
@@ -126,5 +125,3 @@ PLyUnicode_FromString(const char *s)
 {
 	return PLyUnicode_FromStringAndSize(s, strlen(s));
 }
-
-#endif							/* PY_MAJOR_VERSION >= 3 */
