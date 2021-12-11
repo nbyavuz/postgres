@@ -288,6 +288,8 @@ typedef struct LVRelState
 	bool		failsafe_active;
 	/* Consider index vacuuming bypass optimization? */
 	bool		consider_bypass_optimization;
+	/* Should we scan all unfrozen pages? */
+	bool		aggressive;
 
 	/* Doing index vacuuming, index cleanup, rel truncation? */
 	bool		do_index_vacuuming;
@@ -308,6 +310,8 @@ typedef struct LVRelState
 	/* VACUUM operation's cutoff for freezing XIDs and MultiXactIds */
 	TransactionId FreezeLimit;
 	MultiXactId MultiXactCutoff;
+	/* visibility state for pruning */
+	GlobalVisState *vistest;
 
 	/* Error reporting state */
 	char	   *relnamespace;
@@ -377,11 +381,10 @@ static int	elevel = -1;
 
 
 /* non-export function prototypes */
-static void lazy_scan_heap(LVRelState *vacrel, VacuumParams *params,
-						   bool aggressive);
+static void lazy_scan_heap(LVRelState *vacrel, VacuumParams *params);
+static void lazy_scan_heap_limits(LVRelState *vacrel, VacuumParams *params);
 static void lazy_scan_prune(LVRelState *vacrel, Buffer buf,
 							BlockNumber blkno, Page page,
-							GlobalVisState *vistest,
 							LVPagePruneState *prunestate);
 static void lazy_vacuum(LVRelState *vacrel);
 static bool lazy_vacuum_all_indexes(LVRelState *vacrel);
@@ -417,7 +420,7 @@ static bool should_attempt_truncation(LVRelState *vacrel);
 static void lazy_truncate_heap(LVRelState *vacrel);
 static BlockNumber count_nondeletable_pages(LVRelState *vacrel,
 											bool *lock_waiter_detected);
-static int dead_items_max_items(LVRelState *vacrel);
+static int	dead_items_max_items(LVRelState *vacrel);
 static inline Size max_items_to_alloc_size(int max_items);
 static void dead_items_alloc(LVRelState *vacrel, int nworkers);
 static void dead_items_cleanup(LVRelState *vacrel);
@@ -465,11 +468,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	int			usecs;
 	double		read_rate,
 				write_rate;
-	bool		aggressive;		/* should we scan all unfrozen pages? */
 	bool		scanned_all_unfrozen;	/* actually scanned all such pages? */
 	char	  **indnames = NULL;
-	TransactionId xidFullScanLimit;
-	MultiXactId mxactFullScanLimit;
 	BlockNumber new_rel_pages;
 	BlockNumber new_rel_allvisible;
 	double		new_live_tuples;
@@ -478,9 +478,6 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	ErrorContextCallback errcallback;
 	PgStat_Counter startreadtime = 0;
 	PgStat_Counter startwritetime = 0;
-	TransactionId OldestXmin;
-	TransactionId FreezeLimit;
-	MultiXactId MultiXactCutoff;
 
 	/* measure elapsed time iff autovacuum logging requires it */
 	if (IsAutoVacuumWorkerProcess() && params->log_min_duration >= 0)
@@ -501,27 +498,6 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 
 	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM,
 								  RelationGetRelid(rel));
-
-	vacuum_set_xid_limits(rel,
-						  params->freeze_min_age,
-						  params->freeze_table_age,
-						  params->multixact_freeze_min_age,
-						  params->multixact_freeze_table_age,
-						  &OldestXmin, &FreezeLimit, &xidFullScanLimit,
-						  &MultiXactCutoff, &mxactFullScanLimit);
-
-	/*
-	 * We request an aggressive scan if the table's frozen Xid is now older
-	 * than or equal to the requested Xid full-table scan limit; or if the
-	 * table's minimum MultiXactId is older than or equal to the requested
-	 * mxid full-table scan limit; or if DISABLE_PAGE_SKIPPING was specified.
-	 */
-	aggressive = TransactionIdPrecedesOrEquals(rel->rd_rel->relfrozenxid,
-											   xidFullScanLimit);
-	aggressive |= MultiXactIdPrecedesOrEquals(rel->rd_rel->relminmxid,
-											  mxactFullScanLimit);
-	if (params->options & VACOPT_DISABLE_PAGE_SKIPPING)
-		aggressive = true;
 
 	vacrel = (LVRelState *) palloc0(sizeof(LVRelState));
 
@@ -569,11 +545,6 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	vacrel->relminmxid = rel->rd_rel->relminmxid;
 	vacrel->old_live_tuples = rel->rd_rel->reltuples;
 
-	/* Set cutoffs for entire VACUUM */
-	vacrel->OldestXmin = OldestXmin;
-	vacrel->FreezeLimit = FreezeLimit;
-	vacrel->MultiXactCutoff = MultiXactCutoff;
-
 	vacrel->relnamespace = get_namespace_name(RelationGetNamespace(rel));
 	vacrel->relname = pstrdup(RelationGetRelationName(rel));
 	vacrel->indname = NULL;
@@ -609,7 +580,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * Call lazy_scan_heap to perform all required heap pruning, index
 	 * vacuuming, and heap vacuuming (plus related processing)
 	 */
-	lazy_scan_heap(vacrel, params, aggressive);
+	lazy_scan_heap(vacrel, params);
 
 	/* Done with indexes */
 	vac_close_indexes(vacrel->nindexes, vacrel->indrels, NoLock);
@@ -624,7 +595,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	if ((vacrel->scanned_pages + vacrel->frozenskipped_pages)
 		< vacrel->rel_pages)
 	{
-		Assert(!aggressive);
+		Assert(!vacrel->aggressive);
 		scanned_all_unfrozen = false;
 	}
 	else
@@ -674,8 +645,16 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	if (new_rel_allvisible > new_rel_pages)
 		new_rel_allvisible = new_rel_pages;
 
-	new_frozen_xid = scanned_all_unfrozen ? FreezeLimit : InvalidTransactionId;
-	new_min_multi = scanned_all_unfrozen ? MultiXactCutoff : InvalidMultiXactId;
+	if (scanned_all_unfrozen)
+	{
+		new_frozen_xid = vacrel->FreezeLimit;
+		new_min_multi = vacrel->MultiXactCutoff;
+	}
+	else
+	{
+		new_frozen_xid = InvalidTransactionId;
+		new_min_multi = InvalidMultiXactId;
+	}
 
 	vac_update_relstats(rel,
 						new_rel_pages,
@@ -743,14 +722,14 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 				 * implies aggressive.  Produce distinct output for the corner
 				 * case all the same, just in case.
 				 */
-				if (aggressive)
+				if (vacrel->aggressive)
 					msgfmt = _("automatic aggressive vacuum to prevent wraparound of table \"%s.%s.%s\": index scans: %d\n");
 				else
 					msgfmt = _("automatic vacuum to prevent wraparound of table \"%s.%s.%s\": index scans: %d\n");
 			}
 			else
 			{
-				if (aggressive)
+				if (vacrel->aggressive)
 					msgfmt = _("automatic aggressive vacuum of table \"%s.%s.%s\": index scans: %d\n");
 				else
 					msgfmt = _("automatic vacuum of table \"%s.%s.%s\": index scans: %d\n");
@@ -770,7 +749,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 							 (long long) vacrel->tuples_deleted,
 							 (long long) vacrel->new_rel_tuples,
 							 (long long) vacrel->new_dead_tuples,
-							 OldestXmin);
+							 vacrel->OldestXmin);
 			orig_rel_pages = vacrel->rel_pages + vacrel->pages_removed;
 			if (orig_rel_pages > 0)
 			{
@@ -888,7 +867,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
  *		supply.
  */
 static void
-lazy_scan_heap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
+lazy_scan_heap(LVRelState *vacrel, VacuumParams *params)
 {
 	LVDeadItems *dead_items;
 	BlockNumber nblocks,
@@ -906,20 +885,9 @@ lazy_scan_heap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
 		PROGRESS_VACUUM_MAX_DEAD_TUPLES
 	};
 	int64		initprog_val[3];
-	GlobalVisState *vistest;
+	bool		aggressive;
 
 	pg_rusage_init(&ru0);
-
-	if (aggressive)
-		ereport(elevel,
-				(errmsg("aggressively vacuuming \"%s.%s\"",
-						vacrel->relnamespace,
-						vacrel->relname)));
-	else
-		ereport(elevel,
-				(errmsg("vacuuming \"%s.%s\"",
-						vacrel->relnamespace,
-						vacrel->relname)));
 
 	nblocks = RelationGetNumberOfBlocks(vacrel->rel);
 	next_unskippable_block = 0;
@@ -941,8 +909,6 @@ lazy_scan_heap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
 	vacrel->new_dead_tuples = 0;
 	vacrel->num_tuples = 0;
 	vacrel->live_tuples = 0;
-
-	vistest = GlobalVisTestFor(vacrel->rel);
 
 	vacrel->indstats = (IndexBulkDeleteResult **)
 		palloc0(vacrel->nindexes * sizeof(IndexBulkDeleteResult *));
@@ -967,6 +933,28 @@ lazy_scan_heap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
 	initprog_val[1] = nblocks;
 	initprog_val[2] = dead_items->max_items;
 	pgstat_progress_update_multi_param(3, initprog_index, initprog_val);
+
+	/*
+	 * Compute vacuuming XID cutoffs.
+	 *
+	 * We do this as late as possible, as the limits determine how much work
+	 * can be done now / how much has to be deferred till later.
+	 * vac_open_indexes() may block, RelationGetNumberOfBlocks() can take a
+	 * while on large relations, dead_items_alloc() isn't cheap, ...
+	 */
+	lazy_scan_heap_limits(vacrel, params);
+	aggressive = vacrel->aggressive;
+
+	if (aggressive)
+		ereport(elevel,
+				(errmsg("aggressively vacuuming \"%s.%s\"",
+						vacrel->relnamespace,
+						vacrel->relname)));
+	else
+		ereport(elevel,
+				(errmsg("vacuuming \"%s.%s\"",
+						vacrel->relnamespace,
+						vacrel->relname)));
 
 	/*
 	 * Except when aggressive is set, we want to skip pages that are
@@ -1364,7 +1352,7 @@ lazy_scan_heap(LVRelState *vacrel, VacuumParams *params, bool aggressive)
 		 * were pruned some time earlier.  Also considers freezing XIDs in the
 		 * tuple headers of remaining items with storage.
 		 */
-		lazy_scan_prune(vacrel, buf, blkno, page, vistest, &prunestate);
+		lazy_scan_prune(vacrel, buf, blkno, page, &prunestate);
 
 		Assert(!prunestate.all_visible || !prunestate.has_lpdead_items);
 
@@ -1683,7 +1671,6 @@ lazy_scan_prune(LVRelState *vacrel,
 				Buffer buf,
 				BlockNumber blkno,
 				Page page,
-				GlobalVisState *vistest,
 				LVPagePruneState *prunestate)
 {
 	Relation	rel = vacrel->rel;
@@ -1722,7 +1709,7 @@ retry:
 	 * lpdead_items's final value can be thought of as the number of tuples
 	 * that were deleted from indexes.
 	 */
-	tuples_deleted = heap_page_prune(rel, buf, vistest,
+	tuples_deleted = heap_page_prune(rel, buf, vacrel->vistest,
 									 InvalidTransactionId, 0, &nnewlpdead,
 									 &vacrel->offnum);
 
@@ -2182,6 +2169,54 @@ lazy_vacuum(LVRelState *vacrel)
 	 * vacuum)
 	 */
 	vacrel->dead_items->num_items = 0;
+}
+
+/*
+ * Helper for lazy_scan_heap(), determining xid limits (vacrel->OldestXmin,
+ * vacrel->MultiXactCutoff) and whether the full relation should be scanned
+ * (vacrel->aggressive).
+ */
+static void
+lazy_scan_heap_limits(LVRelState *vacrel, VacuumParams *params)
+{
+	TransactionId xidFullScanLimit;
+	MultiXactId mxactFullScanLimit;
+	bool		aggressive;
+
+	vacuum_set_xid_limits(vacrel->rel,
+						  params->freeze_min_age,
+						  params->freeze_table_age,
+						  params->multixact_freeze_min_age,
+						  params->multixact_freeze_table_age,
+						  &vacrel->OldestXmin, &vacrel->FreezeLimit,
+						  &xidFullScanLimit,
+						  &vacrel->MultiXactCutoff,
+						  &mxactFullScanLimit);
+
+	/*
+	 * We request an aggressive scan if the table's frozen Xid is now older
+	 * than or equal to the requested Xid full-table scan limit; or if the
+	 * table's minimum MultiXactId is older than or equal to the requested
+	 * mxid full-table scan limit; or if DISABLE_PAGE_SKIPPING was specified.
+	 */
+	aggressive = TransactionIdPrecedesOrEquals(vacrel->rel->rd_rel->relfrozenxid,
+											   xidFullScanLimit);
+	aggressive |= MultiXactIdPrecedesOrEquals(vacrel->rel->rd_rel->relminmxid,
+											  mxactFullScanLimit);
+	if (params->options & VACOPT_DISABLE_PAGE_SKIPPING)
+		aggressive = true;
+	vacrel->aggressive = aggressive;
+
+	/*
+	 * heap_prune_page() uses vacrel->vistest for visibility (primarily for
+	 * compatibility with on-access pruning, but also because it allows to
+	 * prune more). vacrel->vistest is always at least as aggressive as the
+	 * limits vacuum_set_xid_limits() computes because ComputeXidHorizons()
+	 * (via vacuum_set_xid_limits() ->GetOldestNonRemovableTransactionId())
+	 * ensures the approximate horizons are always at least as aggressive as
+	 * the precise horizons.
+	 */
+	vacrel->vistest = GlobalVisTestFor(vacrel->rel);
 }
 
 /*
