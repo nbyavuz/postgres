@@ -77,7 +77,7 @@ RUN `
 
 # Install openssl
 #
-# This is one of the windows binararies referenced by the openssl wiki. See
+# This is one of the windows binaries referenced by the openssl wiki. See
 # https://www.openssl.org/community/binaries.html and
 # https://wiki.openssl.org/index.php/Binaries
 #
@@ -99,7 +99,7 @@ RUN `
 
 # Install visual studio
 #
-# Adding path to vcvarsall.bat to PATH so user of container dont't need to
+# Adding path to vcvarsall.bat to PATH so user of container don't need to
 # know the full path
 RUN `
     mkdir c:\t ; `

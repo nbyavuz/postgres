@@ -40,9 +40,13 @@ task:
   ccache_cache:
     folder: "/tmp/ccache_dir"
   sysinfo_script:
+    - id
+    - uname -a
+    - ulimit -a -H
+    - ulimit -a -S
     - export
   sysconfig_script:
-    - sudo sysctl kern.corefile='/tmp/%N.%P.core'
+    - sysctl kern.corefile='/tmp/%N.%P.core'
   repartition_script:
     - ci/gcp_freebsd_repartition.sh
   create_user_script:
