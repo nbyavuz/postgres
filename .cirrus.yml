@@ -323,7 +323,7 @@ task:
     - set
 
   configure_script:
-    - copy ci\windows_build_config.pl src\tools\msvc\config.pl
+    - copy src\tools\ci\windows_build_config.pl src\tools\msvc\config.pl
     - vcvarsall x64
     - perl src/tools/msvc/mkvcbuild.pl
   build_script:
