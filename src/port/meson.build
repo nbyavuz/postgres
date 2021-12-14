@@ -29,6 +29,7 @@ if host_machine.system() == 'windows'
     'system.c',
     'win32env.c',
     'win32error.c',
+    'win32ntdll.c',
     'win32security.c',
     'win32setlocale.c',
     'win32stat.c',
