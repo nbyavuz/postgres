@@ -299,7 +299,7 @@ task:
   name: Windows
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*windows.*'
   windows_container:
-    dockerfile: src/tools/ci/docker/windows_vs_2019
+    image: us-docker.pkg.dev/pg-vm-images-aio/ci/windows_vs_2019:latest
     cpu: 4
     memory: 4G
   env:
@@ -388,7 +388,7 @@ task:
   # condition here :/
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*linux.*'
   container:
-    dockerfile: src/tools/ci/docker/linux_debian_bullseye
+    image: us-docker.pkg.dev/pg-vm-images-aio/ci/linux_debian_bullseye_ci:latest
   env:
     # Use larger ccache cache, as this task compiles with multiple compilers /
     # flag combinations
