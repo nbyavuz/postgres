@@ -228,7 +228,7 @@ task:
 task:
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*linux.*'
   container:
-    dockerfile: src/tools/ci/docker/linux_opensuse_tumbleweed
+    dockerfile: ci/docker/linux_opensuse_tumbleweed
     cpu: 4
     memory: 4G
   env:
