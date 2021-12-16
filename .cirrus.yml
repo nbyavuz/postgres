@@ -144,7 +144,7 @@ task:
     - echo '/tmp/%e-%s-%p.core' > /proc/sys/kernel/core_pattern
 
   matrix:
-    - name: Linux Autoconf
+    - name: Linux Debian Autoconf
 
       compute_engine_instance:
         image: family/pg-aio-bullseye
@@ -181,7 +181,7 @@ task:
           make -s ${CHECK} ${CHECKFLAGS} -j8 \
           '
 
-    - name: Linux Meson
+    - name: Linux Debian Meson
 
       compute_engine_instance:
         image: family/pg-aio-bullseye
@@ -196,13 +196,106 @@ task:
       tests_script:
         - su postgres -c 'meson test --no-rebuild -C build'
 
-    - name: Linux Meson Sid
+    - name: Linux Debian Meson Sid
 
       compute_engine_instance:
         image: family/pg-aio-sid
 
       configure_script:
         - su postgres -c 'meson setup --buildtype debug -Dcassert=true -Dssl=openssl -Duuid=ossp build'
+      build_script:
+        - su postgres -c 'ninja -C build'
+      upload_caches:
+        - ccache
+
+      tests_script:
+        - su postgres -c 'meson test --no-rebuild -C build'
+
+  always:
+    meson_log_artifacts:
+      path: "build/meson-logs/*.txt"
+      type: text/plain
+
+  on_failure:
+    <<: *on_failure
+    cores_script: |
+      for corefile in $(find /tmp -name '*.core' 2>/dev/null) ; do
+        binary=$(gdb -quiet -core $corefile -batch -ex 'info auxv' | grep AT_EXECFN | perl -pe "s/^.*\"(.*)\"\$/\$1/g") ;
+        echo dumping $corefile for $binary ;
+        gdb --batch --quiet -ex "thread apply all bt full" -ex "quit" $binary $corefile ;
+      done
+
+task:
+  only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*linux.*'
+  container:
+    dockerfile: src/tools/ci/docker/linux_opensuse_tumbleweed
+    cpu: 4
+    memory: 4G
+  env:
+    CCACHE_DIR: "/tmp/ccache_dir"
+    DEBUGINFOD_URLS: "https://debuginfod.opensuse.org/"
+
+  ccache_cache:
+    folder: "/tmp/ccache_dir"
+
+  sysinfo_script:
+    - id
+    - uname -a
+    - cat /proc/cmdline
+    - lsblk
+    - ulimit -a -H
+    - ulimit -a -S
+    - export
+  sysconfig_script:
+    - useradd -m -U postgres
+    - chown -R postgres:postgres .
+    - mkdir -p /tmp/ccache_dir
+    - chown -R postgres:postgres /tmp/ccache_dir
+    - echo '* - nofile 65536' > /etc/security/limits.d/postgres.conf
+    - su postgres -c 'ulimit -l -H'
+    - su postgres -c 'ulimit -l -S'
+    # - echo '/tmp/%e-%s-%p.core' > /proc/sys/kernel/core_pattern
+
+  matrix:
+    - name: Linux OpenSuse Tumbleweed Autoconf
+
+      configure_script: |
+        su postgres -c 'export PATH="/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin" && \
+          ./configure \
+          --enable-cassert --enable-debug --enable-tap-tests \
+          --enable-nls \
+          \
+          --with-gssapi \
+          --with-icu \
+          --with-ldap \
+          --with-libxml \
+          --with-libxslt \
+          --with-llvm \
+          --with-lz4 \
+          --with-pam \
+          --with-perl \
+          --with-python \
+          --with-ssl=openssl \
+          --with-systemd \
+          --with-tcl --with-tclconfig=/usr/lib64/ \
+          --with-uuid=e2fs \
+          \
+          CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang" CFLAGS="-O0 -ggdb"'
+      build_script:
+        - su postgres -c 'make -s -j4 && make -s -j4 -C contrib'
+      upload_caches:
+        - ccache
+
+      tests_script: |
+        su postgres -c '\
+          ulimit -c unlimited; \
+          make -s ${CHECK} ${CHECKFLAGS} -j8 \
+          '
+
+    - name: Linux OpenSuse Tumbleweed Meson
+
+      configure_script:
+        - su postgres -c 'meson setup --buildtype debug -Dcassert=true -Dssl=openssl -Duuid=e2fs build'
       build_script:
         - su postgres -c 'ninja -C build'
       upload_caches:
@@ -477,7 +570,7 @@ task:
 task:
   name: CompilerWarnings
   depends_on:
-    - Linux Autoconf
+    - Linux Debian Autoconf
   # task that did not run count as a success, so we need to recheck Linux' condition here :/
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*linux.*'
   container:

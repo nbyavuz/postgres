@@ -1,0 +1,19 @@
+FROM opensuse/tumbleweed
+RUN \
+  zypper -n update && \
+  zypper -n install \
+  shadow util-linux util-linux-systemd systemd-devel \
+  git make gcc gcc-c++ perl-IPC-Run \
+  ccache clang meson ninja bison flex diff gettext-runtime \
+  llvm-devel icu libicu-devel liblz4-devel libopenssl-devel \
+  readline-devel pam-devel tcl-devel python3-devel \
+  libxml2-devel libxslt-devel libldapcpp-devel libuuid-devel \
+  krb5-devel krb5-client krb5-server krb5-plugin-kdb-ldap \
+  openldap2 openldap2-client
+# Fixing libperl.so not found error
+RUN \
+  find /usr/lib/ -name libperl.so -exec ln -sf '{}' /usr/lib64/libperl.so ';'
+# Fixing ICU errors caused by locale being set to 'POSIX' 
+ENV LANG en_US.UTF-8
+ENV LANGUAGE en_US:en
+ENV LC_ALL en_US.UTF-8
