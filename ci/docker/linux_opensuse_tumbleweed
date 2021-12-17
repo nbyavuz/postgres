@@ -12,6 +12,7 @@ RUN \
   shadow \
   systemd-devel \
   util-linux \
+  util-linux-systemd \
   \
   bison \
   ccache \
