@@ -251,7 +251,6 @@ task:
     - chown -R postgres:postgres .
     - mkdir -p /tmp/ccache_dir
     - chown -R postgres:postgres /tmp/ccache_dir
-    - echo '* - nofile 65536' > /etc/security/limits.d/postgres.conf
     - su postgres -c 'ulimit -l -H'
     - su postgres -c 'ulimit -l -S'
     # - echo '/tmp/%e-%s-%p.core' > /proc/sys/kernel/core_pattern
