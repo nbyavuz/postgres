@@ -3838,6 +3838,8 @@ substitute_actual_parameters_context
 substitute_actual_srf_parameters_context
 substitute_phv_relids_context
 symbol
+sync_entry
+sync_walkdir_state
 tablespaceinfo
 teSection
 temp_tablespaces_extra
