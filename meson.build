@@ -767,6 +767,8 @@ if not llvmopt.disabled()
 
     ccache = find_program('ccache', native: true, required: false)
     clang = find_program(llvm_binpath / 'clang', required: true)
+    llvm_lto = find_program(llvm_binpath / 'llvm-lto', required: true)
+    irlink = find_program('src/tools/irlink', native: true)
   endif
 else
   llvm = not_found_dep
@@ -2606,6 +2608,10 @@ nls_targets = []
 test_deps = []
 tests = []
 
+# List of object files + source files to generated LLVM IR for inlining.
+# Each element is a hash of {'target': target, 'srcfiles': ...}.
+bitcode_modules = []
+
 
 # Default options for targets
 
@@ -2927,6 +2933,11 @@ subdir('src/interfaces/libpq/test')
 subdir('src/interfaces/ecpg/test')
 
 subdir('doc/src/sgml')
+
+# generate bitcode for JIT inlining after giving contrib modules etc a chance
+# to add themselves to bitcode_modules[]
+subdir('src/backend/jit/llvm/bitcode', if_found: llvm)
+
 
 generated_sources_ac += {'': ['GNUmakefile']}
 
