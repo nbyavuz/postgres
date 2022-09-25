@@ -67,5 +67,8 @@ tests += {
       'priority': 40,
       'timeout': 1000,
     },
+    # checks pg_locks etc
+    'runningcheck-parallel': false,
+    'dbname': 'isolation',
   },
 }

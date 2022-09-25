@@ -64,5 +64,8 @@ tests += {
       'priority': 50,
       'timeout': 1000,
     },
+    'dbname': 'regression',
+    # checks pg_locks etc
+    'runningcheck-parallel': false,
   },
 }

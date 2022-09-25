@@ -2866,6 +2866,18 @@ endif
 # Test Generation
 ###############################################################
 
+# when using a meson version understanding exclude_suites, define a 'default'
+# test setup that excludes tests running against a pre-existing install and a
+# 'running' setup that conflicts with creation of the temporary installation
+# and tap tests (which don't support running against a running server).
+running_suites = []
+install_suites = []
+if meson.version().version_compare('>=0.57')
+  runningcheck = true
+else
+  runningcheck = false
+endif
+
 testwrap = files('src/tools/testwrap')
 
 foreach test_dir : tests
@@ -2894,17 +2906,26 @@ foreach test_dir : tests
 
       test_output = test_result_dir / test_dir['name'] / kind
 
+      # unless specified by the test, choose a non-conflicting database name,
+      # to avoid conflicts when running against existing server.
+      dbname = t.get('dbname',
+        'regression_@0@_@1@'.format(test_dir['name'], kind))
+
       test_command = [
         runner.full_path(),
         '--inputdir', t.get('inputdir', test_dir['sd']),
         '--expecteddir', t.get('expecteddir', test_dir['sd']),
         '--outputdir', test_output,
-        '--temp-instance', test_output / 'tmp_check',
         '--bindir', '',
         '--dlpath', test_dir['bd'],
         '--max-concurrent-tests=20',
-        '--port', testport.to_string(),
+        '--dbname', dbname,
       ] + t.get('regress_args', [])
+
+      test_command_tmp_install = test_command + [
+          '--temp-instance', test_output / 'tmp_check',
+          '--port', testport.to_string(),
+        ]
 
       if t.has_key('schedule')
         test_command += ['--schedule', t['schedule'],]
@@ -2920,7 +2941,6 @@ foreach test_dir : tests
       env.prepend('PATH', temp_install_bindir, test_dir['bd'])
 
       test_kwargs = {
-        'suite': [test_dir['name']],
         'priority': 10,
         'timeout': 1000,
         'depends': test_deps + t.get('deps', []),
@@ -2931,10 +2951,28 @@ foreach test_dir : tests
         python,
         args: testwrap_base + [
           '--testname', kind,
-          '--', test_command,
+          '--', test_command_tmp_install,
         ],
+        suite: test_dir['name'],
         kwargs: test_kwargs,
       )
+      install_suites += test_dir['name']
+
+      # some tests can't support running against running DB
+      if runningcheck and t.get('runningcheck', true)
+        suite = test_dir['name'] + '-running'
+        test(suite / kind,
+          python,
+          args: testwrap_base + [
+            '--testname', kind,
+            '--', test_command,
+          ],
+          is_parallel: t.get('runningcheck-parallel', true),
+          suite: suite,
+          kwargs: test_kwargs,
+        )
+        running_suites += suite
+      endif
 
       testport += 1
     elif kind == 'tap'
@@ -2957,9 +2995,10 @@ foreach test_dir : tests
         env.set(name, value)
       endforeach
 
+      suite = test_dir['name']
       test_kwargs = {
         'protocol': 'tap',
-        'suite': [test_dir['name']],
+        'suite': suite,
         'timeout': 1000,
         'depends': test_deps + t.get('deps', []),
         'env': env,
@@ -2985,6 +3024,7 @@ foreach test_dir : tests
           ],
         )
       endforeach
+      install_suites += suite
     else
       error('unknown kind @0@ of test in @1@'.format(kind, test_dir['sd']))
     endif
@@ -2993,6 +3033,13 @@ foreach test_dir : tests
 
 endforeach # directories with tests
 
+if runningcheck
+  add_test_setup('default',
+    is_default: true,
+    exclude_suites: running_suites)
+  add_test_setup('running',
+    exclude_suites: ['setup'] + install_suites)
+endif
 
 
 ###############################################################
