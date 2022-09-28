@@ -26,6 +26,9 @@ env:
   PGCTLTIMEOUT: 120 # avoids spurious failures during parallel tests
   TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/src/tools/ci/pg_ci_base.conf
   PG_TEST_EXTRA: kerberos ldap ssl
+  # kerberos test is not working on arm macos yet. See
+  # https://postgr.es/m/CAN55FZ2R%2BXufuVgJ8ew_yDBk48PgXEBvyKNvnNdTTVyczbQj0g%40mail.gmail.com
+  PG_TEST_EXTRA_MACOS: ldap ssl
 
 
 # What files to preserve in case tests fail
@@ -581,13 +584,10 @@ task:
   name: macOS - Monterey - Meson
 
   env:
-    CPUS: 12 # always get that much for cirrusci macOS instances
-    BUILD_JOBS: $CPUS
-    # Test performance regresses noticably when using all cores. 8 seems to
-    # work OK. See
-    # https://postgr.es/m/20220927040208.l3shfcidovpzqxfh%40awork3.anarazel.de
-    TEST_JOBS: 8
+    BUILD_JOBS: 4 # cirrusci macOS arm instances use 4 CPUs for now
+    TEST_JOBS: 8 # experimentally derived to be a decent choice
 
+    BREW_PATH: /opt/homebrew
     CIRRUS_WORKING_DIR: ${HOME}/pgsql/
     CCACHE_DIR: ${HOME}/ccache
     HOMEBREW_CACHE: ${HOME}/homebrew-cache
@@ -602,8 +602,8 @@ task:
   depends_on: SanityCheck
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*(macos|darwin|osx).*'
 
-  osx_instance:
-    image: monterey-base
+  macos_instance:
+    image: ghcr.io/cirruslabs/macos-monterey-base:latest
 
   sysinfo_script: |
     id
@@ -649,7 +649,7 @@ task:
   ccache_cache:
     folder: $CCACHE_DIR
   configure_script: |
-    brewpath="/usr/local"
+    brewpath=${BREW_PATH}
     PKG_CONFIG_PATH="${brewpath}/lib/pkgconfig:${PKG_CONFIG_PATH}"
 
     for pkg in icu4c krb5 openldap openssl zstd ; do
@@ -667,7 +667,7 @@ task:
       -Dcassert=true \
       -Dssl=openssl -Duuid=e2fs -Ddtrace=auto \
       -Dsegsize_blocks=6 \
-      -DPG_TEST_EXTRA="$PG_TEST_EXTRA" \
+      -DPG_TEST_EXTRA="$PG_TEST_EXTRA_MACOS" \
       build
 
   build_script: ninja -C build -j${BUILD_JOBS}
