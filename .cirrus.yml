@@ -359,6 +359,28 @@ task:
           meson test $MTEST_ARGS --num-processes ${TEST_JOBS}
         EOF
 
+      #####
+      # test extensions
+      install_script: ninja -C build install -j${BUILD_JOBS}
+
+      install_required_packages_for_extensions_script: |
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get -y install \
+          autoconf \
+          libtool \
+          libgeos-dev \
+          libproj-dev \
+          libprotobuf-c-dev \
+          protobuf-c-compiler
+
+      # some of the make commands of test_extensions script needs to run with sudo,
+      # that command makes postgres user can execute sudo commands without password
+      dont_ask_sudo_pw_script: |
+        echo "postgres ALL=(ALL:ALL) NOPASSWD: ALL" | tee /etc/sudoers.d/postgres
+
+      install_extensions_script: su postgres -c 'python3 src/tools/ci/test_extensions'
+      #####
+
       on_failure:
         <<: *on_failure_meson
 
