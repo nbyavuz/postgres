@@ -2934,6 +2934,27 @@ test('install_additional_files',
     is_parallel: false,
     suite: ['setup'])
 
+# it seems freebsd doesn't use libdir for pkgconfig path
+if host_system == 'freebsd'
+  pkgconf_installdir =  test_install_location / 'libdata' / 'pkgconfig'
+else
+  pkgconf_installdir = test_install_location / dir_lib / 'pkgconfig'
+endif
+test_pkg_conf_file = files('src/tools/ci/test_pkg_conf')
+test('pkg_conf_extensions',
+    test_pkg_conf_file,
+    args: [
+      '--meson', meson_bin.path(),
+      '--meson_args', meson_args,
+      '--rootdir', meson.source_root(),
+      '--pkgconf_installdir', pkgconf_installdir,
+      '--builddir', meson.build_root(),
+      '--pkg_confdir', get_option('pkg_config_path'),
+      '--pkg_sysrootdir', test_install_destdir,
+      '--',
+        cc.cmd_array(),
+      ],)
+
 test_result_dir = meson.build_root() / 'testrun'
 
 
