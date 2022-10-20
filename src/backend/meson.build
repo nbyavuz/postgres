@@ -184,6 +184,9 @@ pg_mod_args = default_mod_args + {
 }
 
 
+pg_test_mod_args = pg_mod_args + {
+  'install': false
+}
 
 ###############################################################
 # Define a .pc file that can be used to build server extensions
