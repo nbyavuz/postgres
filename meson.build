@@ -2786,6 +2786,10 @@ backend_code = declare_dependency(
   dependencies: os_deps + backend_both_deps + backend_deps,
 )
 
+# install these files only during test, not main install
+test_install_files = []
+test_install_libs = []
+
 # src/backend/meson.build defines backend_mod_code used for extension
 # libraries.
 
@@ -2805,6 +2809,10 @@ subdir('src/interfaces/ecpg/test')
 subdir('doc/src/sgml')
 
 generated_sources_ac += {'': ['GNUmakefile']}
+
+# After processing src/test, add test_install_libs to the testprep_targets
+# to build them
+testprep_targets += test_install_libs
 
 
 # If there are any files in the source directory that we also generate in the
@@ -2896,11 +2904,33 @@ meson_install_args = meson_args + ['install'] + {
     'muon': []
 }[meson_impl]
 
+# setup tests should  be run first,
+# so define priority for these
+setup_tests_priority = 100
 test('tmp_install',
     meson_bin, args: meson_install_args ,
     env: {'DESTDIR':test_install_destdir},
-    priority: 100,
+    priority: setup_tests_priority,
     timeout: 300,
+    is_parallel: false,
+    suite: ['setup'])
+
+# get full paths of test_install_libs to copy them
+test_install_libs_fp = []
+foreach lib: test_install_libs
+  test_install_libs_fp += lib.full_path()
+endforeach
+
+install_additional_files = files('src/test/install_additional_files')
+test('install_additional_files',
+    python, args: [
+      install_additional_files,
+      '--sharedir', test_install_location / contrib_data_args['install_dir'],
+      '--libdir', test_install_location / dir_lib_pkg,
+      '--install_files', test_install_files,
+      '--install_libs', test_install_libs_fp,
+    ],
+    priority: setup_tests_priority,
     is_parallel: false,
     suite: ['setup'])
 

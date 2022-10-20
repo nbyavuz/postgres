@@ -1,5 +1,3 @@
-# FIXME: prevent install during main install, but not during test :/
-
 test_parser_sources = files(
   'test_parser.c',
 )
@@ -12,14 +10,13 @@ endif
 
 test_parser = shared_module('test_parser',
   test_parser_sources,
-  kwargs: pg_mod_args,
+  kwargs: pg_test_mod_args,
 )
-testprep_targets += test_parser
+test_install_libs += test_parser
 
-install_data(
+test_install_files += files(
   'test_parser.control',
   'test_parser--1.0.sql',
-  kwargs: contrib_data_args,
 )
 
 tests += {
