@@ -101,8 +101,7 @@ const IoMethodOps pgaio_worker_ops = {
 	 * XXX For Windows in worker mode with direct IO on, we could teach our
 	 * pg_readv(), pg_writev() functions to use scatter gather and wait.
 	 */
-#if (defined(HAVE_PREADV) && defined(HAVE_PWRITEV)) || \
-	(defined(HAVE_READV) && defined(HAVE_WRITEV))
+#if defined(HAVE_PREADV) && defined(HAVE_PWRITEV)
 	.can_scatter_gather_direct = true,
 #endif
 	.can_scatter_gather_buffered = true
