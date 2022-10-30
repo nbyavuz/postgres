@@ -416,7 +416,6 @@ IoWorkerMain(void)
 		}
 	}
 
-	/* XXX Should do this in error cleanup! */
 	LWLockAcquire(AioWorkerSubmissionQueueLock, LW_EXCLUSIVE);
 	io_worker_control->idle_worker_mask &= ~(UINT64_C(1) << MyIoWorkerId);
 	io_worker_control->workers[MyIoWorkerId].latch = NULL;
