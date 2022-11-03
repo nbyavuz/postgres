@@ -818,14 +818,16 @@ endif
 ###############################################################
 
 posix_aio_opt = get_option('posix_aio')
-posix_aio = cc.find_library('rt',
-  has_headers: 'aio.h',
-  header_include_directories: postgres_inc,
-  dirs: test_lib_d,
-  required: posix_aio_opt)
+posix_aio = not_found_dep
+if not posix_aio_opt.disabled()
+  rt_dep = cc.find_library('rt', required: false)
 
-if posix_aio.found()
-  cdata.set('USE_POSIX_AIO', 1)
+  if cc.has_header_symbol('aio.h', 'aio_read',
+      required: posix_aio_opt,
+      args: test_c_args, include_directories: postgres_inc)
+    posix_aio = declare_dependency()
+    cdata.set('USE_POSIX_AIO', 1)
+  endif
 endif
 
 

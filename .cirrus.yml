@@ -219,7 +219,7 @@ task:
       meson setup \
         --buildtype=debug \
         -Dcassert=true -Dssl=openssl -Duuid=bsd -Dtcl_version=tcl86 -Ddtrace=auto \
-        -Dposix_aio=true \
+        -Dposix_aio=enabled \
         -DPG_TEST_EXTRA="$PG_TEST_EXTRA" \
         -Dextra_lib_dirs=/usr/local/lib -Dextra_include_dirs=/usr/local/include/ \
         build
@@ -370,7 +370,7 @@ task:
             --buildtype=debug \
             -Dcassert=true \
             ${LINUX_MESON_FEATURES} \
-            -Dposix_aio=true \
+            -Dposix_aio=enabled \
             -DPG_TEST_EXTRA="$PG_TEST_EXTRA" \
             build
         EOF
@@ -546,7 +546,7 @@ task:
       -Dextra_lib_dirs=${brewpath}/lib \
       -Dcassert=true \
       -Dssl=openssl -Duuid=e2fs -Ddtrace=auto \
-      -Dposix_aio=true \
+      -Dposix_aio=enabled \
       -DPG_TEST_EXTRA="$PG_TEST_EXTRA" \
       build
 
