@@ -12,6 +12,6 @@ if liburing.found()
   backend_sources += files('aio_uring.c')
 endif
 
-if posix_aio
+if posix_aio.found()
   backend_sources += files('aio_posix.c')
 endif

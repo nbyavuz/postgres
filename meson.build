@@ -817,8 +817,14 @@ endif
 # Library: posix_aio
 ###############################################################
 
-posix_aio = get_option('posix_aio')
-if posix_aio
+posix_aio_opt = get_option('posix_aio')
+posix_aio = cc.find_library('rt',
+  has_headers: 'aio.h',
+  header_include_directories: postgres_inc,
+  dirs: test_lib_d,
+  required: posix_aio_opt)
+
+if posix_aio.found()
   cdata.set('USE_POSIX_AIO', 1)
 endif
 
@@ -2778,6 +2784,7 @@ backend_both_deps += [
   libxml,
   lz4,
   pam,
+  posix_aio,
   ssl,
   systemd,
   zlib,

@@ -116,7 +116,7 @@ option('plpython', type : 'feature', value: 'auto',
 option('pltcl', type : 'feature', value: 'auto',
   description: 'build with TCL support')
 
-option('posix_aio', type : 'boolean', value: 'false',
+option('posix_aio', type : 'feature', value: 'auto',
   description: 'use POSIX AIO for async io')
 
 option('tcl_version', type : 'string', value : 'tcl',
