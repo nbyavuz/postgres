@@ -2345,7 +2345,8 @@ endif
 
 backtrace_dep = cc.find_library('backtrace',
   has_headers: 'backtrace.h',
-  header_include_directories: postgres_inc)
+  header_include_directories: postgres_inc,
+  required: false)
 
 # XXX: Might be worth conditioning some checks on the OS, to avoid doing
 # unnecessary checks over and over, particularly on windows.
