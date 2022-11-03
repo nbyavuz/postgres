@@ -2343,6 +2343,10 @@ else
   socket_dep = not_found_dep
 endif
 
+backtrace_dep = cc.find_library('backtrace',
+  has_headers: 'backtrace.h',
+  header_include_directories: postgres_inc)
+
 # XXX: Might be worth conditioning some checks on the OS, to avoid doing
 # unnecessary checks over and over, particularly on windows.
 func_checks = [
@@ -2350,6 +2354,7 @@ func_checks = [
   ['aio_waitcomplete'],
   ['aio_waitn'],
   ['backtrace_symbols', {'dependencies': [execinfo_dep]}],
+  ['backtrace_create_state', {'dependencies': [backtrace_dep]}],
   ['clock_gettime', {'dependencies': [rt_dep, posix4_dep], 'define': false}],
   ['copyfile'],
   # gcc/clang's sanitizer helper library provides dlopen but not dlsym, thus
