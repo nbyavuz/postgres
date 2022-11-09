@@ -628,10 +628,13 @@ windows_template: &windows_template
 
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*windows.*'
 
-  windows_container:
-    image: $CONTAINER_REPO/windows_ci_vs_2019:latest
+  compute_engine_instance:
+    image_project: pg-ci-images-dev
+    image: family/pg-ci-windows-vs-2019
+    platform: windows
     cpu: $CPUS
     memory: 4G
+    disk: 50
 
   sysinfo_script: |
     chcp
@@ -646,24 +649,64 @@ windows_template: &windows_template
 task:
   <<: *windows_template
   name: Windows - Server 2019, VS 2019 - Meson & ninja
+  only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*wdocs.*'
 
   meson_install_wraps_script: |
     mkdir subprojects
     meson wrap install lz4
     meson wrap install zlib
 
-  # Use /DEBUG:FASTLINK to avoid high memory usage during linking
-  configure_script: |
-    vcvarsall x64
-    meson setup --backend ninja --buildtype debug -Dc_link_args=/DEBUG:FASTLINK -Dcassert=true -Db_pch=true -Dssl=openssl -Dextra_lib_dirs=c:\openssl\1.1\lib -Dextra_include_dirs=c:\openssl\1.1\include -DTAR=c:/windows/system32/tar.exe -DPG_TEST_EXTRA="%PG_TEST_EXTRA%" build
+  get_pathdirs_script: |
+    meson setup --backend ninja build
+    meson install -C build
+    ls c:/usr/local/pgsql || true
+    ls c:/usr/local/pgsql/share || true
+    rm -rf build
 
-  build_script: |
-    vcvarsall x64
-    ninja -C build
+    meson setup build --backend ninja --prefix=%cd%/install
+    meson install -C build
+    ls ./install/ || true
+    ls ./install/share/ || true
 
-  check_world_script: |
-    vcvarsall x64
-    meson test %MTEST_ARGS% --num-processes %TEST_JOBS%
+  # test_all_script: |
+  #   vcvarsall x64
+
+  #   meson setup build --prefix=%cd%/install
+  #   cd build/
+  #   ninja
+  #   ninja install
+  #   meson test
+
+  #   ../install/bin/initdb -D ../data
+  #   ../install/bin/pg_ctl -D ../data/ -l logfile start
+  #   ../install/bin/psql -d postgres -c "CREATE TABLE hello (world text);"
+  #   ../install/bin/pg_ctl -D ../data/ stop
+
+  #   rm -rf ../data/ ../install/ ../build/ logfile
+  #   cd ../
+
+  #   meson setup build --prefix=%cd%/install --buildtype=debug
+  #   meson configure -Dcassert=true build
+  #   meson install -C build
+  #   meson test --list -C build
+
+  #   meson test postgresql:setup / tmp_install -C build
+  #   meson test recovery/001_stream_rep -C build
+
+  #   meson test --suite setup --suite regress -C build
+
+  # # Use /DEBUG:FASTLINK to avoid high memory usage during linking
+  # configure_script: |
+  #   vcvarsall x64
+  #   meson setup --backend ninja --buildtype debug -Dc_link_args=/DEBUG:FASTLINK -Dcassert=true -Db_pch=true -Dssl=openssl -Dextra_lib_dirs=c:\openssl\1.1\lib -Dextra_include_dirs=c:\openssl\1.1\include -DTAR=c:/windows/system32/tar.exe -DPG_TEST_EXTRA="%PG_TEST_EXTRA%" build
+
+  # build_script: |
+  #   vcvarsall x64
+  #   ninja -C build
+
+  # check_world_script: |
+  #   vcvarsall x64
+  #   meson test %MTEST_ARGS% --num-processes %TEST_JOBS%
 
   on_failure:
     <<: *on_failure_meson

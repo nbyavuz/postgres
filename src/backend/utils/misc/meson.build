@@ -31,5 +31,5 @@ backend_link_with += static_library('guc-file',
 )
 
 install_data('postgresql.conf.sample',
-  install_dir: dir_data,
+  install_dir: dir_man,
 )

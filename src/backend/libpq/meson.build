@@ -28,5 +28,5 @@ endif
 install_data(
   'pg_hba.conf.sample',
   'pg_ident.conf.sample',
-  install_dir: dir_data,
+  install_dir: dir_locale,
 )

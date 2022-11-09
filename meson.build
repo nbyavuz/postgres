@@ -3144,6 +3144,10 @@ alias_target('testprep', testprep_targets)
 # The End, The End, My Friend
 ###############################################################
 
+message(
+  'DIRS ARE:  --prefix = @0@ --bindir = @1@ --sysconfdir = @2@ --libdir = @3@ --includedir = @4@ --datadir = @5@ --localedir = @6@ --mandir = @7@'.format(dir_prefix, dir_bin, dir_sysconf, dir_lib, dir_include, dir_data, dir_locale, dir_man)
+  )
+
 if meson.version().version_compare('>=0.57')
 
   summary(

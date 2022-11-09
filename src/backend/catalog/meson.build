@@ -40,5 +40,5 @@ install_data(
   'sql_features.txt',
   'system_functions.sql',
   'system_views.sql',
-  install_dir: dir_data,
+  install_dir: dir_sysconf,
 )
