@@ -628,10 +628,13 @@ windows_template: &windows_template
 
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*windows.*'
 
-  windows_container:
-    image: $CONTAINER_REPO/windows_ci_vs_2019:latest
+  compute_engine_instance:
+    image_project: pg-ci-images-dev
+    image: family/pg-ci-windows-vs-2019
+    platform: windows
     cpu: $CPUS
     memory: 4G
+    disk: 50
 
   sysinfo_script: |
     chcp
@@ -664,6 +667,65 @@ task:
   check_world_script: |
     vcvarsall x64
     meson test %MTEST_ARGS% --num-processes %TEST_JOBS%
+
+  on_failure:
+    <<: *on_failure_meson
+    crashlog_artifacts:
+      path: "crashlog-*.txt"
+      type: text/plain
+
+
+task:
+  <<: *windows_template
+  name: Windows - Server 2019, MinGW64 - Meson
+
+  # This task needs to be triggered manually on Cirrus CI.
+  # Otherwise it will not run and be shown as paused
+  # XXX: Below line needs to be uncommented before merge. It's commented for now so that cfbot can run it
+  #trigger_type: manual
+
+  compute_engine_instance:
+    image_project: pg-ci-images-dev
+    image: family/pg-ci-windows-mingw
+    platform: windows
+    cpu: $CPUS
+    memory: 4G
+    disk: 50
+
+  env:
+    CCACHE_DIR: C:/msys64/ccache
+    CCACHE_MAXSIZE: "500M"
+    CCACHE_SLOPPINESS: pch_defines,time_macros
+    CCACHE_DEPEND: 1
+    # Need this for plpython tests to pass
+    PYTHONHOME: C:/msys64/ucrt64
+    MSYS: winjitdebug
+    # Start bash in current working directory
+    CHERE_INVOKING: 1
+    BASH_EXE: C:\msys64\usr\bin\bash.exe
+
+  ccache_cache:
+    folder: ${CCACHE_DIR}
+
+  setup_additional_packages_script: |
+    REM C:\msys64\usr\bin\pacman.exe -S --noconfirm ...
+
+  mingw_info_script: |
+    %BASH_EXE% -lc "where gcc"
+    %BASH_EXE% -lc "gcc --version"
+    %BASH_EXE% -lc "where perl"
+    %BASH_EXE% -lc "perl --version"
+
+  configure_script: |
+    %BASH_EXE% -lc "meson setup -Ddebug=true -Doptimization=g -Dcassert=true -Db_pch=true -DTAR=%TAR% build"
+
+  build_script: |
+    %BASH_EXE% -lc "ninja -C build"
+
+  upload_caches: ccache
+
+  test_world_script: |
+    %BASH_EXE% -lc "meson test %MTEST_ARGS% --num-processes %TEST_JOBS%"
 
   on_failure:
     <<: *on_failure_meson
