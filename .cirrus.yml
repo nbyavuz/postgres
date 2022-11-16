@@ -6,7 +6,7 @@
 
 env:
   # Source of images / containers
-  GCP_PROJECT: pg-ci-images
+  GCP_PROJECT: pg-ci-images-dev
   IMAGE_PROJECT: $GCP_PROJECT
   CONTAINER_REPO: us-docker.pkg.dev/${GCP_PROJECT}/ci
 
@@ -628,14 +628,6 @@ windows_template: &windows_template
 
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*windows.*'
 
-  compute_engine_instance:
-    image_project: pg-ci-images-dev
-    image: family/pg-ci-windows-vs-2019
-    platform: windows
-    cpu: $CPUS
-    memory: 4G
-    disk: 50
-
   sysinfo_script: |
     chcp
     systeminfo
@@ -649,6 +641,19 @@ windows_template: &windows_template
 task:
   <<: *windows_template
   name: Windows - Server 2019, VS 2019 - Meson & ninja
+
+  matrix:
+    - compute_engine_instance:
+        image_project: pg-ci-images-dev
+        image: family/pg-ci-windows-ci-vs-2019
+        platform: windows
+        cpu: $CPUS
+        memory: 4G
+        disk: 50
+    - windows_container:
+        image: $CONTAINER_REPO/windows-ci-vs-2019-docker:latest
+        cpu: $CPUS
+        memory: 4G
 
   meson_install_wraps_script: |
     mkdir subprojects
@@ -683,14 +688,20 @@ task:
   # Otherwise it will not run and be shown as paused
   # XXX: Below line needs to be uncommented before merge. It's commented for now so that cfbot can run it
   #trigger_type: manual
+  matrix:
+    - compute_engine_instance:
+        image_project: pg-ci-images-dev
+        image: family/pg-ci-windows-ci-mingw64
+        platform: windows
+        cpu: $CPUS
+        memory: 4G
+        disk: 50
+    - windows_container:
+        image: $CONTAINER_REPO/windows-ci-mingw64-docker:latest
+        cpu: $CPUS
+        memory: 4G
 
-  compute_engine_instance:
-    image_project: pg-ci-images-dev
-    image: family/pg-ci-windows-mingw
-    platform: windows
-    cpu: $CPUS
-    memory: 4G
-    disk: 50
+
 
   env:
     CCACHE_DIR: C:/msys64/ccache
@@ -738,6 +749,19 @@ task:
   <<: *windows_template
   name: Windows - Server 2019, VS 2019 - Meson & msbuild
 
+  matrix:
+    - compute_engine_instance:
+        image_project: pg-ci-images-dev
+        image: family/pg-ci-windows-ci-vs-2019
+        platform: windows
+        cpu: $CPUS
+        memory: 4G
+        disk: 50
+    - windows_container:
+        image: $CONTAINER_REPO/windows-ci-vs-2019-docker:latest
+        cpu: $CPUS
+        memory: 4G
+
   meson_install_wraps_script: |
     mkdir subprojects
     meson wrap install lz4
@@ -765,6 +789,19 @@ task:
 task:
   <<: *windows_template
   name: Windows - Server 2019, VS 2019 - Homegrown
+
+  matrix:
+    - compute_engine_instance:
+        image_project: pg-ci-images-dev
+        image: family/pg-ci-windows-ci-vs-2019
+        platform: windows
+        cpu: $CPUS
+        memory: 4G
+        disk: 50
+    - windows_container:
+        image: $CONTAINER_REPO/windows-ci-vs-2019-docker:latest
+        cpu: $CPUS
+        memory: 4G
 
   env:
     # Our windows infrastructure doesn't have test concurrency above the level
