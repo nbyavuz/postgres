@@ -2950,7 +2950,7 @@ test('pkg_conf_extensions',
       '--pkgconf_installdir', pkgconf_installdir,
       '--builddir', meson.build_root(),
       '--pkg_confdir', get_option('pkg_config_path'),
-      '--pkg_sysrootdir', test_install_destdir,
+      '--tmp_installdir', test_install_location,
       '--',
         cc.cmd_array(),
       ],)

@@ -22,8 +22,8 @@ parser.add_argument('--meson_args', help='args of meson binary',
 parser.add_argument('--pkg_confdir',
                     help='to set PKG_CONF_PATH from surrounding meson build',
                     type=str, nargs='?', const='', required=False)
-parser.add_argument('--pkg_sysrootdir',
-                    help='to set PKG_CONFIG_SYSROOT_DIR',
+parser.add_argument('--tmp_installdir',
+                    help='to set install dir',
                     type=str, nargs='?', const='', required=False)
 
 parser.add_argument('c_args', help='c_args from surrounding meson build',
@@ -81,17 +81,24 @@ def remove_duplicates(duplicate_str):
 
 
 # run tests
-def run_tests(pkg_confdir, message='', set_sysroot=False):
+def run_tests(pkg_confdir, message='', change_prefix=False):
     print('\n{}\n{}\n'.format('#' * 60, message), flush=True)
 
     adminpack_builddir = os.path.join(workdir, 'build')
 
-    env = {**os.environ, }
+    if change_prefix:
+      pkg_conffile = os.path.join(pkg_confdir, 'postgresql-extension.pc')
+      prefix = 'prefix={}\n'.format(args.tmp_installdir)
 
-    if set_sysroot:
-        env['PKG_CONFIG_SYSROOT_DIR'] = '{}:{}'.format(
-            args.pkg_sysrootdir, env.get('PKG_CONFIG_SYSROOT_DIR', ''),
-        ).strip(': ')
+      with open(pkg_conffile, 'r') as sources:
+        lines = sources.readlines()
+      with open(pkg_conffile, 'w') as sources:
+          for line in lines:
+            if 'prefix=' in line:
+              line = prefix
+            sources.write(line)
+
+    env = {**os.environ, }
 
     env['PKG_CONFIG_PATH'] = '{}:{}:{}'.format(
       pkg_confdir, args.pkg_confdir, env.get('PKG_CONFIG_PATH', ''),
@@ -126,7 +133,7 @@ if not run_tests(os.path.join(builddir, 'meson-uninstalled'),
 # test postgresql-extension-warnings
 if not run_tests(pkgconf_installdir,
                  message='Testing postgresql-extension-warnings',
-                 set_sysroot=True):
+                 change_prefix=True):
     exit_code = exit_code + 1
 
 sys.exit(exit_code)
