@@ -697,7 +697,7 @@ task:
         memory: 4G
         disk: 50
     - windows_container:
-        image: $CONTAINER_REPO/windows-ci-mingw64-docker:latest
+        image: $CONTAINER_REPO/windows_ci_mingw64:latest
         cpu: $CPUS
         memory: 4G
 
