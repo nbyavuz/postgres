@@ -565,17 +565,23 @@ task:
   name: Windows - Server 2019, MinGW64 - Meson
 
   # due to resource constraints we don't run this task by default for now
-  trigger_type: manual
+  # trigger_type: manual
   # worth using only_if despite being manual, otherwise this task will show up
   # when e.g. ci-os-only: linux is used.
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*mingw.*'
   # otherwise it'll be sorted before other tasks
-  depends_on: SanityCheck
+  # depends_on: SanityCheck
 
-  windows_container:
-    image: $CONTAINER_REPO/windows_ci_mingw64:latest
-    cpu: $CPUS
-    memory: 4G
+  matrix:
+    - windows_container:
+        image: $CONTAINER_REPO/windows_ci_mingw64:latest
+        cpu: $CPUS
+        memory: 4G
+
+    - windows_container:
+        image: us-docker.pkg.dev/pg-ci-images-dev/ci/windows-ci-mingw64-docker:latest
+        cpu: $CPUS
+        memory: 4G
 
   env:
     TEST_JOBS: 4 # higher concurrency causes occasional failures
