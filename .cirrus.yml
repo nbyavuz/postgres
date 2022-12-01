@@ -573,10 +573,10 @@ task:
   # depends_on: SanityCheck
 
   matrix:
-    - windows_container:
-        image: $CONTAINER_REPO/windows_ci_mingw64:latest
-        cpu: $CPUS
-        memory: 4G
+    # - windows_container:
+    #     image: $CONTAINER_REPO/windows_ci_mingw64:latest
+    #     cpu: $CPUS
+    #     memory: 4G
 
     - windows_container:
         image: us-docker.pkg.dev/pg-ci-images-dev/ci/windows-ci-mingw64-docker:latest
