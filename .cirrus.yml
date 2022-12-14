@@ -26,6 +26,9 @@ env:
   PGCTLTIMEOUT: 120 # avoids spurious failures during parallel tests
   TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/src/tools/ci/pg_ci_base.conf
   PG_TEST_EXTRA: kerberos ldap ssl
+  # kerberos test is not working on arm macos yet. See
+  # https://postgr.es/m/CAN55FZ2R%2BXufuVgJ8ew_yDBk48PgXEBvyKNvnNdTTVyczbQj0g%40mail.gmail.com
+  PG_TEST_EXTRA_MACOS: ldap ssl
 
 
 # What files to preserve in case tests fail
@@ -581,12 +584,8 @@ task:
   name: macOS - Monterey - Meson
 
   env:
-    CPUS: 4 # always get that much for cirrusci macOS instances
-    BUILD_JOBS: $CPUS
-    # Test performance regresses noticably when using all cores. 8 seems to
-    # work OK. See
-    # https://postgr.es/m/20220927040208.l3shfcidovpzqxfh%40awork3.anarazel.de
-    TEST_JOBS: 8
+    # MacOS arm instances use 4 CPUs for now
+    BUILD_JOBS: 4
 
     BREW_PATH: /opt/homebrew
     CIRRUS_WORKING_DIR: ${HOME}/pgsql/
@@ -599,6 +598,27 @@ task:
     CPPFLAGS: -DRANDOMIZE_ALLOCATED_MEMORY
     CFLAGS: -Og -ggdb
     CXXFLAGS: -Og -ggdb
+
+  matrix:
+    - name: macOS - Monterey - Meson 4
+      env:
+        TEST_JOBS: 4
+
+    - name: macOS - Monterey - Meson 6
+      env:
+        TEST_JOBS: 6
+
+    - name: macOS - Monterey - Meson 8
+      env:
+        TEST_JOBS: 8
+
+    - name: macOS - Monterey - Meson 10
+      env:
+        TEST_JOBS: 10
+
+    - name: macOS - Monterey - Meson 12
+      env:
+        TEST_JOBS: 12
 
   depends_on: SanityCheck
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*(macos|darwin|osx).*'
@@ -668,7 +688,7 @@ task:
       -Dcassert=true \
       -Dssl=openssl -Duuid=e2fs -Ddtrace=auto \
       -Dsegsize_blocks=6 \
-      -DPG_TEST_EXTRA="$PG_TEST_EXTRA" \
+      -DPG_TEST_EXTRA="$PG_TEST_EXTRA_MACOS" \
       build
 
   build_script: ninja -C build -j${BUILD_JOBS}
