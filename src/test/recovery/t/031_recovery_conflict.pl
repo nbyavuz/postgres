@@ -26,7 +26,7 @@ log_temp_files = 0
 max_prepared_transactions = 10
 
 # wait some to test the wait paths as well, but not long for obvious reasons
-max_standby_streaming_delay = 50ms
+max_standby_streaming_delay = 0
 
 temp_tablespaces = $tablespace1
 # Some of the recovery conflict logging code only gets exercised after
