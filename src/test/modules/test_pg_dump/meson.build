@@ -1,10 +1,8 @@
 # Copyright (c) 2022, PostgreSQL Global Development Group
 
-# FIXME: prevent install during main install, but not during test :/
-install_data(
+test_install_files += files(
   'test_pg_dump.control',
   'test_pg_dump--1.0.sql',
-  kwargs: contrib_data_args,
 )
 
 tests += {
