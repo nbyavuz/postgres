@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+
+import argparse
+import shutil
+import os
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument('--sharedir', help='installationpath of file', type=str)
+parser.add_argument('--libdir', help='installation path of libs', type=str)
+parser.add_argument('--install_files', help='list of files to be installed', type=str, nargs='*')
+parser.add_argument('--install_libs', help='list of libs to be installed', type=str, nargs='*')
+
+args = parser.parse_args()
+
+def copy_files(src_list: list, dest: str):
+    # check if dir exists
+    try:
+        os.makedirs(dest)
+    except OSError as e:
+        if not os.path.isdir(dest):
+            raise
+
+    # check if the src is dir or file
+    # then call the correct function
+    for src in src_list:
+        if os.path.isdir(src):
+            shutil.copytree(src, dest)
+        else:
+            shutil.copy2(src, dest)
+
+copy_files(args.install_files, args.sharedir)
+copy_files(args.install_libs, args.libdir)
