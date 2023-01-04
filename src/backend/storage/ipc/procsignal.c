@@ -99,7 +99,6 @@ typedef struct
 static ProcSignalHeader *ProcSignal = NULL;
 static ProcSignalSlot *MyProcSignalSlot = NULL;
 
-static bool CheckProcSignal(ProcSignalReason reason);
 static void CleanupProcSignalState(int status, Datum arg);
 static void ResetProcSignalBarrierBits(uint32 flags);
 
@@ -613,7 +612,7 @@ ResetProcSignalBarrierBits(uint32 flags)
  * signaled, and clear the signal flag.  Should be called after receiving
  * SIGUSR1.
  */
-static bool
+bool
 CheckProcSignal(ProcSignalReason reason)
 {
 	volatile ProcSignalSlot *slot = MyProcSignalSlot;
@@ -638,6 +637,7 @@ void
 procsignal_sigusr1_handler(SIGNAL_ARGS)
 {
 	int			save_errno = errno;
+	bool 		database, tablespace, lock, snapshot, deadlock, bufferpin;
 
 	if (CheckProcSignal(PROCSIG_CATCHUP_INTERRUPT))
 		HandleCatchupInterrupt();
@@ -657,23 +657,38 @@ procsignal_sigusr1_handler(SIGNAL_ARGS)
 	if (CheckProcSignal(PROCSIG_LOG_MEMORY_CONTEXT))
 		HandleLogMemoryContextInterrupt();
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_DATABASE))
+	database = CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_DATABASE);
+	if (database)
 		RecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_DATABASE);
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_TABLESPACE))
+	tablespace = CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_TABLESPACE);
+	if (tablespace)
 		RecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_TABLESPACE);
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_LOCK))
+	lock = CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_LOCK);
+	if (lock)
 		RecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_LOCK);
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_SNAPSHOT))
+	snapshot = CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_SNAPSHOT);
+	if (snapshot)
 		RecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_SNAPSHOT);
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK))
+	deadlock = CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK);
+	if (deadlock)
 		RecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK);
 
-	if (CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_BUFFERPIN))
+	bufferpin = CheckProcSignal(PROCSIG_RECOVERY_CONFLICT_BUFFERPIN);
+	if (bufferpin)
 		RecoveryConflictInterrupt(PROCSIG_RECOVERY_CONFLICT_BUFFERPIN);
+
+	elog(WARNING,
+		"\nPROCSIG_RECOVERY_CONFLICT_DATABASE: %d\n"
+		"PROCSIG_RECOVERY_CONFLICT_TABLESPACE: %d\n"
+		"PROCSIG_RECOVERY_CONFLICT_LOCK: %d\n"
+		"PROCSIG_RECOVERY_CONFLICT_SNAPSHOT: %d\n"
+		"PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK: %d\n"
+		"PROCSIG_RECOVERY_CONFLICT_BUFFERPIN: %d\n",
+		database, tablespace, lock, snapshot, deadlock, bufferpin);
 
 	SetLatch(MyLatch);
 
