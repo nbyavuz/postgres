@@ -16,7 +16,6 @@
 
 #include "storage/backendid.h"
 
-
 /*
  * Reasons for signaling a Postgres child process (a backend or an auxiliary
  * process, like checkpointer).  We can cope with concurrent signals for different
@@ -65,6 +64,7 @@ extern int	SendProcSignal(pid_t pid, ProcSignalReason reason,
 extern uint64 EmitProcSignalBarrier(ProcSignalBarrierType type);
 extern void WaitForProcSignalBarrier(uint64 generation);
 extern void ProcessProcSignalBarrier(void);
+extern bool CheckProcSignal(ProcSignalReason reason);
 
 extern void procsignal_sigusr1_handler(SIGNAL_ARGS);
 
