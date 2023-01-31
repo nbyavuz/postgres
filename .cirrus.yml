@@ -3,6 +3,9 @@
 # For instructions on how to enable the CI integration in a repository and
 # further details, see src/tools/ci/README
 
+# CI run can be skipped completely by adding `skip-ci` to the commit message
+skip: $CIRRUS_CHANGE_MESSAGE =~ '.*\nskip-ci.*'
+
 
 env:
   # Source of images / containers
@@ -60,11 +63,12 @@ on_failure_meson: &on_failure_meson
 task:
   name: SanityCheck
 
-  # If a specific OS is requested, don't run the sanity check. This shortens
-  # push-wait-for-ci cycle time a bit when debugging operating system specific
-  # failures. Uses skip instead of only_if, as cirrus otherwise warns about
+  # If a specific OS is requested or CI run is wanted to be skipped,
+  # don't run the sanity check. This shortens push-wait-for-ci cycle time
+  # a bit when debugging operating system specific failures.
+  # Uses skip instead of only_if, as cirrus otherwise warns about
   # only_if conditions not matching.
-  skip: $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:.*'
+  skip: $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nskip-ci.*'
 
   env:
     CPUS: 4
