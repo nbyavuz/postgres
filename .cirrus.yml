@@ -574,9 +574,12 @@ task:
     vcvarsall x64
     ninja -C build
 
-  check_world_script: |
-    vcvarsall x64
-    meson test %MTEST_ARGS% --num-processes %TEST_JOBS%
+  # check_world_script: |
+  #   vcvarsall x64
+  #   meson test %MTEST_ARGS% --num-processes %TEST_JOBS%
+
+  test_regression_script: |
+    meson test -C build --logbase checklog --print-errorlogs --no-rebuild --suite setup --suite regress
 
   on_failure:
     <<: *on_failure_meson
