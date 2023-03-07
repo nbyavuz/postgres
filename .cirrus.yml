@@ -38,6 +38,11 @@ on_failure_ac: &on_failure_ac
     type: text/plain
 
 on_failure_meson: &on_failure_meson
+  compile_artifacts:
+    paths:
+      - build*/meson-logs/**/*.log
+    type: text/plain
+
   testrun_artifacts:
     paths:
       - "build*/testrun/**/*.log"
@@ -578,11 +583,10 @@ task:
     vcvarsall x64
     meson test %MTEST_ARGS% --num-processes %TEST_JOBS%
 
-  on_failure:
-    <<: *on_failure_meson
-    crashlog_artifacts:
-      path: "crashlog-*.txt"
-      type: text/plain
+  <<: *on_failure_meson
+  crashlog_artifacts:
+    path: "crashlog-*.txt"
+    type: text/plain
 
 
 task:
