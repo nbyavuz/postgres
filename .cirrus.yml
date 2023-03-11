@@ -730,9 +730,6 @@ WINDOWS_ENVIRONMENT_BASE: &WINDOWS_ENVIRONMENT_BASE
     powershell -Command get-psdrive -psprovider filesystem
     set
 
-  meson_downgrade_script: |
-     pip install git+https://github.com/eli-schwartz/meson@vs-find_program-path
-
 task:
   name: Windows - Server 2019, VS 2019 - Meson & ninja
   <<: *WINDOWS_ENVIRONMENT_BASE
