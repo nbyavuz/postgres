@@ -1282,34 +1282,61 @@ endif
 ###############################################################
 
 uuidopt = get_option('uuid')
+uuid_library = 'none'
+uuid = not_found_dep
+if uuidopt == 'auto' and auto_features.disabled()
+  uuidopt = 'none'
+endif
+
 if uuidopt != 'none'
-  uuidname = uuidopt.to_upper()
-  if uuidopt == 'e2fs'
-    uuid = dependency('uuid', required: true)
-    uuidfunc = 'uuid_generate'
-    uuidheader = 'uuid/uuid.h'
-  elif uuidopt == 'bsd'
+
+  uuids = {
+    'e2fs': {
+      'uuiddep': 'uuid',
+      'uuidfunc': 'uuid_generate',
+      'uuidheader': 'uuid/uuid.h',
+    },
+    'bsd': {
+      'uuiddep': '',
+      'uuidfunc': 'uuid_to_string',
+      'uuidheader': 'uuid.h',
+    },
+    'ossp': {
+      'uuiddep': 'ossp-uuid',
+      'uuidfunc': 'uuid_export',
+      'uuidheader': 'uuid.h',
+    }
+  }
+
+  foreach uuidname, uuid_values : uuids
+    if uuidopt != 'auto' and uuidname != uuidopt
+      continue
+    endif
+    uuid_required = (uuidname == uuidopt)
+    uuiddep = uuid_values['uuiddep']
+    uuidheader = uuid_values['uuidheader']
+    uuidfunc = uuid_values['uuidfunc']
+
     # libc should have uuid function
-    uuid = declare_dependency()
-    uuidfunc = 'uuid_to_string'
-    uuidheader = 'uuid.h'
-  elif uuidopt == 'ossp'
-    uuid = dependency('ossp-uuid', required: true)
-    uuidfunc = 'uuid_export'
-    uuidheader = 'uuid.h'
-  else
-    error('huh')
-  endif
+    uuid = uuiddep != '' ? dependency(uuiddep, required: uuid_required) : \
+                            declare_dependency()
 
-  if not cc.has_header_symbol(uuidheader, uuidfunc, args: test_c_args, dependencies: uuid)
-    error('uuid library @0@ missing required function @1@'.format(uuidopt, uuidfunc))
-  endif
-  cdata.set('HAVE_@0@'.format(uuidheader.underscorify().to_upper()), 1)
+    if uuid.found() and cc.has_header_symbol(uuidheader, uuidfunc, args: test_c_args,
+                                             dependencies: uuid, required: uuid_required)
+      uuidname_upper = uuidname.to_upper()
+      uuid_library = uuidname
+      cdata.set('HAVE_@0@'.format(uuidheader.underscorify().to_upper()), 1)
+      cdata.set('HAVE_UUID_@0@'.format(uuidname_upper), 1,
+          description: 'Define to 1 if you have @0@ UUID support.'.format(uuidname_upper))
+      break
+    else
+      uuid = not_found_dep
+    endif
+  endforeach
+endif
 
-  cdata.set('HAVE_UUID_@0@'.format(uuidname), 1,
-           description: 'Define to 1 if you have @0@ UUID support.'.format(uuidname))
-else
-  uuid = not_found_dep
+if uuidopt == 'auto' and auto_features.enabled() and not uuid.found()
+  error('no UUID library found')
 endif
 
 
@@ -3288,11 +3315,12 @@ if meson.version().version_compare('>=0.57')
       'readline': readline,
       'selinux': selinux,
       'systemd': systemd,
-      'uuid': uuid,
+      'uuid': uuid.found() ? [uuid, '(@0@)'.format(uuid_library)] : uuid,
       'zlib': zlib,
       'zstd': zstd,
     },
     section: 'External libraries',
+    list_sep: ', ',
   )
 
 endif

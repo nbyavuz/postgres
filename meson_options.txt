@@ -137,8 +137,8 @@ option('ssl', type : 'combo', choices : ['auto', 'none', 'openssl'],
 option('systemd', type : 'feature', value: 'auto',
   description: 'build with systemd support')
 
-option('uuid', type : 'combo', choices : ['none', 'bsd', 'e2fs', 'ossp'],
-  value : 'none',
+option('uuid', type : 'combo', choices : ['auto', 'none', 'bsd', 'e2fs', 'ossp'],
+  value : 'auto',
   description: 'build contrib/uuid-ossp using LIB')
 
 option('zlib', type : 'feature', value: 'auto',
