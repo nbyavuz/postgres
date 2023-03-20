@@ -47,7 +47,7 @@ elsif ($^O eq 'darwin')
 elsif ($^O eq 'freebsd')
 {
 	$krb5_bin_dir  = '/usr/local/bin';
-	$krb5_sbin_dir = '/usr/local/bin';
+	$krb5_sbin_dir = '/usr/local/sbin';
 }
 elsif ($^O eq 'linux')
 {
