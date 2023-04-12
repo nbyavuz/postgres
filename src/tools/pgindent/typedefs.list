@@ -2990,6 +2990,8 @@ VacDeadItems
 VacErrPhase
 VacObjFilter
 VacOptValue
+VacuumHeapBlockState
+VacuumHeapState
 VacuumParams
 VacuumRelation
 VacuumStmt
