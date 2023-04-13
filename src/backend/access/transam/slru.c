@@ -1646,7 +1646,9 @@ SlruSyncFileTagComplete(PgStreamingWrite *pgsw, void *pgsw_private, int result, 
 
 	CloseTransientFile((int) entry->handler_data);
 
-	SyncRequestCompleted(entry, result >= 0, result >= 0 ? 0 : -result);
+	/* FIXME: hack for test_slru.c's benefit */
+	if (entry->hash_entry)
+		SyncRequestCompleted(entry, result >= 0, result >= 0 ? 0 : -result);
 }
 
 static bool
@@ -1680,7 +1682,9 @@ SlruSyncFileTag(SlruCtl ctl, struct PgStreamingWrite *pgsw, InflightSyncEntry *e
 	fd = OpenTransientFile(entry->path, O_RDWR | PG_BINARY);
 	if (fd < 0)
 	{
-		SyncRequestCompleted(entry, false, errno);
+		/* FIXME: hack for test_slru.c's benefit */
+		if (entry->hash_entry)
+			SyncRequestCompleted(entry, false, errno);
 		return;
 	}
 

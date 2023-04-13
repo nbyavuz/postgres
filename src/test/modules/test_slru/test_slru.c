@@ -17,9 +17,11 @@
 #include "access/slru.h"
 #include "access/transam.h"
 #include "miscadmin.h"
+#include "storage/aio.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
+#include "storage/streaming_write.h"
 #include "utils/builtins.h"
 
 PG_MODULE_MAGIC;
@@ -144,16 +146,22 @@ test_slru_page_exists(PG_FUNCTION_ARGS)
 Datum
 test_slru_page_sync(PG_FUNCTION_ARGS)
 {
-	int64		pageno = PG_GETARG_INT64(0);
-	FileTag		ftag;
-	char		path[MAXPGPATH];
+	int64			pageno = PG_GETARG_INT64(0);
+	PgStreamingWrite *pgsw;
+	InflightSyncEntry entry = {0};
+
+	pgsw = pg_streaming_write_alloc(4, NULL);
 
 	/* note that this flushes the full file a segment is located in */
-	ftag.segno = pageno / SLRU_PAGES_PER_SEGMENT;
-	SlruSyncFileTag(TestSlruCtl, &ftag, path);
+	entry.tag.segno = pageno / SLRU_PAGES_PER_SEGMENT;
+
+	SlruSyncFileTag(TestSlruCtl, pgsw, &entry);
+
+	pg_streaming_write_wait_all(pgsw);
+	pg_streaming_write_free(pgsw);
 
 	elog(NOTICE, "Called SlruSyncFileTag() for segment %lld on path %s",
-		 (long long) ftag.segno, path);
+		 (long long) entry.tag.segno, entry.path);
 
 	PG_RETURN_VOID();
 }
