@@ -3422,6 +3422,15 @@ if meson.version().version_compare('>=0.57')
     section: 'Programs',
   )
 
+  if llvm.found()
+    summary(
+      {
+        'clang': clang,
+      },
+      section: 'Programs',
+    )
+  endif
+
   summary(
     {
       'bonjour': bonjour,
