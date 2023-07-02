@@ -1412,6 +1412,7 @@ LWLock
 LWLockHandle
 LWLockMode
 LWLockPadded
+LWLockWaitCheckRes
 LZ4F_compressionContext_t
 LZ4F_decompressOptions_t
 LZ4F_decompressionContext_t
