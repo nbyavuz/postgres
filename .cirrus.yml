@@ -536,6 +536,13 @@ WINDOWS_ENVIRONMENT_BASE: &WINDOWS_ENVIRONMENT_BASE
     PG_TEST_USE_UNIX_SOCKETS: 1
     PG_REGRESS_SOCK_DIR: "c:/cirrus/"
 
+  compute_engine_instance:
+    image_project: $IMAGE_PROJECT
+    image: family/pg-ci-windows
+    platform: windows
+    cpu: $CPUS
+    memory: 4G
+
   sysinfo_script: |
     chcp
     systeminfo
@@ -561,13 +568,6 @@ task:
 
   depends_on: SanityCheck
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*windows.*'
-
-  compute_engine_instance:
-    image_project: $IMAGE_PROJECT
-    image: family/pg-ci-windows-ci-vs-2019
-    platform: windows
-    cpu: $CPUS
-    memory: 4G
 
   setup_additional_packages_script: |
     REM choco install -y --no-progress ...
@@ -609,13 +609,6 @@ task:
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*mingw.*'
   # otherwise it'll be sorted before other tasks
   depends_on: SanityCheck
-
-  compute_engine_instance:
-    image_project: $IMAGE_PROJECT
-    image: family/pg-ci-windows-ci-mingw64
-    platform: windows
-    cpu: $CPUS
-    memory: 4G
 
   env:
     TEST_JOBS: 4 # higher concurrency causes occasional failures
