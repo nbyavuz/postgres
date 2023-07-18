@@ -143,8 +143,6 @@ task:
     # Postgres interprets LANG as a 'en_US.UTF-8' but it is 'C', then
     # Postgres tries to set 'LC_COLLATE' to 'en_US.UTF-8' but it is not
     # changeable. Initdb fails because of that. So, LANG is forced to be 'C'.
-    LANG: "C"
-    LC_ALL: "C"
 
   matrix:
     - name: NetBSD - 9 - Meson
@@ -153,6 +151,7 @@ task:
         IMAGE_NAME: pg-ci-netbsd-postgres-9-3
         PLATFORM: netbsd
         INCLUDE_DIRS: -Dextra_lib_dirs=/usr/pkg/lib -Dextra_include_dirs=/usr/pkg/include
+        LC_ALL: "C"
 
     - name: OpenBSD - 7 - Meson
       only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*openbsd.*'
