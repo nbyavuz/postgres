@@ -1002,6 +1002,8 @@ CreateLockFile(const char *filename, bool amPostmaster,
 				my_gp_pid;
 	const char *envvar;
 
+	elog(LOG, "Log File name = %s", filename);
+
 	/*
 	 * If the PID in the lockfile is our own PID or our parent's or
 	 * grandparent's PID, then the file must be stale (probably left over from

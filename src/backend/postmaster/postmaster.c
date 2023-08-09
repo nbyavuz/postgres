@@ -1307,7 +1307,9 @@ PostmasterMain(int argc, char *argv[])
 		int			success = 0;
 
 		/* Need a modifiable copy of Unix_socket_directories */
+		elog(LOG, "SOCKETDIR = %s", Unix_socket_directories);
 		rawstring = pstrdup(Unix_socket_directories);
+		elog(LOG, "RAWSTRING = %s", rawstring);
 
 		/* Parse string into list of directories */
 		if (!SplitDirectoriesString(rawstring, ',', &elemlist))
