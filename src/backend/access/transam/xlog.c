@@ -1409,6 +1409,8 @@ PadPartialPage(XLogRecPtr upto, TimeLineID tli, XLogRecPtr *final_pad)
 	if (padded)
 	{
 		pgWalUsage.wal_bytes += pad_size;
+		PendingWalStats.wal_partial_pad++;
+		PendingWalStats.wal_partial_pad_bytes += pad_size;
 
 		*final_pad = XLogBytePosToEndRecPtr(endbytepos);
 		return true;
@@ -2930,6 +2932,7 @@ XLogWriteCheckPending(XLogWritePos *write_pos)
 							   (uint32) (write_pos->write_init_min >> 32), (uint32) write_pos->write_init_min),
 						errhidestmt(true),
 						errhidecontext(true));
+				PendingWalStats.wal_partial_wait++;
 				pgaio_io_wait_ref(&partial_aio_ref, false);
 			}
 			else
@@ -2947,6 +2950,7 @@ XLogWriteCheckPending(XLogWritePos *write_pos)
 						errhidestmt(true),
 						errhidecontext(true));
 
+				PendingWalStats.wal_partial_wait++;
 				pgaio_io_wait_ref(&partial_aio_ref, false);
 
 				goto write_out_wait;
@@ -3541,6 +3545,7 @@ XLogWrite(XLogwrtRqst WriteRqstTmp, TimeLineID tli, bool flexible)
 	bool		performed_io = false;
 	bool		holding_lock PG_USED_FOR_ASSERTS_ONLY = false;
 	XLogWritePos write_pos = {0};
+	bool		statted = false;
 	bool		did_wait_for_insert = false;
 	bool		tried_lock = false;
 
@@ -3586,6 +3591,12 @@ xlogwrite_again:
 		write_pos.flush_done_min <= LogwrtResult.FlushDone)
 	{
 		END_CRIT_SECTION();
+
+		if (!statted)
+		{
+			PendingWalStats.wal_already_done_unlocked++;
+			statted = true;
+		}
 		return performed_io;
 	}
 
@@ -3621,6 +3632,12 @@ xlogwrite_again:
 			elog(DEBUG3, "walwriter didn't need to write, just wait: %X/%X vs %X/%X/",
 				 (uint32) (write_pos.write_init_min >> 32), (uint32) write_pos.write_init_min,
 				 (uint32) (LogwrtResult.WriteInit >> 32), (uint32) LogwrtResult.WriteInit);
+		}
+
+		if (!statted)
+		{
+			PendingWalStats.wal_just_wait++;
+			statted = true;
 		}
 
 		/* elog(DEBUG1, "just needed to wait for IO"); */
@@ -3686,10 +3703,12 @@ xlogwrite_again:
 	{
 		tried_lock = true;
 		holding_lock = false;
+		PendingWalStats.wal_lock_wait++;
 		goto xlogwrite_again;
 	}
 	else
 	{
+		PendingWalStats.wal_lock_immed++;
 		holding_lock = true;
 	}
 
@@ -3716,6 +3735,8 @@ xlogwrite_again:
 				 (uint32) (LogwrtResult.WriteInit >> 32), (uint32) LogwrtResult.WriteInit);
 
 		}
+
+		PendingWalStats.wal_already_done_locked++;
 
 		END_CRIT_SECTION();
 		return performed_io;
