@@ -550,7 +550,7 @@ pgaio_flush_range_smgr_retry(PgAioInProgress *io)
 	SMgrRelation reln = smgropen(tag->rlocator.locator,
 								 tag->rlocator.backend);
 
-	io->op_data.flush_range.fd = smgrfd(reln, tag->forkNum, tag->blockNum, &off);
+	io->op_data.flush_range.fd = smgrfd(reln, true, tag->forkNum, tag->blockNum, &off);
 	Assert(off == io->op_data.flush_range.offset);
 }
 
@@ -574,7 +574,7 @@ pgaio_read_sb_retry(PgAioInProgress *io)
 	tag = bufHdr->tag;
 
 	reln = smgropen(BufTagGetRelFileLocator(&tag), io->scb_data.read_sb.backend);
-	io->op_data.read.fd = smgrfd(reln, BufTagGetForkNum(&tag), tag.blockNum, &off);
+	io->op_data.read.fd = smgrfd(reln, false, BufTagGetForkNum(&tag), tag.blockNum, &off);
 
 	Assert(off == io->op_data.read.offset);
 }
@@ -612,7 +612,7 @@ pgaio_read_smgr_retry(PgAioInProgress *io)
 	SMgrRelation reln = smgropen(tag->rlocator.locator,
 								 tag->rlocator.backend);
 
-	io->op_data.read.fd = smgrfd(reln, tag->forkNum, tag->blockNum, &off);
+	io->op_data.read.fd = smgrfd(reln, false, tag->forkNum, tag->blockNum, &off);
 	Assert(off == io->op_data.read.offset);
 }
 
@@ -661,7 +661,7 @@ pgaio_write_sb_retry(PgAioInProgress *io)
 
 	tag = bufHdr->tag;
 	reln = smgropen(BufTagGetRelFileLocator(&tag), io->scb_data.read_sb.backend);
-	io->op_data.write.fd = smgrfd(reln, tag.forkNum, tag.blockNum, &off);
+	io->op_data.write.fd = smgrfd(reln, false, tag.forkNum, tag.blockNum, &off);
 
 	Assert(off == io->op_data.write.offset);
 }
@@ -699,7 +699,7 @@ pgaio_write_smgr_retry(PgAioInProgress *io)
 	SMgrRelation reln = smgropen(tag->rlocator.locator,
 								 tag->rlocator.backend);
 
-	io->op_data.read.fd = smgrfd(reln, tag->forkNum, tag->blockNum, &off);
+	io->op_data.read.fd = smgrfd(reln, false, tag->forkNum, tag->blockNum, &off);
 	Assert(off == io->op_data.read.offset);
 }
 
