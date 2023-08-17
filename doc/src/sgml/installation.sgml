@@ -2574,7 +2574,7 @@ ninja install
      </varlistentry>
 
      <varlistentry id="configure-with-uuid-meson">
-      <term><option>-Duuid=<replaceable>LIBRARY</replaceable></option></term>
+      <term><option>-Duuid={ auto | none | <replaceable>LIBRARY</replaceable> }</option></term>
       <listitem>
        <para>
         Build the <xref linkend="uuid-ossp"/> module
@@ -2585,7 +2585,22 @@ ninja install
        <itemizedlist>
         <listitem>
          <para>
-          <option>none</option> to not build the uuid module. This is the default.
+          <option>auto</option> to select UUID library module automatically between
+          <option>e2fs, bsd, ossp</option>. This is the default.
+          </para>
+          <para>
+          Search order is <option>e2fs, bsd, ossp</option>. Because,
+          <option>ossp</option> UUID library is not well maintained; and is
+          becoming increasingly difficult to port to newer platforms. So,
+          <option>ossp</option> will be last option. Between
+          <option>e2fs</option> and <option>bsd</option>, <option>e2fs</option> is
+          used more often than <option>bsd</option>. Hence, they ordered as
+          <option>e2fs, bsd, ossp</option>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <option>none</option> to not build the uuid module.
          </para>
         </listitem>
         <listitem>

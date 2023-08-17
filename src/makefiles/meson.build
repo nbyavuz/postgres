@@ -66,7 +66,7 @@ pgxs_kv = {
 
   # want the chosen option, rather than the library
   'with_ssl' : ssl_library,
-  'with_uuid': uuidopt,
+  'with_uuid': uuid_library,
 
   'default_port': get_option('pgport'),
   'with_system_tzdata': get_option('system_tzdata'),

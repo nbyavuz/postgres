@@ -181,7 +181,7 @@ task:
     su postgres <<-EOF
       meson setup \
         --buildtype=debug \
-        -Dcassert=true -Duuid=bsd -Dtcl_version=tcl86 -Ddtrace=auto \
+        -Dcassert=true -Dtcl_version=tcl86 -Ddtrace=auto \
         -DPG_TEST_EXTRA="$PG_TEST_EXTRA" \
         -Dextra_lib_dirs=/usr/local/lib -Dextra_include_dirs=/usr/local/include/ \
         build
@@ -243,7 +243,6 @@ LINUX_CONFIGURE_FEATURES: &LINUX_CONFIGURE_FEATURES >-
 
 LINUX_MESON_FEATURES: &LINUX_MESON_FEATURES >-
   -Dllvm=enabled
-  -Duuid=e2fs
 
 
 task:
@@ -509,7 +508,7 @@ task:
       -Dextra_include_dirs=${brewpath}/include \
       -Dextra_lib_dirs=${brewpath}/lib \
       -Dcassert=true \
-      -Duuid=e2fs -Ddtrace=auto \
+      -Ddtrace=auto \
       -DPG_TEST_EXTRA="$PG_TEST_EXTRA" \
       build
 
