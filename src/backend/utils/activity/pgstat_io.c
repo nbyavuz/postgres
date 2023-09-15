@@ -122,13 +122,15 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 		if (io_op == IOOP_WRITE)
 		{
 			pgstat_count_buffer_write_time(INSTR_TIME_GET_MICROSEC(io_time));
-			if (io_object == IOOBJECT_RELATION)
+			if (io_object == IOOBJECT_RELATION
+			    || io_object == IOOBJECT_TEMP_RELATION)
 				INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
 		}
 		else if (io_op == IOOP_READ)
 		{
 			pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
-			if (io_object == IOOBJECT_RELATION)
+			if (io_object == IOOBJECT_RELATION
+			    || io_object == IOOBJECT_TEMP_RELATION)
 				INSTR_TIME_ADD(pgBufferUsage.blk_read_time, io_time);
 		}
 
