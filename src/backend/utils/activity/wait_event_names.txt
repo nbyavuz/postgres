@@ -245,6 +245,7 @@ WAL_INIT_WRITE	"Waiting for a write while initializing a new WAL file."
 WAL_READ	"Waiting for a read from a WAL file."
 WAL_SYNC	"Waiting for a WAL file to reach durable storage."
 WAL_SYNC_METHOD_ASSIGN	"Waiting for data to reach durable storage while assigning a new WAL sync method."
+WAL_WAIT_INSERT	"Waiting for WAL buffers to be copied into buffers."
 WAL_WRITE	"Waiting for a write to a WAL file."
 
 
