@@ -147,13 +147,24 @@ task:
     DISK_SIZE: 50
 
     CCACHE_DIR: /tmp/ccache_dir
-    CPPFLAGS: -DRELCACHE_FORCE_RELEASE -DCOPY_PARSE_PLAN_TREES -DWRITE_READ_PARSE_PLAN_TREES -DRAW_EXPRESSION_COVERAGE_TEST -DENFORCE_REGRESSION_TEST_NAME_RESTRICTIONS
+    # Painful runtime-wise for AIO
+    # CPPFLAGS: -DRELCACHE_FORCE_RELEASE -DCOPY_PARSE_PLAN_TREES -DWRITE_READ_PARSE_PLAN_TREES -DRAW_EXPRESSION_COVERAGE_TEST -DENFORCE_REGRESSION_TEST_NAME_RESTRICTIONS
     CFLAGS: -Og -ggdb
 
   <<: *freebsd_task_template
 
   depends_on: SanityCheck
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*freebsd.*'
+
+  sysconfig_script:
+    # Doesn't work reliably on single core instances
+    - sysctl kern.timecounter.hardware=TSC-low || true
+    - sysctl vfs.write_behind=1
+    - sysctl vfs.lodirtybuffers=8192
+    - sysctl vfs.hidirtybuffers=16384
+    - sysctl vfs.dirtybufthresh=14745
+    - sysctl vfs.lorunningspace=1048576
+    - sysctl vfs.hirunningspace=2097152
 
   sysinfo_script: |
     id
@@ -163,6 +174,15 @@ task:
 
   ccache_cache:
     folder: $CCACHE_DIR
+  ccache_info_prune_script:
+    - ccache --version
+    - ccache -p || true
+    - ccache -s
+    - ccache -c
+    - ccache -s
+    - ccache -x || true
+    - export
+
   # Work around performance issues due to 32KB block size
   repartition_script: src/tools/ci/gcp_freebsd_repartition.sh
   create_user_script: |
