@@ -825,6 +825,8 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	bool		found;
 	bool		isExtend;
 	bool		isLocalBuf = SmgrIsTemp(smgr);
+	instr_time	io_start,
+				io_time;
 
 	*hit = false;
 
@@ -992,8 +994,20 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 	{
 		/* new buffers are zero-filled */
 		MemSet((char *) bufBlock, 0, BLCKSZ);
+
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
+
 		/* don't set checksum for all-zero page */
 		smgrextend(smgr, forkNum, blockNum, (char *) bufBlock, false);
+
+		if (track_io_timing)
+		{
+			INSTR_TIME_SET_CURRENT(io_time);
+			INSTR_TIME_SUBTRACT(io_time, io_start);
+			pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
+			INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
+		}
 
 		/*
 		 * NB: we're *not* doing a ScheduleBufferTagForWriteback here;
@@ -1012,9 +1026,6 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 			MemSet((char *) bufBlock, 0, BLCKSZ);
 		else
 		{
-			instr_time	io_start,
-						io_time;
-
 			if (track_io_timing)
 				INSTR_TIME_SET_CURRENT(io_start);
 
