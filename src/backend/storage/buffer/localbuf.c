@@ -18,6 +18,7 @@
 #include "access/parallel.h"
 #include "catalog/catalog.h"
 #include "executor/instrument.h"
+#include "pgstat.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
 #include "utils/guc.h"
@@ -116,6 +117,8 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 	int			trycounter;
 	bool		found;
 	uint32		buf_state;
+	instr_time	io_start,
+				io_time;
 
 	INIT_BUFFERTAG(newTag, smgr->smgr_rnode.node, forkNum, blockNum);
 
@@ -219,12 +222,23 @@ LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,
 
 		PageSetChecksumInplace(localpage, bufHdr->tag.blockNum);
 
+		if (track_io_timing)
+			INSTR_TIME_SET_CURRENT(io_start);
+
 		/* And write... */
 		smgrwrite(oreln,
 				  bufHdr->tag.forkNum,
 				  bufHdr->tag.blockNum,
 				  localpage,
 				  false);
+
+		if (track_io_timing)
+		{
+			INSTR_TIME_SET_CURRENT(io_time);
+			INSTR_TIME_SUBTRACT(io_time, io_start);
+			pgstat_count_buffer_read_time(INSTR_TIME_GET_MICROSEC(io_time));
+			INSTR_TIME_ADD(pgBufferUsage.blk_write_time, io_time);
+		}
 
 		/* Mark not-dirty now in case we error out below */
 		buf_state &= ~BM_DIRTY;
