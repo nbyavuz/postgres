@@ -2976,7 +2976,7 @@ static bool
 XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 {
 	bool		ispartialpage;
-	bool		last_iteration;
+	int			last_iteration;
 	bool		finishing_seg;
 	int			curridx;
 	int			npages;
@@ -3227,17 +3227,17 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 		/* FIXME, consider doing a separate write? */
 
 		if (write_pos->write_init_opt <= PageEndPtr)
-			last_iteration = true;
+			last_iteration = 1;
 		else if (curridx == lastnonpartialidx && write_pos->write_init_min <= PageEndPtr)
 		{
-			last_iteration = true;
+			last_iteration = 2;
 			elog(DEBUG3, "preventing partial write min %X/%X, max %X/%X, page %X/%X",
 				 (uint32) (write_pos->write_init_min >> 32), (uint32) write_pos->write_init_min,
 				 (uint32) (write_pos->write_init_opt >> 32), (uint32) write_pos->write_init_opt,
 				 (uint32) (PageEndPtr >> 32), (uint32) PageEndPtr);
 		}
 		else
-			last_iteration = false;
+			last_iteration = 0;
 
 		finishing_seg = !ispartialpage &&
 			(startoffset + npages * XLOG_BLCKSZ) >= wal_segment_size;
@@ -3254,7 +3254,7 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 		if (last_iteration ||
 			curridx == XLogCtl->XLogCacheBlck ||
 		/* (!io_wal_pad_partial && curridx == lastnonpartialidx) || */
-			curridx == lastnonpartialidx ||
+			//curridx == lastnonpartialidx ||
 			finishing_seg ||
 			large_enough_write)
 		{
@@ -3273,7 +3273,7 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 				XLogRecPtr	ins = XLogBytePosToRecPtr(XLogCtl->Insert.CurrBytePos);
 
 				ereport(DEBUG1,
-						errmsg("performing %s write of %d bytes: from %X/%X to %X/%X, min %X/%X opt %X/%X (compl %X/%X: %u, ins %X/%X: %u)",
+						errmsg("performing %s write of %d bytes: from %X/%X to %X/%X, min %X/%X opt %X/%X (compl %X/%X: %u, ins %X/%X: %u, last: %d)",
 							   ispartialpage ? "partial" : "non-partial",
 							   nbytes,
 							   (uint32) (startwrite >> 32), (uint32) startwrite,
@@ -3281,7 +3281,8 @@ XLogWriteIssueWrites(XLogWritePos *write_pos, bool flexible)
 							   (uint32) (write_pos->write_init_min >> 32), (uint32) write_pos->write_init_min,
 							   (uint32) (write_pos->write_init_opt >> 32), (uint32) write_pos->write_init_opt,
 							   (uint32) (compl >> 32), (uint32) compl, (uint32) (compl - write_upto),
-							   (uint32) (ins >> 32), (uint32) ins, (uint32) (ins - write_upto)),
+							   (uint32) (ins >> 32), (uint32) ins, (uint32) (ins - write_upto),
+							   last_iteration),
 						errhidestmt(true),
 						errhidecontext(true));
 			}
