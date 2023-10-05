@@ -68,7 +68,7 @@ int			max_aio_in_progress = 32768;	/* XXX: Multiple of MaxBackends
 											 * instead? */
 int			max_aio_in_flight = 4096;
 int			max_aio_bounce_buffers = 1024;
-int			io_max_concurrency = 128;
+int			io_max_concurrency = 512;
 
 static int	aio_local_callback_depth = 0;
 

@@ -292,7 +292,7 @@ heap_pgsr_next_parallel(PgStreamingRead *pgsr, uintptr_t pgsr_private,
 static PgStreamingRead *
 heap_pgsr_single_alloc(HeapScanDesc scan)
 {
-	int			iodepth = Max(Min(128, NBuffers / 128), 1);
+	int			iodepth = Max(Min(512, NBuffers / 128), 1);
 
 	return pg_streaming_read_buffer_alloc(iodepth, (uintptr_t) scan,
 										  scan->rs_strategy,
@@ -302,7 +302,7 @@ heap_pgsr_single_alloc(HeapScanDesc scan)
 static PgStreamingRead *
 heap_pgsr_parallel_alloc(HeapScanDesc scan)
 {
-	int			iodepth = Max(Min(128, NBuffers / 128), 1);
+	int			iodepth = Max(Min(512, NBuffers / 128), 1);
 
 	return pg_streaming_read_buffer_alloc(iodepth, (uintptr_t) scan,
 										  scan->rs_strategy,
