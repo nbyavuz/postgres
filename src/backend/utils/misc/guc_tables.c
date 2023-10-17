@@ -572,7 +572,7 @@ static char *datestyle_string;
 static char *server_encoding_string;
 static char *server_version_string;
 static int	server_version_num;
-static char *debug_io_direct_string;
+static char *io_direct_string;
 
 #ifdef HAVE_SYSLOG
 #define	DEFAULT_SYSLOG_FACILITY LOG_LOCAL0
@@ -4566,9 +4566,9 @@ struct config_string ConfigureNamesString[] =
 			NULL,
 			GUC_LIST_INPUT | GUC_NOT_IN_SAMPLE
 		},
-		&debug_io_direct_string,
+		&io_direct_string,
 		"",
-		check_debug_io_direct, assign_debug_io_direct, NULL
+		check_io_direct, assign_io_direct, NULL
 	},
 
 	/* End-of-list marker */
