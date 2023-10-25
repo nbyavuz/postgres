@@ -152,6 +152,10 @@ xlog_desc(StringInfo buf, XLogReaderState *record)
 	{
 		/* No details to write out */
 	}
+	else if (info == XLOG_WASTE)
+	{
+		appendStringInfo(buf, "waste");
+	}
 }
 
 const char *
