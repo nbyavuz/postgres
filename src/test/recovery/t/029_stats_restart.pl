@@ -232,6 +232,7 @@ $node->safe_psql($connect_db, "SELECT pg_stat_reset_shared('wal')");
 
 $sect = "post wal reset";
 my $wal_reset = wal_stats();
+my $io_wal_reset = io_wal_read_stats();
 
 cmp_ok(
 	$wal_reset->{records}, '<',
@@ -266,17 +267,30 @@ cmp_ok(
 	$wal_restart2->{reset},
 	"$sect: newer stats_reset");
 
+# Run query to generate WAL, then immediately restart to server
+# This will lead to recovery run on so WAL read count
+# will be higher.
+$node->safe_psql($connect_db,
+	"SELECT pg_logical_emit_message(true, 'test', repeat('1', 1024 * 1024)) FROM generate_series(1, 10)");
+
 $node->stop('immediate');
 $node->start;
 
 $sect = "post immediate restart";
 my $wal_restart_immediate = wal_stats();
+my $io_wal_restart_immediate = io_wal_read_stats();
 
 cmp_ok(
 	$wal_reset_restart->{reset},
 	'lt',
 	$wal_restart_immediate->{reset},
 	"$sect: reset timestamp is new");
+
+cmp_ok(
+	$io_wal_reset->{count},
+	'<',
+	$io_wal_restart_immediate->{count},
+	"$sect: more WAL read count after immediate reset");
 
 $node->stop;
 done_testing();
@@ -339,6 +353,15 @@ sub wal_stats
 	  $node->safe_psql($connect_db, "SELECT wal_bytes FROM pg_stat_wal");
 	$results{reset} =
 	  $node->safe_psql($connect_db, "SELECT stats_reset FROM pg_stat_wal");
+
+	return \%results;
+}
+
+sub io_wal_read_stats
+{
+	my %results;
+	$results{count} = $node->safe_psql($connect_db,
+		"SELECT SUM(reads) from pg_stat_io WHERE object = 'wal'");
 
 	return \%results;
 }
