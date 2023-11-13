@@ -862,6 +862,25 @@ WHERE pg_stat_get_backend_pid(beid) = pg_backend_pid();
  t
 (1 row)
 
+-- check pg_stat_io IOOBJECT_WAL / IOCONTEXT_INIT
+-- When the servers starts, initial WAL file must be created.
+-- So, check that before stats get resetted
+SELECT sum(writes) AS writes, sum(fsyncs) AS fsyncs
+  FROM pg_stat_io
+  WHERE context = 'init' and object = 'wal' \gset io_sum_wal_init_
+SELECT :io_sum_wal_init_writes > 0;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT current_setting('fsync') = 'off'
+  OR :io_sum_wal_init_fsyncs > 0;
+ ?column? 
+----------
+ t
+(1 row)
+
 -----
 -- Test that resetting stats works for reset timestamp
 -----
