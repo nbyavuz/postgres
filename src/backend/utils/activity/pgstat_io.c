@@ -186,15 +186,15 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 				INSTR_TIME_ADD(pgBufferUsage.local_blk_write_time, io_time);
 
 			/* Track IOOBJECT_WAL / IOCONTEXT_NORMAL times on PendingWalStats */
-			else if (io_object == IOOBJECT_WAL && io_context == IOCONTEXT_NORMAL)
-				INSTR_TIME_ADD(PendingWalStats.wal_write_time, io_time);
+			// else if (io_object == IOOBJECT_WAL && io_context == IOCONTEXT_NORMAL)
+			// 	INSTR_TIME_ADD(PendingWalStats.wal_write_time, io_time);
 		}
-		else if (io_op == IOOP_FSYNC)
-		{
-			/* Track IOOBJECT_WAL / IOCONTEXT_NORMAL times on PendingWalStats */
-			if (io_object == IOOBJECT_WAL && io_context == IOCONTEXT_NORMAL)
-				INSTR_TIME_ADD(PendingWalStats.wal_sync_time, io_time);
-		}
+		// else if (io_op == IOOP_FSYNC)
+		// {
+		// 	/* Track IOOBJECT_WAL / IOCONTEXT_NORMAL times on PendingWalStats */
+		// 	if (io_object == IOOBJECT_WAL && io_context == IOCONTEXT_NORMAL)
+		// 		INSTR_TIME_ADD(PendingWalStats.wal_sync_time, io_time);
+		// }
 
 		else if (io_op == IOOP_READ)
 		{

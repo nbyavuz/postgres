@@ -2282,9 +2282,9 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 			nbytes = npages * (Size) XLOG_BLCKSZ;
 			nleft = nbytes;
 
-			io_start = pgstat_prepare_io_time();
 			do
 			{
+				io_start = pgstat_prepare_io_time();
 				errno = 0;
 
 				pgstat_report_wait_start(WAIT_EVENT_WAL_WRITE);
@@ -2292,6 +2292,16 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 				pgstat_report_wait_end();
 
 				PendingWalStats.wal_write++;
+				pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL,
+						IOOP_WRITE, io_start, 1);
+
+				if (track_wal_io_timing)
+				{
+					instr_time	end;
+
+					INSTR_TIME_SET_CURRENT(end);
+					INSTR_TIME_ACCUM_DIFF(PendingWalStats.wal_write_time, end, io_start);
+				}
 
 				if (written <= 0)
 				{
@@ -2314,9 +2324,6 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 				from += written;
 				startoffset += written;
 			} while (nleft > 0);
-
-			pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL,
-									IOOP_WRITE, io_start, npages);
 
 			npages = 0;
 
@@ -8373,6 +8380,13 @@ issue_xlog_fsync(int fd, XLogSegNo segno, TimeLineID tli)
 
 	pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_FSYNC,
 							io_start, 1);
+	if (track_wal_io_timing)
+	{
+		instr_time	end;
+
+		INSTR_TIME_SET_CURRENT(end);
+		INSTR_TIME_ACCUM_DIFF(PendingWalStats.wal_sync_time, end, io_start);
+	}
 }
 
 /*
