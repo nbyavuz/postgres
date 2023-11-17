@@ -46,6 +46,7 @@
 #include "postgres.h"
 
 #include "common/hashfn.h"
+#include "storage/aio.h"
 #include "storage/ipc.h"
 #include "storage/predicate.h"
 #include "storage/proc.h"
@@ -152,6 +153,8 @@ typedef struct ResourceOwnerData
 	uint32		capacity;		/* allocated length of hash[] */
 	uint32		grow_at;		/* grow hash when reach this */
 
+	dlist_head	aios;
+
 	/* The local locks cache. */
 	LOCALLOCK  *locks[MAX_RESOWNER_LOCKS];	/* list of owned locks */
 } ResourceOwnerData;
@@ -200,6 +203,7 @@ static void ResourceOwnerReleaseInternal(ResourceOwner owner,
 										 bool isCommit,
 										 bool isTopLevel);
 static void ReleaseAuxProcessResourcesCallback(int code, Datum arg);
+static void PrintAioIPLeakWarning(dlist_node *aio_node);
 
 
 /*****************************************************************************
@@ -726,6 +730,18 @@ ResourceOwnerReleaseInternal(ResourceOwner owner,
 		 * so issue warnings.  In the abort case, just clean up quietly.
 		 */
 		ResourceOwnerReleaseAll(owner, phase, isCommit);
+
+		/* Release AIOs (registered via dlist, so the above can't be used) */
+		/* XXX: reconsider phase? */
+		while (!dlist_is_empty(&owner->aios))
+		{
+			dlist_node *aio_node = dlist_head_node(&owner->aios);
+
+			if (isCommit)
+				PrintAioIPLeakWarning(aio_node);
+
+			pgaio_io_release_resowner(aio_node);
+		}
 	}
 	else if (phase == RESOURCE_RELEASE_LOCKS)
 	{
@@ -988,10 +1004,10 @@ CreateAuxProcessResourceOwner(void)
 	CurrentResourceOwner = AuxProcessResourceOwner;
 
 	/*
-	 * Register a shmem-exit callback for cleanup of aux-process resource
-	 * owner.  (This needs to run after, e.g., ShutdownXLOG.)
+	 * Register a before-shmem-exit callback for cleanup of aux-process
+	 * resource owner.  (This needs to run after, e.g., ShutdownXLOG.)
 	 */
-	on_shmem_exit(ReleaseAuxProcessResourcesCallback, 0);
+	before_shmem_exit(ReleaseAuxProcessResourcesCallback, 0);
 }
 
 /*
@@ -1082,4 +1098,35 @@ ResourceOwnerForgetLock(ResourceOwner owner, LOCALLOCK *locallock)
 	}
 	elog(ERROR, "lock reference %p is not owned by resource owner %s",
 		 locallock, owner->name);
+}
+
+void
+ResourceOwnerRememberAioIP(ResourceOwner owner, dlist_node *aio_node)
+{
+	Assert(owner != NULL);
+	Assert(aio_node != NULL);
+
+	/*
+	 * Mustn't try to remember more resources after we have already started
+	 * releasing.  We already checked this in ResourceOwnerEnlarge.
+	 */
+	Assert(!owner->releasing);
+	Assert(!owner->sorted);
+
+	dlist_push_tail(&owner->aios, aio_node);
+}
+
+void
+ResourceOwnerForgetAioIP(ResourceOwner owner, dlist_node *aio_node)
+{
+	Assert(owner != NULL);
+	Assert(aio_node != NULL);
+
+	dlist_delete_from(&owner->aios, aio_node);
+}
+
+static void
+PrintAioIPLeakWarning(dlist_node *aio_node)
+{
+	pgaio_io_resowner_leak(aio_node);
 }

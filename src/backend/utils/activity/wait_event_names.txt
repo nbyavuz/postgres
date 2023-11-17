@@ -49,6 +49,7 @@ AUTOVACUUM_MAIN	"Waiting in main loop of autovacuum launcher process."
 BGWRITER_HIBERNATE	"Waiting in background writer process, hibernating."
 BGWRITER_MAIN	"Waiting in main loop of background writer process."
 CHECKPOINTER_MAIN	"Waiting in main loop of checkpointer process."
+IO_WORKER_MAIN	"Waiting in main loop of IO Worker process."
 LOGICAL_APPLY_MAIN	"Waiting in main loop of logical replication apply process."
 LOGICAL_LAUNCHER_MAIN	"Waiting in main loop of logical replication launcher process."
 LOGICAL_PARALLEL_APPLY_MAIN	"Waiting in main loop of logical replication parallel apply process."
@@ -172,6 +173,12 @@ VACUUM_TRUNCATE	"Waiting to acquire an exclusive lock to truncate off any empty 
 
 Section: ClassName - WaitEventIO
 
+AIO_BACKPRESSURE	"Describe AIOBackpressure."
+AIO_IO_COMPLETE_ANY	"Describe AIOCompleteAny."
+AIO_IO_COMPLETE_ONE	"Describe AIOCompleteOne."
+AIO_IO_COMPLETE_ONE_LOCAL	"Describe AIOCompleteOneLocal."
+AIO_REFS	"Describe AIORefs."
+AIO_SUBMIT	"Describe AIOSubmit."
 BASEBACKUP_READ	"Waiting for base backup to read from a file."
 BASEBACKUP_SYNC	"Waiting for data written by a base backup to reach durable storage."
 BASEBACKUP_WRITE	"Waiting for base backup to write to a file."

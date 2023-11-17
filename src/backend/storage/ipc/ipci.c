@@ -37,6 +37,7 @@
 #include "replication/slot.h"
 #include "replication/walreceiver.h"
 #include "replication/walsender.h"
+#include "storage/aio.h"
 #include "storage/bufmgr.h"
 #include "storage/dsm.h"
 #include "storage/ipc.h"
@@ -147,6 +148,7 @@ CalculateShmemSize(int *num_semaphores)
 	size = add_size(size, AsyncShmemSize());
 	size = add_size(size, StatsShmemSize());
 	size = add_size(size, WaitEventExtensionShmemSize());
+	size = add_size(size, AioShmemSize());
 #ifdef EXEC_BACKEND
 	size = add_size(size, ShmemBackendArraySize());
 #endif
@@ -348,6 +350,7 @@ CreateOrAttachShmemStructs(void)
 	AsyncShmemInit();
 	StatsShmemInit();
 	WaitEventExtensionShmemInit();
+	AioShmemInit();
 }
 
 /*

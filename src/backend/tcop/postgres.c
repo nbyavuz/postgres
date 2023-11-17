@@ -61,6 +61,7 @@
 #include "replication/slot.h"
 #include "replication/walsender.h"
 #include "rewrite/rewriteHandler.h"
+#include "storage/aio.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
@@ -3286,6 +3287,8 @@ ProcessInterrupts(void)
 			 */
 			proc_exit(1);
 		}
+		else if (AmIoWorkerProcess())
+			proc_exit(0);
 		else if (IsBackgroundWorker)
 			ereport(FATAL,
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),
@@ -3925,6 +3928,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 				break;
 
 			case 'T':
+			case 'Z':
 				/* ignored for consistency with the postmaster */
 				break;
 
@@ -4100,6 +4104,12 @@ PostgresSingleUserMain(int argc, char *argv[],
 	 * before we can use LWLocks.
 	 */
 	InitProcess();
+
+	/* AIO is needed during InitPostgres() */
+	pgaio_postmaster_init();
+	pgaio_postmaster_child_init_local();
+
+	set_max_safe_fds();
 
 	/*
 	 * Now that sufficient infrastructure has been initialized, PostgresMain()

@@ -66,6 +66,7 @@ typedef uint32 ResourceReleasePriority;
 #define RELEASE_PRIO_JIT_CONTEXTS			500
 #define RELEASE_PRIO_CRYPTOHASH_CONTEXTS	600
 #define RELEASE_PRIO_HMAC_CONTEXTS			700
+#define RELEASE_PRIO_AIO_BB					800
 
 /* priorities of built-in AFTER_LOCKS resources */
 #define RELEASE_PRIO_CATCACHE_REFS			100
@@ -163,5 +164,12 @@ extern void ReleaseAuxProcessResources(bool isCommit);
 struct LOCALLOCK;
 extern void ResourceOwnerRememberLock(ResourceOwner owner, struct LOCALLOCK *locallock);
 extern void ResourceOwnerForgetLock(ResourceOwner owner, struct LOCALLOCK *locallock);
+
+/* special support for AIO management */
+struct dlist_node;
+extern void ResourceOwnerRememberAioIP(ResourceOwner owner,
+									   struct dlist_node *aio_node);
+extern void ResourceOwnerForgetAioIP(ResourceOwner owner,
+									 struct dlist_node *aio_node);
 
 #endif							/* RESOWNER_H */
