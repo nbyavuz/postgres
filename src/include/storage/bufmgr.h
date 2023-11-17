@@ -264,7 +264,8 @@ extern bool ConditionalLockBufferForCleanup(Buffer buffer);
 extern bool IsBufferCleanupOK(Buffer buffer);
 extern bool HoldingBufferPinThatDelaysRecovery(void);
 
-extern bool BgBufferSync(struct WritebackContext *wb_context);
+struct PgStreamingWrite;
+extern bool BgBufferSync(struct PgStreamingWrite *pgsw, struct WritebackContext *wb_context);
 
 /* in buf_init.c */
 extern void InitBufferPool(void);
