@@ -1604,10 +1604,33 @@ static char *
 GetXLogBuffer(XLogRecPtr ptr, TimeLineID tli)
 {
 	int			idx;
+	bool		sleeping = false;
+	bool		wakeup = false;
 	XLogRecPtr	endptr;
 	static uint64 cachedPage = 0;
 	static char *cachedPos = NULL;
 	XLogRecPtr	expectedEndPtr;
+
+	SpinLockAcquire(&XLogCtl->info_lck);
+	LogwrtResult = XLogCtl->LogwrtResult;
+	sleeping = XLogCtl->WalWriterSleeping;
+	SpinLockRelease(&XLogCtl->info_lck);
+
+	if (sleeping)
+		wakeup = true;
+	else
+	{
+		int			flushblocks;
+
+		flushblocks =
+			ptr / XLOG_BLCKSZ - LogwrtResult.Flush / XLOG_BLCKSZ;
+
+		if (WalWriterFlushAfter == 0 || flushblocks >= WalWriterFlushAfter)
+			wakeup = true;
+	}
+
+	if (wakeup && ProcGlobal->walwriterLatch)
+		SetLatch(ProcGlobal->walwriterLatch);
 
 	/*
 	 * Fast path for the common case that we need to access again the same
@@ -2293,7 +2316,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 
 				PendingWalStats.wal_write++;
 				pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL,
-						IOOP_WRITE, io_start, 1);
+										IOOP_WRITE, io_start, 1);
 
 				if (track_wal_io_timing)
 				{
@@ -2612,9 +2635,33 @@ UpdateMinRecoveryPoint(XLogRecPtr lsn, bool force)
 void
 XLogFlush(XLogRecPtr record)
 {
+	bool		sleeping = false;
+	bool		wakeup = false;
 	XLogRecPtr	WriteRqstPtr;
 	XLogwrtRqst WriteRqst;
 	TimeLineID	insertTLI = XLogCtl->InsertTimeLineID;
+
+
+	SpinLockAcquire(&XLogCtl->info_lck);
+	LogwrtResult = XLogCtl->LogwrtResult;
+	sleeping = XLogCtl->WalWriterSleeping;
+	SpinLockRelease(&XLogCtl->info_lck);
+
+	if (sleeping)
+		wakeup = true;
+	else
+	{
+		int			flushblocks;
+
+		flushblocks =
+			record / XLOG_BLCKSZ - LogwrtResult.Flush / XLOG_BLCKSZ;
+
+		if (WalWriterFlushAfter == 0 || flushblocks >= WalWriterFlushAfter)
+			wakeup = true;
+	}
+
+	if (wakeup && ProcGlobal->walwriterLatch)
+		SetLatch(ProcGlobal->walwriterLatch);
 
 	/*
 	 * During REDO, we are reading not writing WAL.  Therefore, instead of
