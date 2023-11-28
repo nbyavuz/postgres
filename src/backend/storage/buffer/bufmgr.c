@@ -2147,6 +2147,7 @@ AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn,
 	while (true)
 	{
 		uint32		cur_buf_state;
+		XLogRecPtr	page_lsn = InvalidXLogRecPtr;
 
 		ReservePrivateRefCountEntry();
 		ResourceOwnerEnlarge(CurrentResourceOwner);
@@ -2176,6 +2177,22 @@ AsyncGetVictimBuffer(BufferAccessStrategy strategy, XLogRecPtr *lsn,
 		else
 		{
 			LWLock	   *content_lock;
+
+			page_lsn = BufferGetLSN(cur_buf_hdr);
+
+			if (cur_buf_state & BM_PERMANENT)
+			{
+				if (XLogAsyncFlush(page_lsn))
+				{
+					*lsn = page_lsn;
+					break;
+				}
+				else if (XLogNeedsFlush(page_lsn))
+				{
+					*lsn = page_lsn;
+					break;
+				}
+			}
 
 			if (aio == NULL)
 				aio = pgaio_io_get();

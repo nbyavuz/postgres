@@ -56,3 +56,4 @@ NotifyQueueTailLock					47
 WaitEventExtensionLock				48
 SharedAIOCtlLock					49
 AioWorkerSubmissionQueueLock		50
+WALIOQueueLock						51
