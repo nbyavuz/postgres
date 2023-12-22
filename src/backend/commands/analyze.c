@@ -117,6 +117,7 @@ static Datum ind_fetch_func(VacAttrStatsP stats, int rownum, bool *isNull);
  * the name therein for reporting any failure to open/lock the rel; do not
  * use it once we've successfully opened the rel, since it might be stale.
  */
+/* ENTRY POINT FOR VACUUM -> ANALYZE */
 void
 analyze_rel(Oid relid, RangeVar *relation,
 			VacuumParams *params, List *va_cols, bool in_outer_xact,
@@ -198,6 +199,8 @@ analyze_rel(Oid relid, RangeVar *relation,
 	/*
 	 * Check that it's of an analyzable relkind, and set up appropriately.
 	 */
+
+	/* ACQUIRE ROWS HERE */
 	if (onerel->rd_rel->relkind == RELKIND_RELATION ||
 		onerel->rd_rel->relkind == RELKIND_MATVIEW)
 	{
@@ -525,6 +528,8 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 	/*
 	 * Acquire the sample rows
 	 */
+
+	/* acquire_sample_rows or acquire_inherited_sample_rows or postgresAcquireSampleRowsFunc */
 	rows = (HeapTuple *) palloc(targrows * sizeof(HeapTuple));
 	pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE,
 								 inh ? PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS_INH :
@@ -635,6 +640,7 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 		BlockNumber relallvisible;
 
 		if (RELKIND_HAS_STORAGE(onerel->rd_rel->relkind))
+			/* IO DONE */
 			visibilitymap_count(onerel, &relallvisible, NULL);
 		else
 			relallvisible = 0;
@@ -690,6 +696,8 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 	 * Reset the changes_since_analyze counter only if we analyzed all
 	 * columns; otherwise, there is still work for auto-analyze to do.
 	 */
+
+	/* REPORT IO STATS */
 	if (!inh)
 		pgstat_report_analyze(onerel, totalrows, totaldeadrows,
 							  (va_cols == NIL));
@@ -1223,6 +1231,7 @@ acquire_sample_rows(Relation onerel, int elevel,
 
 		vacuum_delay_point();
 
+		/// TODO:
 		block_accepted = table_scan_analyze_next_block(scan, targblock, vac_strategy);
 
 #ifdef USE_PREFETCH

@@ -1011,6 +1011,7 @@ heapam_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
 	 */
 	hscan->rs_cblock = blockno;
 	hscan->rs_cindex = FirstOffsetNumber;
+	/// TODO:
 	hscan->rs_cbuf = ReadBufferExtended(scan->rs_rd, MAIN_FORKNUM,
 										blockno, RBM_NORMAL, bstrategy);
 	LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);

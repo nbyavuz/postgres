@@ -636,6 +636,7 @@ vacuum(List *relations, VacuumParams *params, BufferAccessStrategy bstrategy,
 					PushActiveSnapshot(GetTransactionSnapshot());
 				}
 
+				/* ANALYZE IS CALLED */
 				analyze_rel(vrel->oid, vrel->relation, params,
 							vrel->va_cols, in_outer_xact, bstrategy);
 
