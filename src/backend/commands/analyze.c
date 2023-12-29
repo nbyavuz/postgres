@@ -78,6 +78,39 @@ typedef struct AnlIndexData
 	int			attr_cnt;
 } AnlIndexData;
 
+typedef struct pg_hpm_analyze_streaming_read_private
+{
+	Relation	rel;
+	ForkNumber	forkNumber;
+	int64		curblock;
+	int64		lastblock;
+	List	   *bbs;
+	BlockSamplerData prefetch_bs;
+}			pg_hpm_analyze_streaming_read_private;
+
+static BlockNumber
+pg_hpm_analyze_streaming_read_next(PgStreamingRead *pgsr,
+								   uintptr_t pgsr_private, void *io_private,
+								   Relation *rel, ForkNumber *fork, ReadBufferMode *mode)
+{
+	pg_hpm_analyze_streaming_read_private *p =
+		(pg_hpm_analyze_streaming_read_private *) pgsr_private;
+
+	if (BlockSampler_HasMore(&(p->prefetch_bs)))
+	{
+		*rel = p->rel;
+		*fork = p->forkNumber;
+		*mode = RBM_NORMAL;
+		p->curblock = BlockSampler_Next(&(p->prefetch_bs));
+
+		return p->curblock;
+	}
+
+	return InvalidBlockNumber;
+}
+
+
+
 
 /* Default statistics target (GUC parameter) */
 int			default_statistics_target = 100;
@@ -1141,16 +1174,14 @@ acquire_sample_rows(Relation onerel, int elevel,
 	uint32		randseed;		/* Seed for block sampler(s) */
 	BlockNumber totalblocks;
 	TransactionId OldestXmin;
-	BlockSamplerData bs;
+	BlockSamplerData bs_t;
 	ReservoirStateData rstate;
 	TupleTableSlot *slot;
 	TableScanDesc scan;
 	BlockNumber nblocks;
 	BlockNumber blksdone = 0;
-#ifdef USE_PREFETCH
-	int			prefetch_maximum = 0;	/* blocks to prefetch if enabled */
-	BlockSamplerData prefetch_bs;
-#endif
+	pg_hpm_analyze_streaming_read_private p;
+	PgStreamingRead *pgsr = NULL;
 
 	Assert(targrows > 0);
 
@@ -1161,14 +1192,8 @@ acquire_sample_rows(Relation onerel, int elevel,
 
 	/* Prepare for sampling block numbers */
 	randseed = pg_prng_uint32(&pg_global_prng_state);
-	nblocks = BlockSampler_Init(&bs, totalblocks, targrows, randseed);
-
-#ifdef USE_PREFETCH
-	prefetch_maximum = get_tablespace_maintenance_io_concurrency(onerel->rd_rel->reltablespace);
-	/* Create another BlockSampler, using the same seed, for prefetching */
-	if (prefetch_maximum)
-		(void) BlockSampler_Init(&prefetch_bs, totalblocks, targrows, randseed);
-#endif
+	nblocks = BlockSampler_Init(&(p.prefetch_bs), totalblocks, targrows, randseed);
+	BlockSampler_Init(&bs_t, totalblocks, targrows, randseed);
 
 	/* Report sampling block numbers */
 	pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_TOTAL,
@@ -1180,63 +1205,24 @@ acquire_sample_rows(Relation onerel, int elevel,
 	scan = table_beginscan_analyze(onerel);
 	slot = table_slot_create(onerel, NULL);
 
-#ifdef USE_PREFETCH
+	p.rel = scan->rs_rd;
+	p.forkNumber = MAIN_FORKNUM;
+	p.lastblock = nblocks;
+	p.bbs = NIL;
 
-	/*
-	 * If we are doing prefetching, then go ahead and tell the kernel about
-	 * the first set of pages we are going to want.  This also moves our
-	 * iterator out ahead of the main one being used, where we will keep it so
-	 * that we're always pre-fetching out prefetch_maximum number of blocks
-	 * ahead.
-	 */
-	if (prefetch_maximum)
-	{
-		for (int i = 0; i < prefetch_maximum; i++)
-		{
-			BlockNumber prefetch_block;
-
-			if (!BlockSampler_HasMore(&prefetch_bs))
-				break;
-
-			prefetch_block = BlockSampler_Next(&prefetch_bs);
-			PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, prefetch_block);
-		}
-	}
-#endif
+	pgsr = pg_streaming_read_buffer_alloc(512, 0, (uintptr_t) &p,
+										  NULL,
+										  pg_hpm_analyze_streaming_read_next);
 
 	/* Outer loop over blocks to sample */
-	while (BlockSampler_HasMore(&bs))
+	while (BlockSampler_HasMore(&bs_t))
 	{
 		bool		block_accepted;
-		BlockNumber targblock = BlockSampler_Next(&bs);
-#ifdef USE_PREFETCH
-		BlockNumber prefetch_targblock = InvalidBlockNumber;
-
-		/*
-		 * Make sure that every time the main BlockSampler is moved forward
-		 * that our prefetch BlockSampler also gets moved forward, so that we
-		 * always stay out ahead.
-		 */
-		if (prefetch_maximum && BlockSampler_HasMore(&prefetch_bs))
-			prefetch_targblock = BlockSampler_Next(&prefetch_bs);
-#endif
+		BlockNumber targblock = BlockSampler_Next(&bs_t);
 
 		vacuum_delay_point();
 
-		block_accepted = table_scan_analyze_next_block(scan, targblock, vac_strategy);
-
-#ifdef USE_PREFETCH
-
-		/*
-		 * When pre-fetching, after we get a block, tell the kernel about the
-		 * next one we will want, if there's any left.
-		 *
-		 * We want to do this even if the table_scan_analyze_next_block() call
-		 * above decides against analyzing the block it picked.
-		 */
-		if (prefetch_maximum && prefetch_targblock != InvalidBlockNumber)
-			PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, prefetch_targblock);
-#endif
+		block_accepted = table_scan_analyze_next_block(scan, pgsr, targblock);
 
 		/*
 		 * Don't analyze if table_scan_analyze_next_block() indicated this
@@ -1293,6 +1279,7 @@ acquire_sample_rows(Relation onerel, int elevel,
 		pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_DONE,
 									 ++blksdone);
 	}
+	pg_streaming_read_free(pgsr);
 
 	ExecDropSingleTupleTableSlot(slot);
 	table_endscan(scan);
@@ -1316,10 +1303,10 @@ acquire_sample_rows(Relation onerel, int elevel,
 	 * a random sample of the pages in the relation, this should be a good
 	 * assumption.
 	 */
-	if (bs.m > 0)
+	if (p.prefetch_bs.m > 0)
 	{
-		*totalrows = floor((liverows / bs.m) * totalblocks + 0.5);
-		*totaldeadrows = floor((deadrows / bs.m) * totalblocks + 0.5);
+		*totalrows = floor((liverows / p.prefetch_bs.m) * totalblocks + 0.5);
+		*totaldeadrows = floor((deadrows / p.prefetch_bs.m) * totalblocks + 0.5);
 	}
 	else
 	{
@@ -1335,7 +1322,7 @@ acquire_sample_rows(Relation onerel, int elevel,
 					"containing %.0f live rows and %.0f dead rows; "
 					"%d rows in sample, %.0f estimated total rows",
 					RelationGetRelationName(onerel),
-					bs.m, totalblocks,
+					p.prefetch_bs.m, totalblocks,
 					liverows, deadrows,
 					numrows, *totalrows)));
 

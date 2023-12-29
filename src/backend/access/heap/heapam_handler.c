@@ -995,8 +995,8 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 }
 
 static bool
-heapam_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
-							   BufferAccessStrategy bstrategy)
+heapam_scan_analyze_next_block(TableScanDesc scan, PgStreamingRead *pgsr,
+							   BlockNumber targblock)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
 
@@ -1009,10 +1009,11 @@ heapam_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
 	 * doing much work per tuple, the extra lock traffic is probably better
 	 * avoided.
 	 */
-	hscan->rs_cblock = blockno;
+	hscan->rs_cblock = targblock;
 	hscan->rs_cindex = FirstOffsetNumber;
-	hscan->rs_cbuf = ReadBufferExtended(scan->rs_rd, MAIN_FORKNUM,
-										blockno, RBM_NORMAL, bstrategy);
+	hscan->rs_cbuf = pg_streaming_read_buffer_get_next(pgsr, NULL);
+
+	Assert(BufferIsValid(hscan->rs_cbuf));
 	LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);
 
 	/* in heap all blocks can contain tuples, so always return true */
