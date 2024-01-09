@@ -14,6 +14,14 @@
  */
 #define PGSR_FLAG_MAINTENANCE 0x01
 
+/*
+ * We usually avoid issuing prefetch advice automatically when sequential
+ * access is detected, but this flag explicitly disables it, for cases that
+ * might not be correctly detected.  Explicit advice is known to perform worse
+ * than letting the kernel (at least Linux) detect sequential access.
+ */
+#define PGSR_FLAG_SEQUENTIAL 0x02
+
 struct PgStreamingRead;
 typedef struct PgStreamingRead PgStreamingRead;
 
