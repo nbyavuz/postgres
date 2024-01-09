@@ -22,6 +22,13 @@
  */
 #define PGSR_FLAG_SEQUENTIAL 0x02
 
+/*
+ * We usually ramp up from smaller reads to larger ones, to support users who
+ * don't know if it's worth reading lots of buffers yet.  This flag disables
+ * that, declaring ahead of time that we'll be reading all available buffers.
+ */
+#define PGSR_FLAG_FULL 0x04
+
 struct PgStreamingRead;
 typedef struct PgStreamingRead PgStreamingRead;
 

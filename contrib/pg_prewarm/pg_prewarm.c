@@ -214,7 +214,7 @@ pg_prewarm(PG_FUNCTION_ARGS)
 		p.blocknum = first_block;
 		p.last_block = last_block;
 
-		pgsr = pg_streaming_read_buffer_alloc(PGSR_FLAG_DEFAULT,
+		pgsr = pg_streaming_read_buffer_alloc(PGSR_FLAG_FULL,
 											  &p,
 											  0,
 											  NULL,

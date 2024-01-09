@@ -33,6 +33,8 @@ struct PgStreamingRead
 	int			pinned_buffers;
 	int			pinned_buffers_trigger;
 	int			next_tail_buffer;
+	int			ramp_up_pin_limit;
+	int			ramp_up_pin_stall;
 	bool		finished;
 	void	   *pgsr_private;
 	PgStreamingReadBufferCB callback;
@@ -135,6 +137,16 @@ pg_streaming_read_buffer_alloc_internal(int flags,
 		(flags & PGSR_FLAG_SEQUENTIAL) == 0)
 		pgsr->advice_enabled = true;
 #endif
+
+	/*
+	 * We start off building small ranges, but double that quickly, for the
+	 * benefit of users that don't know how far ahead they'll read.  This can
+	 * be disabled by users that already know they'll read all the way.
+	 */
+	if (flags & PGSR_FLAG_FULL)
+		pgsr->ramp_up_pin_limit = INT_MAX;
+	else
+		pgsr->ramp_up_pin_limit = 1;
 
 	/*
 	 * We want to avoid creating ranges that are smaller than they could be
@@ -246,6 +258,16 @@ static void
 pg_streaming_read_look_ahead(PgStreamingRead *pgsr)
 {
 	/*
+	 * If we're still ramping up, we may have to stall to wait for buffers to
+	 * be consumed first before we do any more prefetching.
+	 */
+	if (pgsr->ramp_up_pin_stall > 0)
+	{
+		Assert(pgsr->pinned_buffers > 0);
+		return;
+	}
+
+	/*
 	 * If we're finished or can't start more I/O, then don't look ahead.
 	 */
 	if (pgsr->finished || pgsr->ios_in_progress == pgsr->max_ios)
@@ -343,7 +365,19 @@ pg_streaming_read_look_ahead(PgStreamingRead *pgsr)
 			pgsr->per_buffer_data_next = 0;
 
 	} while (pgsr->pinned_buffers < pgsr->max_pinned_buffers &&
-			 pgsr->ios_in_progress < pgsr->max_ios);
+			 pgsr->ios_in_progress < pgsr->max_ios &&
+			 pgsr->pinned_buffers < pgsr->ramp_up_pin_limit);
+
+	/* If we've hit the ramp-up limit, insert a stall. */
+	if (pgsr->pinned_buffers >= pgsr->ramp_up_pin_limit)
+	{
+		/* Can't get here if an earlier stall hasn't finished. */
+		Assert(pgsr->ramp_up_pin_stall == 0);
+		/* Don't do any more prefetching until these buffers are consumed. */
+		pgsr->ramp_up_pin_stall = pgsr->ramp_up_pin_limit;
+		/* Double it.  It will soon be out of the way. */
+		pgsr->ramp_up_pin_limit *= 2;
+	}
 
 	if (pgsr->ranges[pgsr->head].nblocks > 0)
 		pg_streaming_read_new_range(pgsr);
@@ -399,6 +433,9 @@ pg_streaming_read_buffer_get_next(PgStreamingRead *pgsr, void **per_buffer_data)
 			/* We are giving away ownership of this pinned buffer. */
 			Assert(pgsr->pinned_buffers > 0);
 			pgsr->pinned_buffers--;
+
+			if (pgsr->ramp_up_pin_stall > 0)
+				pgsr->ramp_up_pin_stall--;
 
 			if (per_buffer_data)
 				*per_buffer_data = (char *) pgsr->per_buffer_data +
