@@ -501,7 +501,7 @@ static uint32 WaitBufHdrUnlocked(BufferDesc *buf);
 static int	SyncOneBuffer(int buf_id, bool skip_recently_used,
 						  WritebackContext *wb_context);
 static void WaitIO(BufferDesc *buf);
-static bool StartBufferIO(BufferDesc *buf, bool forInput);
+static bool StartBufferIO(BufferDesc *buf, bool forInput, bool nowait);
 static void TerminateBufferIO(BufferDesc *buf, bool clear_dirty,
 							  uint32 set_flag_bits, bool forget_owner);
 static void AbortBufferIO(Buffer buffer);
@@ -1156,7 +1156,7 @@ PrepareReadBuffer(BufferManagerRelation bmr,
 }
 
 static inline bool
-CompleteReadBuffersCanStartIO(Buffer buffer)
+CompleteReadBuffersCanStartIO(Buffer buffer, bool nowait)
 {
 	if (BufferIsLocal(buffer))
 	{
@@ -1165,7 +1165,7 @@ CompleteReadBuffersCanStartIO(Buffer buffer)
 		return (pg_atomic_read_u32(&bufHdr->state) & BM_VALID) == 0;
 	}
 	else
-		return StartBufferIO(GetBufferDescriptor(buffer - 1), true);
+		return StartBufferIO(GetBufferDescriptor(buffer - 1), true, nowait);
 }
 
 /*
@@ -1248,8 +1248,13 @@ CompleteReadBuffers(BufferManagerRelation bmr,
 		}
 #endif
 
-		/* Skip this block if someone else has already completed it. */
-		if (!CompleteReadBuffersCanStartIO(buffers[i]))
+		/*
+		 * Skip this block if someone else has already completed it.  If an
+		 * I/O is already in progress in another backend, this will wait for
+		 * the outcome: either done, or something went wrong and we will
+		 * retry.
+		 */
+		if (!CompleteReadBuffersCanStartIO(buffers[i], false))
 		{
 			/*
 			 * Report this as a 'hit' for this backend, even though it must
@@ -1272,10 +1277,13 @@ CompleteReadBuffers(BufferManagerRelation bmr,
 
 		/*
 		 * How many neighboring-on-disk blocks can we can scatter-read into
-		 * other buffers at the same time?
+		 * other buffers at the same time?  In this case we don't wait if we
+		 * see an I/O already in progress.  We already hold BM_IO_IN_PROGRESS
+		 * for the head block, so we should get on with that I/O as soon as
+		 * possible.  We'll come back to this block again, above.
 		 */
 		while ((i + 1) < nblocks &&
-			   CompleteReadBuffersCanStartIO(buffers[i + 1]))
+			   CompleteReadBuffersCanStartIO(buffers[i + 1], true))
 		{
 			/* Must be consecutive block numbers. */
 			Assert(BufferGetBlockNumber(buffers[i + 1]) ==
@@ -2152,7 +2160,7 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 
 				buf_state &= ~BM_VALID;
 				UnlockBufHdr(existing_hdr, buf_state);
-			} while (!StartBufferIO(existing_hdr, true));
+			} while (!StartBufferIO(existing_hdr, true, false));
 		}
 		else
 		{
@@ -2175,7 +2183,7 @@ ExtendBufferedRelShared(BufferManagerRelation bmr,
 			LWLockRelease(partition_lock);
 
 			/* XXX: could combine the locked operations in it with the above */
-			StartBufferIO(victim_buf_hdr, true);
+			StartBufferIO(victim_buf_hdr, true, false);
 		}
 	}
 
@@ -3572,7 +3580,7 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln, IOObject io_object,
 	 * someone else flushed the buffer before we could, so we need not do
 	 * anything.
 	 */
-	if (!StartBufferIO(buf, false))
+	if (!StartBufferIO(buf, false, false))
 		return;
 
 	/* Setup error traceback support for ereport() */
@@ -5347,9 +5355,15 @@ WaitIO(BufferDesc *buf)
  *
  * Returns true if we successfully marked the buffer as I/O busy,
  * false if someone else already did the work.
+ *
+ * If nowait is true, then we don't wait for an I/O to be finished by another
+ * backend.  In that case, false indicates either that the I/O was already
+ * finished, or is still in progress.  This is useful for callers that want to
+ * find out if they can perform the I/O as part of a larger operation, without
+ * waiting for the answer or distinguishing the reasons why not.
  */
 static bool
-StartBufferIO(BufferDesc *buf, bool forInput)
+StartBufferIO(BufferDesc *buf, bool forInput, bool nowait)
 {
 	uint32		buf_state;
 
@@ -5362,6 +5376,8 @@ StartBufferIO(BufferDesc *buf, bool forInput)
 		if (!(buf_state & BM_IO_IN_PROGRESS))
 			break;
 		UnlockBufHdr(buf, buf_state);
+		if (nowait)
+			return false;
 		WaitIO(buf);
 	}
 
