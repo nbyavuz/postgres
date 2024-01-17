@@ -474,8 +474,7 @@ ForgetPrivateRefCountEntry(PrivateRefCountEntry *ref)
 
 static Buffer ReadBuffer_common(BufferManagerRelation bmr,
 								ForkNumber forkNum, BlockNumber blockNum,
-								ReadBufferMode mode, BufferAccessStrategy strategy,
-								bool *hit);
+								ReadBufferMode mode, BufferAccessStrategy strategy);
 static BlockNumber ExtendBufferedRelCommon(BufferManagerRelation bmr,
 										   ForkNumber fork,
 										   BufferAccessStrategy strategy,
@@ -782,7 +781,6 @@ Buffer
 ReadBufferExtended(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 				   ReadBufferMode mode, BufferAccessStrategy strategy)
 {
-	bool		hit;
 	Buffer		buf;
 
 	/*
@@ -796,7 +794,7 @@ ReadBufferExtended(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
 				 errmsg("cannot access temporary tables of other sessions")));
 
 	buf = ReadBuffer_common(BMR_REL(reln),
-							forkNum, blockNum, mode, strategy, &hit);
+							forkNum, blockNum, mode, strategy);
 
 	return buf;
 }
@@ -817,14 +815,13 @@ ReadBufferWithoutRelcache(RelFileLocator rlocator, ForkNumber forkNum,
 						  BlockNumber blockNum, ReadBufferMode mode,
 						  BufferAccessStrategy strategy, bool permanent)
 {
-	bool		hit;
 
 	SMgrRelation smgr = smgropen(rlocator, InvalidBackendId);
 
 	return ReadBuffer_common(BMR_SMGR(smgr, permanent ? RELPERSISTENCE_PERMANENT :
 									  RELPERSISTENCE_UNLOGGED),
 							 forkNum, blockNum,
-							 mode, strategy, &hit);
+							 mode, strategy);
 }
 
 /*
@@ -990,12 +987,10 @@ ExtendBufferedRelTo(BufferManagerRelation bmr,
 	 */
 	if (buffer == InvalidBuffer)
 	{
-		bool		hit;
 
 		Assert(extended_by == 0);
 		buffer = ReadBuffer_common(bmr,
-								   fork, extend_to - 1, mode, strategy,
-								   &hit);
+								   fork, extend_to - 1, mode, strategy);
 	}
 
 	return buffer;
@@ -1006,12 +1001,15 @@ ExtendBufferedRelTo(BufferManagerRelation bmr,
  *
  * *hit is set to true if the request was satisfied from shared buffer cache.
  */
+
+/* nby_c: hit is removed from  definition of ReadBuffer_common() */
 static Buffer
 ReadBuffer_common(BufferManagerRelation bmr, ForkNumber forkNum,
 				  BlockNumber blockNum, ReadBufferMode mode,
-				  BufferAccessStrategy strategy, bool *hit)
+				  BufferAccessStrategy strategy)
 {
 	Buffer		buffer;
+	bool 		hit;
 
 	/*
 	 * Backward compatibility path, most code should use ExtendBufferedRel()
@@ -1030,7 +1028,8 @@ ReadBuffer_common(BufferManagerRelation bmr, ForkNumber forkNum,
 		if (mode == RBM_ZERO_AND_LOCK || mode == RBM_ZERO_AND_CLEANUP_LOCK)
 			flags |= EB_LOCK_FIRST;
 
-		*hit = false;
+		/* nby_c: Why hit is set here, it does not effect anything ?? */
+		// *hit = false;
 
 		return ExtendBufferedRel(bmr, forkNum, strategy, flags);
 	}
@@ -1039,16 +1038,17 @@ ReadBuffer_common(BufferManagerRelation bmr, ForkNumber forkNum,
 							   forkNum,
 							   blockNum,
 							   strategy,
-							   hit);
+							   &hit);
 
 	/* At this point we do NOT hold any locks. */
+
 
 	if (mode == RBM_ZERO_AND_CLEANUP_LOCK || mode == RBM_ZERO_AND_LOCK)
 	{
 		/* if we just want zeroes and a lock, we're done */
-		ZeroBuffer(buffer, mode);
+		ZeroBuffer(buffer, mode, hit);
 	}
-	else if (!*hit)
+	else
 	{
 		/* we might need to perform I/O */
 		CompleteReadBuffers(bmr,
@@ -1188,6 +1188,9 @@ CompleteReadBuffers(BufferManagerRelation bmr,
 	bool		isLocalBuf;
 	IOContext	io_context;
 	IOObject	io_object;
+
+	/* nby_c: Add assertion check nblocks <= MAX_BUFFERS_PER_TRANSFER */
+	Assert(nblocks <= MAX_BUFFERS_PER_TRANSFER);
 
 	if (bmr.rel)
 	{
@@ -4969,14 +4972,30 @@ ConditionalLockBuffer(Buffer buffer)
  * does not have to be valid, but it is valid and locked on return.
  */
 void
-ZeroBuffer(Buffer buffer, ReadBufferMode mode)
+ZeroBuffer(Buffer buffer, ReadBufferMode mode, bool hit)
 {
 	BufferDesc *bufHdr;
 	uint32		buf_state;
+	bool 		isLocalBuf = BufferIsLocal(buffer);
 
 	Assert(mode == RBM_ZERO_AND_LOCK || mode == RBM_ZERO_AND_CLEANUP_LOCK);
 
-	if (BufferIsLocal(buffer))
+	/* nby_c: add assertion to check if buffer is already pinnned */
+	Assert(BufferIsPinned(buffer));
+
+	if (hit)
+	{
+		if (isLocalBuf)
+			return;
+		if (mode == RBM_ZERO_AND_LOCK)
+			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+		else if (mode == RBM_ZERO_AND_CLEANUP_LOCK)
+			LockBufferForCleanup(buffer);
+
+		return;
+	}
+
+	if (isLocalBuf)
 		bufHdr = GetLocalBufferDescriptor(-buffer - 1);
 	else
 	{
@@ -4989,7 +5008,7 @@ ZeroBuffer(Buffer buffer, ReadBufferMode mode)
 
 	memset(BufferGetPage(buffer), 0, BLCKSZ);
 
-	if (BufferIsLocal(buffer))
+	if (isLocalBuf)
 	{
 		buf_state = pg_atomic_read_u32(&bufHdr->state);
 		buf_state |= BM_VALID;

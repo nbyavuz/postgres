@@ -265,7 +265,7 @@ extern void LockBufferForCleanup(Buffer buffer);
 extern bool ConditionalLockBufferForCleanup(Buffer buffer);
 extern bool IsBufferCleanupOK(Buffer buffer);
 extern bool HoldingBufferPinThatDelaysRecovery(void);
-extern void ZeroBuffer(Buffer buffer, ReadBufferMode mode);
+extern void ZeroBuffer(Buffer buffer, ReadBufferMode mode, bool hit);
 
 extern bool BgBufferSync(struct WritebackContext *wb_context);
 
