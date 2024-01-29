@@ -65,6 +65,7 @@
 #include "storage/smgr.h"
 #include "storage/spin.h"
 #include "storage/standby.h"
+#include "storage/streaming_read.h"
 #include "utils/datum.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
@@ -228,6 +229,27 @@ static const int MultiXactStatusLock[MaxMultiXactStatus + 1] =
  * ----------------------------------------------------------------
  */
 
+static BlockNumber
+heap_pgsr_next_single(PgStreamingRead *pgsr, void *pgsr_private,
+					  void *per_buffer_data)
+{
+	HeapScanDesc scan = (HeapScanDesc) pgsr_private;
+
+	/* Only forward scans support streaming reads */
+	if (!scan->rs_inited)
+	{
+		scan->rs_prefetch_block = heapgettup_initial_block(scan,
+														   ForwardScanDirection);
+		scan->rs_inited = true;
+	}
+	else
+		scan->rs_prefetch_block = heapgettup_advance_block(scan,
+														   scan->rs_prefetch_block,
+														   ForwardScanDirection);
+
+	return scan->rs_prefetch_block;
+}
+
 /* ----------------
  *		initscan - scan code common to heap_beginscan and heap_rescan
  * ----------------
@@ -345,6 +367,36 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	 */
 	if (scan->rs_base.rs_flags & SO_TYPE_SEQSCAN)
 		pgstat_count_heap_scan(scan->rs_base.rs_rd);
+
+	scan->rs_prefetch_block = InvalidBlockNumber;
+
+	/* pgsr is freed and reallocated on rescan */
+	if (scan->pgsr)
+		pg_streaming_read_free(scan->pgsr);
+	scan->pgsr = NULL;
+	scan->rs_prefetch_block = InvalidBlockNumber;
+
+	/*
+	 * This streaming read cannot be allocated in the per tuple memory context
+	 * which is the current memory context during heapgettup[_pagemode](), as
+	 * the per tuple context is often reset before the end of the query. There
+	 * was discussion of allocating the pgsr when rs_inited is false. We could
+	 * switch into a memory context that doesn't get reset to allocate it
+	 * there, but 1) we probably want to reuse the pgsr across rescans and 2)
+	 * we have to free the pgsr if the scan changes from forwards to a
+	 * backwards scan anyway, so we better just allocate it here.
+	 */
+	if (!RelationUsesLocalBuffers(scan->rs_base.rs_rd) &&
+		(scan->rs_base.rs_flags & SO_TYPE_SEQSCAN))
+	{
+		scan->pgsr = pg_streaming_read_buffer_alloc(PGSR_FLAG_SEQUENTIAL,
+													scan,
+													0,
+													scan->rs_strategy,
+													BMR_REL(scan->rs_base.rs_rd),
+													MAIN_FORKNUM,
+													heap_pgsr_next_single);
+	}
 }
 
 /*
@@ -488,19 +540,41 @@ heapfetchbuf(TableScanDesc sscan, ScanDirection dir)
 	 */
 	CHECK_FOR_INTERRUPTS();
 
-	if (!scan->rs_inited)
+	/*
+	 * Backwards scans aren't supported with streaming read. At the time of
+	 * allocation, the scan direction is not determined. Note that this means
+	 * that if the scan switches from backwards to forwards, the forward scan
+	 * will not use streaming reads
+	 */
+	if (!ScanDirectionIsForward(dir) && scan->pgsr)
 	{
-		scan->rs_cblock = heapgettup_initial_block(scan, dir);
-		Assert(scan->rs_cblock != InvalidBlockNumber || !BufferIsValid(scan->rs_cbuf));
-		scan->rs_inited = true;
+		pg_streaming_read_free(scan->pgsr);
+		scan->pgsr = NULL;
+		scan->rs_prefetch_block = InvalidBlockNumber;
+	}
+
+	if (scan->pgsr)
+	{
+		scan->rs_cbuf = pg_streaming_read_buffer_get_next(scan->pgsr, NULL);
+		if (BufferIsValid(scan->rs_cbuf))
+			scan->rs_cblock = BufferGetBlockNumber(scan->rs_cbuf);
 	}
 	else
-		scan->rs_cblock = heapgettup_advance_block(scan, scan->rs_cblock, dir);
+	{
+		if (!scan->rs_inited)
+		{
+			scan->rs_cblock = heapgettup_initial_block(scan, dir);
+			Assert(scan->rs_cblock != InvalidBlockNumber || !BufferIsValid(scan->rs_cbuf));
+			scan->rs_inited = true;
+		}
+		else
+			scan->rs_cblock = heapgettup_advance_block(scan, scan->rs_cblock, dir);
 
-	/* read block if valid */
-	if (BlockNumberIsValid(scan->rs_cblock))
-		scan->rs_cbuf = ReadBufferExtended(scan->rs_base.rs_rd, MAIN_FORKNUM,
-										   scan->rs_cblock, RBM_NORMAL, scan->rs_strategy);
+		/* read block if valid */
+		if (BlockNumberIsValid(scan->rs_cblock))
+			scan->rs_cbuf = ReadBufferExtended(scan->rs_base.rs_rd, MAIN_FORKNUM,
+											   scan->rs_cblock, RBM_NORMAL, scan->rs_strategy);
+	}
 }
 
 /*
@@ -1002,6 +1076,15 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 		scan->rs_parallelworkerdata = NULL;
 
 	/*
+	 * TODO: implement pg_streaming_read_reset(), then allocate the streaming
+	 * reads here. Currently, they are allocated in initscan() which will free
+	 * and reallocate the pgsr on each rescan. Fixing this is especially
+	 * important for nested loop join. For now, set this to NULL to ensure the
+	 * streaming read is allocated in initscan().
+	 */
+	scan->pgsr = NULL;
+
+	/*
 	 * we do this here instead of in initscan() because heap_rescan also calls
 	 * initscan() and we don't want to allocate memory again
 	 */
@@ -1064,6 +1147,11 @@ heap_endscan(TableScanDesc sscan)
 	 */
 	if (BufferIsValid(scan->rs_cbuf))
 		ReleaseBuffer(scan->rs_cbuf);
+
+	if (scan->pgsr)
+		pg_streaming_read_free(scan->pgsr);
+	scan->pgsr = NULL;
+	scan->rs_prefetch_block = InvalidBlockNumber;
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage
