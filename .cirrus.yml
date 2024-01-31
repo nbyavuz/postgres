@@ -22,7 +22,7 @@
 
 env:
   # Source of images / containers
-  GCP_PROJECT: pg-ci-images
+  GCP_PROJECT: pg-ci-images-dev
   IMAGE_PROJECT: $GCP_PROJECT
   CONTAINER_REPO: us-docker.pkg.dev/${GCP_PROJECT}/ci
   DISK_SIZE: 25
@@ -35,7 +35,7 @@ env:
 cirrus_community_vm_template: &cirrus_community_vm_template
   compute_engine_instance:
     image_project: $IMAGE_PROJECT
-    image: family/$IMAGE_FAMILY
+    image: pg-ci-windows-ci-2024-01-31t10-56-02
     platform: $PLATFORM
     cpu: $CPUS
     disk: $DISK_SIZE
