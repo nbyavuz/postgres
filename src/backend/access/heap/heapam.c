@@ -65,6 +65,7 @@
 #include "storage/smgr.h"
 #include "storage/spin.h"
 #include "storage/standby.h"
+#include "storage/streaming_read.h"
 #include "utils/datum.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
@@ -228,6 +229,25 @@ static const int MultiXactStatusLock[MaxMultiXactStatus + 1] =
  * ----------------------------------------------------------------
  */
 
+static BlockNumber
+heap_seq_pgsr_next(PgStreamingRead *pgsr, void *pgsr_private,
+				   void *per_buffer_data)
+{
+	HeapScanDesc scan = (HeapScanDesc) pgsr_private;
+
+	if (!scan->rs_inited)
+	{
+		scan->rs_prefetch_block = heapgettup_initial_block(scan, scan->rs_dir);
+		scan->rs_inited = true;
+	}
+	else
+		scan->rs_prefetch_block = heapgettup_advance_block(scan,
+														   scan->rs_prefetch_block,
+														   scan->rs_dir);
+
+	return scan->rs_prefetch_block;
+}
+
 /* ----------------
  *		initscan - scan code common to heap_beginscan and heap_rescan
  * ----------------
@@ -329,6 +349,9 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	ItemPointerSetInvalid(&scan->rs_ctup.t_self);
 	scan->rs_cbuf = InvalidBuffer;
 	scan->rs_cblock = InvalidBlockNumber;
+	scan->rs_prefetch_block = InvalidBlockNumber;
+	/* ForwardScanDirection is most common, so initialize to this */
+	scan->rs_dir = ForwardScanDirection;
 
 	/* page-at-a-time fields are always invalid when not rs_inited */
 
@@ -367,6 +390,45 @@ heap_setscanlimits(TableScanDesc sscan, BlockNumber startBlk, BlockNumber numBlk
 
 	scan->rs_startblock = startBlk;
 	scan->rs_numblocks = numBlks;
+}
+
+/*
+ * heap_seq_pgsr_alloc - Allocate a seq scan streaming read object
+ *
+ * On each scan and rescan, a new streaming read object must be allocated. If
+ * the scan changes directions, we must free the existing streaming read object
+ * and allocate a new one, releasing any buffers which had been fetched that we
+ * no longer need.
+ */
+static void
+heap_seq_pgsr_alloc(HeapScanDesc scan, ScanDirection dir)
+{
+	MemoryContext oldcontext;
+
+	Assert(scan->rs_dir != dir || !scan->rs_pgsr);
+
+	/*
+	 * If the scan direction is changing, reset the prefetch block to the
+	 * current block. Otherwise, we will incorrectly prefetch the blocks
+	 * between the prefetch block and the current block again before
+	 * prefetching blocks in the new, correct scan direction.
+	 */
+	if (scan->rs_dir != dir)
+		scan->rs_prefetch_block = scan->rs_cblock;
+
+	if (scan->rs_pgsr)
+		pg_streaming_read_free(scan->rs_pgsr);
+
+	oldcontext = MemoryContextSwitchTo(scan->rs_alloc_mctx);
+
+	scan->rs_pgsr = pg_streaming_read_buffer_alloc(PGSR_FLAG_SEQUENTIAL,
+												   scan,
+												   0,
+												   scan->rs_strategy,
+												   BMR_REL(scan->rs_base.rs_rd),
+												   MAIN_FORKNUM,
+												   heap_seq_pgsr_next);
+	MemoryContextSwitchTo(oldcontext);
 }
 
 /*
@@ -463,43 +525,6 @@ heapbuildvis(TableScanDesc sscan)
 	scan->rs_ntuples = ntup;
 }
 
-/*
- * heapfetchbuf - subroutine for heapgettup()
- *
- * This routine reads the next block of the relation into a buffer and returns
- * with that pinned buffer saved in the scan descriptor.
- */
-static inline void
-heapfetchbuf(HeapScanDesc scan, ScanDirection dir)
-{
-	/* release previous scan buffer, if any */
-	if (BufferIsValid(scan->rs_cbuf))
-	{
-		ReleaseBuffer(scan->rs_cbuf);
-		scan->rs_cbuf = InvalidBuffer;
-	}
-
-	/*
-	 * Be sure to check for interrupts at least once per page.  Checks at
-	 * higher code levels won't be able to stop a seqscan that encounters many
-	 * pages' worth of consecutive dead tuples.
-	 */
-	CHECK_FOR_INTERRUPTS();
-
-	if (!scan->rs_inited)
-	{
-		scan->rs_cblock = heapgettup_initial_block(scan, dir);
-		Assert(scan->rs_cblock != InvalidBlockNumber || !BufferIsValid(scan->rs_cbuf));
-		scan->rs_inited = true;
-	}
-	else
-		scan->rs_cblock = heapgettup_advance_block(scan, scan->rs_cblock, dir);
-
-	/* read block if valid */
-	if (BlockNumberIsValid(scan->rs_cblock))
-		scan->rs_cbuf = ReadBufferExtended(scan->rs_base.rs_rd, MAIN_FORKNUM,
-										   scan->rs_cblock, RBM_NORMAL, scan->rs_strategy);
-}
 
 /*
  * heapgettup_initial_block - return the first BlockNumber to scan
@@ -750,6 +775,13 @@ heapgettup(HeapScanDesc scan,
 	OffsetNumber lineoff;
 	int			linesleft;
 
+	Assert(ScanDirectionIsValid(dir));
+
+	if (!scan->rs_pgsr || scan->rs_dir != dir)
+		heap_seq_pgsr_alloc(scan, dir);
+
+	scan->rs_dir = dir;
+
 	if (scan->rs_inited)
 	{
 		/* continue from previously returned page/tuple */
@@ -764,9 +796,26 @@ heapgettup(HeapScanDesc scan,
 	 */
 	while (true)
 	{
-		heapfetchbuf(scan, dir);
+		/* release previous scan buffer, if any */
+		if (BufferIsValid(scan->rs_cbuf))
+		{
+			ReleaseBuffer(scan->rs_cbuf);
+			scan->rs_cbuf = InvalidBuffer;
+		}
+
+		/*
+		 * Be sure to check for interrupts at least once per page.  Checks at
+		 * higher code levels won't be able to stop a seqscan that encounters
+		 * many pages' worth of consecutive dead tuples.
+		 */
+		CHECK_FOR_INTERRUPTS();
+
+		Assert(scan->rs_pgsr);
+
+		scan->rs_cbuf = pg_streaming_read_buffer_get_next(scan->rs_pgsr, NULL);
 		if (!BufferIsValid(scan->rs_cbuf))
 			break;
+		scan->rs_cblock = BufferGetBlockNumber(scan->rs_cbuf);
 		Assert(BufferGetBlockNumber(scan->rs_cbuf) == scan->rs_cblock);
 		LockBuffer(scan->rs_cbuf, BUFFER_LOCK_SHARE);
 		page = heapgettup_start_page(scan, dir, &linesleft, &lineoff);
@@ -827,6 +876,7 @@ continue_page:
 
 	scan->rs_cbuf = InvalidBuffer;
 	scan->rs_cblock = InvalidBlockNumber;
+	scan->rs_prefetch_block = InvalidBlockNumber;
 	tuple->t_data = NULL;
 	scan->rs_inited = false;
 }
@@ -855,6 +905,13 @@ heapgettup_pagemode(HeapScanDesc scan,
 	int			lineindex;
 	int			linesleft;
 
+	Assert(ScanDirectionIsValid(dir));
+
+	if (!scan->rs_pgsr || scan->rs_dir != dir)
+		heap_seq_pgsr_alloc(scan, dir);
+
+	scan->rs_dir = dir;
+
 	if (scan->rs_inited)
 	{
 		/* continue from previously returned page/tuple */
@@ -876,9 +933,26 @@ heapgettup_pagemode(HeapScanDesc scan,
 	 */
 	while (true)
 	{
-		heapfetchbuf(scan, dir);
+		/* release previous scan buffer, if any */
+		if (BufferIsValid(scan->rs_cbuf))
+		{
+			ReleaseBuffer(scan->rs_cbuf);
+			scan->rs_cbuf = InvalidBuffer;
+		}
+
+		/*
+		 * Be sure to check for interrupts at least once per page.  Checks at
+		 * higher code levels won't be able to stop a seqscan that encounters
+		 * many pages' worth of consecutive dead tuples.
+		 */
+		CHECK_FOR_INTERRUPTS();
+
+		Assert(scan->rs_pgsr);
+
+		scan->rs_cbuf = pg_streaming_read_buffer_get_next(scan->rs_pgsr, NULL);
 		if (!BufferIsValid(scan->rs_cbuf))
 			break;
+		scan->rs_cblock = BufferGetBlockNumber(scan->rs_cbuf);
 		Assert(BufferGetBlockNumber(scan->rs_cbuf) == scan->rs_cblock);
 		heapbuildvis((TableScanDesc) scan);
 		page = BufferGetPage(scan->rs_cbuf);
@@ -917,6 +991,7 @@ continue_page:
 		ReleaseBuffer(scan->rs_cbuf);
 	scan->rs_cbuf = InvalidBuffer;
 	scan->rs_cblock = InvalidBlockNumber;
+	scan->rs_prefetch_block = InvalidBlockNumber;
 	tuple->t_data = NULL;
 	scan->rs_inited = false;
 }
@@ -956,6 +1031,9 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_flags = flags;
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_strategy = NULL;	/* set in initscan */
+
+	scan->rs_pgsr = NULL;
+	scan->rs_alloc_mctx = CurrentMemoryContext;
 
 	/*
 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
@@ -1044,6 +1122,12 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 	if (BufferIsValid(scan->rs_cbuf))
 		ReleaseBuffer(scan->rs_cbuf);
 
+	if (scan->rs_pgsr)
+	{
+		pg_streaming_read_free(scan->rs_pgsr);
+		scan->rs_pgsr = NULL;
+	}
+
 	/*
 	 * reinitialize scan descriptor
 	 */
@@ -1062,6 +1146,9 @@ heap_endscan(TableScanDesc sscan)
 	 */
 	if (BufferIsValid(scan->rs_cbuf))
 		ReleaseBuffer(scan->rs_cbuf);
+
+	if (scan->rs_pgsr)
+		pg_streaming_read_free(scan->rs_pgsr);
 
 	/*
 	 * decrement relation reference count and free scan descriptor storage

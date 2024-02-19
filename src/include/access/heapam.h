@@ -59,6 +59,7 @@ typedef struct HeapScanDescData
 	bool		rs_inited;		/* false = scan not init'd yet */
 	OffsetNumber rs_coffset;	/* current offset # in non-page-at-a-time mode */
 	BlockNumber rs_cblock;		/* current block # in scan, if any */
+	BlockNumber rs_prefetch_block;	/* block being prefetched, if any */
 	Buffer		rs_cbuf;		/* current buffer in scan, if any */
 	/* NB: if rs_cbuf is not InvalidBuffer, we hold a pin on that buffer */
 
@@ -71,6 +72,17 @@ typedef struct HeapScanDescData
 	 * performing a parallel scan.
 	 */
 	ParallelBlockTableScanWorkerData *rs_parallelworkerdata;
+
+	/*
+	 * Fields used for streaming reads. The streaming read object must be
+	 * allocated above the per-tuple context, so save the memory context during
+	 * scan initialization and switch to that context when allocating the
+	 * streaming read object. If the scan direction changes, we must free and
+	 * reallocate the streaming read object and reset the prefetch block.
+	 */
+	struct PgStreamingRead *rs_pgsr;
+	MemoryContext rs_alloc_mctx;
+	ScanDirection rs_dir;
 
 	/* these fields only used in page-at-a-time mode and for bitmap scans */
 	int			rs_cindex;		/* current tuple's index in vistuples */
