@@ -1090,6 +1090,7 @@ ReadBuffer_common(BufferManagerRelation bmr, ForkNumber forkNum,
 						 &nblocks,
 						 strategy,
 						 flags,
+						 false,
 						 &operation))
 		WaitReadBuffers(&operation);
 	Assert(nblocks == 1);		/* single block can't be short */
@@ -1201,6 +1202,7 @@ StartReadBuffers(BufferManagerRelation bmr,
 				 int *nblocks,
 				 BufferAccessStrategy strategy,
 				 int flags,
+				 bool is_backwards,
 				 ReadBuffersOperation *operation)
 {
 	int			actual_nblocks = *nblocks;
@@ -1218,6 +1220,7 @@ StartReadBuffers(BufferManagerRelation bmr,
 	operation->nblocks = actual_nblocks;
 	operation->strategy = strategy;
 	operation->flags = flags;
+	operation->is_backwards = is_backwards;
 
 	operation->io_buffers_len = 0;
 
@@ -1227,7 +1230,7 @@ StartReadBuffers(BufferManagerRelation bmr,
 
 		buffers[i] = PrepareReadBuffer(bmr,
 									   forkNum,
-									   blockNum + i,
+									   is_backwards ?  blockNum - i : blockNum + i,
 									   strategy,
 									   &found);
 
@@ -1264,7 +1267,10 @@ StartReadBuffers(BufferManagerRelation bmr,
 			 * true asynchronous version we might choose to process only one
 			 * real I/O at a time in that case.
 			 */
-			smgrprefetch(bmr.smgr, forkNum, blockNum, operation->io_buffers_len);
+			if(is_backwards)
+				smgrprefetch(bmr.smgr, forkNum, blockNum - operation->io_buffers_len, operation->io_buffers_len);
+			else
+				smgrprefetch(bmr.smgr, forkNum, blockNum, operation->io_buffers_len);
 		}
 
 		/* Indicate that WaitReadBuffers() should be called. */
@@ -1298,6 +1304,7 @@ WaitReadBuffers(ReadBuffersOperation *operation)
 	BlockNumber blocknum;
 	ForkNumber	forknum;
 	bool		isLocalBuf;
+	bool 		is_backwards;
 	IOContext	io_context;
 	IOObject	io_object;
 
@@ -1318,6 +1325,7 @@ WaitReadBuffers(ReadBuffersOperation *operation)
 	blocknum = operation->blocknum;
 	forknum = operation->forknum;
 	bmr = operation->bmr;
+	is_backwards = operation->is_backwards;
 
 	isLocalBuf = SmgrIsTemp(bmr.smgr);
 	if (isLocalBuf)
@@ -1364,7 +1372,7 @@ WaitReadBuffers(ReadBuffersOperation *operation)
 			 * Report this as a 'hit' for this backend, even though it must
 			 * have started out as a miss in PrepareReadBuffer().
 			 */
-			TRACE_POSTGRESQL_BUFFER_READ_DONE(forknum, blocknum + i,
+			TRACE_POSTGRESQL_BUFFER_READ_DONE(forknum, is_backwards ? blocknum - i: blocknum + i,
 											  bmr.smgr->smgr_rlocator.locator.spcOid,
 											  bmr.smgr->smgr_rlocator.locator.dbOid,
 											  bmr.smgr->smgr_rlocator.locator.relNumber,
@@ -1390,11 +1398,28 @@ WaitReadBuffers(ReadBuffersOperation *operation)
 			   WaitReadBuffersCanStartIO(buffers[i + 1], true))
 		{
 			/* Must be consecutive block numbers. */
-			Assert(BufferGetBlockNumber(buffers[i + 1]) ==
-				   BufferGetBlockNumber(buffers[i]) + 1);
+			Assert(!is_backwards || (BufferGetBlockNumber(buffers[i + 1]) == BufferGetBlockNumber(buffers[i]) - 1));
+			Assert(is_backwards || (BufferGetBlockNumber(buffers[i + 1]) == BufferGetBlockNumber(buffers[i]) + 1));
 
-			io_buffers[io_buffers_len] = buffers[++i];
-			io_pages[io_buffers_len++] = BufferGetBlock(buffers[i]);
+			i++;
+			if (!is_backwards)
+			{
+				io_buffers[io_buffers_len] = buffers[i];
+				io_pages[io_buffers_len] = BufferGetBlock(buffers[i]);
+			}
+			io_buffers_len++;
+		}
+
+		if (is_backwards)
+		{
+			for (int j = 0; j < io_buffers_len; j++)
+			{
+				int reverse_place = i - j;
+
+				io_buffers[j] = buffers[reverse_place];
+				io_pages[j] = BufferGetBlock(buffers[reverse_place]);
+			}
+			io_first_block = blocknum - i;
 		}
 
 		io_start = pgstat_prepare_io_time(track_io_timing);

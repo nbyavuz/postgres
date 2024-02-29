@@ -202,6 +202,7 @@ struct ReadBuffersOperation
 	int			nblocks;
 	BufferAccessStrategy strategy;
 	int			flags;
+	bool		is_backwards;
 
 	/* Range of buffers, if we need to perform a read. */
 	int			io_buffers_len;
@@ -216,6 +217,7 @@ extern bool StartReadBuffers(BufferManagerRelation bmr,
 							 int *nblocks,
 							 BufferAccessStrategy strategy,
 							 int flags,
+							 bool is_backwards,
 							 ReadBuffersOperation *operation);
 extern void WaitReadBuffers(ReadBuffersOperation *operation);
 

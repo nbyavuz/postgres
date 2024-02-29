@@ -3,6 +3,14 @@
 #include "storage/streaming_read.h"
 #include "utils/rel.h"
 
+typedef enum StreamingReadDirection
+{
+	SRDBackwards = -1,
+	SRDNotInitialized = 0,
+	SRDForward = 1,
+} StreamingReadDirection;
+
+
 /*
  * Element type for PgStreamingRead's circular array of block ranges.
  */
@@ -10,6 +18,7 @@ typedef struct PgStreamingReadRange
 {
 	bool		need_wait;
 	bool		advice_issued;
+	StreamingReadDirection		direction;
 	BlockNumber blocknum;
 	int			nblocks;
 	int			per_buffer_data_index;
@@ -276,6 +285,7 @@ pg_streaming_read_start_head_range(PgStreamingRead *pgsr)
 						 &nblocks_pinned,
 						 pgsr->strategy,
 						 flags,
+						 head_range->direction == SRDBackwards,
 						 &head_range->operation);
 
 	/* Did that start an I/O? */
@@ -297,8 +307,19 @@ pg_streaming_read_start_head_range(PgStreamingRead *pgsr)
 	/*
 	 * Remember where the next block would be after that, so we can detect
 	 * sequential access next time.
+	 * pgsr->seq_blocknum = head_range->blocknum + nblocks_pinned;
 	 */
-	pgsr->seq_blocknum = head_range->blocknum + nblocks_pinned;
+
+	/*
+	 * Does sequential access effects backwards scan ??
+	 * If so, use below; otherwise use above.
+	 * Also, Do not set seq_blocknum for the SRDNotInitialized since it can
+	 * give cause wrong detections.
+	 */
+	if (head_range->direction == SRDForward)
+		pgsr->seq_blocknum = head_range->blocknum + nblocks_pinned;
+	else if (head_range->direction == SRDBackwards)
+		pgsr->seq_blocknum = head_range->blocknum - nblocks_pinned;
 
 	/*
 	 * Create a new head range.  There must be space, because we have enough
@@ -311,6 +332,7 @@ pg_streaming_read_start_head_range(PgStreamingRead *pgsr)
 	new_head_range = &pgsr->ranges[pgsr->head];
 	new_head_range->nblocks = 0;
 	new_head_range->advice_issued = false;
+	new_head_range->direction = SRDNotInitialized;
 
 	/*
 	 * If we didn't manage to start the whole read above, we split the range,
@@ -322,7 +344,16 @@ pg_streaming_read_start_head_range(PgStreamingRead *pgsr)
 
 		head_range->nblocks = nblocks_pinned;
 
-		new_head_range->blocknum = head_range->blocknum + nblocks_pinned;
+		if (head_range->direction == SRDForward)
+		{
+			new_head_range->blocknum = head_range->blocknum + nblocks_pinned;
+			new_head_range->direction = SRDForward;
+		}
+		else if (head_range->direction == SRDBackwards)
+		{
+			new_head_range->blocknum = head_range->blocknum - nblocks_pinned;
+			new_head_range->direction = SRDBackwards;
+		}
 		new_head_range->nblocks = nblocks_remaining;
 	}
 
@@ -452,11 +483,24 @@ pg_streaming_read_look_ahead(PgStreamingRead *pgsr)
 		}
 
 		/*
+		 * To set direction
+		 */
+		if (range->nblocks == 1)
+		{
+			if(range->blocknum + range->nblocks == blocknum)
+				range->direction = SRDForward;
+			else if (range->blocknum - range->nblocks == blocknum)
+				range->direction = SRDBackwards;
+		}
+
+		/*
 		 * Is there a head range that we cannot extend, because the requested
 		 * block is not consecutive?
 		 */
 		if (range->nblocks > 0 &&
-			range->blocknum + range->nblocks != blocknum)
+			(range->direction == SRDNotInitialized ||
+			(range->direction == SRDForward && range->blocknum + range->nblocks != blocknum) ||
+			(range->direction == SRDBackwards && range->blocknum - range->nblocks != blocknum)))
 		{
 			/* Yes.  Start it, so we can begin building a new one. */
 			range = pg_streaming_read_start_head_range(pgsr);
@@ -484,12 +528,13 @@ pg_streaming_read_look_ahead(PgStreamingRead *pgsr)
 		if (range->nblocks == 0)
 		{
 			range->blocknum = blocknum;
+			range->direction = SRDNotInitialized;
 		}
 
 		/* This block extends the range by one. */
-		Assert(range->blocknum + range->nblocks == blocknum);
+		Assert(!(range->direction == SRDForward) || range->blocknum + range->nblocks == blocknum);
+		Assert(!(range->direction == SRDBackwards) || range->blocknum - range->nblocks == blocknum);
 		range->nblocks++;
-
 	} while (pgsr->pinned_buffers + range->nblocks < pgsr->max_pinned_buffers &&
 			 pgsr->pinned_buffers + range->nblocks < pgsr->ramp_up_pin_limit);
 
