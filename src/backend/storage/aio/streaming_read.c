@@ -32,6 +32,7 @@ struct PgStreamingRead
 	int			ramp_up_pin_stall;
 	bool		finished;
 	bool		advice_enabled;
+	bool		resumable;
 	void	   *pgsr_private;
 	PgStreamingReadBufferCB callback;
 
@@ -385,6 +386,7 @@ static void
 pg_streaming_read_look_ahead(PgStreamingRead *pgsr)
 {
 	PgStreamingReadRange *range;
+	bool		done = pgsr->finished && !pgsr->resumable;
 
 	/*
 	 * If we're still ramping up, we may have to stall to wait for buffers to
@@ -399,7 +401,7 @@ pg_streaming_read_look_ahead(PgStreamingRead *pgsr)
 	/*
 	 * If we're finished or can't start more I/O, then don't look ahead.
 	 */
-	if (pgsr->finished || pgsr->ios_in_progress == pgsr->max_ios)
+	if (done || pgsr->ios_in_progress == pgsr->max_ios)
 		return;
 
 	/*
@@ -609,4 +611,10 @@ pg_streaming_read_free(PgStreamingRead *pgsr)
 		pfree(pgsr->per_buffer_data);
 
 	pfree(pgsr);
+}
+
+void
+pg_streaming_read_set_resumable(PgStreamingRead *pgsr)
+{
+	pgsr->resumable = true;
 }
