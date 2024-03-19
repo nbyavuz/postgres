@@ -1004,27 +1004,46 @@ ExtendBufferedRelTo(BufferManagerRelation bmr,
  * return.
  */
 static void
-ZeroBuffer(Buffer buffer, ReadBufferMode mode)
+ZeroBuffer(Buffer buffer, ReadBufferMode mode, BufferManagerRelation bmr, ForkNumber forkNum, BlockNumber blockNum, bool hit)
 {
 	BufferDesc *bufHdr;
 	uint32		buf_state;
+	bool		isLocalBuf;
 
 	Assert(mode == RBM_ZERO_AND_LOCK || mode == RBM_ZERO_AND_CLEANUP_LOCK);
 
-	if (BufferIsLocal(buffer))
-		bufHdr = GetLocalBufferDescriptor(-buffer - 1);
+	isLocalBuf = BufferIsLocal(buffer);
+
+	if (hit)
+	{
+		if (!isLocalBuf)
+		{
+			if (mode == RBM_ZERO_AND_LOCK)
+				LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+			else
+				LockBufferForCleanup(buffer);
+		}
+		return;
+	}
 	else
 	{
-		bufHdr = GetBufferDescriptor(buffer - 1);
-		if (mode == RBM_ZERO_AND_LOCK)
-			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+		if (isLocalBuf)
+			bufHdr = GetBufferDescriptor(-buffer - 1);
 		else
-			LockBufferForCleanup(buffer);
+		{
+			bufHdr = GetBufferDescriptor(buffer - 1);
+			LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+		}
 	}
+
+	if (bmr.rel)
+		bmr.smgr = RelationGetSmgr(bmr.rel);
+
+	Assert(bmr.smgr);
 
 	memset(BufferGetPage(buffer), 0, BLCKSZ);
 
-	if (BufferIsLocal(buffer))
+	if (isLocalBuf)
 	{
 		buf_state = pg_atomic_read_u32(&bufHdr->state);
 		buf_state |= BM_VALID;
@@ -1036,6 +1055,21 @@ ZeroBuffer(Buffer buffer, ReadBufferMode mode)
 		buf_state |= BM_VALID;
 		UnlockBufHdr(bufHdr, buf_state);
 	}
+
+	/*
+	 * If it is a miss, count them there because we won't count them in
+	 * WaitReadBuffers
+	 */
+	VacuumPageMiss++;
+	if (VacuumCostActive)
+		VacuumCostBalance += VacuumCostPageMiss;
+
+	TRACE_POSTGRESQL_BUFFER_READ_DONE(forkNum, blockNum,
+									  bmr.smgr->smgr_rlocator.locator.spcOid,
+									  bmr.smgr->smgr_rlocator.locator.dbOid,
+									  bmr.smgr->smgr_rlocator.locator.relNumber,
+									  bmr.smgr->smgr_rlocator.backend,
+									  false);
 }
 
 /*
@@ -1052,6 +1086,7 @@ ReadBuffer_common(BufferManagerRelation bmr, ForkNumber forkNum,
 	Buffer		buffer;
 	int			nblocks;
 	int			flags;
+	bool		hit;
 
 	/*
 	 * Backward compatibility path, most code should use ExtendBufferedRel()
@@ -1078,19 +1113,20 @@ ReadBuffer_common(BufferManagerRelation bmr, ForkNumber forkNum,
 		flags = READ_BUFFERS_ZERO_ON_ERROR;
 	else
 		flags = 0;
-	if (StartReadBuffers(bmr,
-						 &buffer,
-						 forkNum,
-						 blockNum,
-						 &nblocks,
-						 strategy,
-						 flags,
-						 &operation))
-		WaitReadBuffers(&operation);
+	hit = !StartReadBuffers(bmr,
+							&buffer,
+							forkNum,
+							blockNum,
+							&nblocks,
+							strategy,
+							flags,
+							&operation);
 	Assert(nblocks == 1);		/* single block can't be short */
 
 	if (mode == RBM_ZERO_AND_CLEANUP_LOCK || mode == RBM_ZERO_AND_LOCK)
-		ZeroBuffer(buffer, mode);
+		ZeroBuffer(buffer, mode, bmr, forkNum, blockNum, hit);
+	else if (!hit)
+		WaitReadBuffers(&operation);
 
 	return buffer;
 }
