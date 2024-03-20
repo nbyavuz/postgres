@@ -200,6 +200,7 @@ struct ReadBuffersOperation
 	ForkNumber	forknum;
 	BlockNumber blocknum;
 	int			nblocks;
+	int			buffer_index;
 	BufferAccessStrategy strategy;
 	int			flags;
 

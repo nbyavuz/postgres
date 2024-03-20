@@ -571,12 +571,6 @@ pg_streaming_read_buffer_get_next(PgStreamingRead *pgsr, void **per_buffer_data)
 					}
 				}
 			}
-			else if (pgsr->next_tail_buffer == 0)
-			{
-				/* No I/O necessary. Look-ahead distance gradually decays. */
-				if (pgsr->distance > 1)
-					pgsr->distance--;
-			}
 
 			/* Are there more buffers available in this range? */
 			if (pgsr->next_tail_buffer < tail_range->nblocks)

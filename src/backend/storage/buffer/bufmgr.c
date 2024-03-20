@@ -1198,7 +1198,10 @@ StartReadBuffers(BufferManagerRelation bmr,
 				 int flags,
 				 ReadBuffersOperation *operation)
 {
+	int			i = 0;
 	int			actual_nblocks = *nblocks;
+	bool		is_hit_sequence = false;
+	bool		found;
 
 	if (bmr.rel)
 	{
@@ -1214,35 +1217,51 @@ StartReadBuffers(BufferManagerRelation bmr,
 	operation->strategy = strategy;
 	operation->flags = flags;
 
+	operation->buffer_index = 0;
 	operation->io_buffers_len = 0;
 
-	for (int i = 0; i < actual_nblocks; ++i)
+	buffers[0] = PrepareReadBuffer(bmr,
+									forkNum,
+									blockNum + i,
+									strategy,
+									&found);
+
+	Assert(actual_nblocks > 0);
+
+	if (found)
+		is_hit_sequence = true;
+	else
+		operation->io_buffers_len++;
+
+	for (i = 1; i < actual_nblocks; ++i)
 	{
-		bool		found;
 
 		buffers[i] = PrepareReadBuffer(bmr,
-									   forkNum,
-									   blockNum + i,
-									   strategy,
-									   &found);
+										forkNum,
+										blockNum + i,
+										strategy,
+										&found);
 
-		if (found)
-		{
-			/*
-			 * Terminate the read as soon as we get a hit.  It could be a
-			 * single buffer hit, or it could be a hit that follows a readable
-			 * range.  We don't want to create more than one readable range,
-			 * so we stop here.
-			 */
-			actual_nblocks = operation->nblocks = *nblocks = i + 1;
+
+		if (found != is_hit_sequence)
 			break;
-		}
-		else
-		{
-			/* Extend the readable range to cover this block. */
-			operation->io_buffers_len++;
-		}
 	}
+
+	if (!is_hit_sequence)
+		operation->io_buffers_len = i;
+
+	if (is_hit_sequence && i < actual_nblocks)
+	{
+		operation->io_buffers_len = 1;
+		operation->blocknum += i;
+		operation->buffer_index = i;
+	}
+
+	if (i == actual_nblocks)
+		operation->nblocks = *nblocks = i;
+	else
+		operation->nblocks = *nblocks = i + 1;
+
 
 	if (operation->io_buffers_len > 0)
 	{
@@ -1260,7 +1279,7 @@ StartReadBuffers(BufferManagerRelation bmr,
 			 * true asynchronous version we might choose to process only one
 			 * real I/O at a time in that case.
 			 */
-			smgrprefetch(bmr.smgr, forkNum, blockNum, operation->io_buffers_len);
+			smgrprefetch(bmr.smgr, forkNum, operation->blocknum, operation->io_buffers_len);
 		}
 
 		/* Indicate that WaitReadBuffers() should be called. */
@@ -1302,15 +1321,15 @@ WaitReadBuffers(ReadBuffersOperation *operation)
 	 * with an optional extra buffer that is already pinned at the end.  So
 	 * nblocks can be at most one more than io_buffers_len.
 	 */
-	Assert((operation->nblocks == operation->io_buffers_len) ||
-		   (operation->nblocks == operation->io_buffers_len + 1));
+	/*Assert((operation->nblocks == operation->io_buffers_len) ||
+		   (operation->nblocks == operation->io_buffers_len + 1));*/
 
 	/* Find the range of the physical read we need to perform. */
 	nblocks = operation->io_buffers_len;
 	if (nblocks == 0)
 		return;					/* nothing to do */
 
-	buffers = &operation->buffers[0];
+	buffers = &operation->buffers[operation->buffer_index];
 	blocknum = operation->blocknum;
 	forknum = operation->forknum;
 	bmr = operation->bmr;
