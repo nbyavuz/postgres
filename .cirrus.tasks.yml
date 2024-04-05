@@ -54,6 +54,7 @@ WINDOWS_ENVIRONMENT_BASE: &WINDOWS_ENVIRONMENT_BASE
   env:
     # Half the allowed per-user CPU cores
     CPUS: 4
+    MEMORY: 16
 
     # The default cirrus working dir is in a directory msbuild complains about
     CIRRUS_WORKING_DIR: "c:/cirrus"
@@ -96,7 +97,7 @@ task:
     region: eastus
     platform: windows
     cpu: $CPUS
-    memory: 12G
+    memory: $MEMORY
 
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*windows.*'
 
@@ -145,7 +146,7 @@ task:
     region: eastus
     platform: windows
     cpu: $CPUS
-    memory: 12G
+    memory: $MEMORY
 
   env:
     PLATFORM: windows
