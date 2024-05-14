@@ -46,6 +46,12 @@
 #include "utils/builtins.h"
 #include "utils/rel.h"
 
+static TM_Result heapam_tuple_lock(Relation relation, ItemPointer tid,
+								   Snapshot snapshot, TupleTableSlot *slot,
+								   CommandId cid, LockTupleMode mode,
+								   LockWaitPolicy wait_policy, uint8 flags,
+								   TM_FailureData *tmfd);
+
 static void reform_and_rewrite_tuple(HeapTuple tuple,
 									 Relation OldHeap, Relation NewHeap,
 									 Datum *values, bool *isnull, RewriteState rwstate);
@@ -993,36 +999,28 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	pfree(isnull);
 }
 
-/*
- * Prepare to analyze the next block in the read stream.  Returns false if
- * the stream is exhausted and true otherwise. The scan must have been started
- * with SO_TYPE_ANALYZE option.
- *
- * This routine holds a buffer pin and lock on the heap page.  They are held
- * until heapam_scan_analyze_next_tuple() returns false.  That is until all the
- * items of the heap page are analyzed.
- */
 static bool
-heapam_scan_analyze_next_block(TableScanDesc scan, ReadStream *stream)
+heapam_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
+							   BufferAccessStrategy bstrategy)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
 
 	/*
 	 * We must maintain a pin on the target page's buffer to ensure that
 	 * concurrent activity - e.g. HOT pruning - doesn't delete tuples out from
-	 * under us.  It comes from the stream already pinned.   We also choose to
-	 * hold sharelock on the buffer throughout --- we could release and
-	 * re-acquire sharelock for each tuple, but since we aren't doing much
-	 * work per tuple, the extra lock traffic is probably better avoided.
+	 * under us.  Hence, pin the page until we are done looking at it.  We
+	 * also choose to hold sharelock on the buffer throughout --- we could
+	 * release and re-acquire sharelock for each tuple, but since we aren't
+	 * doing much work per tuple, the extra lock traffic is probably better
+	 * avoided.
 	 */
-	hscan->rs_cbuf = read_stream_next_buffer(stream, NULL);
-	if (!BufferIsValid(hscan->rs_cbuf))
-		return false;
-
+	hscan->rs_cblock = blockno;
+	hscan->rs_cindex = FirstOffsetNumber;
+	hscan->rs_cbuf = ReadBufferExtended(scan->rs_rd, MAIN_FORKNUM,
+										blockno, RBM_NORMAL, bstrategy);
 	LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);
 
-	hscan->rs_cblock = BufferGetBlockNumber(hscan->rs_cbuf);
-	hscan->rs_cindex = FirstOffsetNumber;
+	/* in heap all blocks can contain tuples, so always return true */
 	return true;
 }
 
