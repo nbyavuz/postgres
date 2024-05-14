@@ -28,6 +28,7 @@
 #include "storage/read_stream.h"
 #include "storage/shm_toc.h"
 #include "utils/relcache.h"
+#include "utils/sampling.h"
 #include "utils/snapshot.h"
 
 
@@ -84,6 +85,12 @@ typedef struct HeapScanDescData
 	 */
 	ScanDirection rs_dir;
 	BlockNumber rs_prefetch_block;
+
+	/*
+	 * For using read streams in ANALYZE.
+	 */
+	BlockSamplerData rs_bs;
+	BlockSamplerData rs_prefetch_bs;
 
 	/*
 	 * For parallel scans to store page allocation data.  NULL when not

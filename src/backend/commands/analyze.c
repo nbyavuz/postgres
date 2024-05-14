@@ -18,6 +18,7 @@
 
 #include "access/detoast.h"
 #include "access/genam.h"
+#include "access/heapam.h"
 #include "access/multixact.h"
 #include "access/relation.h"
 #include "access/table.h"
@@ -1103,20 +1104,6 @@ examine_attribute(Relation onerel, int attnum, Node *index_expr)
 }
 
 /*
- * Read stream callback returning the next BlockNumber as chosen by the
- * BlockSampling algorithm.
- */
-static BlockNumber
-block_sampling_read_stream_next(ReadStream *stream,
-								void *callback_private_data,
-								void *per_buffer_data)
-{
-	BlockSamplerData *bs = callback_private_data;
-
-	return BlockSampler_HasMore(bs) ? BlockSampler_Next(bs) : InvalidBlockNumber;
-}
-
-/*
  * acquire_sample_rows -- acquire a random sample of rows from the table
  *
  * Selected rows are returned in the caller-allocated array rows[], which
@@ -1168,7 +1155,7 @@ acquire_sample_rows(Relation onerel, int elevel,
 	TableScanDesc scan;
 	BlockNumber nblocks;
 	BlockNumber blksdone = 0;
-	ReadStream *stream;
+	int			prefetch_maximum = 0;	/* blocks to prefetch if enabled */
 
 	Assert(targrows > 0);
 
@@ -1191,18 +1178,51 @@ acquire_sample_rows(Relation onerel, int elevel,
 	scan = table_beginscan_analyze(onerel);
 	slot = table_slot_create(onerel, NULL);
 
-	stream = read_stream_begin_relation(READ_STREAM_MAINTENANCE,
-										vac_strategy,
-										scan->rs_rd,
-										MAIN_FORKNUM,
-										block_sampling_read_stream_next,
-										&bs,
-										0);
+	((HeapScanDesc) scan)->rs_bs = bs;
+
+#ifdef USE_PREFETCH
+	prefetch_maximum = get_tablespace_maintenance_io_concurrency(onerel->rd_rel->reltablespace);
+	((HeapScanDesc) scan)->rs_prefetch_bs = bs;
+#endif
+
+	/*
+	 * If we are doing prefetching, then go ahead and tell the kernel about
+	 * the first set of pages we are going to want.  This also moves our
+	 * iterator out ahead of the main one being used, where we will keep it so
+	 * that we're always pre-fetching out prefetch_maximum number of blocks
+	 * ahead.
+	 *
+	 * This gets called although there is no need to call this when read
+	 * stream API is used.
+	 */
+	table_scan_analyze_prefetch_block(scan, prefetch_maximum);
 
 	/* Outer loop over blocks to sample */
-	while (table_scan_analyze_next_block(scan, stream))
+	while (nblocks)
 	{
+		/* This gets called one time although there is no need to call
+		 * this when read stream API is used.
+		 */
+		BlockNumber targblock = InvalidBlockNumber;
+		/*
+		 * Maybe put unlikely here?
+		 */
+		if (!((HeapScanDesc) scan)->rs_read_stream)
+			targblock = BlockSampler_Next(&bs);
+
 		vacuum_delay_point();
+
+		table_scan_analyze_next_block(scan, targblock, vac_strategy);
+
+		/*
+		 * Make sure that every time the main BlockSampler is moved forward
+		 * that our prefetch BlockSampler also gets moved forward, so that we
+		 * always stay out ahead.
+		 *
+		 * This will not do anything if read stream API is used.
+		 */
+		table_scan_analyze_prefetch_block(scan, Min(1, prefetch_maximum));
+
 
 		while (table_scan_analyze_next_tuple(scan, OldestXmin, &liverows, &deadrows, slot))
 		{
@@ -1251,9 +1271,14 @@ acquire_sample_rows(Relation onerel, int elevel,
 
 		pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_DONE,
 									 ++blksdone);
+		nblocks--;
 	}
 
-	read_stream_end(stream);
+	/*
+	 * Use bs for both all AM implementations.
+	 */
+	if (((HeapScanDesc) scan)->rs_read_stream)
+		bs = ((HeapScanDesc) scan)->rs_bs;
 
 	ExecDropSingleTupleTableSlot(slot);
 	table_endscan(scan);

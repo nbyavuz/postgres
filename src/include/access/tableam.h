@@ -656,14 +656,12 @@ typedef struct TableAmRoutine
 									BufferAccessStrategy bstrategy);
 
 	/*
-	 * Prepare to analyze the next block in the read stream.  Returns false if
-	 * the stream is exhausted and true otherwise. The scan must have been
-	 * started with SO_TYPE_ANALYZE option.
-	 *
-	 * This routine holds a buffer pin and lock on the heap page.  They are
-	 * held until heapam_scan_analyze_next_tuple() returns false.  That is
-	 * until all the items of the heap page are analyzed.
+	 * Prepare to prefetch the next nblocks of the analyze. If there is a read
+	 * stream, do not prefetch because read stream has its own prefetch
+	 * mechanism.
 	 */
+	void		(*scan_analyze_prefetch_block) (TableScanDesc scan,
+												uint32 nblocks);
 
 	/*
 	 * Prepare to analyze block `blockno` of `scan`. The scan has been started
@@ -683,7 +681,8 @@ typedef struct TableAmRoutine
 	 * isn't one yet.
 	 */
 	bool		(*scan_analyze_next_block) (TableScanDesc scan,
-											ReadStream *stream);
+											BlockNumber blockno,
+											BufferAccessStrategy bstrategy);
 
 	/*
 	 * See table_scan_analyze_next_tuple().
@@ -1721,6 +1720,17 @@ table_relation_vacuum(Relation rel, struct VacuumParams *params,
 }
 
 /*
+ * Prepare to prefetch the next nblocks of the analyze. If there is a read
+ * stream, do not prefetch because read stream has its own prefetch
+ * mechanism.
+ */
+static inline void
+table_scan_analyze_prefetch_block(TableScanDesc scan, uint32 nblocks)
+{
+	return scan->rs_rd->rd_tableam->scan_analyze_prefetch_block(scan, nblocks);
+}
+
+/*
  * Prepare to analyze the next block in the read stream. The scan needs to
  * have been  started with table_beginscan_analyze().  Note that this routine
  * might acquire resources like locks that are held until
@@ -1729,9 +1739,10 @@ table_relation_vacuum(Relation rel, struct VacuumParams *params,
  * Returns false if block is unsuitable for sampling, true otherwise.
  */
 static inline bool
-table_scan_analyze_next_block(TableScanDesc scan, ReadStream *stream)
+table_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
+							  BufferAccessStrategy bstrategy)
 {
-	return scan->rs_rd->rd_tableam->scan_analyze_next_block(scan, stream);
+	return scan->rs_rd->rd_tableam->scan_analyze_next_block(scan, blockno, bstrategy);
 }
 
 /*

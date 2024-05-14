@@ -994,6 +994,54 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 }
 
 /*
+ * Read stream callback returning the next BlockNumber as chosen by the
+ * BlockSampling algorithm.
+ */
+static BlockNumber
+block_sampling_read_stream_next(ReadStream *stream,
+								void *callback_private_data,
+								void *per_buffer_data)
+{
+	BlockSamplerData *bs = callback_private_data;
+
+	return BlockSampler_HasMore(bs) ? BlockSampler_Next(bs) : InvalidBlockNumber;
+}
+
+
+/*
+ * Prepare to prefetch the next nblocks of the analyze. If there is a read
+ * stream, do not prefetch because read stream has its own prefetch
+ * mechanism.
+ */
+static void
+heapam_scan_analyze_prefetch_block(TableScanDesc scan, uint32 nblocks)
+{
+#ifdef USE_PREFETCH
+	HeapScanDesc hscan = (HeapScanDesc) scan;
+
+	/*
+	 * Read streams has their own prefetch mechanism, if there is no
+	 * read streams (meaning new AM is used instead of
+	 * heapam_scan_analyze_next_block() AM), fallback ot old prefetch
+	 * mechanism.
+	 */
+	if (likely(hscan->rs_read_stream))
+		return;
+
+	for (int i = 0; i < nblocks; i++)
+	{
+		BlockNumber prefetch_block;
+
+		if (!BlockSampler_HasMore(&(hscan->rs_prefetch_bs)))
+			break;
+
+		prefetch_block = BlockSampler_Next(&(hscan->rs_prefetch_bs));
+		PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, prefetch_block);
+	}
+#endif
+}
+
+/*
  * Prepare to analyze the next block in the read stream.  Returns false if
  * the stream is exhausted and true otherwise. The scan must have been started
  * with SO_TYPE_ANALYZE option.
@@ -1003,9 +1051,24 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
  * items of the heap page are analyzed.
  */
 static bool
-heapam_scan_analyze_next_block(TableScanDesc scan, ReadStream *stream)
+heapam_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
+							   BufferAccessStrategy bstrategy)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
+
+	/*
+	 * Create read stream object here
+	 */
+	if (unlikely(!(hscan->rs_read_stream)))
+	{
+		hscan->rs_read_stream = read_stream_begin_relation(READ_STREAM_MAINTENANCE,
+														   bstrategy,
+														   hscan->rs_base.rs_rd,
+														   MAIN_FORKNUM,
+														   block_sampling_read_stream_next,
+														   &(hscan->rs_bs),
+														   0);
+	}
 
 	/*
 	 * We must maintain a pin on the target page's buffer to ensure that
@@ -1015,9 +1078,7 @@ heapam_scan_analyze_next_block(TableScanDesc scan, ReadStream *stream)
 	 * re-acquire sharelock for each tuple, but since we aren't doing much
 	 * work per tuple, the extra lock traffic is probably better avoided.
 	 */
-	hscan->rs_cbuf = read_stream_next_buffer(stream, NULL);
-	if (!BufferIsValid(hscan->rs_cbuf))
-		return false;
+	hscan->rs_cbuf = read_stream_next_buffer(hscan->rs_read_stream, NULL);
 
 	LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);
 
@@ -2630,6 +2691,8 @@ static const TableAmRoutine heapam_methods = {
 	.relation_copy_data = heapam_relation_copy_data,
 	.relation_copy_for_cluster = heapam_relation_copy_for_cluster,
 	.relation_vacuum = heap_vacuum_rel,
+
+	.scan_analyze_prefetch_block = heapam_scan_analyze_prefetch_block,
 	.scan_analyze_next_block = heapam_scan_analyze_next_block,
 	.scan_analyze_next_tuple = heapam_scan_analyze_next_tuple,
 	.index_build_range_scan = heapam_index_build_range_scan,
