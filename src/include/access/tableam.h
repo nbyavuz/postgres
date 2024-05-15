@@ -69,6 +69,9 @@ typedef enum ScanOptions
 	 * needed. If table data may be needed, set SO_NEED_TUPLES.
 	 */
 	SO_NEED_TUPLES = 1 << 10,
+
+	/* use read streams in ANALYZE */
+	SO_USE_READ_STREAMS_IN_ANALYZE = 1 << 11,
 }			ScanOptions;
 
 /*

@@ -18,6 +18,7 @@
 
 #include "access/detoast.h"
 #include "access/genam.h"
+#include "access/heapam.h"
 #include "access/multixact.h"
 #include "access/relation.h"
 #include "access/table.h"
@@ -1103,6 +1104,20 @@ examine_attribute(Relation onerel, int attnum, Node *index_expr)
 }
 
 /*
+ * Read stream callback returning the next BlockNumber as chosen by the
+ * BlockSampling algorithm.
+ */
+static BlockNumber
+block_sampling_read_stream_next(ReadStream *stream,
+								void *callback_private_data,
+								void *per_buffer_data)
+{
+	BlockSamplerData *bs = callback_private_data;
+
+	return BlockSampler_HasMore(bs) ? BlockSampler_Next(bs) : InvalidBlockNumber;
+}
+
+/*
  * acquire_sample_rows -- acquire a random sample of rows from the table
  *
  * Selected rows are returned in the caller-allocated array rows[], which
@@ -1146,6 +1161,7 @@ acquire_sample_rows(Relation onerel, int elevel,
 	double		deadrows = 0;	/* # dead rows seen */
 	double		rowstoskip = -1;	/* -1 means not set yet */
 	uint32		randseed;		/* Seed for block sampler(s) */
+	bool		use_read_streams = false;
 	BlockNumber totalblocks;
 	TransactionId OldestXmin;
 	BlockSamplerData bs;
@@ -1170,13 +1186,6 @@ acquire_sample_rows(Relation onerel, int elevel,
 	randseed = pg_prng_uint32(&pg_global_prng_state);
 	nblocks = BlockSampler_Init(&bs, totalblocks, targrows, randseed);
 
-#ifdef USE_PREFETCH
-	prefetch_maximum = get_tablespace_maintenance_io_concurrency(onerel->rd_rel->reltablespace);
-	/* Create another BlockSampler, using the same seed, for prefetching */
-	if (prefetch_maximum)
-		(void) BlockSampler_Init(&prefetch_bs, totalblocks, targrows, randseed);
-#endif
-
 	/* Report sampling block numbers */
 	pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_TOTAL,
 								 nblocks);
@@ -1187,62 +1196,105 @@ acquire_sample_rows(Relation onerel, int elevel,
 	scan = table_beginscan_analyze(onerel);
 	slot = table_slot_create(onerel, NULL);
 
-#ifdef USE_PREFETCH
+	/*
+	 * SO_USE_READ_STREAMS_IN_ANALYZE flag is set in heap AM constructor,
+	 * which means heap AMs will be used. So, it is safe to use read streams
+	 * now.
+	 */
+	use_read_streams = scan->rs_flags & SO_USE_READ_STREAMS_IN_ANALYZE;
+
+	if (use_read_streams)
+	{
+		((HeapScanDesc) scan)->rs_read_stream = read_stream_begin_relation(READ_STREAM_MAINTENANCE,
+																		   vac_strategy,
+																		   scan->rs_rd,
+																		   MAIN_FORKNUM,
+																		   block_sampling_read_stream_next,
+																		   &bs,
+																		   0);
+	}
 
 	/*
-	 * If we are doing prefetching, then go ahead and tell the kernel about
-	 * the first set of pages we are going to want.  This also moves our
-	 * iterator out ahead of the main one being used, where we will keep it so
-	 * that we're always pre-fetching out prefetch_maximum number of blocks
-	 * ahead.
+	 * Read streams have their own prefetch mechanism, so do not prefetch when
+	 * the read streams are used. This applies for all of the prefetch code in
+	 * this function.
 	 */
-	if (prefetch_maximum)
+#ifdef USE_PREFETCH
+	if (!use_read_streams)
 	{
-		for (int i = 0; i < prefetch_maximum; i++)
+		prefetch_maximum = get_tablespace_maintenance_io_concurrency(onerel->rd_rel->reltablespace);
+		/* Create another BlockSampler, using the same seed, for prefetching */
+		if (prefetch_maximum)
+			(void) BlockSampler_Init(&prefetch_bs, totalblocks, targrows, randseed);
+	}
+#endif
+
+#ifdef USE_PREFETCH
+	if (!use_read_streams)
+	{
+		/*
+		 * If we are doing prefetching, then go ahead and tell the kernel
+		 * about the first set of pages we are going to want.  This also moves
+		 * our iterator out ahead of the main one being used, where we will
+		 * keep it so that we're always pre-fetching out prefetch_maximum
+		 * number of blocks ahead.
+		 */
+		if (prefetch_maximum)
 		{
-			BlockNumber prefetch_block;
+			for (int i = 0; i < prefetch_maximum; i++)
+			{
+				BlockNumber prefetch_block;
 
-			if (!BlockSampler_HasMore(&prefetch_bs))
-				break;
+				if (!BlockSampler_HasMore(&prefetch_bs))
+					break;
 
-			prefetch_block = BlockSampler_Next(&prefetch_bs);
-			PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, prefetch_block);
+				prefetch_block = BlockSampler_Next(&prefetch_bs);
+				PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, prefetch_block);
+			}
 		}
 	}
 #endif
 
 	/* Outer loop over blocks to sample */
-	while (BlockSampler_HasMore(&bs))
+	while (nblocks)
 	{
 		bool		block_accepted;
-		BlockNumber targblock = BlockSampler_Next(&bs);
+		BlockNumber targblock = InvalidBlockNumber;
 #ifdef USE_PREFETCH
 		BlockNumber prefetch_targblock = InvalidBlockNumber;
 
-		/*
-		 * Make sure that every time the main BlockSampler is moved forward
-		 * that our prefetch BlockSampler also gets moved forward, so that we
-		 * always stay out ahead.
-		 */
-		if (prefetch_maximum && BlockSampler_HasMore(&prefetch_bs))
-			prefetch_targblock = BlockSampler_Next(&prefetch_bs);
+		if (!use_read_streams)
+		{
+			/*
+			 * Make sure that every time the main BlockSampler is moved
+			 * forward that our prefetch BlockSampler also gets moved forward,
+			 * so that we always stay out ahead.
+			 */
+			if (prefetch_maximum && BlockSampler_HasMore(&prefetch_bs))
+				prefetch_targblock = BlockSampler_Next(&prefetch_bs);
+		}
 #endif
+
+		if (!use_read_streams)
+			targblock = BlockSampler_Next(&bs);
 
 		vacuum_delay_point();
 
 		block_accepted = table_scan_analyze_next_block(scan, targblock, vac_strategy);
 
 #ifdef USE_PREFETCH
-
-		/*
-		 * When pre-fetching, after we get a block, tell the kernel about the
-		 * next one we will want, if there's any left.
-		 *
-		 * We want to do this even if the table_scan_analyze_next_block() call
-		 * above decides against analyzing the block it picked.
-		 */
-		if (prefetch_maximum && prefetch_targblock != InvalidBlockNumber)
-			PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, prefetch_targblock);
+		if (!use_read_streams)
+		{
+			/*
+			 * When pre-fetching, after we get a block, tell the kernel about
+			 * the next one we will want, if there's any left.
+			 *
+			 * We want to do this even if the table_scan_analyze_next_block()
+			 * call above decides against analyzing the block it picked.
+			 */
+			if (prefetch_maximum && prefetch_targblock != InvalidBlockNumber)
+				PrefetchBuffer(scan->rs_rd, MAIN_FORKNUM, prefetch_targblock);
+		}
 #endif
 
 		/*
@@ -1299,6 +1351,7 @@ acquire_sample_rows(Relation onerel, int elevel,
 
 		pgstat_progress_update_param(PROGRESS_ANALYZE_BLOCKS_DONE,
 									 ++blksdone);
+		nblocks--;
 	}
 
 	ExecDropSingleTupleTableSlot(slot);

@@ -42,6 +42,7 @@
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "storage/procarray.h"
+#include "storage/read_stream.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
@@ -1008,19 +1009,19 @@ heapam_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
 	/*
 	 * We must maintain a pin on the target page's buffer to ensure that
 	 * concurrent activity - e.g. HOT pruning - doesn't delete tuples out from
-	 * under us.  Hence, pin the page until we are done looking at it.  We
-	 * also choose to hold sharelock on the buffer throughout --- we could
-	 * release and re-acquire sharelock for each tuple, but since we aren't
-	 * doing much work per tuple, the extra lock traffic is probably better
-	 * avoided.
+	 * under us.  It comes from the stream already pinned.   We also choose to
+	 * hold sharelock on the buffer throughout --- we could release and
+	 * re-acquire sharelock for each tuple, but since we aren't doing much
+	 * work per tuple, the extra lock traffic is probably better avoided.
 	 */
-	hscan->rs_cblock = blockno;
-	hscan->rs_cindex = FirstOffsetNumber;
-	hscan->rs_cbuf = ReadBufferExtended(scan->rs_rd, MAIN_FORKNUM,
-										blockno, RBM_NORMAL, bstrategy);
+	hscan->rs_cbuf = read_stream_next_buffer(hscan->rs_read_stream, NULL);
+	if (!BufferIsValid(hscan->rs_cbuf))
+		return false;
+
 	LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_SHARE);
 
-	/* in heap all blocks can contain tuples, so always return true */
+	hscan->rs_cblock = BufferGetBlockNumber(hscan->rs_cbuf);
+	hscan->rs_cindex = FirstOffsetNumber;
 	return true;
 }
 

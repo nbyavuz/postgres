@@ -1143,6 +1143,14 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 														  0);
 	}
 
+	/*
+	 * Set USE_READ_STREAMS_IN_ANALYZE flag here, then use this flag to decide
+	 * if read streams will be used in the acquire_sample_rows() function.
+	 */
+	if (scan->rs_base.rs_flags & SO_TYPE_ANALYZE)
+	{
+		scan->rs_base.rs_flags |= SO_USE_READ_STREAMS_IN_ANALYZE;
+	}
 
 	return (TableScanDesc) scan;
 }
