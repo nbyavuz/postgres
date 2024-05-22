@@ -1373,20 +1373,23 @@ endif
 zlibopt = get_option('zlib')
 zlib = not_found_dep
 if not zlibopt.disabled()
-  zlib_t = dependency('zlib', required: zlibopt)
+  zlib = dependency('zlib', required: false)
 
-  if zlib_t.type_name() == 'internal'
-    # if fallback was used, we don't need to test if headers are present (they
-    # aren't built yet, so we can't test)
-    zlib = zlib_t
-  elif not zlib_t.found()
-    warning('did not find zlib')
-  elif not cc.has_header('zlib.h',
-      args: test_c_args, include_directories: postgres_inc,
-      dependencies: [zlib_t], required: zlibopt)
-    warning('zlib header not found')
-  else
-    zlib = zlib_t
+  if zlib.found() and zlib.type_name() != 'internal'
+    if not cc.has_header('zlib.h',
+        args: test_c_args, include_directories: postgres_inc,
+        dependencies: zlib, required: false)
+      zlib = not_found_dep
+    endif
+  elif not zlib.found()
+    zlib_lib = cc.find_library('zlib',
+      dirs: test_lib_d,
+      header_include_directories: postgres_inc,
+      has_headers: ['zlib.h'],
+      required: zlibopt)
+    if zlib_lib.found()
+      zlib = declare_dependency(dependencies: zlib_lib, include_directories: postgres_inc)
+    endif
   endif
 
   if zlib.found()

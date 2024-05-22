@@ -520,6 +520,7 @@ WINDOWS_ENVIRONMENT_BASE: &WINDOWS_ENVIRONMENT_BASE
     PG_TEST_USE_UNIX_SOCKETS: 1
     PG_REGRESS_SOCK_DIR: "c:/cirrus/"
     DISK_SIZE: 50
+    IMAGE_FAMILY: pg-ci-windows-ci
 
   sysinfo_script: |
     chcp
@@ -543,7 +544,6 @@ task:
     # given that it explicitly prevents crash dumps from working...
     # 0x8001 is SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX
     CIRRUS_WINDOWS_ERROR_MODE: 0x8001
-    IMAGE_FAMILY: pg-ci-windows-ci-vs-2019
 
   <<: *windows_task_template
 
@@ -562,7 +562,7 @@ task:
   # Use /DEBUG:FASTLINK to avoid high memory usage during linking
   configure_script: |
     vcvarsall x64
-    meson setup --backend ninja --buildtype debug -Dc_link_args=/DEBUG:FASTLINK -Dcassert=true -Dinjection_points=true -Db_pch=true -Dextra_lib_dirs=c:\openssl\1.1\lib -Dextra_include_dirs=c:\openssl\1.1\include -DTAR=%TAR% -DPG_TEST_EXTRA="%PG_TEST_EXTRA%" build
+    meson setup --backend ninja --buildtype debug -Dzlib=enabled -Dc_link_args=/DEBUG:FASTLINK -Dcassert=true -Dinjection_points=true -Db_pch=true -Dextra_lib_dirs=c:\openssl\1.1\lib,c:\zlib\lib -Dextra_include_dirs=c:\openssl\1.1\include,c:\zlib\include -DTAR=%TAR% -DPG_TEST_EXTRA="%PG_TEST_EXTRA%" build
 
   build_script: |
     vcvarsall x64
@@ -604,7 +604,6 @@ task:
     # Start bash in current working directory
     CHERE_INVOKING: 1
     BASH: C:\msys64\usr\bin\bash.exe -l
-    IMAGE_FAMILY: pg-ci-windows-ci-mingw64
 
   <<: *windows_task_template
 
