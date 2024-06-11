@@ -91,11 +91,8 @@ task:
     # 0x8001 is SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX
     CIRRUS_WINDOWS_ERROR_MODE: 0x8001
 
-  azure_container_instance:
+  windows_container:
     image: us-docker.pkg.dev/pg-ci-images/ci/windows_ci_vs_2019:latest
-    resource_group: CirrusCI
-    region: eastus
-    platform: windows
     cpu: $CPUS
     memory: $MEMORY
 
@@ -140,11 +137,8 @@ task:
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*mingw.*'
   # otherwise it'll be sorted before other tasks
 
-  azure_container_instance:
+  windows_container:
     image: us-docker.pkg.dev/pg-ci-images/ci/windows_ci_mingw64:latest
-    resource_group: CirrusCI
-    region: eastus
-    platform: windows
     cpu: $CPUS
     memory: $MEMORY
 
