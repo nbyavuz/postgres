@@ -571,7 +571,7 @@ task:
   # Use /DEBUG:FASTLINK to avoid high memory usage during linking
   configure_script: |
     vcvarsall x64
-    set CC=c:\ProgramData\chocolatey\lib\ccache\tools\ccache-4.10-windows-x86_64\ccache.exe cl.exe
+    set CC=ccache.exe cl.exe
     meson setup build --backend ninja --buildtype debugoptimized -Dc_link_args=/DEBUG:FASTLINK -Dcassert=true -Dinjection_points=true -Db_pch=true -Dextra_lib_dirs=c:\openssl\1.1\lib -Dextra_include_dirs=c:\openssl\1.1\include -DTAR=%TAR% -DPG_TEST_EXTRA="%PG_TEST_EXTRA%" -Dc_args="/Z7"
 
   build_script: |
