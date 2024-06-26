@@ -545,6 +545,10 @@ task:
     # 0x8001 is SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX
     CIRRUS_WINDOWS_ERROR_MODE: 0x8001
 
+    PATH: ${PG_DEPS_PATH}${PATH}
+    PKG_CONFIG: ${PG_DEPS_PKG_CONFIG}
+    PKG_CONFIG_PATH: ${PG_DEPS_PKG_CONFIG_PATH}
+
   <<: *windows_task_template
 
   depends_on: SanityCheck
@@ -568,7 +572,7 @@ task:
     REM libintl doesn't have a .pc file, so we need to ensure it's discoverable via libdir/include
     REM might want to disable nls, it makes the test considerably slower
     REM gssapi cause test failures due to debugging output it generates, not sure why yet
-    meson setup --backend ninja --buildtype debug -Dc_link_args=/DEBUG:FASTLINK -Dcassert=true -Dinjection_points=true -Db_pch=true -DTAR=%TAR% -DPG_TEST_EXTRA="%PG_TEST_EXTRA%" -Dextra_include_dirs=c:/vcpkg/installed/x64-windows/include -Dextra_lib_dirs=c:/vcpkg/installed/x64-windows/debug/lib -Dgssapi=disabled -Dnls=enabled build
+    meson setup --backend ninja --buildtype debug -Dc_link_args=/DEBUG:FASTLINK -Dcassert=true -Dinjection_points=true -Db_pch=true -DTAR=%TAR% -DPG_TEST_EXTRA="%PG_TEST_EXTRA%" -Dextra_include_dirs=%PG_DEPS_EXTRA_INCLUDE_DIRS% -Dextra_lib_dirs=%PG_DEPS_EXTRA_LIB_DIRS% -Dgssapi=disabled -Dnls=enabled build
 
   build_script: |
     vcvarsall x64
