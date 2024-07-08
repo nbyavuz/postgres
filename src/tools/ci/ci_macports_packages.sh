@@ -13,7 +13,19 @@ set -e
 
 packages="$@"
 
-macports_url="https://github.com/macports/macports-base/releases/download/v2.8.1/MacPorts-2.8.1-13-Ventura.pkg"
+# Upstream Postgres CI uses MacOS Ventura but forks of Postgres uses
+# MacOs Sonoma. So, we need to check the MacOS version to download the
+# correct MacPorts package.
+mac_major_version=$(sw_vers -productVersion | cut -d '.' -f1)
+if [ "${mac_major_version}" == "13" ]; then
+    macports_pkg="MacPorts-2.8.1-13-Ventura.pkg"
+elif [ "${mac_major_version}" == "14" ]; then
+    macports_pkg="MacPorts-2.8.1-14-Sonoma.pkg"
+else
+    echo "Unsupported macOS version: ${mac_major_version}"
+    exit 1
+fi
+macports_url="https://github.com/macports/macports-base/releases/download/v2.8.1/${macports_pkg}"
 cache_dmg="macports.hfs.dmg"
 
 if [ "$CIRRUS_CI" != "true" ]; then
