@@ -47,7 +47,7 @@ option('injection_points', type: 'boolean', value: false,
   description: 'Enable injection points')
 
 option('PG_TEST_EXTRA', type: 'string', value: '',
-  description: 'Enable selected extra tests')
+  description: 'Enable selected extra tests, please note that this configure option is overridden by PG_TEST_EXTRA environment variable if it exists')
 
 option('atomics', type: 'boolean', value: true,
   description: 'Use atomic operations')

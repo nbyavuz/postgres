@@ -13,6 +13,7 @@ parser.add_argument('--basedir', help='base directory of test', type=str)
 parser.add_argument('--testgroup', help='test group', type=str)
 parser.add_argument('--testname', help='test name', type=str)
 parser.add_argument('--skip', help='skip test (with reason)', type=str)
+parser.add_argument('--pg_test_extra', help='extra tests', type=str)
 parser.add_argument('test_command', nargs='*')
 
 args = parser.parse_args()
@@ -40,6 +41,11 @@ open(os.path.join(testdir, 'test.start'), 'x')
 env_dict = {**os.environ,
             'TESTDATADIR': os.path.join(testdir, 'data'),
             'TESTLOGDIR': os.path.join(testdir, 'log')}
+
+# If PG_TEST_EXTRA is not set in the environment, then look for its Meson
+# configure option.
+if "PG_TEST_EXTRA" not in os.environ and args.pg_test_extra:
+    env_dict["PG_TEST_EXTRA"] = args.pg_test_extra
 
 sp = subprocess.Popen(args.test_command, env=env_dict, stdout=subprocess.PIPE)
 # Meson categorizes a passing TODO test point as bad
