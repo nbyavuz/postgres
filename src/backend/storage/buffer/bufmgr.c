@@ -143,7 +143,7 @@ typedef struct SMgrSortArray
 struct copy_storage_using_buffer_read_stream_private
 {
 	BlockNumber blocknum;
-	BlockNumber last_block;
+	BlockNumber nblocks;
 };
 
 /*
@@ -157,7 +157,7 @@ copy_storage_using_buffer_read_stream_next_block(ReadStream *stream,
 {
 	struct copy_storage_using_buffer_read_stream_private *p = callback_private_data;
 
-	if (p->blocknum < p->last_block)
+	if (p->blocknum < p->nblocks)
 		return p->blocknum++;
 
 	return InvalidBlockNumber;
@@ -4709,7 +4709,7 @@ RelationCopyStorageUsingBuffer(RelFileLocator srclocator,
 	Page		dstPage;
 	bool		use_wal;
 	BlockNumber nblocks;
-	BlockNumber blkno;
+	BlockNumber blkno = 0;
 	PGIOAlignedBlock buf;
 	BufferAccessStrategy bstrategy_src;
 	BufferAccessStrategy bstrategy_dst;
@@ -4745,8 +4745,8 @@ RelationCopyStorageUsingBuffer(RelFileLocator srclocator,
 	bstrategy_dst = GetAccessStrategy(BAS_BULKWRITE);
 
 	/* Initalize streaming read */
-	p.blocknum = 0;
-	p.last_block = nblocks;
+	p.blocknum = blkno;
+	p.nblocks = nblocks;
 	src_smgr = smgropen(srclocator, INVALID_PROC_NUMBER);
 	src_stream = read_stream_begin_smgr_relation(READ_STREAM_FULL,
 												 bstrategy_src,
@@ -4758,7 +4758,7 @@ RelationCopyStorageUsingBuffer(RelFileLocator srclocator,
 												 0);
 
 	/* Iterate over each block of the source relation file. */
-	for (blkno = 0; blkno < nblocks; blkno++)
+	for (; blkno < nblocks; blkno++)
 	{
 		CHECK_FOR_INTERRUPTS();
 
