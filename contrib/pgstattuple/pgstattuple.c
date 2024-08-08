@@ -355,26 +355,35 @@ pgstat_heap(Relation rel, FunctionCallInfo fcinfo)
 			stat.dead_tuple_count++;
 		}
 
-		LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
-
-		/*
-		 * To avoid physically reading the table twice, try to do the
-		 * free-space scan in parallel with the heap scan.  However,
-		 * heap_getnext may find no tuples on a given page, so we cannot
-		 * simply examine the pages returned by the heap scan.
-		 */
 		tupblock = ItemPointerGetBlockNumber(&tuple->t_self);
 
-		while (block <= tupblock)
+		/*
+		* To avoid physically reading the table twice, try to do the
+		* free-space scan in parallel with the heap scan.  However,
+		* heap_getnext may find no tuples on a given page, so we cannot
+		* simply examine the pages returned by the heap scan.
+		*/
+		if (block == tupblock)
 		{
-			CHECK_FOR_INTERRUPTS();
-
-			buffer = ReadBufferExtended(rel, MAIN_FORKNUM, block,
-										RBM_NORMAL, hscan->rs_strategy);
-			LockBuffer(buffer, BUFFER_LOCK_SHARE);
-			stat.free_space += PageGetHeapFreeSpace((Page) BufferGetPage(buffer));
-			UnlockReleaseBuffer(buffer);
+			stat.free_space += PageGetHeapFreeSpace((Page) BufferGetPage(hscan->rs_cbuf));
+			LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
 			block++;
+		}
+		else
+		{
+			LockBuffer(hscan->rs_cbuf, BUFFER_LOCK_UNLOCK);
+
+			while (block <= tupblock)
+			{
+				CHECK_FOR_INTERRUPTS();
+
+				buffer = ReadBufferExtended(rel, MAIN_FORKNUM, block,
+											RBM_NORMAL, hscan->rs_strategy);
+				LockBuffer(buffer, BUFFER_LOCK_SHARE);
+				stat.free_space += PageGetHeapFreeSpace((Page) BufferGetPage(buffer));
+				UnlockReleaseBuffer(buffer);
+				block++;
+			}
 		}
 	}
 
