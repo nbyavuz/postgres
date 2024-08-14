@@ -2465,7 +2465,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 			} while (nleft > 0);
 
 			pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL,
-									IOOP_WRITE, io_start, npages);
+									IOOP_WRITE, io_start, npages, npages * XLOG_BLCKSZ);
 
 			npages = 0;
 
@@ -3279,7 +3279,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 	pgstat_report_wait_end();
 
 	pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_INIT, IOOP_WRITE,
-							io_start, 1);
+							io_start, 1, wal_segment_size);
 
 	if (save_errno)
 	{
@@ -3313,7 +3313,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 	pgstat_report_wait_end();
 
 	pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_INIT,
-							IOOP_FSYNC, io_start, 1);
+							IOOP_FSYNC, io_start, 1, 0);
 
 	if (close(fd) != 0)
 		ereport(ERROR,
@@ -8713,7 +8713,7 @@ issue_xlog_fsync(int fd, XLogSegNo segno, TimeLineID tli)
 	pgstat_report_wait_end();
 
 	pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_FSYNC,
-							io_start, 1);
+							io_start, 1, 0);
 
 	PendingWalStats.wal_sync++;
 }

@@ -24,6 +24,7 @@
 
 typedef struct PgStat_PendingIO
 {
+	PgStat_Counter bytes[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	instr_time	pending_times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 } PgStat_PendingIO;
@@ -75,20 +76,22 @@ pgstat_bktype_io_stats_valid(PgStat_BktypeIO *backend_io,
 }
 
 void
-pgstat_count_io_op(IOObject io_object, IOContext io_context, IOOp io_op)
+pgstat_count_io_op(IOObject io_object, IOContext io_context, IOOp io_op, uint32 bytes)
 {
-	pgstat_count_io_op_n(io_object, io_context, io_op, 1);
+	pgstat_count_io_op_n(io_object, io_context, io_op, 1, bytes);
 }
 
 void
-pgstat_count_io_op_n(IOObject io_object, IOContext io_context, IOOp io_op, uint32 cnt)
+pgstat_count_io_op_n(IOObject io_object, IOContext io_context, IOOp io_op, uint32 cnt, uint32 bytes)
 {
 	Assert((unsigned int) io_object < IOOBJECT_NUM_TYPES);
 	Assert((unsigned int) io_context < IOCONTEXT_NUM_TYPES);
 	Assert((unsigned int) io_op < IOOP_NUM_TYPES);
 	Assert(pgstat_tracks_io_op(MyBackendType, io_object, io_context, io_op));
-
+	/* Only IOOP_READ, IOOP_WRITE and IOOP_EXTEND can do I/O in bytes. */
+	Assert(bytes == 0 || (io_op == IOOP_READ || io_op == IOOP_WRITE || io_op == IOOP_EXTEND));
 	PendingIOStats.counts[io_object][io_context][io_op] += cnt;
+	PendingIOStats.bytes[io_object][io_context][io_op] += bytes;
 
 	have_iostats = true;
 }
@@ -135,7 +138,7 @@ pgstat_should_track_io_time(IOObject io_object)
  */
 void
 pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
-						instr_time start_time, uint32 cnt)
+						instr_time start_time, uint32 cnt, uint32 bytes)
 {
 	/*
 	 * B_WAL_RECEIVER backend does IOOBJECT_WAL IOObject & IOOP_READ IOOp IOs
@@ -190,7 +193,7 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 					   io_time);
 	}
 
-	pgstat_count_io_op_n(io_object, io_context, io_op, cnt);
+	pgstat_count_io_op_n(io_object, io_context, io_op, cnt, bytes);
 }
 
 PgStat_IO *
@@ -237,6 +240,9 @@ pgstat_flush_io(bool nowait)
 
 				bktype_shstats->counts[io_object][io_context][io_op] +=
 					PendingIOStats.counts[io_object][io_context][io_op];
+
+				bktype_shstats->bytes[io_object][io_context][io_op] +=
+					PendingIOStats.bytes[io_object][io_context][io_op];
 
 				time = PendingIOStats.pending_times[io_object][io_context][io_op];
 

@@ -3445,7 +3445,7 @@ retry:
 	pgstat_report_wait_end();
 
 	pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
-							io_start, 1);
+							io_start, 1, XLOG_BLCKSZ);
 
 	Assert(targetSegNo == readSegNo);
 	Assert(targetPageOff == readOff);
