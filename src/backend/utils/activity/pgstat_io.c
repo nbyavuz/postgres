@@ -24,7 +24,7 @@
 
 typedef struct PgStat_PendingIO
 {
-	PgStat_Counter bytes[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	uint64		bytes[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 	instr_time	pending_times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
 } PgStat_PendingIO;
@@ -76,19 +76,19 @@ pgstat_bktype_io_stats_valid(PgStat_BktypeIO *backend_io,
 }
 
 void
-pgstat_count_io_op(IOObject io_object, IOContext io_context, IOOp io_op, uint32 bytes)
+pgstat_count_io_op(IOObject io_object, IOContext io_context, IOOp io_op, uint64 bytes)
 {
 	pgstat_count_io_op_n(io_object, io_context, io_op, 1, bytes);
 }
 
 void
-pgstat_count_io_op_n(IOObject io_object, IOContext io_context, IOOp io_op, uint32 cnt, uint32 bytes)
+pgstat_count_io_op_n(IOObject io_object, IOContext io_context, IOOp io_op, uint32 cnt, uint64 bytes)
 {
 	Assert((unsigned int) io_object < IOOBJECT_NUM_TYPES);
 	Assert((unsigned int) io_context < IOCONTEXT_NUM_TYPES);
 	Assert((unsigned int) io_op < IOOP_NUM_TYPES);
 	Assert(pgstat_tracks_io_op(MyBackendType, io_object, io_context, io_op));
-	/* Only IOOP_READ, IOOP_WRITE and IOOP_EXTEND can do I/O in bytes. */
+	/* Only IOOP_READ, IOOP_WRITE and IOOP_EXTEND can do IO in bytes. */
 	Assert(bytes == 0 || (io_op == IOOP_READ || io_op == IOOP_WRITE || io_op == IOOP_EXTEND));
 	PendingIOStats.counts[io_object][io_context][io_op] += cnt;
 	PendingIOStats.bytes[io_object][io_context][io_op] += bytes;
@@ -138,7 +138,7 @@ pgstat_should_track_io_time(IOObject io_object)
  */
 void
 pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
-						instr_time start_time, uint32 cnt, uint32 bytes)
+						instr_time start_time, uint32 cnt, uint64 bytes)
 {
 	/*
 	 * B_WAL_RECEIVER backend does IOOBJECT_WAL IOObject & IOOP_READ IOOp IOs
@@ -282,30 +282,6 @@ pgstat_get_io_context_name(IOContext io_context)
 
 	elog(ERROR, "unrecognized IOContext value: %d", io_context);
 	pg_unreachable();
-}
-
-/*
- * Get the number of bytes associated to an operation depending on
- * an IOObject and an IOContext.
- *
- * Returns BLCKSZ by default because that is what most of the
- * IOObject/IOContext combinations use.  The number of bytes for an
- * IOOBJECT_WAL depends on the context.
- */
-int
-pgstat_get_io_op_bytes(IOObject io_object, IOContext io_context)
-{
-	if (io_object == IOOBJECT_WAL)
-	{
-		if (io_context == IOCONTEXT_NORMAL)
-			return XLOG_BLCKSZ;
-		else if (io_context == IOCONTEXT_INIT)
-			return wal_segment_size;
-
-		Assert(false);			/* not reachable */
-	}
-
-	return BLCKSZ;
 }
 
 const char *
