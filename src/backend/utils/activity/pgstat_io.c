@@ -141,18 +141,6 @@ pgstat_count_io_op_time(IOObject io_object, IOContext io_context, IOOp io_op,
 						instr_time start_time, uint32 cnt, uint64 bytes)
 {
 	/*
-	 * B_WAL_RECEIVER backend does IOOBJECT_WAL IOObject & IOOP_READ IOOp IOs
-	 * but these IOs are not countable for now because IOOP_READ IOs' op_bytes
-	 * (number of bytes per unit of I/O) might not be the same all the time.
-	 * The current implementation requires that the op_bytes must be the same
-	 * for the same IOObject, IOContext and IOOp. To avoid confusion, the
-	 * B_WAL_RECEIVER backend & IOOBJECT_WAL IOObject IOs are disabled for
-	 * now.
-	 */
-	if (MyBackendType == B_WAL_RECEIVER && io_object == IOOBJECT_WAL)
-		return;
-
-	/*
 	 * Accumulate timing data.  pgstat_count_buffer is for pgstat_database. As
 	 * pg_stat_database only counts blk_read_time and blk_write_time, it is
 	 * set for IOOP_READ and IOOP_WRITE.
@@ -386,15 +374,6 @@ pgstat_tracks_io_bktype(BackendType bktype)
 		case B_INVALID:
 		case B_ARCHIVER:
 		case B_LOGGER:
-		case B_WAL_RECEIVER:
-
-			/*
-			 * B_WAL_RECEIVER can do IOs but it is disabled for now to avoid
-			 * confusion. See comment at the top of the
-			 * pgstat_count_io_op_time() function.
-			 */
-
-		case B_WAL_SUMMARIZER:
 			return false;
 
 		case B_AUTOVAC_LAUNCHER:
@@ -406,7 +385,9 @@ pgstat_tracks_io_bktype(BackendType bktype)
 		case B_SLOTSYNC_WORKER:
 		case B_STANDALONE_BACKEND:
 		case B_STARTUP:
+		case B_WAL_RECEIVER:
 		case B_WAL_SENDER:
+		case B_WAL_SUMMARIZER:
 		case B_WAL_WRITER:
 			return true;
 	}
@@ -508,8 +489,13 @@ pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 	/*
 	 * Some BackendTypes will not do certain IOOps.
 	 */
-	if ((bktype == B_BG_WRITER || bktype == B_CHECKPOINTER) &&
+	if ((bktype == B_BG_WRITER) &&
 		(io_op == IOOP_READ || io_op == IOOP_EVICT || io_op == IOOP_HIT))
+		return false;
+
+	if ((bktype == B_CHECKPOINTER) &&
+		((io_object != IOOBJECT_WAL && io_op == IOOP_READ) ||
+		 (io_op == IOOP_EVICT || io_op == IOOP_HIT)))
 		return false;
 
 	if ((bktype == B_AUTOVAC_LAUNCHER || bktype == B_BG_WRITER ||
@@ -517,10 +503,12 @@ pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 		return false;
 
 	/*
-	 * Most BackendTypes don't do reads with IOOBJECT_WAL.
+	 * Some BackendTypes don't do reads with IOOBJECT_WAL.
 	 */
 	if (io_object == IOOBJECT_WAL && io_op == IOOP_READ &&
-		!(bktype == B_STANDALONE_BACKEND || bktype == B_STARTUP))
+		(bktype == B_WAL_RECEIVER || bktype == B_BG_WRITER ||
+		 bktype == B_AUTOVAC_WORKER || bktype == B_AUTOVAC_WORKER ||
+		 bktype == B_WAL_WRITER))
 		return false;
 
 	/*
