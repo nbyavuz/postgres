@@ -39,25 +39,6 @@ typedef enum
 
 static PGIOAlignedBlock blockbuffer;
 
-struct pg_prewarm_read_stream_private
-{
-	BlockNumber blocknum;
-	int64		last_block;
-};
-
-static BlockNumber
-pg_prewarm_read_stream_next_block(ReadStream *stream,
-								  void *callback_private_data,
-								  void *per_buffer_data)
-{
-	struct pg_prewarm_read_stream_private *p = callback_private_data;
-
-	if (p->blocknum <= p->last_block)
-		return p->blocknum++;
-
-	return InvalidBlockNumber;
-}
-
 /*
  * pg_prewarm(regclass, mode text, fork text,
  *			  first_block int8, last_block int8)
@@ -149,7 +130,15 @@ pg_prewarm(PG_FUNCTION_ARGS)
 							(long long) (nblocks - 1))));
 	}
 	if (PG_ARGISNULL(4))
+	{
 		last_block = nblocks - 1;
+		if (last_block < 0)
+		{
+			/* Close relation, release lock. */
+			relation_close(rel, AccessShareLock);
+			PG_RETURN_INT64(0);
+		}
+	}
 	else
 	{
 		last_block = PG_GETARG_INT64(4);
@@ -203,7 +192,7 @@ pg_prewarm(PG_FUNCTION_ARGS)
 	}
 	else if (ptype == PREWARM_BUFFER)
 	{
-		struct pg_prewarm_read_stream_private p;
+		BlockRangeReadStreamPrivate p;
 		ReadStream *stream;
 
 		/*
@@ -218,7 +207,7 @@ pg_prewarm(PG_FUNCTION_ARGS)
 											NULL,
 											rel,
 											forkNumber,
-											pg_prewarm_read_stream_next_block,
+											block_range_read_stream_cb,
 											&p,
 											0);
 
