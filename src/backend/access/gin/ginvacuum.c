@@ -23,6 +23,7 @@
 #include "storage/indexfsm.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
+#include "storage/read_stream.h"
 #include "utils/memutils.h"
 
 struct GinVacuumState
@@ -684,6 +685,12 @@ ginbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	return gvs.result;
 }
 
+struct gin_vacuum_cleanup_read_stream_private
+{
+	BlockNumber blocknum;
+	BlockNumber npages;
+};
+
 IndexBulkDeleteResult *
 ginvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
@@ -694,6 +701,8 @@ ginvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 	BlockNumber totFreePages;
 	GinState	ginstate;
 	GinStatsData idxStat;
+	ReadStream *stream;
+	BlockRangeReadStreamPrivate p;
 
 	/*
 	 * In an autovacuum analyze, we want to clean up pending insertions.
@@ -744,6 +753,19 @@ ginvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 
 	totFreePages = 0;
 
+	/* Set up the private state for our streaming buffer read callback. */
+	p.blocknum = GIN_ROOT_BLKNO;
+	p.nblocks = npages;
+
+	stream = read_stream_begin_relation(READ_STREAM_FULL,
+										NULL,
+										index,
+										MAIN_FORKNUM,
+										block_range_read_stream_cb,
+										&p,
+										0);
+
+
 	for (blkno = GIN_ROOT_BLKNO; blkno < npages; blkno++)
 	{
 		Buffer		buffer;
@@ -751,8 +773,7 @@ ginvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 
 		vacuum_delay_point();
 
-		buffer = ReadBufferExtended(index, MAIN_FORKNUM, blkno,
-									RBM_NORMAL, info->strategy);
+		buffer = read_stream_next_buffer(stream, NULL);
 		LockBuffer(buffer, GIN_SHARE);
 		page = (Page) BufferGetPage(buffer);
 
@@ -776,6 +797,8 @@ ginvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 
 		UnlockReleaseBuffer(buffer);
 	}
+	Assert(read_stream_next_buffer(stream, NULL) == InvalidBuffer);
+	read_stream_end(stream);
 
 	/* Update the metapage with accurate page and entry counts */
 	idxStat.nTotalPages = npages;
