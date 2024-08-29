@@ -34,8 +34,8 @@
 #include "replication/origin.h"
 
 #ifndef FRONTEND
-#include "pgstat.h"
 #include "utils/pgstat_internal.h"
+#include "pgstat.h"
 #else
 #include "common/logging.h"
 #endif
@@ -172,12 +172,6 @@ XLogReaderFree(XLogReaderState *state)
 		pfree(state->readRecordBuf);
 	pfree(state->readBuf);
 	pfree(state);
-
-// #ifndef FRONTEND
-// 	/* Report pending statistics to the cumulative stats system */
-// 	/* XXX: This did not work */
-// 	pgstat_flush_io(false);
-// #endif
 }
 
 /*
@@ -1577,9 +1571,6 @@ WALRead(XLogReaderState *state,
 
 		pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
 								io_start, 1, readbytes);
-		/* XXX: Do not always flush. */
-		/* Report pending statistics to the cumulative stats system */
-		pgstat_flush_io(false);
 #endif
 
 		if (readbytes <= 0)
