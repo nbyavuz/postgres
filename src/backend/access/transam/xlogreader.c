@@ -172,6 +172,9 @@ XLogReaderFree(XLogReaderState *state)
 		pfree(state->readRecordBuf);
 	pfree(state->readBuf);
 	pfree(state);
+#ifndef FRONTEND
+	pgstat_flush_io(false);
+#endif
 }
 
 /*
