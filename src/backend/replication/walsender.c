@@ -89,6 +89,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
+#include "utils/pgstat_internal.h"
 #include "utils/pg_lsn.h"
 #include "utils/ps_status.h"
 #include "utils/timeout.h"
@@ -3486,6 +3487,11 @@ WalSndDone(WalSndSendDataCallback send_data)
 		EndCommand(&qc, DestRemote, false);
 		pq_flush();
 
+		/*
+		 * Why recovery/027_stream_regress fail if walsender does not flush
+		 * stats
+		 */
+		pgstat_flush_io(false);
 		proc_exit(0);
 	}
 	if (!waiting_for_ping_response)
