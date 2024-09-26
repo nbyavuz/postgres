@@ -12,6 +12,8 @@ parser.add_argument('--srcdir', help='source directory of test', type=str)
 parser.add_argument('--basedir', help='base directory of test', type=str)
 parser.add_argument('--testgroup', help='test group', type=str)
 parser.add_argument('--testname', help='test name', type=str)
+parser.add_argument('--schedule', help='schedule tests', nargs='*')
+parser.add_argument('--tests', help='tests', nargs='*')
 parser.add_argument('--skip', help='skip test (with reason)', type=str)
 parser.add_argument('test_command', nargs='*')
 
@@ -40,6 +42,18 @@ open(os.path.join(testdir, 'test.start'), 'x')
 env_dict = {**os.environ,
             'TESTDATADIR': os.path.join(testdir, 'data'),
             'TESTLOGDIR': os.path.join(testdir, 'log')}
+
+# Symmetric behaviour with make check-tests. If TESTS environment variable is
+# set, only run these tests in regress/regress test. Note that setup suite
+# tests (at least tmp_install and initdb_cache tests) may need to be run before
+# running these tests.
+if "TESTS" in env_dict and args.testgroup == 'regress' and args.testname == 'regress':
+    args.test_command.extend(env_dict["TESTS"].split(' '))
+else:
+    if args.schedule:
+        args.test_command += ['--schedule', ' '.join(args.schedule)]
+    if args.tests:
+        args.test_command.extend(args.tests)
 
 sp = subprocess.Popen(args.test_command, env=env_dict, stdout=subprocess.PIPE)
 # Meson categorizes a passing TODO test point as bad
