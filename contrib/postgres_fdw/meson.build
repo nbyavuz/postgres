@@ -55,3 +55,10 @@ tests += {
     ],
   },
 }
+
+meson_extension_tests += {
+  'name': 'postgres_fdw',
+  'kind': 'pkg_config',
+  'sd': meson.current_source_dir(),
+  'input': files('meson-test.build'),
+}

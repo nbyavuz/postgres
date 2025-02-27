@@ -15,3 +15,10 @@ auth_delay = shared_module('auth_delay',
   kwargs: contrib_mod_args,
 )
 contrib_targets += auth_delay
+
+meson_extension_tests += {
+  'name': 'auth_delay',
+  'kind': 'pkg_config',
+  'sd': meson.current_source_dir(),
+  'input': files('meson-test.build'),
+}

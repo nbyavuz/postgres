@@ -3268,6 +3268,7 @@ nls_targets = []
 # Define the tests to distribute them to the correct test styles later
 test_deps = []
 tests = []
+meson_extension_tests = []
 
 
 # Default options for targets
@@ -3824,6 +3825,41 @@ sys.exit(sp.returncode)
      suite: ['setup'])
 
 
+# pkgconfig is not available on Windows, so skip it.
+if host_machine.system() != 'windows'
+  # it seems freebsd doesn't use libdir for pkgconfig path
+  if host_system == 'freebsd'
+    pkgconf_installdir =  dir_prefix / 'libdata' / 'pkgconfig'
+  else
+    pkgconf_installdir = dir_prefix / dir_lib / 'pkgconfig'
+  endif
+  test_pkg_conf_file = files('src/tools/test_meson_extensions')
+
+  foreach test : meson_extension_tests
+    if test['kind'] not in ['pkg_config']
+      error('unknown kind @0@ of test in @1@'.format(test['kind'], test['sd']))
+    endif
+
+    test_group = 'meson_@0@_extensions'.format(test['kind'])
+
+    test(test_group / test['name'],
+        test_pkg_conf_file,
+        args: [
+          '--meson', meson_bin.full_path(),
+          '--meson_args', meson_args,
+          '--input', test['input'],
+          '--test_source_dir', test['sd'],
+          '--test_dir', test_result_dir / 'meson_extensions' / test['name'],
+          '--builddir', meson.project_build_root(),
+          '--pkg_conf_path', get_option('pkg_config_path'),
+          '--',
+            cc.cmd_array(),
+          ],
+          suite: test_group,
+        )
+
+  endforeach
+endif
 
 ###############################################################
 # Test Generation

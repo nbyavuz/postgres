@@ -1,0 +1,20 @@
+# Copyright (c) 2022-2025, PostgreSQL Global Development Group
+
+project('auth_delay', 'c')
+
+# This file will be moved to another directory during testing. By using
+# 'meson_source_dir', we ensure that the correct Meson source directory is
+# used.
+auth_delay_path = get_option('meson_source_dir')
+
+auth_delay_sources = files(
+  auth_delay_path / 'auth_delay.c',
+)
+
+pg_ext = dependency('postgresql-extension-warnings')
+
+auth_delay = shared_module('auth_delay',
+  auth_delay_sources,
+  dependencies: pg_ext,
+  install_dir: pg_ext.get_variable(pkgconfig: 'dir_mod'),
+)
