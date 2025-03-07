@@ -165,6 +165,12 @@ postgres = executable('postgres',
 
 backend_targets += postgres
 
+bitcode_modules += {
+  'name': 'postgres',
+  'target': postgres_lib,
+  'srcfiles': backend_sources,
+}
+
 pg_mod_c_args = cflags_mod
 pg_mod_cxx_args = cxxflags_mod
 pg_mod_link_args = ldflags_sl + ldflags_mod
