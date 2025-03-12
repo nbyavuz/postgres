@@ -8,3 +8,4 @@ backend_sources += files(
 
 # fmgrtab.c
 generated_backend_sources += fmgrtab_target[2]
+bc_generated_backend_sources += {'srcfiles': [fmgrtab_target[2]]}

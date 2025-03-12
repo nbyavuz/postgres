@@ -43,6 +43,14 @@ backend_parser = custom_target('gram',
 generated_sources += backend_parser.to_list()
 parser_sources += backend_parser
 
+bc_generated_backend_sources += {
+  'additional_flags': [
+    '-I@0@'.format(meson.current_build_dir()),
+    '-I@0@'.format(meson.current_source_dir()),
+  ],
+  'srcfiles': [backend_scanner, backend_parser[0]],
+}
+
 parser = static_library('parser',
   parser_sources,
   dependencies: [backend_code],
