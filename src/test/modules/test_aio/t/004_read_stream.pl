@@ -35,7 +35,7 @@ $node->stop();
 
 foreach my $method (TestAio::supported_io_methods())
 {
-	$node->adjust_conf('postgresql.conf', 'io_method', 'worker');
+	$node->adjust_conf('postgresql.conf', 'io_method', $method);
 	$node->start();
 	test_io_method($method, $node);
 	$node->stop();
@@ -205,14 +205,12 @@ SELECT array_agg(blocknum) FROM read_stream_for_blocks('largeish', ARRAY[0, 2, 5
 		$psql_a->{run}, $psql_a->{timeout},
 		\$psql_a->{stdout}, qr/\{0,2,5,7\}/);
 
-	$psql_b->{run}->pump_nb();
-	like(
-		$psql_b->{stderr},
-		qr/.*ERROR.*could not read blocks 5..5.*$/,
-		"$io_method: injected error occurred");
+	pump_until(
+		$psql_b->{run}, $psql_b->{timeout},
+		\$psql_b->{stderr}, qr/ERROR.*could not read blocks 5\.\.5/);
+	ok(1, "$io_method: injected error occurred");
 	$psql_b->{stderr} = '';
 	$psql_b->query_safe(qq/SELECT inj_io_short_read_detach();/);
-
 
 	ok(1,
 		qq/$io_method: read stream encounters failing IO by another backend/);
@@ -270,6 +268,9 @@ sub test_io_method
 {
 	my $io_method = shift;
 	my $node = shift;
+
+	is($node->safe_psql('postgres', 'SHOW io_method'),
+		$io_method, "$io_method: io_method set correctly");
 
 	test_repeated_blocks($io_method, $node);
 
