@@ -12,6 +12,7 @@ use lib $FindBin::RealBin;
 
 use TestAio;
 
+my @methods = TestAio::supported_io_methods();
 my %nodes;
 
 
@@ -19,7 +20,7 @@ my %nodes;
 # Create and configure one instance for each io_method
 ###
 
-foreach my $method (TestAio::supported_io_methods())
+foreach my $method (@methods)
 {
 	my $node = PostgreSQL::Test::Cluster->new($method);
 
@@ -40,7 +41,7 @@ $nodes{'sync'}->append_conf(
 # Execute the tests for each io_method
 ###
 
-foreach my $method (TestAio::supported_io_methods())
+foreach my $method (@methods)
 {
 	my $node = $nodes{$method};
 
