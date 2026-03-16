@@ -1448,6 +1448,7 @@ if not pyopt.disabled()
       python3_header_check_args = ['/I' + python3_incdir]
     else
       python3_dep = python3_inst.dependency(embed: true, required: pyopt)
+      python3_incdir = python3_inst.get_variable('INCLUDEPY')
       python3_header_check_args = []
     endif
     # Remove this check after we depend on Meson >= 1.1.0

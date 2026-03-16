@@ -43,6 +43,13 @@ install_headers(
   install_dir: dir_include_extension / 'hstore',
 )
 
+# Files outside of the current directory include hstore as "hstore/hstore.h"
+hstore_dir_up = join_paths(meson.current_source_dir(), '..')
+bitcode_modules += {
+  'target': hstore,
+  'srcfiles': hstore_sources,
+}
+
 tests += {
   'name': 'hstore',
   'sd': meson.current_source_dir(),

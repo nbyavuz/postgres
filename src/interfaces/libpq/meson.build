@@ -49,6 +49,9 @@ libpq_c_args = ['-DSO_MAJOR_VERSION=5']
 # The OAuth implementation differs depending on the type of library being built.
 libpq_so_c_args = ['-DUSE_DYNAMIC_OAUTH']
 
+# libpq-fe.h is needed to generate bitcode for some extensions
+libpq_dir = meson.current_source_dir()
+
 # Not using both_libraries() here as
 # 1) resource files should only be in the shared library
 # 2) we want the .pc file to include a dependency to {pgport,common}_static for

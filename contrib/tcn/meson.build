@@ -22,6 +22,11 @@ install_data(
   kwargs: contrib_data_args,
 )
 
+bitcode_modules += {
+  'target': tcn,
+  'srcfiles': tcn_sources,
+}
+
 tests += {
   'name': 'tcn',
   'sd': meson.current_source_dir(),
