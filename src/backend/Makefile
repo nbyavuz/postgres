@@ -81,7 +81,59 @@ override LDFLAGS := $(LDFLAGS) $(LDFLAGS_EX) $(LDFLAGS_EX_BE)
 
 ##########################################################################
 
+##########
+# Generate pkg-config files for building server extensions.  These provide
+# an alternative to PGXS for extension authors who prefer pkg-config.
+
+pkgconfigdir = $(libdir)/pkgconfig
+
+PG_EXT_CFLAGS = -I$${includedir} -I$${includedir}/server $(CFLAGS_SL_MODULE) $(CPPFLAGS)
+PG_EXT_LIBS =  $(LIBS) $(LDFLAGS) $(PTHREAD_LIBS)
+
 all: submake-libpgport submake-catalog-headers submake-utils-headers postgres $(POSTGRES_IMP)
+all: postgresql-extension.pc postgresql-extension-warnings.pc
+
+postgresql-extension.pc: $(MAKEFILE_LIST)
+	echo 'prefix=$(prefix)' >$@
+	echo 'includedir=$(patsubst $(prefix)/%,$${prefix}/%,$(includedir))' >>$@
+	echo 'libdir=$(patsubst $(prefix)/%,$${prefix}/%,$(libdir))' >>$@
+	echo >>$@
+	echo 'pkglibdir=$(patsubst $(prefix)/%,$${prefix}/%,$(pkglibdir))' >>$@
+	echo 'dir_mod=$${pkglibdir}' >>$@
+	echo 'dir_data=$(patsubst $(prefix)/%,$${prefix}/%,$(datadir))/extension' >>$@
+	echo 'dir_include=$(patsubst $(prefix)/%,$${prefix}/%,$(includedir_server))/extension' >>$@
+	echo 'dir_doc=$(patsubst $(prefix)/%,$${prefix}/%,$(docdir))/extension' >>$@
+	echo 'dir_bitcode=$(patsubst $(prefix)/%,$${prefix}/%,$(bitcodedir))' >>$@
+	echo 'bindir=$(patsubst $(prefix)/%,$${prefix}/%,$(bindir))' >>$@
+	echo >>$@
+	echo 'Name: postgresql-extension' >>$@
+	echo 'Description: PostgreSQL Extension Support' >>$@
+	echo 'URL: $(PACKAGE_URL)' >>$@
+	echo 'Version: $(VERSION)' >>$@
+	echo 'Requires: ' >>$@
+	echo 'Cflags: $(PG_EXT_CFLAGS)' >>$@
+	echo 'Libs: $(PG_EXT_LIBS)' >>$@
+
+postgresql-extension-warnings.pc: $(MAKEFILE_LIST)
+	echo 'prefix=$(prefix)' >$@
+	echo 'includedir=$(patsubst $(prefix)/%,$${prefix}/%,$(includedir))' >>$@
+	echo >>$@
+	echo 'pkglibdir=$(patsubst $(prefix)/%,$${prefix}/%,$(pkglibdir))' >>$@
+	echo 'dir_mod=$${pkglibdir}' >>$@
+	echo 'dir_data=$(patsubst $(prefix)/%,$${prefix}/%,$(datadir))/extension' >>$@
+	echo 'dir_include=$(patsubst $(prefix)/%,$${prefix}/%,$(includedir_server))/extension' >>$@
+	echo 'dir_doc=$(patsubst $(prefix)/%,$${prefix}/%,$(docdir))/extension' >>$@
+	echo 'dir_bitcode=$(patsubst $(prefix)/%,$${prefix}/%,$(bitcodedir))' >>$@
+	echo 'bindir=$(patsubst $(prefix)/%,$${prefix}/%,$(bindir))' >>$@
+	echo >>$@
+	echo 'Name: postgresql-extension-warnings' >>$@
+	echo 'Description: PostgreSQL Extension Support with compiler warnings the same as core code' >>$@
+	echo 'URL: $(PACKAGE_URL)' >>$@
+	echo 'Version: $(VERSION)' >>$@
+	echo 'Requires: postgresql-extension' >>$@
+	echo 'Cflags: $(CFLAGS)' >>$@
+	echo 'Libs: ' >>$@
+##########
 
 ifneq ($(PORTNAME), cygwin)
 ifneq ($(PORTNAME), win32)
@@ -206,6 +258,8 @@ generated-parser-sources:
 ##########################################################################
 
 install: all installdirs install-bin
+	$(INSTALL_DATA) postgresql-extension.pc '$(DESTDIR)$(pkgconfigdir)/postgresql-extension.pc'
+	$(INSTALL_DATA) postgresql-extension-warnings.pc '$(DESTDIR)$(pkgconfigdir)/postgresql-extension-warnings.pc'
 ifeq ($(PORTNAME), cygwin)
 ifeq ($(MAKE_DLL), true)
 	$(INSTALL_DATA) libpostgres.a '$(DESTDIR)$(libdir)/libpostgres.a'
@@ -241,7 +295,7 @@ endif
 .PHONY: install-bin
 
 installdirs:
-	$(MKDIR_P) '$(DESTDIR)$(bindir)' '$(DESTDIR)$(datadir)'
+	$(MKDIR_P) '$(DESTDIR)$(bindir)' '$(DESTDIR)$(datadir)' '$(DESTDIR)$(pkgconfigdir)'
 ifeq ($(PORTNAME), cygwin)
 ifeq ($(MAKE_DLL), true)
 	$(MKDIR_P) '$(DESTDIR)$(libdir)'
@@ -262,6 +316,8 @@ endif
 
 uninstall:
 	rm -f '$(DESTDIR)$(bindir)/postgres$(X)'
+	rm -f '$(DESTDIR)$(pkgconfigdir)/postgresql-extension.pc'
+	rm -f '$(DESTDIR)$(pkgconfigdir)/postgresql-extension-warnings.pc'
 ifeq ($(MAKE_EXPORTS), true)
 	rm -f '$(DESTDIR)$(pkglibdir)/$(POSTGRES_IMP)'
 	rm -f '$(DESTDIR)$(pgxsdir)/$(MKLDEXPORT_DIR)/mkldexport.sh'
@@ -292,6 +348,7 @@ endif
 
 clean:
 	rm -f $(LOCALOBJS) postgres$(X) $(POSTGRES_IMP)
+	rm -f postgresql-extension.pc postgresql-extension-warnings.pc
 ifeq ($(PORTNAME), cygwin)
 	rm -f postgres.dll libpostgres.a
 endif
