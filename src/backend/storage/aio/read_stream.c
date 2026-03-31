@@ -72,6 +72,7 @@
 #include "postgres.h"
 
 #include "miscadmin.h"
+#include "executor/instrument_node.h"
 #include "storage/aio.h"
 #include "storage/fd.h"
 #include "storage/smgr.h"
@@ -106,6 +107,9 @@ struct ReadStream
 	bool		batch_mode;		/* READ_STREAM_USE_BATCHING */
 	bool		advice_enabled;
 	bool		temporary;
+
+	/* scan stats counters */
+	IOStats    *stats;
 
 	/*
 	 * One-block buffer to support 'ungetting' a block number, to resolve flow
@@ -170,6 +174,57 @@ block_range_read_stream_cb(ReadStream *stream,
 		return p->current_blocknum++;
 
 	return InvalidBlockNumber;
+}
+
+/*
+ * Update stream stats with current pinned buffer depth.
+ *
+ * Called once per buffer returned to the consumer in read_stream_next_buffer().
+ * Records the number of pinned buffers at that moment, so we can compute the
+ * average look-ahead depth.
+ */
+static inline void
+read_stream_count_prefetch(ReadStream *stream)
+{
+	IOStats    *stats = stream->stats;
+
+	if (stats == NULL)
+		return;
+
+	stats->prefetch_count++;
+	stats->distance_sum += stream->pinned_buffers;
+	if (stream->pinned_buffers > stats->distance_max)
+		stats->distance_max = stream->pinned_buffers;
+}
+
+/*
+ * Update stream stats about size of I/O requests.
+ *
+ * We count the number of I/O requests, size of requests (counted in blocks)
+ * and number of in-progress I/Os.
+ */
+static inline void
+read_stream_count_io(ReadStream *stream, int nblocks, int in_progress)
+{
+	IOStats    *stats = stream->stats;
+
+	if (stats == NULL)
+		return;
+
+	stats->io_count++;
+	stats->io_nblocks += nblocks;
+	stats->io_in_progress += in_progress;
+}
+
+static inline void
+read_stream_count_wait(ReadStream *stream)
+{
+	IOStats    *stats = stream->stats;
+
+	if (stats == NULL)
+		return;
+
+	stats->wait_count++;
 }
 
 /*
@@ -380,6 +435,9 @@ read_stream_start_pending_read(ReadStream *stream)
 		Assert(stream->ios_in_progress < stream->max_ios);
 		stream->ios_in_progress++;
 		stream->seq_blocknum = stream->pending_read_blocknum + nblocks;
+
+		/* update I/O stats */
+		read_stream_count_io(stream, nblocks, stream->ios_in_progress);
 	}
 
 	/*
@@ -544,7 +602,8 @@ read_stream_begin_impl(int flags,
 					   ForkNumber forknum,
 					   ReadStreamBlockNumberCB callback,
 					   void *callback_private_data,
-					   size_t per_buffer_data_size)
+					   size_t per_buffer_data_size,
+					   IOStats *stats)
 {
 	ReadStream *stream;
 	size_t		size;
@@ -703,6 +762,11 @@ read_stream_begin_impl(int flags,
 	stream->seq_until_processed = InvalidBlockNumber;
 	stream->temporary = SmgrIsTemp(smgr);
 
+	/* set capacity */
+	stream->stats = stats;
+	if (stream->stats)
+		stream->stats->distance_capacity = max_pinned_buffers;
+
 	/*
 	 * Skip the initial ramp-up phase if the caller says we're going to be
 	 * reading the whole relation.  This way we start out assuming we'll be
@@ -742,7 +806,8 @@ read_stream_begin_relation(int flags,
 						   ForkNumber forknum,
 						   ReadStreamBlockNumberCB callback,
 						   void *callback_private_data,
-						   size_t per_buffer_data_size)
+						   size_t per_buffer_data_size,
+						   IOStats *stats)
 {
 	return read_stream_begin_impl(flags,
 								  strategy,
@@ -752,7 +817,8 @@ read_stream_begin_relation(int flags,
 								  forknum,
 								  callback,
 								  callback_private_data,
-								  per_buffer_data_size);
+								  per_buffer_data_size,
+								  stats);
 }
 
 /*
@@ -777,7 +843,8 @@ read_stream_begin_smgr_relation(int flags,
 								  forknum,
 								  callback,
 								  callback_private_data,
-								  per_buffer_data_size);
+								  per_buffer_data_size,
+								  NULL);
 }
 
 /*
@@ -851,6 +918,7 @@ read_stream_next_buffer(ReadStream *stream, void **per_buffer_data)
 										flags)))
 			{
 				/* Fast return. */
+				read_stream_count_prefetch(stream);
 				return buffer;
 			}
 
@@ -860,6 +928,12 @@ read_stream_next_buffer(ReadStream *stream, void **per_buffer_data)
 			stream->ios_in_progress = 1;
 			stream->ios[0].buffer_index = oldest_buffer_index;
 			stream->seq_blocknum = next_blocknum + 1;
+
+			/* update I/O stats */
+			read_stream_count_io(stream, 1, stream->ios_in_progress);
+
+			/* update prefetch distance */
+			read_stream_count_prefetch(stream);
 		}
 		else
 		{
@@ -916,12 +990,17 @@ read_stream_next_buffer(ReadStream *stream, void **per_buffer_data)
 	{
 		int16		io_index = stream->oldest_io_index;
 		int32		distance;	/* wider temporary value, clamped below */
+		bool		needed_wait;
 
 		/* Sanity check that we still agree on the buffers. */
 		Assert(stream->ios[io_index].op.buffers ==
 			   &stream->buffers[oldest_buffer_index]);
 
-		WaitReadBuffers(&stream->ios[io_index].op);
+		needed_wait = WaitReadBuffers(&stream->ios[io_index].op);
+
+		/* Count it as a stall if we need to wait for IO */
+		if (needed_wait)
+			read_stream_count_wait(stream);
 
 		Assert(stream->ios_in_progress > 0);
 		stream->ios_in_progress--;
@@ -980,6 +1059,8 @@ read_stream_next_buffer(ReadStream *stream, void **per_buffer_data)
 #endif
 	}
 #endif
+
+	read_stream_count_prefetch(stream);
 
 	/* Pin transferred to caller. */
 	Assert(stream->pinned_buffers > 0);
