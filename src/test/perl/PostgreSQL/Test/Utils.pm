@@ -1328,21 +1328,24 @@ sub tar_portability_options
 
 	# GNU tar typically produces gnu-format archives, which we can read fine.
 	# But some platforms configure it to default to posix/pax format, and
-	# apparently they enable --sparse too.  Override that.
-	if (system("$tar --format=ustar -c -O /dev/null >/dev/null 2>/dev/null")
+	# apparently they enable --sparse too.  BSD tar (libarchive) does something
+	# similar.
+	#
+	# ustar format supports UIDs only up to 2^21 (2097151).  Override
+	# owner/group to avoid failures on systems where the running user's UID/GID
+	# exceeds that limit.
+	my $devnull = File::Spec->devnull();
+	if (system("$tar --format=ustar --owner=0 --group=0 -c $devnull >$devnull 2>$devnull")
 		== 0)
 	{
-		push(@tar_p_flags, "--format=ustar");
+		push(@tar_p_flags, "--format=ustar", "--owner=0", "--group=0");
 	}
 
-	# bsdtar also archives sparse files by default, but it spells the switch
-	# to disable that differently.
-	if (system("$tar --no-read-sparse -c - /dev/null >/dev/null 2>/dev/null")
-		== 0)
+	# OpenBSD's tar also defaults to pax, but spells the switch differently.
+	if (system("$tar -F ustar -c $devnull >$devnull 2>$devnull"))
 	{
-		push(@tar_p_flags, "--no-read-sparse");
+		push(@tar_p_flags, "-F", "ustar");
 	}
-
 	return @tar_p_flags;
 }
 
