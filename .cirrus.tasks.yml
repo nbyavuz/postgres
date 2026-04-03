@@ -663,7 +663,6 @@ task:
       meson
       openldap
       openssl
-      p5.34-ipc-run
       python312
       tcl
       zstd
@@ -696,8 +695,19 @@ task:
   # https://postgr.es/m/CAN55FZ3VOUSO2ZmBUE9wRNnL9fUQfGv5qWefk_1pWYqgJ1bRSQ%40mail.gmail.com
   perl_cache:
     folder: ~/perl5
-  cpan_install_script:
-    - perl -mIO::Pty -e 1 || cpan -T IO::Pty
+  cpan_install_script: |
+    if perl -mIPC::Run -e 1 2>/dev/null; then
+      perl -MIPC::Run -le 'print "IPC::Run " . $IPC::Run::VERSION . " exists, removing"'
+      perl -MCPAN -e 'CPAN::Shell->uninstall("IPC::Run")'
+    fi
+    cpan -T IPC::Run
+    perl -MIPC::Run -le 'print $IPC::Run::VERSION'
+    if perl -mIO::Pty -e 1 2>/dev/null; then
+      perl -MIO::Pty -le 'print "IO::Pty " . $IO::Pty::VERSION . " exists, removing"'
+      perl -MCPAN -e 'CPAN::Shell->uninstall("IO::Pty")'
+    fi
+    cpan -T IO::Pty
+    perl -MIO::Pty -le 'print $IO::Pty::VERSION'
   upload_caches: perl
 
   # Use macports, even though homebrew is installed. The installation
@@ -745,7 +755,8 @@ task:
   test_world_script: |
     ulimit -c unlimited # default is 0
     ulimit -n 1024 # default is 256, pretty low
-    meson test $MTEST_ARGS --num-processes ${TEST_JOBS}
+    meson test --suite setup $MTEST_ARGS --num-processes ${TEST_JOBS}
+    meson test $MTEST_ARGS psql/010_tab_completion psql/030_pager authentication/001_password
 
   on_failure:
     <<: *on_failure_meson
