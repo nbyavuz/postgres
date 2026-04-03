@@ -645,6 +645,8 @@ task:
     CCACHE_DIR: ${HOME}/ccache
     MACPORTS_CACHE: ${HOME}/macports-cache
 
+    PERL5LIB: ${HOME}/perl5/lib/perl5
+
     MESON_FEATURES: >-
       -Dbonjour=enabled
       -Ddtrace=enabled
@@ -661,7 +663,6 @@ task:
       meson
       openldap
       openssl
-      p5.34-io-tty
       p5.34-ipc-run
       python312
       tcl
@@ -689,6 +690,15 @@ task:
   setup_core_files_script:
     - mkdir ${HOME}/cores
     - sudo sysctl kern.corefile="${HOME}/cores/core.%P"
+
+  # Install IO::Pty from CPAN instead of MacPorts because IO::TTy v1.240.0 has
+  # problems. See:
+  # https://postgr.es/m/CAN55FZ3VOUSO2ZmBUE9wRNnL9fUQfGv5qWefk_1pWYqgJ1bRSQ%40mail.gmail.com
+  perl_cache:
+    folder: ~/perl5
+  cpan_install_script:
+    - perl -mIO::Pty -e 1 || cpan -T IO::Pty
+  upload_caches: perl
 
   # Use macports, even though homebrew is installed. The installation
   # of the additional packages we need would take quite a while with
