@@ -80,7 +80,7 @@ sub test_repeated_blocks
 	$psql->query_safe(
 		qq/SELECT * FROM read_stream_for_blocks('largeish',
 		   ARRAY[0, 2, 2, 4, 4]);/);
-	ok(1, "$io_method: stream hitting the same block repeatedly");
+	ok(0, "$io_method: stream hitting the same block repeatedly");
 
 	# test hit of the same block twice in a row
 	$psql->query_safe(qq/SELECT evict_rel('largeish');/);
