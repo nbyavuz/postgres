@@ -157,6 +157,11 @@ task:
     EOF
 
   on_failure:
+    # Remove logs of successful tests; keep only failed tests' logs for upload
+    meson_clear_testrun_folder_script: |
+      su postgres <<-EOF
+        meson compile clear_testrun_folder -C build
+      EOF
     <<: *on_failure_meson
     cores_script: |
       mkdir -m 770 /tmp/cores
@@ -274,6 +279,11 @@ task:
         set -e
         build/tmp_install/usr/local/pgsql/bin/pg_ctl -D build/runningcheck stop || true
       EOF
+    # Remove logs of successful tests; keep only failed tests' logs for upload
+    meson_clear_testrun_folder_script: |
+      su postgres <<-EOF
+        meson compile clear_testrun_folder -C build
+      EOF
     <<: *on_failure_meson
     cores_script: src/tools/ci/cores_backtrace.sh freebsd /tmp/cores
 
@@ -389,6 +399,11 @@ task:
     EOF
 
   on_failure:
+    # Remove logs of successful tests; keep only failed tests' logs for upload
+    meson_clear_testrun_folder_script: |
+      su postgres <<-EOF
+        meson compile clear_testrun_folder -C build
+      EOF
     <<: *on_failure_meson
     cores_script: |
       # Although we try to configure the OS to core dump inside
@@ -618,6 +633,13 @@ task:
         EOF
 
       on_failure:
+        # Remove logs of successful tests; keep only failed tests' logs for upload
+        meson_clear_testrun_folder_script: |
+          su postgres <<-EOF
+            # the build folder is removed if the failure is in the 32-bit build
+            [ -d build ] && meson compile clear_testrun_folder -C build
+            meson compile clear_testrun_folder -C build-32
+          EOF
         <<: *on_failure_meson
 
   on_failure:
@@ -738,6 +760,9 @@ task:
     meson test $MTEST_ARGS --num-processes ${TEST_JOBS}
 
   on_failure:
+    # Remove logs of successful tests; keep only failed tests' logs for upload
+    meson_clear_testrun_folder_script: |
+      meson compile clear_testrun_folder -C build
     <<: *on_failure_meson
     cores_script: src/tools/ci/cores_backtrace.sh macos "${HOME}/cores"
 
@@ -818,6 +843,10 @@ task:
     meson test %MTEST_ARGS% --num-processes %TEST_JOBS%
 
   on_failure:
+    # Remove logs of successful tests; keep only failed tests' logs for upload
+    meson_clear_testrun_folder_script: |
+      vcvarsall x64
+      meson compile clear_testrun_folder -C build
     <<: *on_failure_meson
     crashlog_artifacts:
       path: "crashlog-*.txt"
@@ -879,6 +908,9 @@ task:
     %BASH% -c "meson test %MTEST_ARGS% --num-processes %TEST_JOBS%"
 
   on_failure:
+    # Remove logs of successful tests; keep only failed tests' logs for upload
+    meson_clear_testrun_folder_script: |
+      %BASH% -c "meson compile clear_testrun_folder -C build"
     <<: *on_failure_meson
     crashlog_artifacts:
       path: "crashlog-*.txt"
