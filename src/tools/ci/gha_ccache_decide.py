@@ -63,7 +63,7 @@ def main():
     # If there were either barely any misses, or the cache hit ratio was high,
     # there no point in generating a new cache entry. We have limited cache
     # space.
-    should_save = misses > 10 and hit_pct < target_rate
+    should_save = True
 
     append_github_output("should_save", str(should_save).lower())
 
