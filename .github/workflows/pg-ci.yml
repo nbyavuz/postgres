@@ -1072,7 +1072,7 @@ jobs:
 
     defaults:
       run:
-        shell: 'c:\pg-msys\msys64\usr\bin\bash.exe --login -eo pipefail "{0}"'
+        shell: 'r:\msys64\usr\bin\bash.exe --login -eo pipefail "{0}"'
         #shell: msys2 {0}
 
     steps:
@@ -1110,20 +1110,28 @@ jobs:
       #      mingw-w64-ucrt-x86_64-zlib
       #      mingw-w64-ucrt-x86_64-zstd
 
+      # Create a ramdisk on R: and extract msys64 there. The shell for this
+      # job (above) points at r:\msys64\usr\bin\bash.exe, so the
+      # extraction target must match. mingw's perl ships paths baked at
+      # package build time (e.g. archlibexp under .../ucrt64/lib/perl5/...),
+      # so the install root must sit directly at the drive root rather than
+      # under a sub-prefix, otherwise meson's perl.h lookup fails.
+      - name: Create ramdisk on R
+        shell: pwsh
+        run: |
+          choco install imdisk-toolkit -y --no-progress --ignore-checksums
+          imdisk -a -s 2G -m R: -p "/fs:ntfs /q /y"
+
       - name: download msys
         shell: cmd
         run: |
-          echo "mkdir 1"
-          mkdir "%RUNNER_TEMP%/pg-mingw-install" || true
-          echo "mklink"
-          mklink /d "C:/pg-msys/" "%RUNNER_TEMP%/pg-mingw-install"
+          cd /d R:\
 
-          cd c:/pg-msys/
-
-          curl -fsSL -o msys64.tar.zst https://github.com/anarazel/pg-vm-images/releases/latest/download/msys64-full.tar.zst
+          curl -fsSL -o msys64.tar.zst https://github.com/nbyavuz/pg-vm-images/releases/latest/download/msys64-full.tar.zst
 
           ls -lh
           zstd -dcf "msys64.tar.zst" | tar -xf -
+          del msys64.tar.zst
           ls -lh
 
       - name: test msys
@@ -1132,7 +1140,7 @@ jobs:
           where.exe cpan || true
           where.exe perl538.dll || true
           perl --version
-          ldd c:/pg-msys/msys64/ucrt64/bin/perl || true
+          ldd r:/msys64/ucrt64/bin/perl || true
           perl -mIPC::Run -e 1
 
       - *nix_sysinfo_step
