@@ -141,7 +141,7 @@ env:
   # previous major version.
   #
   # Don't set manually, it is automatically set by 'version_stamp.pl' script.
-  PG_MAJOR_VERSION: "20"
+  PG_MAJOR_VERSION: "21"
 
   # Note that we need to be careful to use a separator that can't be in branch
   # names, otherwise e.g. caches for 'master' might be restored on the
