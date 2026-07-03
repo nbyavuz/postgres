@@ -98,6 +98,9 @@ sed_file("configure.ac",
 sed_file("meson.build",
 	qq{-e "/^project(/,/^)/ s/ version: '[0-9a-z.]*',/ version: '$fullversion',/"}
 );
+sed_file(".github/workflows/pg-ci.yml",
+	"-e 's/^\\( *PG_MAJOR_VERSION: *\"\\)[0-9]*\"/\\1$majorversion\"/'"
+);
 
 print "Stamped these files with version number $fullversion:\n$fixedfiles";
 print "Don't forget to run autoconf $aconfver before committing.\n";
