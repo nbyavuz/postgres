@@ -128,7 +128,7 @@ env:
 
   # The full set of OS / job selectors recognized by the `ci-os-only:`
   # commit-message directive parsed in the `setup` job below.
-  CI_OS_ONLY_JOBS: "linux macos windows mingw compilerwarnings sanitycheck"
+  CI_OS_ONLY_JOBS: "linux freebsd netbsd openbsd macos windows mingw compilerwarnings sanitycheck"
 
   ###
   # A few variables to make expressions later on shorter
@@ -196,6 +196,9 @@ jobs:
     timeout-minutes: 1
     outputs:
       linux: ${{ steps.os.outputs.linux }}
+      freebsd: ${{ steps.os.outputs.freebsd }}
+      netbsd: ${{ steps.os.outputs.netbsd }}
+      openbsd: ${{ steps.os.outputs.openbsd }}
       macos: ${{ steps.os.outputs.macos }}
       windows: ${{ steps.os.outputs.windows }}
       mingw: ${{ steps.os.outputs.mingw }}
@@ -828,6 +831,416 @@ jobs:
         if: failure() && !cancelled()
         run: src/tools/ci/cores_backtrace.sh macos "$HOME/cores"
 
+      - *upload_logs_step
+
+
+  # Job: FreeBSD - Meson
+  #
+  # SPECIAL:
+  # - Uses postgres specific CPPFLAGS that increase test coverage
+  # - Specifies configuration options that test reading/writing/copying of node trees
+  # - Specifies debug_parallel_query=regress, to catch related issues during CI
+  # - Enables --link for pg_upgrade
+  # - Intentionally builds without -Dllvm, as the cirrus-ci task did
+  #
+  # GitHub Actions has no native *BSD runners, so the build and tests run
+  # inside a QEMU VM managed by the vmactions/freebsd-vm action. The VM boots
+  # from a vanilla image, therefore all build/test dependencies (which the
+  # previous cirrus-ci images shipped pre-installed) are installed in the
+  # `prepare` step. The package lists mirror anarazel/pg-vm-images. To avoid
+  # re-downloading the packages from the mirrors on every run, pkg's download
+  # cache is kept inside the workspace and persisted via actions/cache,
+  # similar to how the macOS job caches its MacPorts packages.
+  freebsd:
+    name: FreeBSD - Meson
+    needs: [setup, sanity-check]
+    if: |
+      !cancelled() &&
+      needs.setup.outputs.freebsd == 'true' &&
+      needs.sanity-check.result != 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # pkg download cache, kept inside the workspace so it is synced back out
+      # of the VM and can be persisted across runs via actions/cache.
+      PKG_CACHE_DIR: ${{ github.workspace }}/pkg_cache
+
+      # Packages needed to build / test with the features enabled below. The
+      # list mirrors anarazel/pg-vm-images. Kept in an env var so its hash can
+      # be used as part of the package cache key.
+      OS_PACKAGES: >-
+        bash git-tiny gmake meson ninja perl5 pkgconf
+        bison ccache4 flex gettext
+        gnupg p5-IPC-Run
+        curl docbook-xml docbook-xsl icu liblz4 libbacktrace
+        libxml2 libxslt python3 py*-cryptography py*-packaging
+        readline tcl86 zstd
+        krb5 openldap26-client openldap26-server
+
+      CPPFLAGS: -DRELCACHE_FORCE_RELEASE -DENFORCE_REGRESSION_TEST_NAME_RESTRICTIONS
+      CFLAGS: -Og -ggdb
+      PG_TEST_PG_UPGRADE_MODE: --link
+
+      # Several buildfarm animals enable these options. Without testing them
+      # during CI, it would be easy to cause breakage on the buildfarm with CI
+      # passing.
+      PG_TEST_INITDB_EXTRA_OPTS: >-
+        -c debug_copy_parse_plan_trees=on
+        -c debug_write_read_parse_plan_trees=on
+        -c debug_raw_expression_coverage_test=on
+        -c debug_parallel_query=regress
+
+      MESON_FEATURES: >-
+        -Ddtrace=enabled
+        -Dgssapi=enabled
+        -Dlibcurl=enabled
+        -Dnls=enabled
+        -Dpam=enabled
+        -Dtcl_version=tcl86
+        -Duuid=bsd
+
+    steps:
+      - *checkout_step
+      - *ccache_restore_default_step
+      - *ccache_restore_branch_step
+
+      - &bsd_pkgcache_key_step
+        name: "Packages: Compute cache key"
+        id: pkg-key
+        run: |
+          list_hash=$(printf '%s' "$OS_PACKAGES" | md5sum | cut -d' ' -f1)
+          echo "key=pkgcache:${{ github.job }}:${list_hash}:${{ github.run_id }}:${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+          echo "restore-key=pkgcache:${{ github.job }}:${list_hash}:" >> "$GITHUB_OUTPUT"
+
+      - &bsd_pkgcache_restore_step
+        name: "Packages: Restore cache"
+        id: pkg-restore
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.PKG_CACHE_DIR }}
+          key: ${{ steps.pkg-key.outputs.key }}
+          restore-keys: ${{ steps.pkg-key.outputs.restore-key }}
+
+      - name: Build and test
+        id: build-and-test
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          usesh: true
+          copyback: true
+          # Only names listed here are propagated into the VM.
+          envs: >-
+            CCACHE_DIR CCACHE_MAXSIZE PKG_CACHE_DIR OS_PACKAGES
+            MESON_COMMON_PG_CONFIG_ARGS MESON_COMMON_FEATURES MESON_FEATURES
+            MBUILD_TARGET MTEST_ARGS BUILD_JOBS TEST_JOBS PGCTLTIMEOUT
+            TEMP_CONFIG PG_TEST_EXTRA PG_TEST_INITDB_EXTRA_OPTS
+            PG_TEST_PG_UPGRADE_MODE CPPFLAGS CFLAGS
+          prepare: |
+            # Point pkg at the workspace-local download cache and install. On a
+            # cache hit the packages are already present, so no (or few) files
+            # are fetched from the mirrors.
+            set -ef
+            mkdir -p "${PKG_CACHE_DIR}"
+            export PKG_CACHEDIR="${PKG_CACHE_DIR}"
+            pkg install -y -g ${OS_PACKAGES}
+          run: |
+            set -e
+
+            # PostgreSQL refuses to run as root, so create an unprivileged
+            # user to build and test as, like the cirrus-ci tasks did.
+            pw useradd postgres
+            chown -R postgres:postgres .
+            mkdir -p "${CCACHE_DIR}"
+            chown -R postgres:postgres "${CCACHE_DIR}"
+
+            mkdir -m 770 /tmp/cores
+            chown root:postgres /tmp/cores
+            sysctl kern.corefile='/tmp/cores/%N.%P.core'
+
+            # Needed by the load_balance test in PG_TEST_EXTRA.
+            {
+              echo "127.0.0.1 pg-loadbalancetest"
+              echo "127.0.0.2 pg-loadbalancetest"
+              echo "127.0.0.3 pg-loadbalancetest"
+            } >> /etc/hosts
+
+            su postgres <<EOF
+            set -e
+            meson setup \
+              ${MESON_COMMON_PG_CONFIG_ARGS} \
+              --buildtype=debug \
+              -Dextra_lib_dirs=/usr/local/lib \
+              -Dextra_include_dirs=/usr/local/include/ \
+              ${MESON_COMMON_FEATURES} ${MESON_FEATURES} \
+              build
+            ninja -C build -j${BUILD_JOBS} ${MBUILD_TARGET}
+            ninja -C build -t missingdeps
+            ulimit -c unlimited
+            meson test ${MTEST_ARGS} --num-processes ${TEST_JOBS}
+            EOF
+
+      - &bsd_pkgcache_save_step
+        name: "Packages: Save cache"
+        uses: actions/cache/save@v5
+        # Persist newly downloaded packages even if the build/test failed, so
+        # future runs don't re-fetch them. Skip when we had an exact cache hit.
+        if: |
+          always() &&
+          steps.pkg-restore.outputs.cache-hit != 'true' &&
+          steps.pkg-key.outputs.key != ''
+        with:
+          path: ${{ env.PKG_CACHE_DIR }}
+          key: ${{ steps.pkg-key.outputs.key }}
+
+      - &bsd_ccache_save_step
+        name: "ccache: Upload cache"
+        uses: actions/cache/save@v5
+        if: |
+          always() &&
+          steps.ccache-restore-branch.outputs.cache-primary-key != ''
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.ccache-restore-branch.outputs.cache-primary-key }}
+
+      - *upload_logs_step
+
+
+  # Job: NetBSD - Meson
+  #
+  # See the FreeBSD job above for the general approach used for *BSD on GitHub
+  # Actions. Runs the build/tests inside a NetBSD VM.
+  netbsd:
+    name: NetBSD - Meson
+    needs: [setup, sanity-check]
+    if: |
+      !cancelled() &&
+      needs.setup.outputs.netbsd == 'true' &&
+      needs.sanity-check.result != 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # pkgin download cache, kept inside the workspace so it is synced back
+      # out of the VM and can be persisted across runs via actions/cache.
+      PKG_CACHE_DIR: ${{ github.workspace }}/pkg_cache
+
+      # Packages needed to build / test. Kept in an env var so its hash can be
+      # used as part of the package cache key.
+      OS_PACKAGES: >-
+        git gmake meson ninja-build bison ccache flex pkgconf
+        gettext-tools gnupg p5-IPC-Run
+        curl docbook-xml icu libxml2 libxslt lz4 mit-krb5
+        python312 py312-cryptography py312-packaging
+        readline tcl zstd
+        openldap-client openldap-server
+
+      # initdb fails with an 'invalid locale settings' error on NetBSD, so
+      # force 'LANG' and 'LC_*' to be 'C'.
+      # See https://postgr.es/m/2490325.1734471752%40sss.pgh.pa.us
+      LANG: "C"
+      LC_ALL: "C"
+
+      # -Duuid is not set for NetBSD, as the 'bsd' option doesn't work and
+      # other uuid options are not available. See
+      # https://www.postgresql.org/message-id/17358-89806e7420797025@postgresql.org
+      MESON_FEATURES: >-
+        -Dgssapi=enabled
+        -Dlibcurl=enabled
+        -Dnls=enabled
+        -Dpam=enabled
+
+    steps:
+      - *checkout_step
+      - *ccache_restore_default_step
+      - *ccache_restore_branch_step
+      - *bsd_pkgcache_key_step
+      - *bsd_pkgcache_restore_step
+
+      - name: Build and test
+        id: build-and-test
+        uses: vmactions/netbsd-vm@v1
+        with:
+          release: "10.1"
+          usesh: true
+          copyback: true
+          envs: >-
+            CCACHE_DIR CCACHE_MAXSIZE PKG_CACHE_DIR OS_PACKAGES
+            MESON_COMMON_PG_CONFIG_ARGS MESON_COMMON_FEATURES MESON_FEATURES
+            MBUILD_TARGET MTEST_ARGS BUILD_JOBS TEST_JOBS PGCTLTIMEOUT
+            TEMP_CONFIG PG_TEST_EXTRA LANG LC_ALL
+          prepare: |
+            set -e
+            export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/pkg/bin:/usr/pkg/sbin:$PATH
+            mkdir -p "${PKG_CACHE_DIR}"
+
+            # Unlike pkg_add, pkgin keeps a persistent download cache. Bootstrap
+            # it if needed, point it at the mirror for this release, relocate
+            # its cache into the workspace, and install from there. On a cache
+            # hit no (or few) packages are fetched from the mirror.
+            if ! command -v pkgin >/dev/null 2>&1; then
+              /usr/sbin/pkg_add pkgin
+            fi
+            repo="https://cdn.NetBSD.org/pub/pkgsrc/packages/NetBSD/$(uname -p)/$(uname -r | cut -d_ -f1)/All"
+            echo "${repo}" > /usr/pkg/etc/pkgin/repositories.conf
+            mkdir -p /var/db/pkgin
+            rm -rf /var/db/pkgin/cache
+            ln -s "${PKG_CACHE_DIR}" /var/db/pkgin/cache
+
+            pkgin -y update
+            pkgin -y install ${OS_PACKAGES}
+          run: |
+            set -e
+            export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/pkg/bin:/usr/pkg/sbin:$PATH
+
+            useradd -m postgres
+            chown -R postgres:users .
+            mkdir -p "${CCACHE_DIR}"
+            chown -R postgres:users "${CCACHE_DIR}"
+
+            # Set kernel parameters for running the postgres tests.
+            sysctl -w kern.ipc.semmni=2048
+            sysctl -w kern.ipc.semmns=32768
+
+            {
+              echo "127.0.0.1 pg-loadbalancetest"
+              echo "127.0.0.2 pg-loadbalancetest"
+              echo "127.0.0.3 pg-loadbalancetest"
+            } >> /etc/hosts
+
+            su postgres <<EOF
+            set -e
+            export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/pkg/bin:/usr/pkg/sbin:\$PATH
+            meson setup \
+              ${MESON_COMMON_PG_CONFIG_ARGS} \
+              --buildtype=debugoptimized \
+              --pkg-config-path /usr/lib/pkgconfig:/usr/pkg/lib/pkgconfig \
+              ${MESON_COMMON_FEATURES} ${MESON_FEATURES} \
+              build
+            ninja -C build -j${BUILD_JOBS} ${MBUILD_TARGET}
+            ninja -C build -t missingdeps
+            ulimit -c unlimited
+            meson test ${MTEST_ARGS} --num-processes ${TEST_JOBS}
+            EOF
+
+      - *bsd_pkgcache_save_step
+      - *bsd_ccache_save_step
+      - *upload_logs_step
+
+
+  # Job: OpenBSD - Meson
+  #
+  # See the FreeBSD job above for the general approach used for *BSD on GitHub
+  # Actions. Runs the build/tests inside an OpenBSD VM.
+  #
+  # SPECIAL:
+  # - gssapi is not enabled on OpenBSD, so kerberos is dropped from
+  #   PG_TEST_EXTRA.
+  openbsd:
+    name: OpenBSD - Meson
+    needs: [setup, sanity-check]
+    if: |
+      !cancelled() &&
+      needs.setup.outputs.openbsd == 'true' &&
+      needs.sanity-check.result != 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # pkg_add download cache (via PKG_CACHE), kept inside the workspace so it
+      # is synced back out of the VM and can be persisted via actions/cache.
+      PKG_CACHE_DIR: ${{ github.workspace }}/pkg_cache
+
+      # Packages needed to build / test. Kept in an env var so its hash can be
+      # used as part of the package cache key.
+      OS_PACKAGES: >-
+        bash git gmake meson ninja bison ccache flex pkgconf
+        gettext-tools gnupg p5-IPC-Run
+        curl docbook e2fsprogs icu4c libxml libxslt lz4 openpam
+        py3-cryptography py3-packaging python%3 readline tcl%8.6 zstd
+        openldap-client--gssapi openldap-server--gssapi
+
+      # gssapi is not enabled here, so kerberos can't be exercised.
+      PG_TEST_EXTRA: ldap ssl libpq_encryption load_balance oauth
+
+      MESON_FEATURES: >-
+        -Dbsd_auth=enabled
+        -Dlibcurl=enabled
+        -Dtcl_version=tcl86
+        -Duuid=e2fs
+
+    steps:
+      - *checkout_step
+      - *ccache_restore_default_step
+      - *ccache_restore_branch_step
+      - *bsd_pkgcache_key_step
+      - *bsd_pkgcache_restore_step
+
+      - name: Build and test
+        id: build-and-test
+        uses: vmactions/openbsd-vm@v1
+        with:
+          release: "7.7"
+          usesh: true
+          copyback: true
+          envs: >-
+            CCACHE_DIR CCACHE_MAXSIZE PKG_CACHE_DIR OS_PACKAGES
+            MESON_COMMON_PG_CONFIG_ARGS MESON_COMMON_FEATURES MESON_FEATURES
+            MBUILD_TARGET MTEST_ARGS BUILD_JOBS TEST_JOBS PGCTLTIMEOUT
+            TEMP_CONFIG PG_TEST_EXTRA
+          prepare: |
+            # pkg_add stores fetched packages in $PKG_CACHE and reuses them on
+            # subsequent installs, so keep that cache inside the workspace. On a
+            # cache hit no (or few) packages are fetched from the mirror.
+            set -e
+            mkdir -p "${PKG_CACHE_DIR}"
+            export PKG_CACHE="${PKG_CACHE_DIR}"
+            pkg_add -I ${OS_PACKAGES}
+          run: |
+            set -e
+
+            useradd -m postgres
+            chown -R postgres:users .
+            mkdir -p "${CCACHE_DIR}"
+            chown -R postgres:users "${CCACHE_DIR}"
+
+            # Set kernel parameters for running the postgres tests.
+            sysctl kern.seminfo.semmni=2048
+            sysctl kern.seminfo.semmns=32768
+            sysctl kern.maxfiles=10000
+
+            # The default per-user process limit (256) is too low for the
+            # postgres tests. Raise the default login class limits.
+            awk 'BEGIN { in_default = 0 }
+            /^default:\\/ { in_default = 1; print; next }
+            /^[^[:space:]].*:\\/ { in_default = 0; print; next }
+            in_default {
+                gsub(/:maxproc-max=[0-9]+/, ":maxproc-max=4096")
+                gsub(/:maxproc-cur=[0-9]+/, ":maxproc-cur=512")
+            }
+            { print }
+            ' /etc/login.conf > /etc/login.conf.new && mv /etc/login.conf.new /etc/login.conf
+            cap_mkdb /etc/login.conf
+
+            {
+              echo "127.0.0.1 pg-loadbalancetest"
+              echo "127.0.0.2 pg-loadbalancetest"
+              echo "127.0.0.3 pg-loadbalancetest"
+            } >> /etc/hosts
+
+            su postgres <<EOF
+            set -e
+            meson setup \
+              ${MESON_COMMON_PG_CONFIG_ARGS} \
+              --buildtype=debugoptimized \
+              --pkg-config-path /usr/lib/pkgconfig:/usr/local/lib/pkgconfig \
+              ${MESON_COMMON_FEATURES} ${MESON_FEATURES} \
+              build
+            ninja -C build -j${BUILD_JOBS} ${MBUILD_TARGET}
+            ninja -C build -t missingdeps
+            ulimit -c unlimited
+            meson test ${MTEST_ARGS} --num-processes ${TEST_JOBS}
+            EOF
+
+      - *bsd_pkgcache_save_step
+      - *bsd_ccache_save_step
       - *upload_logs_step
 
 
