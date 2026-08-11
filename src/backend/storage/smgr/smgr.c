@@ -1101,6 +1101,12 @@ smgr_aio_reopen(PgAioHandle *ioh)
 			od->write.fd = fd;
 			Assert(off == od->write.offset);
 			return 0;
+		case PGAIO_OP_FSYNC:
+			fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
+			if (fd < 0)
+				break;
+			od->fsync.fd = fd;
+			return 0;
 	}
 
 	return errno != 0 ? -errno : -EIO;
