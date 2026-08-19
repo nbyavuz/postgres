@@ -639,7 +639,9 @@ DataChecksumsStateStruct
 DataChecksumsWorkerDatabase
 DataChecksumsWorkerOperation
 DataChecksumsWorkerResult
+DataDirSyncEntry
 DataDirSyncMethod
+DataDirSyncState
 DataDumperPtr
 DataPageDeleteStack
 DataTypesUsageChecks
