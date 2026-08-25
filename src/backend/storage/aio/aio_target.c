@@ -17,6 +17,7 @@
 #include "storage/aio.h"
 #include "storage/aio_internal.h"
 #include "storage/smgr.h"
+#include "storage/sync.h"
 
 static char *pgaio_sync_describe_identity(const PgAioTargetData *sd);
 
@@ -39,6 +40,7 @@ static const PgAioTargetInfo *pgaio_target_info[] = {
 	},
 	[PGAIO_TID_SMGR] = &aio_smgr_target_info,
 	[PGAIO_TID_SYNC] = &aio_sync_target_info,
+	[PGAIO_TID_SYNC_FILETAG] = &aio_sync_filetag_target_info,
 };
 
 /*
@@ -157,6 +159,11 @@ pgaio_io_reopen(PgAioHandle *ioh)
 	if (result < 0)
 		return result;
 
+	/*
+	 * Remember that this process, rather than the one that staged the IO,
+	 * owns the file descriptor now, so that pgaio_io_close_reopened() can
+	 * release it once the IO has been executed.
+	 */
 	if (pgaio_target_info[ioh->target]->close != NULL)
 		pgaio_reopened_ioh = ioh;
 
