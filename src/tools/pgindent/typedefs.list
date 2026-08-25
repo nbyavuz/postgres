@@ -2263,6 +2263,7 @@ PgAioOpData
 PgAioResult
 PgAioResultStatus
 PgAioReturn
+PgAioSyncFileTag
 PgAioTargetData
 PgAioTargetID
 PgAioTargetInfo
