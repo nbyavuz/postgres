@@ -352,7 +352,11 @@ bitmapheap_stream_read_next(ReadStream *pgsr, void *private_data,
 	Assert(false);
 }
 
-/* Set up a read stream for scan types that use one. */
+/*
+ * Set up a read stream for scan types that can create one without executor
+ * state.  Sample scans create their stream on first use instead, because
+ * their callback needs SampleScanState.
+ */
 static void
 heap_scan_init_stream(HeapScanDesc scan)
 {

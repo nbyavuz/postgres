@@ -80,12 +80,11 @@ typedef struct HeapScanDescData
 	ReadStream *rs_read_stream;
 
 	/*
-	 * For sequential scans and TID range scans to stream reads. The read
-	 * stream is allocated at the beginning of the scan and reset on rescan or
-	 * when the scan direction changes. The scan direction is saved each time
-	 * a new page is requested. If the scan direction changes from one page to
-	 * the next, the read stream releases all previously pinned buffers and
-	 * resets the prefetch block.
+	 * For sequential, sample, and TID range scans to stream reads. The read
+	 * stream is reset on rescan or when the scan direction changes. The scan
+	 * direction is saved each time a new page is requested. If the scan
+	 * direction changes from one page to the next, the read stream releases
+	 * all previously pinned buffers and resets the prefetch block.
 	 */
 	ScanDirection rs_dir;
 	BlockNumber rs_prefetch_block;

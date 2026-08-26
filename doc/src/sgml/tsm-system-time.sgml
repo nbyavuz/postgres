@@ -17,10 +17,10 @@
 
  <para>
   This table sampling method accepts a single floating-point argument that
-  is the maximum number of milliseconds to spend reading the table.  This
-  gives you direct control over how long the query takes, at the price that
-  the size of the sample becomes hard to predict.  The resulting sample will
-  contain as many rows as could be read in the specified time, unless the
+  specifies approximately how many milliseconds to spend reading the table.
+  This gives you approximate control over how long the query takes, at the
+  price that the size of the sample becomes hard to predict.  The resulting
+  sample will contain as many rows as could be read in that time, unless the
   whole table has been read first.
  </para>
 
@@ -64,8 +64,9 @@ SELECT * FROM my_table TABLESAMPLE SYSTEM_TIME(1000);
 
   <para>
    This command will return as large a sample of <structname>my_table</structname> as
-   it can read in 1 second (1000 milliseconds).  Of course, if the whole
-   table can be read in under 1 second, all its rows will be returned.
+   it can read in approximately 1 second (1000 milliseconds).  Of course, if
+   the whole table can be read in under 1 second, all its rows will be
+   returned.
   </para>
  </sect2>
 

@@ -2135,11 +2135,58 @@ heapam_scan_bitmap_next_tuple(TableScanDesc scan,
 	return true;
 }
 
+/*
+ * Read stream API callback for sample scans.  Returns the next block selected
+ * by the sampling method, or the next block of a sequential sample scan.
+ */
+static BlockNumber
+heapam_scan_sample_stream_read_next(ReadStream *stream,
+									void *callback_private_data,
+									void *per_buffer_data)
+{
+	SampleScanState *scanstate = callback_private_data;
+	HeapScanDesc hscan = (HeapScanDesc) scanstate->ss.ss_currentScanDesc;
+	TsmRoutine *tsm = scanstate->tsmroutine;
+	BlockNumber blockno;
+
+	if (tsm->NextSampleBlock)
+	{
+		blockno = tsm->NextSampleBlock(scanstate, hscan->rs_nblocks);
+		CHECK_FOR_INTERRUPTS();
+		return blockno;
+	}
+
+	/* Scan all blocks sequentially. */
+	if (unlikely(!hscan->rs_inited))
+	{
+		blockno = hscan->rs_startblock;
+		hscan->rs_inited = true;
+	}
+	else
+	{
+		blockno = hscan->rs_prefetch_block + 1;
+
+		if (blockno >= hscan->rs_nblocks)
+			blockno = 0;
+
+		/* Report the position before detecting the end, as for a seqscan. */
+		if (hscan->rs_base.rs_flags & SO_ALLOW_SYNC)
+			ss_report_location(hscan->rs_base.rs_rd, blockno);
+
+		if (blockno == hscan->rs_startblock)
+			blockno = InvalidBlockNumber;
+	}
+
+	hscan->rs_prefetch_block = blockno;
+	return blockno;
+}
+
 static bool
 heapam_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate)
 {
 	HeapScanDesc hscan = (HeapScanDesc) scan;
 	TsmRoutine *tsm = scanstate->tsmroutine;
+	int			stream_flags = READ_STREAM_DEFAULT;
 	BlockNumber blockno;
 
 	/* return false immediately if relation is empty */
@@ -2153,59 +2200,6 @@ heapam_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate)
 		hscan->rs_cbuf = InvalidBuffer;
 	}
 
-	if (tsm->NextSampleBlock)
-		blockno = tsm->NextSampleBlock(scanstate, hscan->rs_nblocks);
-	else
-	{
-		/* scanning table sequentially */
-
-		if (hscan->rs_cblock == InvalidBlockNumber)
-		{
-			Assert(!hscan->rs_inited);
-			blockno = hscan->rs_startblock;
-		}
-		else
-		{
-			Assert(hscan->rs_inited);
-
-			blockno = hscan->rs_cblock + 1;
-
-			if (blockno >= hscan->rs_nblocks)
-			{
-				/* wrap to beginning of rel, might not have started at 0 */
-				blockno = 0;
-			}
-
-			/*
-			 * Report our new scan position for synchronization purposes.
-			 *
-			 * Note: we do this before checking for end of scan so that the
-			 * final state of the position hint is back at the start of the
-			 * rel.  That's not strictly necessary, but otherwise when you run
-			 * the same query multiple times the starting position would shift
-			 * a little bit backwards on every invocation, which is confusing.
-			 * We don't guarantee any specific ordering in general, though.
-			 */
-			if (scan->rs_flags & SO_ALLOW_SYNC)
-				ss_report_location(scan->rs_rd, blockno);
-
-			if (blockno == hscan->rs_startblock)
-			{
-				blockno = InvalidBlockNumber;
-			}
-		}
-	}
-
-	hscan->rs_cblock = blockno;
-
-	if (!BlockNumberIsValid(blockno))
-	{
-		hscan->rs_inited = false;
-		return false;
-	}
-
-	Assert(hscan->rs_cblock < hscan->rs_nblocks);
-
 	/*
 	 * Be sure to check for interrupts at least once per page.  Checks at
 	 * higher code levels won't be able to stop a sample scan that encounters
@@ -2213,9 +2207,38 @@ heapam_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate)
 	 */
 	CHECK_FOR_INTERRUPTS();
 
-	/* Read page using selected strategy */
-	hscan->rs_cbuf = ReadBufferExtended(hscan->rs_base.rs_rd, MAIN_FORKNUM,
-										blockno, RBM_NORMAL, hscan->rs_strategy);
+	/* The callback needs SampleScanState, which heap_beginscan() lacks. */
+	if (hscan->rs_read_stream == NULL)
+	{
+		/* Extension callbacks need not be safe in AIO batch mode. */
+		if (tsm->NextSampleBlock == NULL)
+			stream_flags |= READ_STREAM_SEQUENTIAL | READ_STREAM_USE_BATCHING;
+
+		hscan->rs_read_stream =
+			read_stream_begin_relation(stream_flags,
+									   hscan->rs_strategy,
+									   hscan->rs_base.rs_rd,
+									   MAIN_FORKNUM,
+									   heapam_scan_sample_stream_read_next,
+									   scanstate,
+									   0);
+	}
+
+	hscan->rs_cbuf = read_stream_next_buffer(hscan->rs_read_stream, NULL);
+	if (BufferIsValid(hscan->rs_cbuf))
+		blockno = BufferGetBlockNumber(hscan->rs_cbuf);
+	else
+		blockno = InvalidBlockNumber;
+
+	if (!BlockNumberIsValid(blockno))
+	{
+		hscan->rs_cblock = InvalidBlockNumber;
+		hscan->rs_inited = false;
+		return false;
+	}
+
+	hscan->rs_cblock = blockno;
+	Assert(hscan->rs_cblock < hscan->rs_nblocks);
 
 	/* in pagemode, prune the page and determine visible tuple offsets */
 	if (hscan->rs_base.rs_flags & SO_ALLOW_PAGEMODE)

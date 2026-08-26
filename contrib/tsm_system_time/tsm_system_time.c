@@ -4,7 +4,7 @@
  *	  support routines for SYSTEM_TIME tablesample method
  *
  * The desire here is to produce a random sample with as many rows as possible
- * in no more than the specified amount of time.  We use a block-sampling
+ * within approximately the specified amount of time.  We use a block-sampling
  * approach.  To ensure that the whole relation will be visited if necessary,
  * we start at a randomly chosen block and then advance with a stride that
  * is randomly chosen but is relatively prime to the relation's nblocks.
