@@ -2222,6 +2222,10 @@ heapam_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate)
 									   heapam_scan_sample_stream_read_next,
 									   scanstate,
 									   0);
+
+		if (hscan->rs_base.rs_instrument)
+			read_stream_enable_stats(hscan->rs_read_stream,
+									 &hscan->rs_base.rs_instrument->io);
 	}
 
 	hscan->rs_cbuf = read_stream_next_buffer(hscan->rs_read_stream, NULL);
