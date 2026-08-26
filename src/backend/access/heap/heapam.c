@@ -352,6 +352,53 @@ bitmapheap_stream_read_next(ReadStream *pgsr, void *private_data,
 	Assert(false);
 }
 
+/* Set up a read stream for scan types that use one. */
+static void
+heap_scan_init_stream(HeapScanDesc scan)
+{
+	Assert(scan->rs_read_stream == NULL);
+
+	if (scan->rs_base.rs_flags & SO_TYPE_SEQSCAN ||
+		scan->rs_base.rs_flags & SO_TYPE_TIDRANGESCAN)
+	{
+		ReadStreamBlockNumberCB cb;
+
+		if (scan->rs_base.rs_parallel)
+			cb = heap_scan_stream_read_next_parallel;
+		else
+			cb = heap_scan_stream_read_next_serial;
+
+		/*
+		 * Batch mode is safe because 'cb' never holds locks while waiting for
+		 * I/O.  The serial callback uses SyncScanLock, and the parallel
+		 * callback uses only spinlocks and atomics.
+		 */
+		scan->rs_read_stream = read_stream_begin_relation(READ_STREAM_SEQUENTIAL |
+														  READ_STREAM_USE_BATCHING,
+														  scan->rs_strategy,
+														  scan->rs_base.rs_rd,
+														  MAIN_FORKNUM,
+														  cb,
+														  scan,
+														  0);
+	}
+	else if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
+	{
+		scan->rs_read_stream = read_stream_begin_relation(READ_STREAM_DEFAULT |
+														  READ_STREAM_USE_BATCHING,
+														  scan->rs_strategy,
+														  scan->rs_base.rs_rd,
+														  MAIN_FORKNUM,
+														  bitmapheap_stream_read_next,
+														  scan,
+														  sizeof(TBMIterateResult));
+	}
+
+	if (scan->rs_read_stream != NULL && scan->rs_base.rs_instrument != NULL)
+		read_stream_enable_stats(scan->rs_read_stream,
+								 &scan->rs_base.rs_instrument->io);
+}
+
 /* ----------------
  *		initscan - scan code common to heap_beginscan and heap_rescan
  * ----------------
@@ -412,9 +459,19 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
 	else
 	{
 		if (scan->rs_strategy != NULL)
+		{
+			if (scan->rs_read_stream != NULL)
+			{
+				read_stream_end(scan->rs_read_stream);
+				scan->rs_read_stream = NULL;
+			}
 			FreeAccessStrategy(scan->rs_strategy);
+		}
 		scan->rs_strategy = NULL;
 	}
+
+	if (scan->rs_read_stream != NULL && scan->rs_strategy != NULL)
+		read_stream_set_strategy(scan->rs_read_stream, scan->rs_strategy);
 
 	if (scan->rs_base.rs_parallel != NULL)
 	{
@@ -1204,6 +1261,7 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 	scan->rs_base.rs_parallel = parallel_scan;
 	scan->rs_base.rs_instrument = NULL;
 	scan->rs_strategy = NULL;	/* set in initscan */
+	scan->rs_read_stream = NULL;
 	scan->rs_cbuf = InvalidBuffer;
 
 	/*
@@ -1270,50 +1328,8 @@ heap_beginscan(Relation relation, Snapshot snapshot,
 
 	initscan(scan, key, false);
 
-	scan->rs_read_stream = NULL;
-
-	/*
-	 * Set up a read stream for sequential scans and TID range scans. This
-	 * should be done after initscan() because initscan() allocates the
-	 * BufferAccessStrategy object passed to the read stream API.
-	 */
-	if (scan->rs_base.rs_flags & SO_TYPE_SEQSCAN ||
-		scan->rs_base.rs_flags & SO_TYPE_TIDRANGESCAN)
-	{
-		ReadStreamBlockNumberCB cb;
-
-		if (scan->rs_base.rs_parallel)
-			cb = heap_scan_stream_read_next_parallel;
-		else
-			cb = heap_scan_stream_read_next_serial;
-
-		/* ---
-		 * It is safe to use batchmode as the only locks taken by `cb`
-		 * are never taken while waiting for IO:
-		 * - SyncScanLock is used in the non-parallel case
-		 * - in the parallel case, only spinlocks and atomics are used
-		 * ---
-		 */
-		scan->rs_read_stream = read_stream_begin_relation(READ_STREAM_SEQUENTIAL |
-														  READ_STREAM_USE_BATCHING,
-														  scan->rs_strategy,
-														  scan->rs_base.rs_rd,
-														  MAIN_FORKNUM,
-														  cb,
-														  scan,
-														  0);
-	}
-	else if (scan->rs_base.rs_flags & SO_TYPE_BITMAPSCAN)
-	{
-		scan->rs_read_stream = read_stream_begin_relation(READ_STREAM_DEFAULT |
-														  READ_STREAM_USE_BATCHING,
-														  scan->rs_strategy,
-														  scan->rs_base.rs_rd,
-														  MAIN_FORKNUM,
-														  bitmapheap_stream_read_next,
-														  scan,
-														  sizeof(TBMIterateResult));
-	}
+	/* initscan() must choose the access strategy before stream creation */
+	heap_scan_init_stream(scan);
 
 	/* enable read stream instrumentation */
 	if ((flags & SO_SCAN_INSTRUMENT) && (scan->rs_read_stream != NULL))
@@ -1385,6 +1401,10 @@ heap_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 	 * reinitialize scan descriptor
 	 */
 	initscan(scan, key, true);
+
+	/* initscan() may have ended a stream whose strategy was removed */
+	if (scan->rs_read_stream == NULL)
+		heap_scan_init_stream(scan);
 }
 
 void
