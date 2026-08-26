@@ -1429,6 +1429,29 @@ read_stream_clear_strategy(ReadStream *stream)
 }
 
 /*
+ * Change the buffer access strategy used by an idle stream.
+ *
+ * The stream must first be reset so that no reads still refer to the old
+ * strategy.  The allocation made when the stream was created cannot grow, so
+ * the new limit remains capped by the existing queue capacity.  The caller
+ * must create a new stream to exceed that capacity.
+ */
+void
+read_stream_set_strategy(ReadStream *stream, BufferAccessStrategy strategy)
+{
+	Assert(stream->pinned_buffers == 0);
+	Assert(stream->ios_in_progress == 0);
+	Assert(stream->pending_read_nblocks == 0);
+
+	stream->max_pinned_buffers = Max(1,
+									 Min(stream->queue_size - 1,
+										 GetAccessStrategyPinLimit(strategy)));
+
+	for (int i = 0; i < stream->max_ios; ++i)
+		stream->ios[i].op.strategy = strategy;
+}
+
+/*
  * Reset a read stream by releasing any queued up buffers, allowing the stream
  * to be used again for different blocks.  This can be used to clear an
  * end-of-stream condition and start again, or to throw away blocks that were
