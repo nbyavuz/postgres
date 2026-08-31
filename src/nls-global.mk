@@ -2,9 +2,10 @@
 
 # Common rules for Native Language Support (NLS)
 #
-# If some subdirectory of the source tree wants to provide NLS, it
-# needs to contain a file 'nls.mk' with the following make variable
-# assignments:
+# If some subdirectory of the source tree wants to provide NLS, it needs to
+# contain an nls.mk file.  PostgreSQL's own nls.mk files include a
+# build-system-neutral nls.dat file with the following assignments.  External
+# modules may continue to assign the variables directly in nls.mk.
 #
 # CATALOG_NAME          -- name of the message catalog (xxx.po); probably
 #                          name of the program
@@ -29,8 +30,26 @@
 # order to merge the changes into the existing .po files.
 
 
-# existence checked by Makefile.global; otherwise we won't get here
+# Existence checked by Makefile.global; otherwise we won't get here.
 include $(srcdir)/nls.mk
+
+# Keep the common settings in the same expanded form as before they moved to
+# nls-common.dat.
+# The shared data file is installed with this file for PGXS users.
+include $(top_srcdir)/src/nls-common.dat
+
+FRONTEND_COMMON_GETTEXT_FILES := $(subst @top_srcdir@,$(top_srcdir),$(FRONTEND_COMMON_GETTEXT_FILES))
+BACKEND_COMMON_GETTEXT_TRIGGERS := $(subst +frontend_common,$(FRONTEND_COMMON_GETTEXT_TRIGGERS),$(BACKEND_COMMON_GETTEXT_TRIGGERS))
+BACKEND_COMMON_GETTEXT_FLAGS := $(subst +frontend_common,$(FRONTEND_COMMON_GETTEXT_FLAGS),$(BACKEND_COMMON_GETTEXT_FLAGS))
+
+# Replace the +NAME words used by nls.dat with the corresponding settings in
+# nls-common.dat.  External nls.mk files normally use the Make variables
+# directly, which continues to work.
+expand_nls = $(subst @top_srcdir@,$(top_srcdir),$(subst +frontend_common,$(FRONTEND_COMMON_GETTEXT_$(1)),$(subst +backend_common,$(BACKEND_COMMON_GETTEXT_$(1)),$(2))))
+
+GETTEXT_FILES    := $(call expand_nls,FILES,$(GETTEXT_FILES))
+GETTEXT_TRIGGERS := $(call expand_nls,TRIGGERS,$(GETTEXT_TRIGGERS))
+GETTEXT_FLAGS    := $(call expand_nls,FLAGS,$(GETTEXT_FLAGS))
 
 AVAIL_LANGUAGES := $(shell cat $(srcdir)/po/LINGUAS)
 
@@ -54,41 +73,8 @@ ifdef MSGMERGE
 MSGMERGE += --no-wrap --previous --sort-by-file
 endif
 
-# _ is defined in c.h, so it's global
-GETTEXT_TRIGGERS += _
-GETTEXT_FLAGS    += _:1:pass-c-format
-
-
-# common settings that apply to backend and all backend modules
-BACKEND_COMMON_GETTEXT_TRIGGERS = \
-    $(FRONTEND_COMMON_GETTEXT_TRIGGERS) \
-    errmsg errmsg_plural:1,2 \
-    errdetail errdetail_log errdetail_plural:1,2 \
-    errhint errhint_plural:1,2 \
-    errcontext \
-    XactLockTableWait:4 \
-    MultiXactIdWait:6 \
-    ConditionalMultiXactIdWait:6
-BACKEND_COMMON_GETTEXT_FLAGS = \
-    $(FRONTEND_COMMON_GETTEXT_FLAGS) \
-    errmsg:1:c-format errmsg_plural:1:c-format errmsg_plural:2:c-format \
-    errdetail:1:c-format errdetail_log:1:c-format errdetail_plural:1:c-format errdetail_plural:2:c-format \
-    errhint:1:c-format errhint_plural:1:c-format errhint_plural:2:c-format \
-    errcontext:1:c-format
-
-FRONTEND_COMMON_GETTEXT_FILES = $(top_srcdir)/src/common/logging.c
-
-FRONTEND_COMMON_GETTEXT_TRIGGERS = \
-    pg_log_error pg_log_error_detail pg_log_error_hint \
-    pg_log_warning pg_log_warning_detail pg_log_warning_hint \
-    pg_log_info pg_log_info_detail pg_log_info_hint \
-    pg_fatal pg_log_generic:3 pg_log_generic_v:3
-
-FRONTEND_COMMON_GETTEXT_FLAGS = \
-    pg_log_error:1:c-format pg_log_error_detail:1:c-format pg_log_error_hint:1:c-format \
-    pg_log_warning:1:c-format pg_log_warning_detail:1:c-format pg_log_warning_hint:1:c-format \
-    pg_log_info:1:c-format pg_log_info_detail:1:c-format pg_log_info_hint:1:c-format \
-    pg_fatal:1:c-format pg_log_generic:3:c-format pg_log_generic_v:3:c-format
+GETTEXT_TRIGGERS += $(ALWAYS_GETTEXT_TRIGGERS)
+GETTEXT_FLAGS    += $(ALWAYS_GETTEXT_FLAGS)
 
 
 all-po: $(MO_FILES)

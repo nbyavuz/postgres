@@ -1,0 +1,13 @@
+# src/bin/pg_waldump/nls.dat
+CATALOG_NAME     = pg_waldump
+GETTEXT_FILES    = +frontend_common \
+                   archive_waldump.c \
+                   pg_waldump.c \
+                   xlogreader.c \
+                   xlogstats.c \
+                   ../../common/fe_memutils.c \
+                   ../../common/file_utils.c
+GETTEXT_TRIGGERS = +frontend_common \
+                   report_invalid_record:2
+GETTEXT_FLAGS    = +frontend_common \
+                   report_invalid_record:2:c-format

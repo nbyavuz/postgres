@@ -45,7 +45,7 @@ makefile_port = configure_file(
 configure_files += makefile_port
 
 install_data(
-  'Makefile.shlib', 'nls-global.mk',
+  'Makefile.shlib', 'nls-global.mk', 'nls-common.dat',
   install_dir: dir_pgxs / 'src')
 
 install_data(

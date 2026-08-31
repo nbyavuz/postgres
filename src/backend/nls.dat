@@ -1,0 +1,30 @@
+# src/backend/nls.dat
+CATALOG_NAME     = postgres
+# The server catalog covers all backend sources, plus the sources it
+# shares with frontend programs.
+GETTEXT_SCAN_DIRS = . ../common ../port ../include
+GETTEXT_TRIGGERS = +backend_common \
+                   GUC_check_errmsg \
+                   GUC_check_errdetail \
+                   GUC_check_errhint \
+                   write_stderr \
+                   yyerror \
+                   jsonpath_yyerror:4 \
+                   parser_yyerror \
+                   replication_yyerror:3 \
+                   scanner_yyerror \
+                   syncrep_yyerror:4 \
+                   report_invalid_record:2 \
+                   ereport_startup_progress \
+                   json_token_error:2 \
+                   json_manifest_parse_failure:2 \
+                   error_cb:2
+GETTEXT_FLAGS    = +backend_common \
+                   GUC_check_errmsg:1:c-format \
+                   GUC_check_errdetail:1:c-format \
+                   GUC_check_errhint:1:c-format \
+                   write_stderr:1:c-format \
+                   report_invalid_record:2:c-format \
+                   ereport_startup_progress:1:c-format \
+                   json_token_error:2:c-format \
+                   error_cb:2:c-format

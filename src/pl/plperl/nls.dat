@@ -1,0 +1,5 @@
+# src/pl/plperl/nls.dat
+CATALOG_NAME     = plperl
+GETTEXT_FILES    = plperl.c SPI.c
+GETTEXT_TRIGGERS = +backend_common
+GETTEXT_FLAGS    = +backend_common

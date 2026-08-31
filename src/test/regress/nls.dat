@@ -1,0 +1,5 @@
+# src/test/regress/nls.dat
+CATALOG_NAME     = postgresql-regress
+GETTEXT_FILES    = regress.c
+GETTEXT_TRIGGERS = +backend_common
+GETTEXT_FLAGS    = +backend_common

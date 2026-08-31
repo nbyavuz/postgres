@@ -1,0 +1,5 @@
+# src/pl/tcl/nls.dat
+CATALOG_NAME     = pltcl
+GETTEXT_FILES    = pltcl.c
+GETTEXT_TRIGGERS = +backend_common
+GETTEXT_FLAGS    = +backend_common

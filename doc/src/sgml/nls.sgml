@@ -136,9 +136,10 @@ msgstr "another translated"
    <para>
     OK, so how does one create a <quote>blank</quote> message
     catalog?  First, go into the directory that contains the program
-    whose messages you want to translate.  If there is a file
-    <filename>nls.mk</filename>, then this program has been prepared
-    for translation.
+    whose messages you want to translate.  If there is an
+    <filename>nls.dat</filename> file, or a legacy
+    <filename>nls.mk</filename> file in an extension, then this program has
+    been prepared for translation.
    </para>
 
    <para>
@@ -365,9 +366,16 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
 
    <step>
     <para>
-     Add a file <filename>nls.mk</filename> in the directory with the
-     program sources.  This file will be read as a makefile.  The
-     following variable assignments need to be made here:
+     Add a file <filename>nls.dat</filename> in the directory with the
+     program sources.  Every build system reads this file, so it contains
+     nothing but assignments of the form <literal>NAME = word word
+     ...</literal>, where a backslash at the end of a line continues the
+     value on the next line, and a <literal>#</literal> starts a comment.  A
+     word of the form <literal>+<replaceable>name</replaceable></literal>
+     stands for a list of settings that
+     <filename>src/nls-common.dat</filename> defines, for example
+     <literal>+frontend_common</literal>.  The following assignments need to
+     be made here:
 
      <variablelist>
       <varlistentry>
@@ -417,6 +425,15 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
        </listitem>
       </varlistentry>
      </variablelist>
+    </para>
+   </step>
+
+   <step>
+    <para>
+     While the Make build is supported, also add an
+     <filename>nls.mk</filename> file that includes
+     <filename>nls.dat</filename>.  This keeps the catalog usable by Make and
+     by extensions using PGXS without duplicating its metadata.
     </para>
    </step>
 

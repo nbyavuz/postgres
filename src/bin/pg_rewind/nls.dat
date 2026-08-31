@@ -1,0 +1,25 @@
+# src/bin/pg_rewind/nls.dat
+CATALOG_NAME     = pg_rewind
+GETTEXT_FILES    = +frontend_common \
+                   datapagemap.c \
+                   file_ops.c \
+                   filemap.c \
+                   libpq_source.c \
+                   local_source.c \
+                   parsexlog.c \
+                   pg_rewind.c \
+                   timeline.c \
+                   xlogreader.c \
+                   ../../common/controldata_utils.c \
+                   ../../common/fe_memutils.c \
+                   ../../common/file_utils.c \
+                   ../../common/percentrepl.c \
+                   ../../common/restricted_token.c \
+                   ../../fe_utils/archive.c \
+                   ../../fe_utils/option_utils.c \
+                   ../../fe_utils/recovery_gen.c \
+                   ../../fe_utils/string_utils.c
+GETTEXT_TRIGGERS = +frontend_common \
+                   report_invalid_record:2
+GETTEXT_FLAGS    = +frontend_common \
+                   report_invalid_record:2:c-format

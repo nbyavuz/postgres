@@ -1,0 +1,11 @@
+# src/bin/pg_checksums/nls.dat
+CATALOG_NAME     = pg_checksums
+GETTEXT_FILES    = +frontend_common \
+                   pg_checksums.c \
+                   ../../common/controldata_utils.c \
+                   ../../common/fe_memutils.c \
+                   ../../common/file_utils.c \
+                   ../../fe_utils/option_utils.c \
+                   ../../fe_utils/version.c
+GETTEXT_TRIGGERS = +frontend_common
+GETTEXT_FLAGS    = +frontend_common

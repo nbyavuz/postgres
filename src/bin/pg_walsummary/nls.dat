@@ -1,0 +1,9 @@
+# src/bin/pg_walsummary/nls.dat
+CATALOG_NAME     = pg_walsummary
+GETTEXT_FILES    = +frontend_common \
+                   pg_walsummary.c \
+                   ../../common/fe_memutils.c \
+                   ../../common/file_utils.c \
+                   ../../fe_utils/option_utils.c
+GETTEXT_TRIGGERS = +frontend_common
+GETTEXT_FLAGS    = +frontend_common

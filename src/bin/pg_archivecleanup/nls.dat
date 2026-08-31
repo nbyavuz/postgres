@@ -1,0 +1,5 @@
+# src/bin/pg_archivecleanup/nls.dat
+CATALOG_NAME     = pg_archivecleanup
+GETTEXT_FILES    = +frontend_common pg_archivecleanup.c ../../common/fe_memutils.c
+GETTEXT_TRIGGERS = +frontend_common
+GETTEXT_FLAGS    = +frontend_common

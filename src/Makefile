@@ -49,6 +49,7 @@ install-local: installdirs-local
 	$(INSTALL_DATA) Makefile.port '$(DESTDIR)$(pgxsdir)/$(subdir)/Makefile.port'
 	$(INSTALL_DATA) $(srcdir)/Makefile.shlib '$(DESTDIR)$(pgxsdir)/$(subdir)/Makefile.shlib'
 	$(INSTALL_DATA) $(srcdir)/nls-global.mk '$(DESTDIR)$(pgxsdir)/$(subdir)/nls-global.mk'
+	$(INSTALL_DATA) $(srcdir)/nls-common.dat '$(DESTDIR)$(pgxsdir)/$(subdir)/nls-common.dat'
 
 installdirs: installdirs-local
 
@@ -58,7 +59,7 @@ installdirs-local:
 uninstall: uninstall-local
 
 uninstall-local:
-	rm -f $(addprefix '$(DESTDIR)$(pgxsdir)/$(subdir)'/, Makefile.global Makefile.port Makefile.shlib nls-global.mk)
+	rm -f $(addprefix '$(DESTDIR)$(pgxsdir)/$(subdir)'/, Makefile.global Makefile.port Makefile.shlib nls-global.mk nls-common.dat)
 
 clean:
 	$(MAKE) -C test $@
