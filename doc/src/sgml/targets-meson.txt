@@ -18,6 +18,7 @@ Developer Targets:
   expand-dat-files              Expand all data files to include defaults
   update-unicode                Update Unicode data to new version
   init-po                       Create message translation templates
+  update-po                     Update message translation files
   headerscheck                  Check that all headers compile standalone
   cpluspluscheck                Check that all headers compile as C++
 

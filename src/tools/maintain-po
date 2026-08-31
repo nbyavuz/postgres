@@ -382,11 +382,65 @@ def extract_messages(args, catalog, names, extra_files, staging_root):
     return pot_file
 
 
+def find_compendia(catalogs):
+    compendia = {}
+    for catalog in catalogs:
+        for language in sorted(catalog['languages']):
+            path = os.path.join(
+                catalog['source_dir'], 'po', language + '.po')
+            compendia.setdefault(language, []).append(path)
+
+    for language in compendia:
+        compendia[language].sort()
+    return compendia
+
+
 def set_regular_permissions(path):
     if os.name == 'posix':
         mask = os.umask(0)
         os.umask(mask)
         os.chmod(path, 0o666 & ~mask)
+
+
+def merge_translations(args, catalog, pot_file, compendia):
+    output_po_dir = os.path.join(catalog['source_dir'], 'po')
+
+    for language in sorted(compendia):
+        source_po = os.path.join(
+            catalog['source_dir'], 'po', language + '.po')
+        if language in catalog['languages']:
+            input_po = source_po
+        else:
+            # Merge against the template itself for a language this catalog
+            # does not yet provide, so that compendium translations can be
+            # reused.
+            input_po = pot_file
+
+        output_po = os.path.join(
+            output_po_dir, language + '.po.new')
+        descriptor, temporary = tempfile.mkstemp(
+            prefix='.' + language + '.po.new.', dir=output_po_dir)
+        os.close(descriptor)
+        try:
+            command = [
+                args.msgmerge,
+                '--quiet',
+                '--no-wrap',
+                '--previous',
+                '--sort-by-file',
+                '--lang=' + language,
+                input_po,
+                pot_file,
+                '-o', temporary,
+            ]
+            command.extend('--compendium=' + path
+                           for path in compendia[language])
+            run_command(command)
+            set_regular_permissions(temporary)
+            os.replace(temporary, output_po)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
 
 
 def collect_mappings(args, catalogs):
@@ -416,6 +470,7 @@ def main():
     parser.add_argument('--build-root', required=True, type=os.path.abspath)
     parser.add_argument('--major-version', required=True)
     parser.add_argument('--xgettext', required=True)
+    parser.add_argument('--msgmerge')
     parser.add_argument(
         '--extra-file', action='append', default=[], nargs=3,
         metavar=('CATALOG', 'NAME', 'PATH'),
@@ -424,22 +479,31 @@ def main():
         '--skip-file', action='append', default=[], nargs=2,
         metavar=('CATALOG', 'PATH'),
         help='omit a Meson path found while scanning a catalog')
-    parser.add_argument('operation', choices=('init',))
+    parser.add_argument('operation', choices=('init', 'update'))
     args = parser.parse_args()
 
-    if shutil.which(args.xgettext) is None:
-        error("you don't have '{0}'".format(
-            os.path.basename(args.xgettext)))
+    tools = [args.xgettext]
+    if args.operation == 'update':
+        if args.msgmerge is None:
+            parser.error('--msgmerge is required for update')
+        tools.append(args.msgmerge)
+    for tool in tools:
+        if shutil.which(tool) is None:
+            error("you don't have '{0}'".format(os.path.basename(tool)))
 
     catalogs = find_catalogs(args.source_root, args.build_root)
     extra_files, skip_files = collect_mappings(args, catalogs)
+    compendia = (find_compendia(catalogs)
+                 if args.operation == 'update' else None)
     staging_root = os.path.join(args.build_root, 'maintain-po-input')
     shutil.rmtree(staging_root, ignore_errors=True)
 
     try:
+        action = ('Initializing'
+                  if args.operation == 'init' else 'Updating')
         for catalog in catalogs:
-            print('Initializing message catalog {0}'.format(
-                catalog['name']), flush=True)
+            print('{0} message catalog {1}'.format(
+                action, catalog['name']), flush=True)
             if catalog['scan_dirs']:
                 names = scan_directories(
                     catalog, skip_files[catalog['name']])
@@ -452,9 +516,11 @@ def main():
                     names.append(name)
             names.sort()
 
-            extract_messages(
+            pot_file = extract_messages(
                 args, catalog, names, extra_files[catalog['name']],
                 staging_root)
+            if args.operation == 'update':
+                merge_translations(args, catalog, pot_file, compendia)
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
 

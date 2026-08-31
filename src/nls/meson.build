@@ -1,6 +1,7 @@
 # Copyright (c) 2026, PostgreSQL Global Development Group
 
 xgettext = find_program('xgettext', native: true, required: false)
+msgmerge = find_program('msgmerge', native: true, required: false)
 
 nls_command = [
   python, files('../tools/maintain-po'),
@@ -113,5 +114,13 @@ nls_deps = [
 
 run_target('init-po',
   command: nls_command + ['init'],
+  depends: nls_deps,
+)
+
+run_target('update-po',
+  command: nls_command + [
+    '--msgmerge', msgmerge.found() ? msgmerge.full_path() : 'msgmerge',
+    'update',
+  ],
   depends: nls_deps,
 )

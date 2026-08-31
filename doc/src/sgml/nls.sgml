@@ -192,15 +192,21 @@ de fr
    <para>
     As the underlying program or library changes, messages might be
     changed or added by the programmers.  In this case you do not need
-    to start from scratch.  Instead, run the command:
+    to start from scratch.  Instead, run <command>make update-po</command>
+    from the program's build directory, or
+    <command>ninja update-po</command> from the top-level Meson build
+    directory:
 <programlisting>
 make update-po
+ninja update-po
 </programlisting>
-    which will create a new blank message catalog file (the pot file
-    you started with) and will merge it with the existing PO files.
+    The Meson target updates every message catalog.  These commands create a
+    new blank message catalog file (the pot file you started with) and merge
+    it with the existing PO files.
     If the merge algorithm is not sure about a particular message it
-    marks it <quote>fuzzy</quote> as explained above.  The new PO file
-    is saved with a <filename>.po.new</filename> extension.
+    marks it <quote>fuzzy</quote> as explained above.  The new PO file is
+    saved next to the existing PO files with a
+    <filename>.po.new</filename> extension.
    </para>
   </sect2>
 
