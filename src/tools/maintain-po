@@ -1,0 +1,463 @@
+#!/usr/bin/env python3
+
+# Copyright (c) 2026, PostgreSQL Global Development Group
+#
+# Maintain all PostgreSQL message catalogs.  Catalog metadata comes from the
+# build-system-neutral nls.dat files; build-system-specific file locations are
+# supplied on the command line.
+
+import argparse
+import datetime
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+CATALOG_KEYS = {
+    'CATALOG_NAME',
+    'GETTEXT_FILES',
+    'GETTEXT_FLAGS',
+    'GETTEXT_SCAN_DIRS',
+    'GETTEXT_TRIGGERS',
+}
+COMMON_KEY_RE = re.compile(
+    r'^(ALWAYS|BACKEND_COMMON|FRONTEND_COMMON)_GETTEXT_'
+    r'(FILES|FLAGS|TRIGGERS)$')
+LINE_DIRECTIVE_RE = re.compile(br'^(#\s*line\s+\d+\s+")([^"]+)(".*)$')
+
+
+def error(message):
+    print('maintain-po: {0}'.format(message), file=sys.stderr)
+    sys.exit(1)
+
+
+# Message catalogs record file names with forward slashes, independently of
+# the platform, so that builds on different platforms produce the same
+# references.
+def as_posix(path):
+    return path.replace(os.sep, '/')
+
+
+def run_command(command, cwd=None):
+    try:
+        subprocess.run(command, cwd=cwd, check=True)
+    except subprocess.CalledProcessError as exception:
+        error('{0} failed with exit code {1}'.format(
+            os.path.basename(command[0]), exception.returncode))
+    except OSError as exception:
+        error('could not execute {0}: {1}'.format(command[0], exception))
+
+
+# The NLS data files assign lists of words to names, like
+#
+#     NAME = word word ...
+#
+# where a backslash at the end of a line continues the value on the next
+# line, and a '#' starts a comment.
+def read_data_file(path, valid_key):
+    try:
+        with open(path, encoding='utf-8') as file:
+            text = file.read()
+    except OSError as exception:
+        error('could not read {0}: {1}'.format(path, exception))
+
+    values = {}
+    text = re.sub(r'#[^\n]*', '', text).replace('\\\n', ' ')
+    for line_number, line in enumerate(text.split('\n'), 1):
+        if not line.strip():
+            continue
+
+        name, separator, value = line.partition('=')
+        name = name.strip()
+        if not separator:
+            error('{0}:{1}: expected an assignment'.format(
+                path, line_number))
+        if not valid_key(name):
+            error('{0}:{1}: unknown setting {2}'.format(
+                path, line_number, name))
+        if name in values:
+            error('{0}:{1}: setting {2} is assigned more than once'.format(
+                path, line_number, name))
+        values[name] = value.split()
+
+    return values
+
+
+# A word of the form +NAME stands for the value NAME_GETTEXT_<kind> has in
+# src/nls-common.dat, where <kind> is the kind of setting the word appears in.
+def expand_tokens(words, common, kind, expanding=None):
+    if expanding is None:
+        expanding = []
+
+    expanded = []
+    for word in words:
+        if not word.startswith('+'):
+            expanded.append(word)
+            continue
+
+        name = '{0}_GETTEXT_{1}'.format(word[1:].upper(), kind)
+        if name not in common:
+            error('unknown common NLS setting {0}'.format(word))
+        if name in expanding:
+            error('recursive common NLS setting {0}'.format(word))
+        expanded.extend(expand_tokens(
+            common[name], common, kind, expanding + [name]))
+
+    return expanded
+
+
+def read_linguas(path):
+    try:
+        with open(path, encoding='utf-8') as file:
+            lines = file.readlines()
+    except OSError as exception:
+        error('could not read {0}: {1}'.format(path, exception))
+
+    languages = []
+    for line in lines:
+        line = line.partition('#')[0]
+        languages.extend(line.split())
+
+    if len(languages) != len(set(languages)):
+        error('{0} lists a language more than once'.format(path))
+    return languages
+
+
+def read_catalog(common, source_root, build_root, data_file):
+    values = read_data_file(data_file, lambda name: name in CATALOG_KEYS)
+
+    names = values.get('CATALOG_NAME', [])
+    if len(names) != 1:
+        error('{0} must name exactly one catalog'.format(data_file))
+
+    files = values.get('GETTEXT_FILES', [])
+    scan_dirs = values.get('GETTEXT_SCAN_DIRS', [])
+    if bool(files) == bool(scan_dirs):
+        error('{0} must set exactly one of GETTEXT_FILES and '
+              'GETTEXT_SCAN_DIRS'.format(data_file))
+
+    source_dir = os.path.dirname(data_file)
+    relative_dir = os.path.relpath(source_dir, source_root)
+    linguas_file = os.path.join(source_dir, 'po', 'LINGUAS')
+    languages = read_linguas(linguas_file)
+    for language in languages:
+        po_file = os.path.join(source_dir, 'po', language + '.po')
+        if not os.path.isfile(po_file):
+            error('{0} lists {1}, but {2} does not exist'.format(
+                linguas_file, language, po_file))
+
+    catalog = {
+        'build_dir': os.path.join(build_root, relative_dir),
+        'data_file': data_file,
+        'files': expand_tokens(files, common, 'FILES'),
+        'languages': set(languages),
+        'name': names[0],
+        'relative_dir': relative_dir,
+        'scan_dirs': scan_dirs,
+        'source_dir': source_dir,
+    }
+    for key, kind in (('triggers', 'TRIGGERS'), ('flags', 'FLAGS')):
+        catalog[key] = expand_tokens(
+            values.get('GETTEXT_' + kind, []), common, kind)
+        catalog[key] += expand_tokens(['+always'], common, kind)
+
+    return catalog
+
+
+def find_catalogs(source_root, build_root):
+    common_file = os.path.join(source_root, 'src', 'nls-common.dat')
+    common = read_data_file(
+        common_file, lambda name: COMMON_KEY_RE.match(name) is not None)
+
+    catalogs = []
+    source_dir = os.path.join(source_root, 'src')
+    for directory, subdirs, entries in os.walk(source_dir):
+        subdirs.sort()
+        if 'nls.dat' in entries:
+            catalogs.append(read_catalog(
+                common, source_root, build_root,
+                os.path.join(directory, 'nls.dat')))
+
+    catalogs.sort(key=lambda catalog: as_posix(catalog['source_dir']))
+    names = [catalog['name'] for catalog in catalogs]
+    if len(names) != len(set(names)):
+        error('two NLS data files name the same catalog')
+    if not catalogs:
+        error('no NLS catalogs found below {0}'.format(source_dir))
+
+    return catalogs
+
+
+# Files shared by several programs are named relative to the top of the source
+# tree, like $(top_srcdir) does in the Makefiles.
+def expand_names(names, source_dir, source_root):
+    top_srcdir = as_posix(os.path.relpath(source_root, source_dir))
+    return [name.replace('@top_srcdir@', top_srcdir) for name in names]
+
+
+def normalized_path(path):
+    return os.path.normcase(os.path.abspath(path))
+
+
+def scan_directories(catalog, skip_files):
+    names = set()
+
+    # The server catalog covers generated files too, so search the source and
+    # build trees.
+    for base_dir in (catalog['source_dir'], catalog['build_dir']):
+        for relative_dir in catalog['scan_dirs']:
+            search_dir = os.path.normpath(
+                os.path.join(base_dir, relative_dir))
+            if not os.path.isdir(search_dir):
+                continue
+
+            for directory, subdirs, entries in os.walk(search_dir):
+                subdirs.sort()
+                for entry in sorted(entries):
+                    if not entry.endswith('.c') and entry != 'proctypelist.h':
+                        continue
+                    path = os.path.join(directory, entry)
+                    if normalized_path(path) in skip_files:
+                        continue
+                    names.add(as_posix(os.path.relpath(path, base_dir)))
+
+    return sorted(names)
+
+
+def staging_path(staging_root, catalog, name):
+    # The caller supplies a staging directory mirroring the source root.
+    staging_dir = os.path.join(staging_root, catalog['relative_dir'])
+    path = os.path.normpath(os.path.join(staging_dir, name))
+    if normalized_path(os.path.commonpath(
+            [staging_root, path])) != normalized_path(staging_root):
+        error('NLS file name escapes the source tree: {0}'.format(name))
+    return path
+
+
+def stage_file(path, name, staging_root, catalog):
+    output_path = staging_path(staging_root, catalog, name)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    try:
+        with open(path, 'rb') as input_file:
+            lines = input_file.readlines()
+    except OSError as exception:
+        error('could not read {0}: {1}'.format(path, exception))
+
+    # Flex and Bison record their input path in #line directives.  Rewrite it
+    # to the path used by an in-tree Make build, so that source references do
+    # not depend on the build system.
+    directory = as_posix(os.path.dirname(name)).encode()
+    try:
+        with open(output_path, 'wb') as output_file:
+            for line in lines:
+                match = LINE_DIRECTIVE_RE.match(line)
+                if match:
+                    source_name = os.path.basename(match.group(2))
+                    if not catalog['scan_dirs'] and directory:
+                        source_name = directory + b'/' + source_name
+                    line = b''.join((match.group(1), source_name,
+                                     match.group(3), b'\n'))
+                output_file.write(line)
+    except OSError as exception:
+        error('could not write {0}: {1}'.format(output_path, exception))
+
+
+def stage_files(catalog, names, extra_files, staging_root):
+    staged = False
+    extra_names = set()
+
+    for name, path in extra_files:
+        stage_file(path, name, staging_root, catalog)
+        extra_names.add(name)
+        staged = True
+
+    for name in names:
+        if name in extra_names:
+            continue
+        source_path = os.path.normpath(
+            os.path.join(catalog['source_dir'], name))
+        if os.path.isfile(source_path):
+            continue
+
+        build_path = os.path.normpath(
+            os.path.join(catalog['build_dir'], name))
+        if not os.path.isfile(build_path):
+            error('{0}: source file {1} was not found in the source or '
+                  'build tree'.format(catalog['data_file'], name))
+        stage_file(build_path, name, staging_root, catalog)
+        staged = True
+
+    return staged
+
+
+def write_atomic(path, lines):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix='.' + os.path.basename(path) + '.', dir=os.path.dirname(path))
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as file:
+            file.writelines(lines)
+        set_regular_permissions(temporary)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def extract_messages(args, catalog, names, extra_files, staging_root):
+    os.makedirs(catalog['build_dir'], exist_ok=True)
+    po_dir = os.path.join(catalog['source_dir'], 'po')
+
+    command = [
+        args.xgettext,
+        '-ctranslator',
+        '--copyright-holder=PostgreSQL Global Development Group',
+        '--msgid-bugs-address=pgsql-bugs@lists.postgresql.org',
+        '--no-wrap',
+        '--sort-by-file',
+        '--package-name={0} (PostgreSQL)'.format(catalog['name']),
+        '--package-version={0}'.format(args.major_version),
+        '-n',
+    ]
+    command.extend('-k{0}'.format(trigger)
+                   for trigger in catalog['triggers'])
+    command.extend('--flag={0}'.format(flag) for flag in catalog['flags'])
+    command.extend(['-D', catalog['source_dir']])
+
+    staged = stage_files(
+        catalog, names, extra_files, staging_root)
+    if staged:
+        staging_dir = os.path.join(staging_root, catalog['relative_dir'])
+        command.extend(['-D', staging_dir])
+
+    descriptor, list_file = tempfile.mkstemp(
+        prefix='.update-po-files.', dir=catalog['build_dir'], text=True)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as file:
+            if catalog['scan_dirs']:
+                file.write('\n'.join('./' + name for name in names) + '\n')
+            else:
+                file.write('\n'.join(names) + '\n')
+        command.extend(['-f', list_file])
+
+        descriptor, messages_file = tempfile.mkstemp(
+            prefix='.messages.', suffix='.po',
+            dir=catalog['build_dir'])
+        os.close(descriptor)
+        try:
+            command.extend(['-o', messages_file])
+            run_command(command, cwd=catalog['source_dir'])
+            try:
+                with open(messages_file, encoding='utf-8') as file:
+                    lines = file.readlines()
+            except OSError as exception:
+                error('could not read {0}: {1}'.format(
+                    messages_file, exception))
+        finally:
+            if os.path.exists(messages_file):
+                os.remove(messages_file)
+    finally:
+        if os.path.exists(list_file):
+            os.remove(list_file)
+
+    replacements = (
+        ('SOME DESCRIPTIVE TITLE.',
+         'LANGUAGE message translation file for {0}'.format(catalog['name']),
+         1),
+        ('PACKAGE', 'PostgreSQL', -1),
+        ('VERSION', args.major_version, -1),
+        ('YEAR', str(datetime.date.today().year), -1),
+    )
+    for index in range(min(18, len(lines))):
+        for old, new, count in replacements:
+            lines[index] = lines[index].replace(old, new, count)
+
+    pot_file = os.path.join(
+        po_dir, '{0}.pot'.format(catalog['name']))
+    write_atomic(pot_file, lines)
+    return pot_file
+
+
+def set_regular_permissions(path):
+    if os.name == 'posix':
+        mask = os.umask(0)
+        os.umask(mask)
+        os.chmod(path, 0o666 & ~mask)
+
+
+def collect_mappings(args, catalogs):
+    by_name = {catalog['name']: catalog for catalog in catalogs}
+    extra_files = {name: [] for name in by_name}
+    skip_files = {name: set() for name in by_name}
+
+    for catalog_name, name, path in args.extra_file:
+        if catalog_name not in by_name:
+            error('extra file refers to unknown catalog {0}'.format(
+                catalog_name))
+        extra_files[catalog_name].append((name, os.path.abspath(path)))
+
+    for catalog_name, path in args.skip_file:
+        if catalog_name not in by_name:
+            error('skip file refers to unknown catalog {0}'.format(
+                catalog_name))
+        skip_files[catalog_name].add(normalized_path(path))
+
+    return extra_files, skip_files
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='maintain PostgreSQL message catalogs')
+    parser.add_argument('--source-root', required=True, type=os.path.abspath)
+    parser.add_argument('--build-root', required=True, type=os.path.abspath)
+    parser.add_argument('--major-version', required=True)
+    parser.add_argument('--xgettext', required=True)
+    parser.add_argument(
+        '--extra-file', action='append', default=[], nargs=3,
+        metavar=('CATALOG', 'NAME', 'PATH'),
+        help='map a catalog source name to its Meson path')
+    parser.add_argument(
+        '--skip-file', action='append', default=[], nargs=2,
+        metavar=('CATALOG', 'PATH'),
+        help='omit a Meson path found while scanning a catalog')
+    parser.add_argument('operation', choices=('init',))
+    args = parser.parse_args()
+
+    if shutil.which(args.xgettext) is None:
+        error("you don't have '{0}'".format(
+            os.path.basename(args.xgettext)))
+
+    catalogs = find_catalogs(args.source_root, args.build_root)
+    extra_files, skip_files = collect_mappings(args, catalogs)
+    staging_root = os.path.join(args.build_root, 'maintain-po-input')
+    shutil.rmtree(staging_root, ignore_errors=True)
+
+    try:
+        for catalog in catalogs:
+            print('Initializing message catalog {0}'.format(
+                catalog['name']), flush=True)
+            if catalog['scan_dirs']:
+                names = scan_directories(
+                    catalog, skip_files[catalog['name']])
+            else:
+                names = expand_names(
+                    catalog['files'], catalog['source_dir'], args.source_root)
+
+            for name, _ in extra_files[catalog['name']]:
+                if name not in names:
+                    names.append(name)
+            names.sort()
+
+            extract_messages(
+                args, catalog, names, extra_files[catalog['name']],
+                staging_root)
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+
+if __name__ == '__main__':
+    main()
