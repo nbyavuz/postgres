@@ -9,6 +9,9 @@
 # CATALOG_NAME          -- name of the message catalog (xxx.po); probably
 #                          name of the program
 # GETTEXT_FILES         -- list of source files that contain message strings
+# GETTEXT_SCAN_DIRS     -- (optional) directories to search for source files,
+#                          instead of naming them one by one; used by the
+#                          server catalog, which covers whole directories
 # GETTEXT_TRIGGERS      -- (optional) list of functions that contain
 #                          translatable strings
 # GETTEXT_FLAGS         -- (optional) list of gettext --flag arguments to mark
@@ -93,14 +96,24 @@ all-po: $(MO_FILES)
 %.mo: %.po
 	$(MSGFMT) $(MSGFMT_FLAGS) -o $@ $<
 
-ifeq ($(word 1,$(GETTEXT_FILES)),+)
+ifdef GETTEXT_SCAN_DIRS
+gettext-files: generated-parser-sources generated-headers
+	find $(patsubst %/.,%,$(addprefix $(srcdir)/,$(GETTEXT_SCAN_DIRS))) \( -name '*.c' -o -name "proctypelist.h" \) -print | LC_ALL=C sort >$@
+
+po/$(CATALOG_NAME).pot: gettext-files $(MAKEFILE_LIST)
+ifdef XGETTEXT
+	$(XGETTEXT) -D $(srcdir) -D . -n $(addprefix -k, $(GETTEXT_TRIGGERS)) $(addprefix --flag=, $(GETTEXT_FLAGS)) -f $<
+else
+	@echo "You don't have 'xgettext'."; exit 1
+endif
+else ifeq ($(word 1,$(GETTEXT_FILES)),+)
 po/$(CATALOG_NAME).pot: $(word 2, $(GETTEXT_FILES)) $(MAKEFILE_LIST)
 ifdef XGETTEXT
 	$(XGETTEXT) -D $(srcdir) -D . -n $(addprefix -k, $(GETTEXT_TRIGGERS)) $(addprefix --flag=, $(GETTEXT_FLAGS)) -f $<
 else
 	@echo "You don't have 'xgettext'."; exit 1
 endif
-else # GETTEXT_FILES
+else
 po/$(CATALOG_NAME).pot: $(GETTEXT_FILES) $(MAKEFILE_LIST)
 # Change to srcdir explicitly, don't rely on $^.  That way we get
 # consistent #: file references in the po files.
@@ -109,7 +122,7 @@ ifdef XGETTEXT
 else
 	@echo "You don't have 'xgettext'."; exit 1
 endif
-endif # GETTEXT_FILES
+endif
 	@$(MKDIR_P) $(dir $@)
 	sed -e '1,18 { s/SOME DESCRIPTIVE TITLE./LANGUAGE message translation file for $(CATALOG_NAME)/;s/PACKAGE/PostgreSQL/g;s/VERSION/$(MAJORVERSION)/g;s/YEAR/'`date +%Y`'/g; }' messages.po >$@
 	rm messages.po
@@ -134,6 +147,7 @@ clean-po:
 	$(if $(MO_FILES),rm -f $(MO_FILES))
 	@$(if $(wildcard po/*.po.new),rm -f po/*.po.new)
 	rm -f po/$(CATALOG_NAME).pot
+	$(if $(GETTEXT_SCAN_DIRS),rm -f gettext-files)
 
 
 init-po: po/$(CATALOG_NAME).pot

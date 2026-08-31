@@ -193,7 +193,7 @@ utils/probes.o: utils/probes.d $(SUBDIROBJS)
 
 ##########################################################################
 
-# This target is only needed by nls.mk.
+# This target is only needed by src/nls-global.mk.
 .PHONY: generated-parser-sources
 generated-parser-sources:
 	$(MAKE) -C parser	gram.c gram.h scan.c

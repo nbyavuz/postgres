@@ -1,6 +1,8 @@
 # src/backend/nls.mk
 CATALOG_NAME     = postgres
-GETTEXT_FILES    = + gettext-files
+# The server catalog covers all backend sources, plus the sources it
+# shares with frontend programs.
+GETTEXT_SCAN_DIRS = . ../common ../port ../include
 GETTEXT_TRIGGERS = $(BACKEND_COMMON_GETTEXT_TRIGGERS) \
                    GUC_check_errmsg \
                    GUC_check_errdetail \
@@ -26,12 +28,3 @@ GETTEXT_FLAGS    = $(BACKEND_COMMON_GETTEXT_FLAGS) \
                    ereport_startup_progress:1:c-format \
                    json_token_error:2:c-format \
                    error_cb:2:c-format
-
-gettext-files: generated-parser-sources generated-headers
-	find $(srcdir) $(srcdir)/../common $(srcdir)/../port $(srcdir)/../include/ \( -name '*.c' -o -name "proctypelist.h" \) -print | LC_ALL=C sort >$@
-
-my-clean:
-	rm -f gettext-files
-
-.PHONY: my-clean
-clean: my-clean

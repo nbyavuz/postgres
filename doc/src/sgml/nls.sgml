@@ -389,10 +389,10 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
          List of files that contain translatable strings, i.e., those
          marked with <function>gettext</function> or an alternative
          solution.  Eventually, this will include nearly all source
-         files of the program.  If this list gets too long you can
-         make the first <quote>file</quote> be a <literal>+</literal>
-         and the second word be a file that contains one file name per
-         line.
+         files of the program.  A catalog that covers whole directories,
+         which so far only the server does, leaves this out and assigns
+         <varname>GETTEXT_SCAN_DIRS</varname> instead, naming the
+         directories to search for source files.
         </para>
        </listitem>
       </varlistentry>
