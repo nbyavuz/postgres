@@ -18,6 +18,7 @@
 
 #include "postgres.h"
 
+#include "access/clog.h"
 #include "access/relation.h"
 #include "catalog/pg_type.h"
 #include "fmgr.h"
@@ -28,10 +29,15 @@
 #include "storage/bufmgr.h"
 #include "storage/checksum.h"
 #include "storage/condition_variable.h"
+#include "storage/fd.h"
 #include "storage/lwlock.h"
+#include "storage/md.h"
 #include "storage/proc.h"
 #include "storage/procnumber.h"
 #include "storage/read_stream.h"
+#include "storage/smgr.h"
+#include "storage/spin.h"
+#include "storage/sync.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/injection_point.h"
@@ -43,10 +49,26 @@
 PG_MODULE_MAGIC;
 
 
+#define TEST_AIO_COMPLETION_SLOTS 4096
+
+typedef struct TestAioCompletion
+{
+	uint64		sequence;
+	pid_t		executor_pid;
+	pid_t		owner_pid;
+	PgAioOp		operation;
+	PgAioTargetID target;
+	int			raw_result;
+	PgAioTargetData target_data;
+	bool		datasync;
+	bool		synchronous;
+} TestAioCompletion;
+
 /* In shared memory */
 typedef struct InjIoErrorState
 {
 	ConditionVariable cv;
+	slock_t		completion_lock;
 
 	bool		enabled_short_read;
 	bool		enabled_reopen;
@@ -56,11 +78,24 @@ typedef struct InjIoErrorState
 	BlockNumber completion_wait_blockno;
 	pid_t		completion_wait_pid;
 	uint32		completion_wait_event;
+	bool		completion_wait_operation_set;
+	PgAioOp		completion_wait_operation;
+	bool		completion_wait_target_set;
+	PgAioTargetID completion_wait_target;
+	bool		completion_wait_filetag_handler_set;
+	int16		completion_wait_filetag_handler;
+	bool		completion_wait_filetag_segno_set;
+	uint64		completion_wait_filetag_segno;
+	int32		completion_wait_remaining;
 
 	bool		short_read_result_set;
 	Oid			short_read_relfilenode;
 	pid_t		short_read_pid;
 	int			short_read_result;
+
+	uint64		completion_sequence;
+	uint32		completion_count;
+	TestAioCompletion completions[TEST_AIO_COMPLETION_SLOTS];
 } InjIoErrorState;
 
 typedef struct BlocksReadStreamData
@@ -105,8 +140,16 @@ test_aio_shmem_init(void *arg)
 	inj_io_error_state->enabled_short_read = false;
 	inj_io_error_state->enabled_reopen = false;
 	inj_io_error_state->enabled_completion_wait = false;
+	inj_io_error_state->completion_wait_operation_set = false;
+	inj_io_error_state->completion_wait_target_set = false;
+	inj_io_error_state->completion_wait_filetag_handler_set = false;
+	inj_io_error_state->completion_wait_filetag_segno_set = false;
+	inj_io_error_state->completion_wait_remaining = -1;
+	inj_io_error_state->completion_sequence = 0;
+	inj_io_error_state->completion_count = 0;
 
 	ConditionVariableInit(&inj_io_error_state->cv);
+	SpinLockInit(&inj_io_error_state->completion_lock);
 	inj_io_error_state->completion_wait_event = WaitEventInjectionPointNew("completion_wait");
 
 #ifdef USE_INJECTION_POINTS
@@ -167,11 +210,206 @@ errno_from_string(PG_FUNCTION_ARGS)
 		PG_RETURN_INT32(ENOSPC);
 	else if (strcmp(sym, "EROFS") == 0)
 		PG_RETURN_INT32(EROFS);
+	else if (strcmp(sym, "ENOENT") == 0)
+		PG_RETURN_INT32(ENOENT);
+	else if (strcmp(sym, "EBADF") == 0)
+		PG_RETURN_INT32(EBADF);
+	else if (strcmp(sym, "EINVAL") == 0)
+		PG_RETURN_INT32(EINVAL);
 
 	ereport(ERROR,
 			errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 			errmsg_internal("%s is not a supported errno value", sym));
 	PG_RETURN_INT32(0);
+}
+
+PG_FUNCTION_INFO_V1(aio_fsync_rel);
+Datum
+aio_fsync_rel(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	bool		datasync = PG_GETARG_BOOL(1);
+	Relation	rel;
+	SMgrRelation smgr;
+	int			fd;
+	uint32		off;
+	PgAioReturn ior;
+	PgAioHandle *ioh;
+	PgAioWaitRef iow;
+	int			result;
+
+	rel = relation_open(relid, AccessShareLock);
+	smgr = RelationGetSmgr(rel);
+
+	ioh = pgaio_io_acquire(CurrentResourceOwner, &ior);
+	pgaio_io_set_target_smgr(ioh, smgr, MAIN_FORKNUM, 0, 0, false);
+	pgaio_io_get_wref(ioh, &iow);
+
+	HOLD_INTERRUPTS();
+	fd = mdfd(smgr, MAIN_FORKNUM, 0, &off);
+	pgaio_io_start_fsync(ioh, fd, datasync, WAIT_EVENT_DATA_FILE_SYNC);
+	RESUME_INTERRUPTS();
+
+	pgaio_wref_wait(&iow);
+	result = ior.result.result;
+
+	relation_close(rel, AccessShareLock);
+
+	PG_RETURN_INT32(result);
+}
+
+PG_FUNCTION_INFO_V1(aio_fsync_slru);
+Datum
+aio_fsync_slru(PG_FUNCTION_ARGS)
+{
+	int64		open_segno = PG_GETARG_INT64(0);
+	int64		target_segno = PG_GETARG_INT64(1);
+	FileTag		open_tag = {0};
+	FileTag		target_tag = {0};
+	int			fd;
+	PgAioReturn ior;
+	PgAioHandle *ioh;
+	PgAioWaitRef iow;
+	int			result;
+
+	if (open_segno < 0 || open_segno > 0xFFFFFF ||
+		target_segno < 0 || target_segno > 0xFFFFFF)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("SLRU segment number is out of range")));
+
+	open_tag.handler = SYNC_HANDLER_CLOG;
+	open_tag.segno = (uint64) open_segno;
+	target_tag.handler = SYNC_HANDLER_CLOG;
+	target_tag.segno = (uint64) target_segno;
+
+	ioh = pgaio_io_acquire(CurrentResourceOwner, &ior);
+	pgaio_io_set_target_sync_filetag(ioh, &target_tag);
+	pgaio_io_get_wref(ioh, &iow);
+
+	HOLD_INTERRUPTS();
+	fd = clogopenfiletag(&open_tag);
+	if (fd < 0)
+	{
+		int			save_errno = errno;
+
+		RESUME_INTERRUPTS();
+		pgaio_io_release(ioh);
+		errno = save_errno;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open pg_xact segment " INT64_FORMAT ": %m",
+						open_segno)));
+	}
+	pgaio_io_start_fsync(ioh, fd, false, WAIT_EVENT_SLRU_FLUSH_SYNC);
+	RESUME_INTERRUPTS();
+
+	pgaio_wref_wait(&iow);
+	result = ior.result.result;
+
+	(void) CloseTransientFile(fd);
+
+	PG_RETURN_INT32(result);
+}
+
+PG_FUNCTION_INFO_V1(aio_fsync_completions_reset);
+Datum
+aio_fsync_completions_reset(PG_FUNCTION_ARGS)
+{
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+	inj_io_error_state->completion_sequence = 0;
+	inj_io_error_state->completion_count = 0;
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+
+	PG_RETURN_VOID();
+}
+
+static int
+test_aio_completion_cmp(const void *a, const void *b)
+{
+	const TestAioCompletion *ca = (const TestAioCompletion *) a;
+	const TestAioCompletion *cb = (const TestAioCompletion *) b;
+
+	if (ca->sequence < cb->sequence)
+		return -1;
+	if (ca->sequence > cb->sequence)
+		return 1;
+	return 0;
+}
+
+PG_FUNCTION_INFO_V1(aio_fsync_completions);
+Datum
+aio_fsync_completions(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	TestAioCompletion *completions;
+	uint32		completion_count;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	completions = palloc(sizeof(TestAioCompletion) *
+						 TEST_AIO_COMPLETION_SLOTS);
+
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+	completion_count = inj_io_error_state->completion_count;
+	memcpy(completions, inj_io_error_state->completions,
+		   sizeof(TestAioCompletion) * completion_count);
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+
+	qsort(completions, completion_count, sizeof(TestAioCompletion),
+		  test_aio_completion_cmp);
+
+	for (uint32 i = 0; i < completion_count; i++)
+	{
+		TestAioCompletion *completion = &completions[i];
+		PgAioHandle ioh = {0};
+		Datum		values[12] = {0};
+		bool		nulls[12] = {0};
+
+		ioh.op = completion->operation;
+		ioh.target = completion->target;
+		ioh.target_data = completion->target_data;
+
+		values[0] = Int64GetDatum((int64) completion->sequence);
+		values[1] = Int32GetDatum(completion->executor_pid);
+		values[2] = Int32GetDatum(completion->owner_pid);
+		values[3] =
+			CStringGetTextDatum(pgaio_io_get_op_name(&ioh));
+		values[4] =
+			CStringGetTextDatum(pgaio_io_get_target_name(&ioh));
+		values[5] = Int32GetDatum(completion->raw_result);
+		values[6] =
+			CStringGetTextDatum(pgaio_io_get_target_description(&ioh));
+
+		if (completion->target == PGAIO_TID_SMGR)
+			values[7] =
+				ObjectIdGetDatum(completion->target_data.smgr.rlocator.relNumber);
+		else
+			nulls[7] = true;
+
+		if (completion->target == PGAIO_TID_SYNC_FILETAG)
+		{
+			values[8] =
+				Int32GetDatum(completion->target_data.sync_filetag.handler);
+			values[9] =
+				Int64GetDatum((int64) completion->target_data.sync_filetag.segno);
+		}
+		else
+		{
+			nulls[8] = true;
+			nulls[9] = true;
+		}
+
+		values[10] = BoolGetDatum(completion->datasync);
+		values[11] = BoolGetDatum(completion->synchronous);
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
+	}
+
+	pfree(completions);
+
+	return (Datum) 0;
 }
 
 PG_FUNCTION_INFO_V1(grow_rel);
@@ -1051,28 +1289,107 @@ inj_io_completion_wait_matches(PgAioHandle *ioh)
 	if (inj_pid != InvalidPid && inj_pid != io_pid)
 		return false;
 
+	if (inj_io_error_state->completion_wait_operation_set &&
+		inj_io_error_state->completion_wait_operation != pgaio_io_get_op(ioh))
+		return false;
+
+	if (inj_io_error_state->completion_wait_target_set &&
+		inj_io_error_state->completion_wait_target != ioh->target)
+		return false;
+
 	td = pgaio_io_get_target_data(ioh);
 
 	inj_relfilenode = inj_io_error_state->completion_wait_relfilenode;
-	if (inj_relfilenode != InvalidOid &&
-		td->smgr.rlocator.relNumber != inj_relfilenode)
-		return false;
+	if (inj_relfilenode != InvalidOid)
+	{
+		if (ioh->target != PGAIO_TID_SMGR ||
+			td->smgr.rlocator.relNumber != inj_relfilenode)
+			return false;
+	}
 
 	inj_blockno = inj_io_error_state->completion_wait_blockno;
-	io_blockno = td->smgr.blockNum;
-	if (inj_blockno != InvalidBlockNumber &&
-		!(inj_blockno >= io_blockno && inj_blockno < (io_blockno + td->smgr.nblocks)))
-		return false;
+	if (inj_blockno != InvalidBlockNumber)
+	{
+		if (ioh->target != PGAIO_TID_SMGR)
+			return false;
+
+		io_blockno = td->smgr.blockNum;
+		if (!(inj_blockno >= io_blockno &&
+			  inj_blockno < (io_blockno + td->smgr.nblocks)))
+			return false;
+	}
+
+	if (inj_io_error_state->completion_wait_filetag_handler_set)
+	{
+		if (ioh->target != PGAIO_TID_SYNC_FILETAG ||
+			td->sync_filetag.handler !=
+			inj_io_error_state->completion_wait_filetag_handler)
+			return false;
+	}
+
+	if (inj_io_error_state->completion_wait_filetag_segno_set)
+	{
+		if (ioh->target != PGAIO_TID_SYNC_FILETAG ||
+			td->sync_filetag.segno !=
+			inj_io_error_state->completion_wait_filetag_segno)
+			return false;
+	}
 
 	return true;
+}
+
+static void
+test_aio_record_completion(PgAioHandle *ioh)
+{
+	TestAioCompletion *completion;
+	PGPROC	   *owner_proc;
+	uint64		sequence;
+	uint32		slot;
+
+	if (pgaio_io_get_op(ioh) != PGAIO_OP_FSYNC)
+		return;
+
+	owner_proc = GetPGProcByNumber(pgaio_io_get_owner(ioh));
+
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+
+	sequence = ++inj_io_error_state->completion_sequence;
+	slot = (sequence - 1) % TEST_AIO_COMPLETION_SLOTS;
+	completion = &inj_io_error_state->completions[slot];
+
+	completion->sequence = sequence;
+	completion->executor_pid = MyProcPid;
+	completion->owner_pid = owner_proc->pid;
+	completion->operation = pgaio_io_get_op(ioh);
+	completion->target = ioh->target;
+	completion->raw_result = ioh->result;
+	completion->target_data = *pgaio_io_get_target_data(ioh);
+	completion->datasync = ioh->op_data.fsync.datasync;
+	completion->synchronous = pgaio_io_needs_synchronous_execution(ioh);
+
+	if (inj_io_error_state->completion_count < TEST_AIO_COMPLETION_SLOTS)
+		inj_io_error_state->completion_count++;
+
+	SpinLockRelease(&inj_io_error_state->completion_lock);
 }
 
 static void
 inj_io_completion_wait_hook(const char *name, const void *private_data, void *arg)
 {
 	PgAioHandle *ioh = (PgAioHandle *) arg;
+	bool		claimed = true;
 
 	if (!inj_io_completion_wait_matches(ioh))
+		return;
+
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+	if (inj_io_error_state->completion_wait_remaining == 0)
+		claimed = false;
+	else if (inj_io_error_state->completion_wait_remaining > 0)
+		inj_io_error_state->completion_wait_remaining--;
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+
+	if (!claimed)
 		return;
 
 	ConditionVariablePrepareToSleep(&inj_io_error_state->cv);
@@ -1145,6 +1462,7 @@ inj_io_short_read_hook(const char *name, const void *private_data, void *arg)
 void
 inj_io_completion_hook(const char *name, const void *private_data, void *arg)
 {
+	test_aio_record_completion((PgAioHandle *) arg);
 	inj_io_completion_wait_hook(name, private_data, arg);
 	inj_io_short_read_hook(name, private_data, arg);
 }
@@ -1167,6 +1485,41 @@ Datum
 inj_io_completion_wait(PG_FUNCTION_ARGS)
 {
 #ifdef USE_INJECTION_POINTS
+	if (!PG_ARGISNULL(3))
+	{
+		const char *operation =
+			text_to_cstring(PG_GETARG_TEXT_PP(3));
+
+		if (strcmp(operation, "readv") == 0)
+			inj_io_error_state->completion_wait_operation = PGAIO_OP_READV;
+		else if (strcmp(operation, "writev") == 0)
+			inj_io_error_state->completion_wait_operation = PGAIO_OP_WRITEV;
+		else if (strcmp(operation, "fsync") == 0)
+			inj_io_error_state->completion_wait_operation = PGAIO_OP_FSYNC;
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("unknown AIO operation \"%s\"", operation)));
+	}
+
+	if (!PG_ARGISNULL(4))
+	{
+		const char *target =
+			text_to_cstring(PG_GETARG_TEXT_PP(4));
+
+		if (strcmp(target, "smgr") == 0)
+			inj_io_error_state->completion_wait_target = PGAIO_TID_SMGR;
+		else if (strcmp(target, "sync") == 0)
+			inj_io_error_state->completion_wait_target = PGAIO_TID_SYNC;
+		else if (strcmp(target, "sync_filetag") == 0)
+			inj_io_error_state->completion_wait_target =
+				PGAIO_TID_SYNC_FILETAG;
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("unknown AIO target \"%s\"", target)));
+	}
+
 	inj_io_error_state->enabled_completion_wait = true;
 	inj_io_error_state->completion_wait_pid =
 		PG_ARGISNULL(0) ? InvalidPid : PG_GETARG_INT32(0);
@@ -1174,6 +1527,38 @@ inj_io_completion_wait(PG_FUNCTION_ARGS)
 		PG_ARGISNULL(1) ? InvalidOid : PG_GETARG_OID(1);
 	inj_io_error_state->completion_wait_blockno =
 		PG_ARGISNULL(2) ? InvalidBlockNumber : PG_GETARG_UINT32(2);
+	inj_io_error_state->completion_wait_operation_set = !PG_ARGISNULL(3);
+	inj_io_error_state->completion_wait_target_set = !PG_ARGISNULL(4);
+	inj_io_error_state->completion_wait_filetag_handler_set =
+		!PG_ARGISNULL(5);
+	if (!PG_ARGISNULL(5))
+	{
+		int32		handler = PG_GETARG_INT32(5);
+
+		if (handler < 0 || handler >= SYNC_HANDLER_NONE)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid sync handler %d", handler)));
+		inj_io_error_state->completion_wait_filetag_handler = handler;
+	}
+	inj_io_error_state->completion_wait_filetag_segno_set =
+		!PG_ARGISNULL(6);
+	if (!PG_ARGISNULL(6))
+	{
+		int64		segno = PG_GETARG_INT64(6);
+
+		if (segno < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("SLRU segment number must not be negative")));
+		inj_io_error_state->completion_wait_filetag_segno = (uint64) segno;
+	}
+	inj_io_error_state->completion_wait_remaining =
+		PG_ARGISNULL(7) ? -1 : PG_GETARG_INT32(7);
+	if (inj_io_error_state->completion_wait_remaining == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("number of completion waits must be greater than zero")));
 #else
 	elog(ERROR, "injection points not supported");
 #endif
@@ -1190,6 +1575,11 @@ inj_io_completion_continue(PG_FUNCTION_ARGS)
 	inj_io_error_state->completion_wait_pid = InvalidPid;
 	inj_io_error_state->completion_wait_relfilenode = InvalidOid;
 	inj_io_error_state->completion_wait_blockno = InvalidBlockNumber;
+	inj_io_error_state->completion_wait_operation_set = false;
+	inj_io_error_state->completion_wait_target_set = false;
+	inj_io_error_state->completion_wait_filetag_handler_set = false;
+	inj_io_error_state->completion_wait_filetag_segno_set = false;
+	inj_io_error_state->completion_wait_remaining = -1;
 	ConditionVariableBroadcast(&inj_io_error_state->cv);
 #else
 	elog(ERROR, "injection points not supported");

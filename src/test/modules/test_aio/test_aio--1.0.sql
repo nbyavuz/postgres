@@ -9,6 +9,35 @@ RETURNS pg_catalog.int4 STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
 
+CREATE FUNCTION aio_fsync_rel(rel regclass, datasync bool DEFAULT false)
+RETURNS pg_catalog.int4 STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION aio_fsync_slru(open_segno int8, target_segno int8)
+RETURNS pg_catalog.int4 STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION aio_fsync_completions_reset()
+RETURNS pg_catalog.void STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION aio_fsync_completions(
+    OUT sequence int8,
+    OUT executor_pid int4,
+    OUT owner_pid int4,
+    OUT operation text,
+    OUT target text,
+    OUT raw_result int4,
+    OUT target_desc text,
+    OUT relfilenode oid,
+    OUT filetag_handler int4,
+    OUT filetag_segno int8,
+    OUT datasync bool,
+    OUT synchronous bool)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+
 CREATE FUNCTION grow_rel(rel regclass, nblocks int)
 RETURNS pg_catalog.void STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
@@ -105,7 +134,15 @@ AS 'MODULE_PATHNAME' LANGUAGE C;
 /*
  * Injection point related functions
  */
-CREATE FUNCTION inj_io_completion_wait(pid int DEFAULT NULL, relfilenode oid DEFAULT NULL, blockno int4 DEFAULT NULL)
+CREATE FUNCTION inj_io_completion_wait(
+    pid int DEFAULT NULL,
+    relfilenode oid DEFAULT NULL,
+    blockno int4 DEFAULT NULL,
+    operation text DEFAULT NULL,
+    target text DEFAULT NULL,
+    filetag_handler int DEFAULT NULL,
+    filetag_segno int8 DEFAULT NULL,
+    max_waits int DEFAULT NULL)
 RETURNS pg_catalog.void
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
