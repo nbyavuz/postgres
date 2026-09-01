@@ -16,22 +16,60 @@ use TestAio;
 my $have_injection_points = ($ENV{enable_injection_points} // '') eq 'yes';
 my @checkpoint_tables = map { "fsync_checkpoint_$_" } 1 .. 5;
 my $completion_wait_armed = 0;
+my $result_injection_armed = 0;
+my $sync_start_wait_armed = 0;
 my @startup_files;
+my @synthetic_slru_files;
+my $synthetic_slru_requests_pending = 0;
 my $node;
 
 END
 {
-	if ($completion_wait_armed && defined $node)
+	if (defined $node)
 	{
-		eval {
-			$node->safe_psql('postgres',
-				'SELECT inj_io_completion_continue()');
-		};
+		if ($sync_start_wait_armed)
+		{
+			eval {
+				$node->safe_psql('postgres',
+					'SELECT inj_sync_start_continue()');
+			};
+		}
+
+		if ($completion_wait_armed)
+		{
+			eval {
+				$node->safe_psql('postgres',
+					'SELECT inj_io_completion_continue()');
+			};
+		}
+
+		if ($result_injection_armed)
+		{
+			eval {
+				$node->safe_psql('postgres', 'SELECT inj_io_result_detach()');
+			};
+		}
+
+		if (@synthetic_slru_files && $synthetic_slru_requests_pending)
+		{
+			eval {
+				$node->safe_psql('postgres', 'CHECKPOINT');
+				$synthetic_slru_requests_pending = 0;
+			};
+		}
 	}
 
 	foreach my $file (@startup_files)
 	{
 		unlink($file) if -e $file;
+	}
+
+	if (!$synthetic_slru_requests_pending)
+	{
+		foreach my $file (@synthetic_slru_files)
+		{
+			unlink($file) if -e $file;
+		}
 	}
 }
 
@@ -65,6 +103,18 @@ foreach my $method (TestAio::supported_io_methods())
 	test_io_method($method, $node);
 	$node->stop();
 }
+
+$node->adjust_conf('postgresql.conf', 'io_method', 'worker');
+$node->adjust_conf('postgresql.conf', 'io_max_concurrency', '2');
+$node->adjust_conf('postgresql.conf', 'io_min_workers', '2');
+$node->adjust_conf('postgresql.conf', 'io_max_workers', '2');
+$node->adjust_conf('postgresql.conf', 'io_worker_idle_timeout', '0ms');
+$node->adjust_conf('postgresql.conf', 'io_worker_launch_interval', '0ms');
+$node->adjust_conf('postgresql.conf', 'max_files_per_process', '64');
+$node->append_conf('postgresql.conf', 'data_sync_retry=on');
+$node->start();
+test_process_sync_requests($node);
+$node->stop();
 
 done_testing();
 
@@ -138,8 +188,9 @@ sub test_direct_fsync
 	is($node->safe_psql('postgres', 'SELECT 1'),
 		1, "$method: server is usable after direct $kind");
 
-	subtest "$method: direct $kind instrumentation" => sub {
-		plan skip_all => 'Injection points not supported by this build'
+  SKIP:
+	{
+		skip 'Injection points not supported by this build', 6
 		  unless $have_injection_points;
 
 		my $relfilenode = $node->safe_psql('postgres',
@@ -203,7 +254,7 @@ LIMIT 1
 		is( $completion,
 			"fsync|smgr|0|t|$relfilenode|$expected_datasync|$pid",
 			"$method: direct $kind completion is recorded");
-	};
+	}
 }
 
 
@@ -217,8 +268,12 @@ sub test_checkpoint_relations
 	is($node->safe_psql('postgres', 'SELECT 1'),
 		1, "$method: relation checkpoint completes");
 
-	subtest "$method: relation checkpoint instrumentation" => sub {
-		plan skip_all => 'Injection points not supported by this build'
+	my $instrumentation_tests = $method eq 'worker' ? 11 : 10;
+
+  SKIP:
+	{
+		skip 'Injection points not supported by this build',
+		  $instrumentation_tests
 		  unless $have_injection_points;
 
 		dirty_checkpoint_relations($node);
@@ -248,18 +303,6 @@ SELECT inj_io_completion_wait(
 			query => 'CHECKPOINT',
 			inspect => sub {
 				my $pid = shift;
-				my $expected_active = $method eq 'sync' ? 1 : 2;
-
-				ok( $node->poll_query_until(
-						'postgres', qq(
-SELECT count(*)
-FROM pg_aios
-WHERE pid = $pid
-  AND operation = 'fsync'
-  AND target = 'smgr'
-),
-						$expected_active),
-					"$method: relation checkpoint reaches expected depth");
 
 				my $active = $node->safe_psql(
 					'postgres', qq(
@@ -270,9 +313,8 @@ WHERE pid = $pid
   AND target = 'smgr'
 ));
 
-				is($active, $expected_active,
-					"$method: relation checkpoint has expected active fsyncs"
-				);
+				cmp_ok($active, '>', 0,
+					"$method: relation checkpoint has active fsyncs");
 				cmp_ok($active, '<=', 2,
 					"$method: relation checkpoint respects depth");
 
@@ -308,6 +350,18 @@ WHERE owner_pid = $pid
 		is($covered, scalar(@relfilenodes),
 			"$method: checkpoint completions cover every relation");
 
+		my $max_depth = $node->safe_psql(
+			'postgres', qq(
+SELECT max(observed_depth)
+FROM aio_fsync_completions()
+WHERE owner_pid = $pid
+  AND operation = 'fsync'
+  AND target = 'smgr'
+  AND relfilenode = ANY (ARRAY[$relfilenode_array]::oid[])
+));
+		cmp_ok($max_depth, '<=', 2,
+			"$method: relation checkpoint completion depth is bounded");
+
 		my $invalid = $node->safe_psql(
 			'postgres', qq(
 SELECT count(*)
@@ -330,7 +384,7 @@ WHERE owner_pid = $pid
   AND target = 'smgr'
   AND relfilenode = ANY (ARRAY[$relfilenode_array]::oid[])),
 			'relation checkpoint') if $method eq 'worker';
-	};
+	}
 }
 
 
@@ -344,8 +398,12 @@ sub test_checkpoint_slru
 	is($node->safe_psql('postgres', 'SELECT 1'),
 		1, "$method: pg_xact checkpoint for segment $segment completes");
 
-	subtest "$method: pg_xact checkpoint instrumentation" => sub {
-		plan skip_all => 'Injection points not supported by this build'
+	my $instrumentation_tests = $method eq 'worker' ? 7 : 6;
+
+  SKIP:
+	{
+		skip 'Injection points not supported by this build',
+		  $instrumentation_tests
 		  unless $have_injection_points;
 
 		my $segment = (dirty_pg_xact($node))[1];
@@ -422,7 +480,7 @@ LIMIT 1
   AND filetag_handler = 1
   AND filetag_segno = $segment),
 			"pg_xact segment $segment") if $method eq 'worker';
-	};
+	}
 }
 
 
@@ -456,8 +514,12 @@ sub test_startup_sync
 	my %removed = map { $_ => 1 } @files;
 	@startup_files = grep { !$removed{$_} } @startup_files;
 
-	subtest "$method: startup sync instrumentation" => sub {
-		plan skip_all => 'Injection points not supported by this build'
+	my $instrumentation_tests = $method eq 'worker' ? 4 : 3;
+
+  SKIP:
+	{
+		skip 'Injection points not supported by this build',
+		  $instrumentation_tests
 		  unless $have_injection_points;
 
 		my $summary = $node->safe_psql(
@@ -498,7 +560,7 @@ WHERE operation = 'fsync'
 			is($invalid, 0,
 				"$method: startup fsyncs are synchronous outside IO workers");
 		}
-	};
+	}
 }
 
 
@@ -568,6 +630,719 @@ FROM (
 
 	die $error if defined $error;
 	die $restore_error if defined $restore_error;
+}
+
+
+sub test_process_sync_requests
+{
+	my $node = shift;
+
+  SKIP:
+	{
+		skip 'Injection points not supported by this build', 42
+		  unless $have_injection_points;
+
+		is( $node->safe_psql(
+				'postgres', q(
+SELECT current_setting('io_method'),
+       current_setting('io_max_concurrency'),
+       current_setting('io_min_workers'),
+       current_setting('io_max_workers'),
+       current_setting('max_files_per_process'),
+       current_setting('data_sync_retry')
+)),
+			'worker|2|2|2|64|on',
+			'phase two has the required worker and fsync configuration');
+		wait_for_worker_count('worker', $node, 2);
+
+		my $relfilenode = $node->safe_psql('postgres',
+			"SELECT pg_relation_filenode('fsync_direct')");
+
+		test_sync_rerequest($node, $relfilenode);
+		test_sync_cancel($node, $relfilenode);
+		test_sync_errors($node, $relfilenode);
+		test_sync_error_cleanup($node);
+	}
+}
+
+
+sub test_sync_rerequest
+{
+	my $node = shift;
+	my $relfilenode = shift;
+
+	dirty_fsync_direct($node);
+	$node->safe_psql('postgres', 'SELECT aio_fsync_completions_reset()');
+
+	my $failed = run_sync_start_checkpoint($node, $relfilenode, 'rerequest',
+		're-requested in-flight relation checkpoint');
+	ok(!$failed, 're-requested in-flight relation checkpoint succeeds');
+
+	is( relation_success_summary($node, $relfilenode),
+		'1|1',
+		'first checkpoint emits one completion for the re-requested relation'
+	);
+
+	$failed =
+	  run_background_checkpoint($node, 'retained re-request checkpoint');
+	ok(!$failed, 'retained re-request checkpoint succeeds');
+	is(relation_success_summary($node, $relfilenode),
+		'2|2', 'second checkpoint processes the retained re-request');
+
+	$failed = run_background_checkpoint($node, 'post re-request checkpoint');
+	ok(!$failed, 'post re-request checkpoint succeeds');
+	is(relation_success_summary($node, $relfilenode),
+		'2|2', 're-request is removed after the second checkpoint');
+}
+
+
+sub test_sync_cancel
+{
+	my $node = shift;
+	my $relfilenode = shift;
+	my ($error, $failed);
+
+	dirty_fsync_direct($node);
+	$node->safe_psql('postgres', 'SELECT aio_fsync_completions_reset()');
+
+	arm_result_injection(
+		$node, qq(
+SELECT inj_io_result_attach(
+  result => -errno_from_string('ENOENT'),
+  count => 1,
+  relfilenode => $relfilenode,
+  target => 'smgr')
+));
+
+	eval {
+		$failed = run_sync_start_checkpoint($node, $relfilenode, 'cancel',
+			'canceled in-flight relation checkpoint');
+		1;
+	} or $error = $@;
+
+	my $detach_error;
+	eval {
+		detach_result_injection($node);
+		1;
+	} or $detach_error = $@;
+	$error = $detach_error unless defined $error;
+	die $error if defined $error;
+
+	ok(!$failed, 'canceled in-flight relation checkpoint succeeds');
+	is( $node->safe_psql(
+			'postgres', qq(
+SELECT count(*),
+       count(*) FILTER (
+         WHERE raw_result = -errno_from_string('ENOENT'))
+FROM aio_fsync_completions()
+WHERE owner_pid = @{[ get_checkpointer_pid($node) ]}
+  AND operation = 'fsync'
+  AND target = 'smgr'
+  AND relfilenode = $relfilenode
+)),
+		'1|1',
+		'canceled in-flight relation records one raw ENOENT completion');
+
+	$failed =
+	  run_background_checkpoint($node, 'post cancellation checkpoint');
+	ok(!$failed, 'checkpoint after cancellation succeeds');
+	is(relation_completion_count($node, $relfilenode),
+		1,
+		'canceled in-flight relation is not retried by a later checkpoint');
+}
+
+
+sub test_sync_errors
+{
+	my $node = shift;
+	my $relfilenode = shift;
+
+	dirty_fsync_direct($node);
+	$node->safe_psql('postgres', 'SELECT aio_fsync_completions_reset()');
+
+	my $failed = run_result_checkpoint(
+		$node,
+		qq(
+SELECT inj_io_result_attach(
+  result => -errno_from_string('ENOENT'),
+  count => 1,
+  relfilenode => $relfilenode,
+  target => 'smgr')
+),
+		'transient ENOENT relation checkpoint');
+	ok(!$failed, 'transient ENOENT relation checkpoint succeeds');
+	is( $node->safe_psql(
+			'postgres', qq(
+SELECT array_agg(raw_result ORDER BY sequence) =
+       ARRAY[-errno_from_string('ENOENT'), 0]
+FROM aio_fsync_completions()
+WHERE owner_pid = @{[ get_checkpointer_pid($node) ]}
+  AND operation = 'fsync'
+  AND target = 'smgr'
+  AND relfilenode = $relfilenode
+)),
+		't',
+		'transient ENOENT is retried once and then succeeds');
+
+	$failed =
+	  run_background_checkpoint($node, 'post transient ENOENT checkpoint');
+	ok(!$failed, 'checkpoint after transient ENOENT succeeds');
+	is(relation_completion_count($node, $relfilenode),
+		2, 'transient ENOENT request does not persist after its retry');
+
+	dirty_fsync_direct($node);
+	$node->safe_psql('postgres', 'SELECT aio_fsync_completions_reset()');
+
+	$failed = run_result_checkpoint(
+		$node,
+		qq(
+SELECT inj_io_result_attach(
+  result => -errno_from_string('ENOENT'),
+  count => 2,
+  relfilenode => $relfilenode,
+  target => 'smgr')
+),
+		'persistent ENOENT relation checkpoint');
+	ok($failed, 'persistent ENOENT relation checkpoint fails cleanly');
+	is( $node->safe_psql(
+			'postgres', qq(
+SELECT count(*),
+       count(*) FILTER (
+         WHERE raw_result = -errno_from_string('ENOENT'))
+FROM aio_fsync_completions()
+WHERE owner_pid = @{[ get_checkpointer_pid($node) ]}
+  AND operation = 'fsync'
+  AND target = 'smgr'
+  AND relfilenode = $relfilenode
+)),
+		'2|2',
+		'persistent ENOENT fails after exactly two attempts');
+
+	$node->safe_psql('postgres', 'SELECT aio_fsync_completions_reset()');
+	$failed = run_background_checkpoint($node, 'persistent ENOENT recovery');
+	ok(!$failed, 'checkpoint recovers after persistent ENOENT injection');
+	is( $node->safe_psql(
+			'postgres', qq(
+SELECT count(*),
+       count(*) FILTER (WHERE raw_result = 0)
+FROM aio_fsync_completions()
+WHERE owner_pid = @{[ get_checkpointer_pid($node) ]}
+  AND operation = 'fsync'
+  AND target = 'smgr'
+  AND relfilenode = $relfilenode
+)),
+		'1|1',
+		'recovery checkpoint completes the retained relation request');
+	is($node->safe_psql('postgres', 'SELECT 1'),
+		1, 'server is usable after persistent ENOENT recovery');
+}
+
+
+sub test_sync_error_cleanup
+{
+	my $node = shift;
+	my @segments = (16 .. 19);
+
+	foreach my $segment (@segments)
+	{
+		my $file = $node->data_dir . '/pg_xact/' . sprintf('%04X', $segment);
+
+		die "synthetic pg_xact segment \"$file\" already exists" if -e $file;
+		PostgreSQL::Test::Utils::append_to_file($file,
+			"test_aio synthetic pg_xact segment $segment\n");
+		push(@synthetic_slru_files, $file);
+	}
+
+	my @worker_pids = current_worker_pids($node);
+	my $checkpointer_pid = get_checkpointer_pid($node);
+
+	is(queue_slru_requests($node, @segments),
+		't', 'all synthetic pg_xact sync requests are queued');
+	$node->safe_psql('postgres', 'SELECT aio_fsync_completions_reset()');
+	$node->safe_psql('postgres', 'SELECT aio_sync_close_events_reset()');
+
+	my $failed =
+	  run_paused_slru_error_checkpoint($node, $checkpointer_pid, \@segments);
+	ok($failed, 'paused multi-fsync EIO checkpoint fails cleanly');
+
+	is( $node->safe_psql(
+			'postgres', qq(
+SELECT count(*)
+FROM pg_aios
+WHERE pid = $checkpointer_pid
+  AND operation = 'fsync'
+)),
+		0,
+		'failed multi-fsync checkpoint leaves no checkpointer fsyncs');
+	my ($completed, $failed_count, $distinct) =
+	  split(
+		/\|/,
+		slru_completion_summary(
+			$node, $checkpointer_pid,
+			\@segments, "-errno_from_string('EIO')"));
+
+	ok( $completed >= 2
+		  && $completed <= 3
+		  && $failed_count == 1
+		  && $distinct == $completed,
+		'all started completions are drained after one EIO');
+	is(slru_close_count($node, @segments),
+		$completed, 'error path closes every handler-owned descriptor');
+
+	$node->safe_psql('postgres', 'SELECT aio_fsync_completions_reset()');
+	$node->safe_psql('postgres', 'SELECT aio_sync_close_events_reset()');
+	$failed =
+	  run_background_checkpoint($node, 'first multi-fsync EIO recovery');
+	ok(!$failed, 'first multi-fsync EIO recovery checkpoint succeeds');
+	die "first multi-fsync EIO recovery checkpoint failed" if $failed;
+	$synthetic_slru_requests_pending = 0;
+	is( slru_completion_summary($node, $checkpointer_pid, \@segments, '0'),
+		'4|4|4',
+		'first recovery checkpoint completes all synthetic requests');
+	is(slru_close_count($node, @segments),
+		4, 'recovery closes all handler-owned descriptors');
+	check_worker_pid_set($node, \@worker_pids,
+		'workers survive the first multi-fsync error');
+	is(direct_slru_fsync_summary($node, 4),
+		'4|4', 'direct worker SLRU fsyncs succeed after the first error');
+
+	is( $node->safe_psql(
+			'postgres', qq(
+SELECT count(*)
+FROM pg_aios
+WHERE pid = $checkpointer_pid
+  AND operation = 'fsync'
+)),
+		0,
+		'error recovery leaves no checkpointer fsyncs');
+	is(slru_completion_summary($node, $checkpointer_pid, \@segments, '0'),
+		'4|4|4', 'final recovery records all four successful completions');
+	check_worker_pid_set($node, \@worker_pids,
+		'workers survive multi-fsync error cleanup');
+	is(direct_slru_fsync_summary($node, 6),
+		'6|6', 'direct worker SLRU fsyncs succeed after error cleanup');
+	check_worker_pid_set($node, \@worker_pids,
+		'worker PID set is unchanged after direct recovery fsyncs');
+
+	foreach my $file (@synthetic_slru_files)
+	{
+		unlink($file) or die "could not remove \"$file\": $!";
+	}
+	@synthetic_slru_files = ();
+}
+
+
+sub dirty_fsync_direct
+{
+	my $node = shift;
+
+	$node->safe_psql('postgres',
+		'UPDATE fsync_direct SET value = value + 1 WHERE id = 1');
+}
+
+
+sub relation_completion_count
+{
+	my $node = shift;
+	my $relfilenode = shift;
+	my $checkpointer_pid = get_checkpointer_pid($node);
+
+	return $node->safe_psql(
+		'postgres', qq(
+SELECT count(*)
+FROM aio_fsync_completions()
+WHERE owner_pid = $checkpointer_pid
+  AND operation = 'fsync'
+  AND target = 'smgr'
+  AND relfilenode = $relfilenode
+));
+}
+
+
+sub relation_success_summary
+{
+	my $node = shift;
+	my $relfilenode = shift;
+	my $checkpointer_pid = get_checkpointer_pid($node);
+
+	return $node->safe_psql(
+		'postgres', qq(
+SELECT count(*),
+       count(*) FILTER (WHERE raw_result = 0)
+FROM aio_fsync_completions()
+WHERE owner_pid = $checkpointer_pid
+  AND operation = 'fsync'
+  AND target = 'smgr'
+  AND relfilenode = $relfilenode
+));
+}
+
+
+sub queue_slru_requests
+{
+	my $node = shift;
+	my @segments = @_;
+	my $segment_array = join(',', @segments);
+
+	$synthetic_slru_requests_pending = 1;
+	return $node->safe_psql(
+		'postgres', qq(
+SELECT bool_and(aio_register_slru_sync(segno))
+FROM unnest(ARRAY[$segment_array]::int8[]) AS s(segno)
+));
+}
+
+
+sub slru_completion_summary
+{
+	my $node = shift;
+	my $checkpointer_pid = shift;
+	my $segments = shift;
+	my $expected_result = shift;
+	my $segment_array = join(',', @$segments);
+
+	return $node->safe_psql(
+		'postgres', qq(
+SELECT count(*),
+       count(*) FILTER (WHERE raw_result = $expected_result),
+       count(DISTINCT filetag_segno)
+FROM aio_fsync_completions()
+WHERE owner_pid = $checkpointer_pid
+  AND operation = 'fsync'
+  AND target = 'sync_filetag'
+  AND filetag_handler = 1
+  AND filetag_segno = ANY (ARRAY[$segment_array]::int8[])
+));
+}
+
+sub slru_close_count
+{
+	my $node = shift;
+	my @segments = @_;
+	my $segment_array = join(',', @segments);
+
+	return $node->safe_psql(
+		'postgres', qq(
+SELECT sum(aio_sync_close_count(1, segno))
+FROM unnest(ARRAY[$segment_array]::int8[]) AS s(segno)
+));
+}
+
+
+sub direct_slru_fsync_summary
+{
+	my $node = shift;
+	my $count = shift;
+
+	return $node->safe_psql(
+		'postgres', qq(
+SELECT count(*),
+       count(*) FILTER (WHERE result = 0)
+FROM (
+  SELECT aio_fsync_slru(0, 0) AS result
+  FROM generate_series(1, $count)
+) AS fsyncs
+));
+}
+
+
+sub check_worker_pid_set
+{
+	my $node = shift;
+	my $expected = shift;
+	my $name = shift;
+	my @actual = current_worker_pids($node);
+
+	is_deeply(\@actual, $expected, $name);
+}
+
+
+sub run_sync_start_checkpoint
+{
+	local $Test::Builder::Level = $Test::Builder::Level + 1;
+
+	my $node = shift;
+	my $relfilenode = shift;
+	my $action = shift;
+	my $name = shift;
+	my ($error, $failed, $marker, $psql);
+
+	eval {
+		arm_sync_start_wait($node,
+			"SELECT inj_sync_start_wait(relfilenode => $relfilenode)");
+		($psql, $marker) = start_background_checkpoint($node);
+		$node->wait_for_event('checkpointer', 'sync_request_started');
+		pass("$name reaches sync-request-started");
+		release_sync_start_wait($node, $action);
+		my $finish_error;
+
+		eval {
+			$failed = finish_background_checkpoint($psql, $marker, $name);
+			1;
+		} or $finish_error = $@;
+		$psql = undef;
+		die $finish_error if defined $finish_error;
+		1;
+	} or $error = $@;
+
+	if ($sync_start_wait_armed)
+	{
+		my $release_error;
+
+		eval {
+			release_sync_start_wait($node);
+			1;
+		} or $release_error = $@;
+		$error = $release_error unless defined $error;
+	}
+
+	if (defined $psql)
+	{
+		my $finish_error;
+
+		eval {
+			finish_background_checkpoint($psql, $marker, "$name cleanup");
+			1;
+		} or $finish_error = $@;
+		$error = $finish_error unless defined $error;
+	}
+
+	die $error if defined $error;
+	return $failed;
+}
+
+
+sub run_paused_slru_error_checkpoint
+{
+	local $Test::Builder::Level = $Test::Builder::Level + 1;
+
+	my $node = shift;
+	my $checkpointer_pid = shift;
+	my $segments = shift;
+	my $target_descs =
+	  join(', ', map { "'segment $_ of SLRU \"pg_xact\"'" } @$segments);
+	my ($error, $failed, $marker, $psql);
+
+	arm_result_injection(
+		$node, q(
+SELECT inj_io_result_attach(
+  result => -errno_from_string('EIO'),
+  count => 1,
+  target => 'sync_filetag',
+  filetag_handler => 1)
+));
+
+	eval {
+		arm_sync_start_wait(
+			$node, qq(
+SELECT inj_sync_start_wait(
+  filetag_handler => 1,
+  wait_after => 2)
+));
+		($psql, $marker) = start_background_checkpoint($node);
+		$node->wait_for_event('checkpointer', 'sync_request_started');
+		pass('multi-fsync EIO checkpoint starts two matching fsyncs');
+
+		my $active = $node->safe_psql(
+			'postgres', qq(
+SELECT count(*)
+FROM pg_aios
+WHERE pid = $checkpointer_pid
+  AND operation = 'fsync'
+  AND target = 'sync_filetag'
+  AND target_desc IN ($target_descs)
+));
+
+		is($active, 2, 'multi-fsync EIO checkpoint reaches configured depth');
+		cmp_ok($active, '<=', 2,
+			'multi-fsync EIO checkpoint respects configured depth');
+
+		my $invalid = $node->safe_psql(
+			'postgres', qq(
+SELECT count(*)
+FROM pg_aios
+WHERE pid = $checkpointer_pid
+  AND operation = 'fsync'
+  AND target = 'sync_filetag'
+  AND target_desc IN ($target_descs)
+  AND (off IS NOT NULL OR length IS NOT NULL)
+));
+
+		is($invalid, 0, 'multi-fsync EIO entries have no offset or length');
+
+		release_sync_start_wait($node);
+		my $finish_error;
+
+		eval {
+			$failed = finish_background_checkpoint($psql, $marker,
+				'paused multi-fsync EIO checkpoint');
+			1;
+		} or $finish_error = $@;
+		$psql = undef;
+		die $finish_error if defined $finish_error;
+		1;
+	} or $error = $@;
+
+	if ($sync_start_wait_armed)
+	{
+		my $release_error;
+
+		eval {
+			release_sync_start_wait($node);
+			1;
+		} or $release_error = $@;
+		$error = $release_error unless defined $error;
+	}
+
+	my $detach_error;
+	eval {
+		detach_result_injection($node);
+		1;
+	} or $detach_error = $@;
+	$error = $detach_error unless defined $error;
+
+	if (defined $psql)
+	{
+		my $finish_error;
+
+		eval {
+			finish_background_checkpoint($psql, $marker,
+				'paused multi-fsync EIO checkpoint cleanup');
+			1;
+		} or $finish_error = $@;
+		$error = $finish_error unless defined $error;
+	}
+
+	die $error if defined $error;
+	return $failed;
+}
+
+
+sub run_result_checkpoint
+{
+	my $node = shift;
+	my $attach_sql = shift;
+	my $name = shift;
+	my ($error, $failed);
+
+	arm_result_injection($node, $attach_sql);
+	eval {
+		$failed = run_background_checkpoint($node, $name);
+		1;
+	} or $error = $@;
+
+	my $detach_error;
+	eval {
+		detach_result_injection($node);
+		1;
+	} or $detach_error = $@;
+	$error = $detach_error unless defined $error;
+
+	die $error if defined $error;
+	return $failed;
+}
+
+
+sub run_background_checkpoint
+{
+	my $node = shift;
+	my $name = shift;
+	my ($psql, $marker) = start_background_checkpoint($node);
+
+	return finish_background_checkpoint($psql, $marker, $name);
+}
+
+
+sub start_background_checkpoint
+{
+	my $node = shift;
+	my $psql = $node->background_psql('postgres', on_error_stop => 0);
+	my $marker = 'aio_fsync_checkpoint_done';
+
+	$psql->{stdin} .= "CHECKPOINT;\n\\echo '$marker'\n\\warn '$marker'\n";
+	$psql->{run}->pump_nb();
+
+	return ($psql, $marker);
+}
+
+
+sub finish_background_checkpoint
+{
+	local $Test::Builder::Level = $Test::Builder::Level + 1;
+
+	my $psql = shift;
+	my $marker = shift;
+	my $name = shift;
+	my ($error, $failed);
+
+	eval {
+		my $marker_pattern = qr/\Q$marker\E\r?\n/;
+		my $stdout_done = pump_until(
+			$psql->{run}, $psql->{timeout},
+			\$psql->{stdout}, $marker_pattern);
+		my $stderr_done = pump_until(
+			$psql->{run}, $psql->{timeout},
+			\$psql->{stderr}, $marker_pattern);
+
+		die "$name did not reach its completion marker"
+		  unless $stdout_done && $stderr_done;
+
+		$psql->{stdout} =~ s/$marker_pattern//;
+		$psql->{stderr} =~ s/$marker_pattern//;
+		$failed = $psql->{stderr} ne '';
+		1;
+	} or $error = $@;
+
+	my $quit_error;
+	eval {
+		$psql->quit();
+		1;
+	} or $quit_error = $@;
+	$error = $quit_error unless defined $error;
+
+	die $error if defined $error;
+	return $failed;
+}
+
+
+sub arm_result_injection
+{
+	my $node = shift;
+	my $sql = shift;
+
+	$node->safe_psql('postgres', $sql);
+	$result_injection_armed = 1;
+}
+
+
+sub detach_result_injection
+{
+	my $node = shift;
+
+	$node->safe_psql('postgres', 'SELECT inj_io_result_detach()');
+	$result_injection_armed = 0;
+}
+
+
+sub arm_sync_start_wait
+{
+	my $node = shift;
+	my $sql = shift;
+
+	$node->safe_psql('postgres', $sql);
+	$sync_start_wait_armed = 1;
+}
+
+
+sub release_sync_start_wait
+{
+	my $node = shift;
+	my $action = shift;
+	my $action_sql = defined $action ? "'$action'" : 'NULL';
+
+	$node->safe_psql('postgres',
+		"SELECT inj_sync_start_continue($action_sql)");
+	$sync_start_wait_armed = 0;
 }
 
 

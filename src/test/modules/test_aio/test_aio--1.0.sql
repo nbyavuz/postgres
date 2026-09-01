@@ -17,6 +17,10 @@ CREATE FUNCTION aio_fsync_slru(open_segno int8, target_segno int8)
 RETURNS pg_catalog.int4 STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
+CREATE FUNCTION aio_register_slru_sync(segno int8)
+RETURNS pg_catalog.bool STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
 CREATE FUNCTION aio_fsync_completions_reset()
 RETURNS pg_catalog.void STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
@@ -33,8 +37,19 @@ CREATE FUNCTION aio_fsync_completions(
     OUT filetag_handler int4,
     OUT filetag_segno int8,
     OUT datasync bool,
-    OUT synchronous bool)
+    OUT synchronous bool,
+    OUT observed_depth int4)
 RETURNS SETOF record
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION aio_sync_close_events_reset()
+RETURNS pg_catalog.void STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION aio_sync_close_count(
+    handler int,
+    segno int8 DEFAULT NULL)
+RETURNS pg_catalog.int8
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
 
@@ -147,6 +162,32 @@ RETURNS pg_catalog.void
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
 CREATE FUNCTION inj_io_completion_continue()
+RETURNS pg_catalog.void
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION inj_io_result_attach(
+    result int,
+    count int DEFAULT 1,
+    relfilenode oid DEFAULT NULL,
+    target text DEFAULT NULL,
+    filetag_handler int DEFAULT NULL,
+    filetag_segno int8 DEFAULT NULL)
+RETURNS pg_catalog.void
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION inj_io_result_detach()
+RETURNS pg_catalog.void STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION inj_sync_start_wait(
+    relfilenode oid DEFAULT NULL,
+    filetag_handler int DEFAULT NULL,
+    filetag_segno int8 DEFAULT NULL,
+    wait_after int DEFAULT 1)
+RETURNS pg_catalog.void
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION inj_sync_start_continue(action text DEFAULT NULL)
 RETURNS pg_catalog.void
 AS 'MODULE_PATHNAME' LANGUAGE C;
 

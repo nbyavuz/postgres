@@ -50,6 +50,11 @@ PG_MODULE_MAGIC;
 
 
 #define TEST_AIO_COMPLETION_SLOTS 4096
+#define TEST_AIO_SYNC_CLOSE_SLOTS 256
+
+#define SYNC_START_ACTION_NONE		0
+#define SYNC_START_ACTION_REREQUEST	1
+#define SYNC_START_ACTION_CANCEL	2
 
 typedef struct TestAioCompletion
 {
@@ -62,7 +67,16 @@ typedef struct TestAioCompletion
 	PgAioTargetData target_data;
 	bool		datasync;
 	bool		synchronous;
+	int32		observed_depth;
 } TestAioCompletion;
+
+typedef struct TestAioSyncClose
+{
+	pid_t		closer_pid;
+	int16		handler;
+	uint64		segno;
+	SyncFileCloseMethod close_method;
+} TestAioSyncClose;
 
 /* In shared memory */
 typedef struct InjIoErrorState
@@ -93,9 +107,35 @@ typedef struct InjIoErrorState
 	pid_t		short_read_pid;
 	int			short_read_result;
 
+	bool		enabled_result_injection;
+	int32		result_injection_result;
+	int32		result_injection_remaining;
+	Oid			result_injection_relfilenode;
+	bool		result_injection_target_set;
+	PgAioTargetID result_injection_target;
+	bool		result_injection_filetag_handler_set;
+	int16		result_injection_filetag_handler;
+	bool		result_injection_filetag_segno_set;
+	uint64		result_injection_filetag_segno;
+
+	bool		enabled_sync_start_wait;
+	Oid			sync_start_relfilenode;
+	bool		sync_start_filetag_handler_set;
+	int16		sync_start_filetag_handler;
+	bool		sync_start_filetag_segno_set;
+	uint64		sync_start_filetag_segno;
+	int32		sync_start_match_count;
+	int32		sync_start_wait_after;
+	int32		sync_start_action;
+	uint32		sync_start_wait_event;
+
 	uint64		completion_sequence;
 	uint32		completion_count;
 	TestAioCompletion completions[TEST_AIO_COMPLETION_SLOTS];
+
+	uint64		sync_close_sequence;
+	uint32		sync_close_count;
+	TestAioSyncClose sync_closes[TEST_AIO_SYNC_CLOSE_SLOTS];
 } InjIoErrorState;
 
 typedef struct BlocksReadStreamData
@@ -145,12 +185,21 @@ test_aio_shmem_init(void *arg)
 	inj_io_error_state->completion_wait_filetag_handler_set = false;
 	inj_io_error_state->completion_wait_filetag_segno_set = false;
 	inj_io_error_state->completion_wait_remaining = -1;
+	inj_io_error_state->enabled_result_injection = false;
+	inj_io_error_state->enabled_sync_start_wait = false;
+	inj_io_error_state->sync_start_match_count = 0;
+	inj_io_error_state->sync_start_wait_after = 1;
+	inj_io_error_state->sync_start_action = SYNC_START_ACTION_NONE;
 	inj_io_error_state->completion_sequence = 0;
 	inj_io_error_state->completion_count = 0;
+	inj_io_error_state->sync_close_sequence = 0;
+	inj_io_error_state->sync_close_count = 0;
 
 	ConditionVariableInit(&inj_io_error_state->cv);
 	SpinLockInit(&inj_io_error_state->completion_lock);
 	inj_io_error_state->completion_wait_event = WaitEventInjectionPointNew("completion_wait");
+	inj_io_error_state->sync_start_wait_event =
+		WaitEventInjectionPointNew("sync_request_started");
 
 #ifdef USE_INJECTION_POINTS
 	InjectionPointAttach("aio-process-completion-before-shared",
@@ -167,6 +216,20 @@ test_aio_shmem_init(void *arg)
 						 0);
 	InjectionPointLoad("aio-worker-after-reopen");
 
+	InjectionPointAttach("sync-request-started",
+						 "test_aio",
+						 "inj_sync_request_started",
+						 NULL,
+						 0);
+	InjectionPointLoad("sync-request-started");
+
+	InjectionPointAttach("sync-request-file-closed",
+						 "test_aio",
+						 "inj_sync_request_file_closed",
+						 NULL,
+						 0);
+	InjectionPointLoad("sync-request-file-closed");
+
 #endif
 }
 
@@ -180,6 +243,8 @@ test_aio_shmem_attach(void *arg)
 #ifdef USE_INJECTION_POINTS
 	InjectionPointLoad("aio-process-completion-before-shared");
 	InjectionPointLoad("aio-worker-after-reopen");
+	InjectionPointLoad("sync-request-started");
+	InjectionPointLoad("sync-request-file-closed");
 	elog(LOG, "injection point loaded");
 #endif
 }
@@ -312,6 +377,24 @@ aio_fsync_slru(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(result);
 }
 
+PG_FUNCTION_INFO_V1(aio_register_slru_sync);
+Datum
+aio_register_slru_sync(PG_FUNCTION_ARGS)
+{
+	int64		segno = PG_GETARG_INT64(0);
+	FileTag		tag = {0};
+
+	if (segno < 0 || segno > 0xFFFFFF)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("SLRU segment number is out of range")));
+
+	tag.handler = SYNC_HANDLER_CLOG;
+	tag.segno = (uint64) segno;
+
+	PG_RETURN_BOOL(RegisterSyncRequest(&tag, SYNC_REQUEST, false));
+}
+
 PG_FUNCTION_INFO_V1(aio_fsync_completions_reset);
 Datum
 aio_fsync_completions_reset(PG_FUNCTION_ARGS)
@@ -363,8 +446,8 @@ aio_fsync_completions(PG_FUNCTION_ARGS)
 	{
 		TestAioCompletion *completion = &completions[i];
 		PgAioHandle ioh = {0};
-		Datum		values[12] = {0};
-		bool		nulls[12] = {0};
+		Datum		values[13] = {0};
+		bool		nulls[13] = {0};
 
 		ioh.op = completion->operation;
 		ioh.target = completion->target;
@@ -402,6 +485,7 @@ aio_fsync_completions(PG_FUNCTION_ARGS)
 
 		values[10] = BoolGetDatum(completion->datasync);
 		values[11] = BoolGetDatum(completion->synchronous);
+		values[12] = Int32GetDatum(completion->observed_depth);
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
 							 values, nulls);
@@ -410,6 +494,59 @@ aio_fsync_completions(PG_FUNCTION_ARGS)
 	pfree(completions);
 
 	return (Datum) 0;
+}
+
+PG_FUNCTION_INFO_V1(aio_sync_close_events_reset);
+Datum
+aio_sync_close_events_reset(PG_FUNCTION_ARGS)
+{
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+	inj_io_error_state->sync_close_sequence = 0;
+	inj_io_error_state->sync_close_count = 0;
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(aio_sync_close_count);
+Datum
+aio_sync_close_count(PG_FUNCTION_ARGS)
+{
+	int32		handler;
+	bool		match_segno = !PG_ARGISNULL(1);
+	int64		segno = match_segno ? PG_GETARG_INT64(1) : 0;
+	uint64		count = 0;
+
+	if (PG_ARGISNULL(0))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("sync handler must not be null")));
+
+	handler = PG_GETARG_INT32(0);
+
+	if (handler < 0 || handler >= SYNC_HANDLER_NONE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid sync handler %d", handler)));
+	if (segno < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("SLRU segment number must not be negative")));
+
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+
+	for (uint32 i = 0; i < inj_io_error_state->sync_close_count; i++)
+	{
+		TestAioSyncClose *close = &inj_io_error_state->sync_closes[i];
+
+		if (close->handler == handler &&
+			(!match_segno || close->segno == (uint64) segno))
+			count++;
+	}
+
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+
+	PG_RETURN_INT64((int64) count);
 }
 
 PG_FUNCTION_INFO_V1(grow_rel);
@@ -1230,6 +1367,12 @@ extern PGDLLEXPORT void inj_io_completion_hook(const char *name,
 extern PGDLLEXPORT void inj_io_reopen(const char *name,
 									  const void *private_data,
 									  void *arg);
+extern PGDLLEXPORT void inj_sync_request_started(const char *name,
+												 const void *private_data,
+												 void *arg);
+extern PGDLLEXPORT void inj_sync_request_file_closed(const char *name,
+													 const void *private_data,
+													 void *arg);
 
 static bool
 inj_io_short_read_matches(PgAioHandle *ioh)
@@ -1338,18 +1481,92 @@ inj_io_completion_wait_matches(PgAioHandle *ioh)
 	return true;
 }
 
+static bool
+inj_io_result_matches(PgAioHandle *ioh)
+{
+	PgAioTargetData *td;
+
+	if (!inj_io_error_state->enabled_result_injection ||
+		pgaio_io_get_op(ioh) != PGAIO_OP_FSYNC)
+		return false;
+
+	if (inj_io_error_state->result_injection_target_set &&
+		inj_io_error_state->result_injection_target != ioh->target)
+		return false;
+
+	td = pgaio_io_get_target_data(ioh);
+
+	if (inj_io_error_state->result_injection_relfilenode != InvalidOid)
+	{
+		if (ioh->target != PGAIO_TID_SMGR ||
+			td->smgr.rlocator.relNumber !=
+			inj_io_error_state->result_injection_relfilenode)
+			return false;
+	}
+
+	if (inj_io_error_state->result_injection_filetag_handler_set)
+	{
+		if (ioh->target != PGAIO_TID_SYNC_FILETAG ||
+			td->sync_filetag.handler !=
+			inj_io_error_state->result_injection_filetag_handler)
+			return false;
+	}
+
+	if (inj_io_error_state->result_injection_filetag_segno_set)
+	{
+		if (ioh->target != PGAIO_TID_SYNC_FILETAG ||
+			td->sync_filetag.segno !=
+			inj_io_error_state->result_injection_filetag_segno)
+			return false;
+	}
+
+	return true;
+}
+
+static void
+inj_io_result_hook(PgAioHandle *ioh)
+{
+	if (!inj_io_result_matches(ioh))
+		return;
+
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+
+	if (inj_io_result_matches(ioh) &&
+		inj_io_error_state->result_injection_remaining > 0)
+	{
+		ioh->result = inj_io_error_state->result_injection_result;
+		inj_io_error_state->result_injection_remaining--;
+	}
+
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+}
+
 static void
 test_aio_record_completion(PgAioHandle *ioh)
 {
 	TestAioCompletion *completion;
 	PGPROC	   *owner_proc;
+	ProcNumber	owner;
 	uint64		sequence;
 	uint32		slot;
+	int32		observed_depth = 0;
 
 	if (pgaio_io_get_op(ioh) != PGAIO_OP_FSYNC)
 		return;
 
-	owner_proc = GetPGProcByNumber(pgaio_io_get_owner(ioh));
+	owner = pgaio_io_get_owner(ioh);
+	owner_proc = GetPGProcByNumber(owner);
+
+	for (uint64 i = 0; i < pgaio_ctl->io_handle_count; i++)
+	{
+		PgAioHandle *other = &pgaio_ctl->io_handles[i];
+
+		if (other->state != PGAIO_HS_IDLE &&
+			other->owner_procno == owner &&
+			other->op == PGAIO_OP_FSYNC &&
+			other->target == ioh->target)
+			observed_depth++;
+	}
 
 	SpinLockAcquire(&inj_io_error_state->completion_lock);
 
@@ -1366,6 +1583,7 @@ test_aio_record_completion(PgAioHandle *ioh)
 	completion->target_data = *pgaio_io_get_target_data(ioh);
 	completion->datasync = ioh->op_data.fsync.datasync;
 	completion->synchronous = pgaio_io_needs_synchronous_execution(ioh);
+	completion->observed_depth = observed_depth;
 
 	if (inj_io_error_state->completion_count < TEST_AIO_COMPLETION_SLOTS)
 		inj_io_error_state->completion_count++;
@@ -1462,6 +1680,7 @@ inj_io_short_read_hook(const char *name, const void *private_data, void *arg)
 void
 inj_io_completion_hook(const char *name, const void *private_data, void *arg)
 {
+	inj_io_result_hook((PgAioHandle *) arg);
 	test_aio_record_completion((PgAioHandle *) arg);
 	inj_io_completion_wait_hook(name, private_data, arg);
 	inj_io_short_read_hook(name, private_data, arg);
@@ -1477,6 +1696,96 @@ inj_io_reopen(const char *name, const void *private_data, void *arg)
 
 	if (inj_io_error_state->enabled_reopen)
 		elog(ERROR, "injection point triggering failure to reopen ");
+}
+
+static bool
+inj_sync_start_matches(const InflightSyncEntry *entry)
+{
+	if (!inj_io_error_state->enabled_sync_start_wait)
+		return false;
+
+	if (inj_io_error_state->sync_start_relfilenode != InvalidOid &&
+		entry->tag.rlocator.relNumber !=
+		inj_io_error_state->sync_start_relfilenode)
+		return false;
+
+	if (inj_io_error_state->sync_start_filetag_handler_set &&
+		entry->tag.handler !=
+		inj_io_error_state->sync_start_filetag_handler)
+		return false;
+
+	if (inj_io_error_state->sync_start_filetag_segno_set &&
+		entry->tag.segno != inj_io_error_state->sync_start_filetag_segno)
+		return false;
+
+	return true;
+}
+
+void
+inj_sync_request_started(const char *name, const void *private_data, void *arg)
+{
+	InflightSyncEntry *entry = (InflightSyncEntry *) arg;
+	int32		action;
+	bool		wait = false;
+
+	if (!inj_sync_start_matches(entry))
+		return;
+
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+	if (inj_sync_start_matches(entry))
+	{
+		inj_io_error_state->sync_start_match_count++;
+		wait = inj_io_error_state->sync_start_match_count ==
+			inj_io_error_state->sync_start_wait_after;
+	}
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+
+	if (!wait)
+		return;
+
+	ConditionVariablePrepareToSleep(&inj_io_error_state->cv);
+
+	while (inj_sync_start_matches(entry))
+		ConditionVariableSleep(&inj_io_error_state->cv,
+							   inj_io_error_state->sync_start_wait_event);
+
+	ConditionVariableCancelSleep();
+
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+	action = inj_io_error_state->sync_start_action;
+	inj_io_error_state->sync_start_action = SYNC_START_ACTION_NONE;
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+
+	if (action == SYNC_START_ACTION_REREQUEST)
+		RememberSyncRequest(&entry->tag, SYNC_REQUEST);
+	else if (action == SYNC_START_ACTION_CANCEL)
+		RememberSyncRequest(&entry->tag, SYNC_FORGET_REQUEST);
+}
+
+void
+inj_sync_request_file_closed(const char *name,
+							 const void *private_data, void *arg)
+{
+	InflightSyncEntry *entry = (InflightSyncEntry *) arg;
+	TestAioSyncClose *close;
+	uint64		sequence;
+	uint32		slot;
+
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+
+	sequence = ++inj_io_error_state->sync_close_sequence;
+	slot = (sequence - 1) % TEST_AIO_SYNC_CLOSE_SLOTS;
+	close = &inj_io_error_state->sync_closes[slot];
+
+	close->closer_pid = MyProcPid;
+	close->handler = entry->tag.handler;
+	close->segno = entry->tag.segno;
+	close->close_method = entry->close_method;
+
+	if (inj_io_error_state->sync_close_count < TEST_AIO_SYNC_CLOSE_SLOTS)
+		inj_io_error_state->sync_close_count++;
+
+	SpinLockRelease(&inj_io_error_state->completion_lock);
 }
 #endif
 
@@ -1601,6 +1910,208 @@ inj_io_short_read_attach(PG_FUNCTION_ARGS)
 		PG_ARGISNULL(1) ? InvalidPid : PG_GETARG_INT32(1);
 	inj_io_error_state->short_read_relfilenode =
 		PG_ARGISNULL(2) ? InvalidOid : PG_GETARG_OID(2);
+#else
+	elog(ERROR, "injection points not supported");
+#endif
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(inj_io_result_attach);
+Datum
+inj_io_result_attach(PG_FUNCTION_ARGS)
+{
+#ifdef USE_INJECTION_POINTS
+	int32		result;
+	int32		count;
+	Oid			relfilenode =
+		PG_ARGISNULL(2) ? InvalidOid : PG_GETARG_OID(2);
+	bool		target_set = !PG_ARGISNULL(3);
+	PgAioTargetID target = PGAIO_TID_INVALID;
+	bool		handler_set = !PG_ARGISNULL(4);
+	int32		handler = 0;
+	bool		segno_set = !PG_ARGISNULL(5);
+	uint64		segno = 0;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("injected result and count must not be null")));
+
+	result = PG_GETARG_INT32(0);
+	count = PG_GETARG_INT32(1);
+
+	if (result > 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("injected AIO result must not be positive")));
+	if (count <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("injection count must be greater than zero")));
+	if (relfilenode == InvalidOid && !target_set &&
+		!handler_set && !segno_set)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("at least one AIO result filter must be specified")));
+
+	if (target_set)
+	{
+		const char *target_name =
+			text_to_cstring(PG_GETARG_TEXT_PP(3));
+
+		if (strcmp(target_name, "smgr") == 0)
+			target = PGAIO_TID_SMGR;
+		else if (strcmp(target_name, "sync") == 0)
+			target = PGAIO_TID_SYNC;
+		else if (strcmp(target_name, "sync_filetag") == 0)
+			target = PGAIO_TID_SYNC_FILETAG;
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("unknown AIO target \"%s\"", target_name)));
+	}
+
+	if (handler_set)
+	{
+		handler = PG_GETARG_INT32(4);
+		if (handler < 0 || handler >= SYNC_HANDLER_NONE)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid sync handler %d", handler)));
+	}
+
+	if (segno_set)
+	{
+		int64		segno_arg = PG_GETARG_INT64(5);
+
+		if (segno_arg < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("SLRU segment number must not be negative")));
+		segno = (uint64) segno_arg;
+	}
+
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+	inj_io_error_state->result_injection_result = result;
+	inj_io_error_state->result_injection_remaining = count;
+	inj_io_error_state->result_injection_relfilenode = relfilenode;
+	inj_io_error_state->result_injection_target_set = target_set;
+	inj_io_error_state->result_injection_target = target;
+	inj_io_error_state->result_injection_filetag_handler_set = handler_set;
+	inj_io_error_state->result_injection_filetag_handler = handler;
+	inj_io_error_state->result_injection_filetag_segno_set = segno_set;
+	inj_io_error_state->result_injection_filetag_segno = segno;
+	inj_io_error_state->enabled_result_injection = true;
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+#else
+	elog(ERROR, "injection points not supported");
+#endif
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(inj_io_result_detach);
+Datum
+inj_io_result_detach(PG_FUNCTION_ARGS)
+{
+#ifdef USE_INJECTION_POINTS
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+	inj_io_error_state->enabled_result_injection = false;
+	inj_io_error_state->result_injection_remaining = 0;
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+#else
+	elog(ERROR, "injection points not supported");
+#endif
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(inj_sync_start_wait);
+Datum
+inj_sync_start_wait(PG_FUNCTION_ARGS)
+{
+#ifdef USE_INJECTION_POINTS
+	Oid			relfilenode =
+		PG_ARGISNULL(0) ? InvalidOid : PG_GETARG_OID(0);
+	bool		handler_set = !PG_ARGISNULL(1);
+	int32		handler = 0;
+	bool		segno_set = !PG_ARGISNULL(2);
+	uint64		segno = 0;
+	int32		wait_after = PG_ARGISNULL(3) ? 1 : PG_GETARG_INT32(3);
+
+	if (wait_after <= 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("sync-start match count must be greater than zero")));
+
+	if (handler_set)
+	{
+		handler = PG_GETARG_INT32(1);
+		if (handler < 0 || handler >= SYNC_HANDLER_NONE)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid sync handler %d", handler)));
+	}
+
+	if (segno_set)
+	{
+		int64		segno_arg = PG_GETARG_INT64(2);
+
+		if (segno_arg < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("SLRU segment number must not be negative")));
+		segno = (uint64) segno_arg;
+	}
+
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+	inj_io_error_state->sync_start_relfilenode = relfilenode;
+	inj_io_error_state->sync_start_filetag_handler_set = handler_set;
+	inj_io_error_state->sync_start_filetag_handler = handler;
+	inj_io_error_state->sync_start_filetag_segno_set = segno_set;
+	inj_io_error_state->sync_start_filetag_segno = segno;
+	inj_io_error_state->sync_start_match_count = 0;
+	inj_io_error_state->sync_start_wait_after = wait_after;
+	inj_io_error_state->sync_start_action = SYNC_START_ACTION_NONE;
+	inj_io_error_state->enabled_sync_start_wait = true;
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+#else
+	elog(ERROR, "injection points not supported");
+#endif
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(inj_sync_start_continue);
+Datum
+inj_sync_start_continue(PG_FUNCTION_ARGS)
+{
+#ifdef USE_INJECTION_POINTS
+	int32		action = SYNC_START_ACTION_NONE;
+
+	if (!PG_ARGISNULL(0))
+	{
+		const char *action_name =
+			text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+		if (strcmp(action_name, "none") == 0)
+			action = SYNC_START_ACTION_NONE;
+		else if (strcmp(action_name, "rerequest") == 0)
+			action = SYNC_START_ACTION_REREQUEST;
+		else if (strcmp(action_name, "cancel") == 0)
+			action = SYNC_START_ACTION_CANCEL;
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("unknown sync-start action \"%s\"", action_name)));
+	}
+
+	SpinLockAcquire(&inj_io_error_state->completion_lock);
+	inj_io_error_state->sync_start_action = action;
+	inj_io_error_state->enabled_sync_start_wait = false;
+	SpinLockRelease(&inj_io_error_state->completion_lock);
+	ConditionVariableBroadcast(&inj_io_error_state->cv);
 #else
 	elog(ERROR, "injection points not supported");
 #endif

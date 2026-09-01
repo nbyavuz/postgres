@@ -3194,6 +3194,7 @@ Tcl_Size
 Tcl_Time
 TempNamespaceStatus
 TestAioCompletion
+TestAioSyncClose
 TestCustomScanState
 TestDSMRegistryHashEntry
 TestDSMRegistryStruct
