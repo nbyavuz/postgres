@@ -165,7 +165,7 @@ static dlist_head unpinned_relns;
 static void smgrshutdown(int code, Datum arg);
 static void smgrdestroy(SMgrRelation reln);
 
-static void smgr_aio_reopen(PgAioHandle *ioh);
+static int	smgr_aio_reopen(PgAioHandle *ioh);
 static char *smgr_aio_describe_identity(const PgAioTargetData *sd);
 
 
@@ -1060,7 +1060,7 @@ pgaio_io_set_target_smgr(PgAioHandle *ioh,
  * Callback for the smgr AIO target, to reopen the file (e.g. because the IO
  * is executed in a worker).
  */
-static void
+static int
 smgr_aio_reopen(PgAioHandle *ioh)
 {
 	PgAioTargetData *sd = pgaio_io_get_target_data(ioh);
@@ -1098,6 +1098,8 @@ smgr_aio_reopen(PgAioHandle *ioh)
 			od->fsync.fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
 			break;
 	}
+
+	return 0;
 }
 
 /*

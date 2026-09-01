@@ -184,7 +184,7 @@ static const SyncOps syncsw[] = {
 	}
 };
 
-static void sync_aio_reopen(PgAioHandle *ioh);
+static int	sync_aio_reopen(PgAioHandle *ioh);
 static void sync_aio_close(PgAioHandle *ioh);
 static char *sync_aio_describe_identity(const PgAioTargetData *sd);
 
@@ -226,7 +226,7 @@ sync_aio_filetag(const PgAioTargetData *sd)
  * reopen callback for PGAIO_TID_SYNC_FILETAG, to open the file in the process
  * executing the IO.
  */
-static void
+static int
 sync_aio_reopen(PgAioHandle *ioh)
 {
 	PgAioTargetData *sd = pgaio_io_get_target_data(ioh);
@@ -244,13 +244,11 @@ sync_aio_reopen(PgAioHandle *ioh)
 
 	fd = syncsw[ftag.handler].sync_openfiletag(&ftag);
 	if (fd < 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open segment " UINT64_FORMAT " of SLRU \"%s\": %m",
-						ftag.segno,
-						syncsw[ftag.handler].sync_target_name)));
+		return -errno;
 
 	od->fsync.fd = fd;
+
+	return 0;
 }
 
 /*
