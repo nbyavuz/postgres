@@ -145,14 +145,20 @@ pgaio_io_can_reopen(PgAioHandle *ioh)
  * IO has been staged in, the file descriptor has to be reopened - any FD
  * referenced in the IO itself, won't be valid in the separate process.
  */
-void
+int
 pgaio_io_reopen(PgAioHandle *ioh)
 {
+	int			result;
+
 	Assert(ioh->target > PGAIO_TID_INVALID && ioh->target < PGAIO_TID_COUNT);
 	Assert(ioh->op > PGAIO_OP_INVALID && ioh->op < PGAIO_OP_COUNT);
 	Assert(pgaio_reopened_ioh == NULL);
 
-	pgaio_target_info[ioh->target]->reopen(ioh);
+	result = pgaio_target_info[ioh->target]->reopen(ioh);
+	Assert(result <= 0);
+
+	if (result < 0)
+		return result;
 
 	/*
 	 * Remember that this process, rather than the one that staged the IO,
@@ -161,6 +167,8 @@ pgaio_io_reopen(PgAioHandle *ioh)
 	 */
 	if (pgaio_target_info[ioh->target]->close != NULL)
 		pgaio_reopened_ioh = ioh;
+
+	return 0;
 }
 
 /*
