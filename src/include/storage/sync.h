@@ -92,8 +92,7 @@ typedef struct InflightSyncEntry
 	struct PendingFsyncEntry *hash_entry;
 
 	int			retry_count;
-
-	instr_time	start_time;
+	instr_time	io_time;		/* time spent starting and waiting */
 
 	PgAioReturn ioret;
 	PgAioWaitRef iow;

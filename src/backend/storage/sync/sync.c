@@ -27,6 +27,7 @@
 #include "portability/instr_time.h"
 #include "postmaster/bgwriter.h"
 #include "storage/aio.h"
+#include "storage/bufmgr.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
@@ -505,12 +506,10 @@ sync_start_one(SyncState *sync_state, InflightSyncEntry *entry)
 	struct PgAioHandle *ioh;
 	instr_time	io_start;
 
-	INSTR_TIME_SET_CURRENT(io_start);
-	entry->start_time = io_start;
-
 	entry->started = false;
 	entry->open_errno = 0;
 	entry->close_method = SYNC_CLOSE_NONE;
+	INSTR_TIME_SET_ZERO(entry->io_time);
 	pgaio_wref_clear(&entry->iow);
 
 	/*
@@ -530,8 +529,11 @@ sync_start_one(SyncState *sync_state, InflightSyncEntry *entry)
 	 * during submission.
 	 */
 	HOLD_INTERRUPTS();
+	INSTR_TIME_SET_CURRENT(io_start);
 	syncsw[entry->tag.handler].sync_syncfiletag(ioh, entry);
+	INSTR_TIME_SET_CURRENT(entry->io_time);
 	RESUME_INTERRUPTS();
+	INSTR_TIME_SUBTRACT(entry->io_time, io_start);
 
 	if (!entry->started)
 		pgaio_io_release(ioh);
@@ -546,6 +548,7 @@ sync_drain_one(SyncState *sync_state)
 	dlist_node *node;
 	InflightSyncEntry *entry;
 	int			result;
+	instr_time	io_time;
 
 	Assert(sync_state->inflight_count > 0);
 
@@ -555,7 +558,30 @@ sync_drain_one(SyncState *sync_state)
 
 	if (entry->started)
 	{
-		pgaio_wref_wait(&entry->iow);
+		if (entry->ioret.result.status == PGAIO_RS_UNKNOWN &&
+			!pgaio_wref_check_done(&entry->iow))
+		{
+			instr_time	io_start;
+			instr_time	io_end;
+			bool		track_stat_time;
+
+			track_stat_time = entry->tag.handler == SYNC_HANDLER_MD &&
+				track_io_timing;
+			INSTR_TIME_SET_CURRENT(io_start);
+			pgaio_wref_wait(&entry->iow);
+			INSTR_TIME_SET_CURRENT(io_end);
+
+			/*
+			 * The operation itself was counted when it was started.  Add only
+			 * time actually spent waiting for relation IO to complete.
+			 */
+			if (track_stat_time)
+				pgstat_count_io_op_time_end(IOOBJECT_RELATION,
+											IOCONTEXT_NORMAL, IOOP_FSYNC,
+											io_start, io_end, 0, 0);
+
+			INSTR_TIME_ACCUM_DIFF(entry->io_time, io_end, io_start);
+		}
 
 		/*
 		 * We did not register a completion callback, so the distilled status
@@ -568,23 +594,14 @@ sync_drain_one(SyncState *sync_state)
 		result = entry->open_errno;
 
 	sync_close_file(entry);
+	io_time = entry->io_time;
 
 	if (!result)
 	{
-		instr_time	io_time;
-
-		/*
-		 * These values measure submission-to-reap time, not necessarily fsync
-		 * duration.  Submission-order reaping can overstate individual
-		 * durations, and the aggregate can exceed wall-clock time because
-		 * fsyncs overlap.
-		 */
-		INSTR_TIME_SET_CURRENT(io_time);
-		INSTR_TIME_SUBTRACT(io_time, entry->start_time);
-
 		if (INSTR_TIME_GT(io_time, sync_state->longest))
 			sync_state->longest = io_time;
 		INSTR_TIME_ADD(sync_state->total_elapsed, io_time);
+
 		sync_state->processed++;
 
 		if (log_checkpoints)
