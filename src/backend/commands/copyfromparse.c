@@ -1390,6 +1390,19 @@ CopyReadLineTextSIMDHelper(CopyFromState cstate, bool is_csv,
 		/* Load more data if needed. */
 		if (copy_buf_len - input_buf_ptr < sizeof(Vector8))
 		{
+			/*
+			 * In text mode, a backslash in the remaining bytes might start an
+			 * end-of-copy marker.  Check only for the backslash, leaving
+			 * marker recognition and escape handling to the scalar code.  Do
+			 * this before reading more data, which could block on a pipe
+			 * despite a complete marker being buffered.  Otherwise, refill
+			 * here so that long lines can continue to use SIMD.
+			 */
+			if (!is_csv &&
+				memchr(copy_input_buf + input_buf_ptr, '\\',
+					   copy_buf_len - input_buf_ptr) != NULL)
+				break;
+
 			REFILL_LINEBUF;
 
 			CopyLoadInputBuf(cstate, true);
