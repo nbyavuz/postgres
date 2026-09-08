@@ -92,7 +92,6 @@ typedef struct SyncState
 	dlist_head	inflight;		/* InflightSyncEntry being fsync'd right now */
 	dlist_head	retry;			/* InflightSyncEntry to be retried */
 	int			inflight_count; /* number of entries in "inflight" */
-	int			max_inflight;	/* max number of concurrent fsyncs */
 	int			absorb_counter;
 
 	/* stats */
@@ -145,6 +144,7 @@ typedef struct SyncOps
 	int			(*sync_unlinkfiletag) (const FileTag *ftag, char *path);
 	bool		(*sync_filetagmatches) (const FileTag *ftag,
 										const FileTag *candidate);
+	bool		uses_transient_fd;
 	const char *sync_target_name;
 } SyncOps;
 
@@ -156,30 +156,35 @@ static const SyncOps syncsw[] = {
 	[SYNC_HANDLER_MD] = {
 		.sync_syncfiletag = mdsyncfiletag,
 		.sync_unlinkfiletag = mdunlinkfiletag,
-		.sync_filetagmatches = mdfiletagmatches
+		.sync_filetagmatches = mdfiletagmatches,
+		.uses_transient_fd = false
 	},
 	/* pg_xact */
 	[SYNC_HANDLER_CLOG] = {
 		.sync_syncfiletag = clogsyncfiletag,
 		.sync_openfiletag = clogopenfiletag,
+		.uses_transient_fd = true,
 		.sync_target_name = "pg_xact"
 	},
 	/* pg_commit_ts */
 	[SYNC_HANDLER_COMMIT_TS] = {
 		.sync_syncfiletag = committssyncfiletag,
 		.sync_openfiletag = committsopenfiletag,
+		.uses_transient_fd = true,
 		.sync_target_name = "pg_commit_ts"
 	},
 	/* pg_multixact/offsets */
 	[SYNC_HANDLER_MULTIXACT_OFFSET] = {
 		.sync_syncfiletag = multixactoffsetssyncfiletag,
 		.sync_openfiletag = multixactoffsetsopenfiletag,
+		.uses_transient_fd = true,
 		.sync_target_name = "pg_multixact/offsets"
 	},
 	/* pg_multixact/members */
 	[SYNC_HANDLER_MULTIXACT_MEMBER] = {
 		.sync_syncfiletag = multixactmemberssyncfiletag,
 		.sync_openfiletag = multixactmembersopenfiletag,
+		.uses_transient_fd = true,
 		.sync_target_name = "pg_multixact/members"
 	}
 };
@@ -536,8 +541,14 @@ sync_start_one(SyncState *sync_state, InflightSyncEntry *entry)
 	if (!entry->started)
 		pgaio_io_release(ioh);
 
+	Assert(!entry->started ||
+		   (entry->close_method == SYNC_CLOSE_TRANSIENT) ==
+		   syncsw[entry->tag.handler].uses_transient_fd);
+
 	dlist_push_tail(&sync_state->inflight, &entry->node);
 	sync_state->inflight_count++;
+
+	Assert(sync_state->inflight_count <= io_max_concurrency);
 }
 
 static void
@@ -662,6 +673,20 @@ sync_drain_all(SyncState *sync_state)
 }
 
 /*
+ * Make room for another fsync using the limit appropriate for its handler.
+ */
+static void
+sync_ensure_room(SyncState *sync_state, const FileTag *tag)
+{
+	int			max_inflight;
+
+	max_inflight =
+		GetFsyncConcurrencyLimit(syncsw[tag->handler].uses_transient_fd);
+	while (sync_state->inflight_count >= max_inflight)
+		sync_drain_one(sync_state);
+}
+
+/*
  * Finish requests whose fsyncs have completed.
  *
  * The main hash scan may only remove the entry it most recently returned, so
@@ -730,10 +755,7 @@ sync_process_retries(SyncState *sync_state)
 			continue;
 		}
 
-		Assert(sync_state->inflight_count <= sync_state->max_inflight);
-		if (sync_state->inflight_count == sync_state->max_inflight)
-			sync_drain_one(sync_state);
-
+		sync_ensure_room(sync_state, &entry->tag);
 		sync_start_one(sync_state, entry);
 	}
 
@@ -814,13 +836,12 @@ ProcessSyncRequestsInternal(void)
 	sync_in_progress = true;
 
 	/*
-	 * Bound concurrent fsyncs by both the AIO handle and transient descriptor
-	 * budgets.
+	 * The limit for each request depends on whether its handler holds a
+	 * transient descriptor until completion.
 	 */
 	dlist_init(&sync_state.inflight);
 	dlist_init(&sync_state.retry);
 	sync_state.inflight_count = 0;
-	sync_state.max_inflight = GetFsyncConcurrencyLimit();
 	sync_state.processed = 0;
 	INSTR_TIME_SET_ZERO(sync_state.longest);
 	INSTR_TIME_SET_ZERO(sync_state.total_elapsed);
@@ -867,9 +888,7 @@ ProcessSyncRequestsInternal(void)
 		{
 			InflightSyncEntry *inflight_entry;
 
-			Assert(sync_state.inflight_count <= sync_state.max_inflight);
-			if (sync_state.inflight_count == sync_state.max_inflight)
-				sync_drain_one(&sync_state);
+			sync_ensure_room(&sync_state, &entry->tag);
 
 			/*
 			 * Mark the entry as already dealt with in this cycle.  It must
