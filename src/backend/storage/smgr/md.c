@@ -154,7 +154,7 @@ static void register_forget_request(RelFileLocatorBackend rlocator, ForkNumber f
 static void _fdvec_resize(SMgrRelation reln,
 						  ForkNumber forknum,
 						  int nseg);
-static MdPathStr _mdfd_segpath(SMgrRelation reln, ForkNumber forknum,
+static MdPathStr _mdfd_segpath(RelFileLocatorBackend rlocator, ForkNumber forknum,
 							   BlockNumber segno);
 static MdfdVec *_mdfd_openseg(SMgrRelation reln, ForkNumber forknum,
 							  BlockNumber segno, int oflags);
@@ -1511,13 +1511,13 @@ mdfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off)
  * partial active segment.
  */
 int
-mdfsyncfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
+mdfsyncfd(RelFileLocatorBackend rlocator, ForkNumber forknum, BlockNumber blocknum)
 {
 	MdPathStr	path;
 	BlockNumber segno;
 
 	segno = blocknum / ((BlockNumber) RELSEG_SIZE);
-	path = _mdfd_segpath(reln, forknum, segno);
+	path = _mdfd_segpath(rlocator, forknum, segno);
 
 	return OpenTransientFile(path.str, _mdfd_open_flags());
 }
@@ -1702,16 +1702,15 @@ _fdvec_resize(SMgrRelation reln,
 }
 
 /*
- * Return the filename for the specified segment of the relation. The
- * returned string is palloc'd.
+ * Return the filename for the specified segment of the relation.
  */
 static MdPathStr
-_mdfd_segpath(SMgrRelation reln, ForkNumber forknum, BlockNumber segno)
+_mdfd_segpath(RelFileLocatorBackend rlocator, ForkNumber forknum, BlockNumber segno)
 {
 	RelPathStr	path;
 	MdPathStr	fullpath;
 
-	path = relpath(reln->smgr_rlocator, forknum);
+	path = relpath(rlocator, forknum);
 
 	if (segno > 0)
 		sprintf(fullpath.str, "%s.%u", path.str, segno);
@@ -1733,7 +1732,7 @@ _mdfd_openseg(SMgrRelation reln, ForkNumber forknum, BlockNumber segno,
 	File		fd;
 	MdPathStr	fullpath;
 
-	fullpath = _mdfd_segpath(reln, forknum, segno);
+	fullpath = _mdfd_segpath(reln->smgr_rlocator, forknum, segno);
 
 	/* open the file */
 	fd = PathNameOpenFile(fullpath.str, _mdfd_open_flags() | oflags);
@@ -1872,7 +1871,7 @@ _mdfd_getseg(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not open file \"%s\" (target block %u): previous segment is only %u blocks",
-							_mdfd_segpath(reln, forknum, nextsegno).str,
+							_mdfd_segpath(reln->smgr_rlocator, forknum, nextsegno).str,
 							blkno, nblocks)));
 		}
 
@@ -1886,7 +1885,7 @@ _mdfd_getseg(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not open file \"%s\" (target block %u): %m",
-							_mdfd_segpath(reln, forknum, nextsegno).str,
+							_mdfd_segpath(reln->smgr_rlocator, forknum, nextsegno).str,
 							blkno)));
 		}
 	}
@@ -1940,7 +1939,7 @@ mdsyncfiletag(PgAioHandle *ioh, InflightSyncEntry *entry)
 	{
 		MdPathStr	p;
 
-		p = _mdfd_segpath(reln, ftag->forknum, ftag->segno);
+		p = _mdfd_segpath(reln->smgr_rlocator, ftag->forknum, ftag->segno);
 		strlcpy(entry->path, p.str, MD_PATH_STR_MAXLEN);
 
 		file = PathNameOpenFile(entry->path, _mdfd_open_flags());
