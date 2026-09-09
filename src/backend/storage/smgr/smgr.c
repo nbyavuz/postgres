@@ -124,7 +124,7 @@ typedef struct f_smgr
 	void		(*smgr_immedsync) (SMgrRelation reln, ForkNumber forknum);
 	void		(*smgr_registersync) (SMgrRelation reln, ForkNumber forknum);
 	int			(*smgr_fd) (SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off);
-	int			(*smgr_fsync_fd) (SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum);
+	int			(*smgr_fsync_fd) (RelFileLocatorBackend rlocator, ForkNumber forknum, BlockNumber blocknum);
 } f_smgr;
 
 static const f_smgr smgrsw[] = {
@@ -1011,11 +1011,12 @@ smgrfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off)
  * descriptor, or -1 with errno set if the file cannot be opened.
  */
 static int
-smgrfsyncfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
+smgrfsyncfd(RelFileLocatorBackend rlocator, ForkNumber forknum, BlockNumber blocknum)
 {
 	Assert(!INTERRUPTS_CAN_BE_PROCESSED());
 
-	return smgrsw[reln->smgr_which].smgr_fsync_fd(reln, forknum, blocknum);
+	/* We only have md.c at present, as in smgropen(). */
+	return smgrsw[0].smgr_fsync_fd(rlocator, forknum, blocknum);
 }
 
 /*
@@ -1098,13 +1099,13 @@ smgr_aio_reopen(PgAioHandle *ioh)
 	else
 		procno = INVALID_PROC_NUMBER;
 
-	reln = smgropen(sd->smgr.rlocator, procno);
 	switch (pgaio_io_get_op(ioh))
 	{
 		case PGAIO_OP_INVALID:
 			pg_unreachable();
 			break;
 		case PGAIO_OP_READV:
+			reln = smgropen(sd->smgr.rlocator, procno);
 			fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
 			if (fd < 0)
 				break;
@@ -1112,6 +1113,7 @@ smgr_aio_reopen(PgAioHandle *ioh)
 			Assert(off == od->read.offset);
 			return 0;
 		case PGAIO_OP_WRITEV:
+			reln = smgropen(sd->smgr.rlocator, procno);
 			fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
 			if (fd < 0)
 				break;
@@ -1119,11 +1121,22 @@ smgr_aio_reopen(PgAioHandle *ioh)
 			Assert(off == od->write.offset);
 			return 0;
 		case PGAIO_OP_FSYNC:
-			fd = smgrfsyncfd(reln, sd->smgr.forkNum, sd->smgr.blockNum);
-			if (fd < 0)
-				break;
-			od->fsync.fd = fd;
-			return 0;
+			{
+				RelFileLocatorBackend rlocator;
+
+				/*
+				 * Fsync uses a transient descriptor, so avoid creating an
+				 * SMGR cache entry that the worker would retain indefinitely.
+				 */
+				rlocator.locator = sd->smgr.rlocator;
+				rlocator.backend = procno;
+				fd = smgrfsyncfd(rlocator, sd->smgr.forkNum,
+								 sd->smgr.blockNum);
+				if (fd < 0)
+					break;
+				od->fsync.fd = fd;
+				return 0;
+			}
 	}
 
 	return errno != 0 ? -errno : -EIO;
