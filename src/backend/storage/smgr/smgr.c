@@ -165,7 +165,7 @@ static dlist_head unpinned_relns;
 static void smgrshutdown(int code, Datum arg);
 static void smgrdestroy(SMgrRelation reln);
 
-static void smgr_aio_reopen(PgAioHandle *ioh);
+static int	smgr_aio_reopen(PgAioHandle *ioh);
 static char *smgr_aio_describe_identity(const PgAioTargetData *sd);
 
 
@@ -980,7 +980,7 @@ smgrimmedsync(SMgrRelation reln, ForkNumber forknum)
 
 /*
  * Return fd for the specified block number and update *off to the appropriate
- * position.
+ * position, or -1 with errno set if the file cannot be opened.
  *
  * This is only to be used for when AIO needs to perform the IO in a different
  * process than where it was issued (e.g. in an IO worker).
@@ -1058,9 +1058,9 @@ pgaio_io_set_target_smgr(PgAioHandle *ioh,
 
 /*
  * Callback for the smgr AIO target, to reopen the file (e.g. because the IO
- * is executed in a worker).
+ * is executed in a worker). Returns 0 on success, -errno on failure.
  */
-static void
+static int
 smgr_aio_reopen(PgAioHandle *ioh)
 {
 	PgAioTargetData *sd = pgaio_io_get_target_data(ioh);
@@ -1068,6 +1068,7 @@ smgr_aio_reopen(PgAioHandle *ioh)
 	SMgrRelation reln;
 	ProcNumber	procno;
 	uint32		off;
+	int			fd;
 
 	/*
 	 * The caller needs to prevent interrupts from being processed, otherwise
@@ -1087,14 +1088,22 @@ smgr_aio_reopen(PgAioHandle *ioh)
 			pg_unreachable();
 			break;
 		case PGAIO_OP_READV:
-			od->read.fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
+			fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
+			if (fd < 0)
+				break;
+			od->read.fd = fd;
 			Assert(off == od->read.offset);
-			break;
+			return 0;
 		case PGAIO_OP_WRITEV:
-			od->write.fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
+			fd = smgrfd(reln, sd->smgr.forkNum, sd->smgr.blockNum, &off);
+			if (fd < 0)
+				break;
+			od->write.fd = fd;
 			Assert(off == od->write.offset);
-			break;
+			return 0;
 	}
+
+	return errno != 0 ? -errno : -EIO;
 }
 
 /*

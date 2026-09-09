@@ -160,8 +160,11 @@ struct PgAioTargetInfo
 	/*
 	 * To support executing using worker processes, the file descriptor for an
 	 * IO may need to be reopened in a different process.
+	 *
+	 * Returns 0 on success, or -errno for an ordinary failure to reopen.  An
+	 * unexpected failure may instead raise an error.
 	 */
-	void		(*reopen) (PgAioHandle *ioh);
+	int			(*reopen) (PgAioHandle *ioh);
 
 	/* describe the target of the IO, used for log messages and views */
 	char	   *(*describe_identity) (const PgAioTargetData *sd);

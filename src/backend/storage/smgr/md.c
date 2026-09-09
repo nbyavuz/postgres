@@ -120,6 +120,8 @@ static MemoryContext MdCxt;		/* context for all MdfdVec objects */
 #define EXTENSION_CREATE_RECOVERY	(1 << 3)
 /* don't try to open a segment, if not already open */
 #define EXTENSION_DONT_OPEN			(1 << 5)
+/* return NULL for any open failure */
+#define EXTENSION_RETURN_NULL_ANY	(1 << 6)
 
 
 /*
@@ -688,8 +690,9 @@ mdopenfork(SMgrRelation reln, ForkNumber forknum, int behavior)
 
 	if (fd < 0)
 	{
-		if ((behavior & EXTENSION_RETURN_NULL) &&
-			FILE_POSSIBLY_DELETED(errno))
+		if ((behavior & EXTENSION_RETURN_NULL_ANY) ||
+			((behavior & EXTENSION_RETURN_NULL) &&
+			 FILE_POSSIBLY_DELETED(errno)))
 			return NULL;
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -1490,13 +1493,21 @@ mdimmedsync(SMgrRelation reln, ForkNumber forknum)
 	}
 }
 
+/*
+ * Return the raw descriptor for the segment containing blocknum, or -1 with
+ * errno set if the segment cannot be opened.
+ */
 int
 mdfd(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, uint32 *off)
 {
-	MdfdVec    *v = mdopenfork(reln, forknum, EXTENSION_FAIL);
+	MdfdVec    *v = mdopenfork(reln, forknum, EXTENSION_RETURN_NULL_ANY);
 
+	if (v == NULL)
+		return -1;
 	v = _mdfd_getseg(reln, forknum, blocknum, false,
-					 EXTENSION_FAIL);
+					 EXTENSION_RETURN_NULL_ANY);
+	if (v == NULL)
+		return -1;
 
 	*off = (pgoff_t) BLCKSZ * (blocknum % ((BlockNumber) RELSEG_SIZE));
 
@@ -1762,7 +1773,7 @@ _mdfd_getseg(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 	/* some way to handle non-existent segments needs to be specified */
 	Assert(behavior &
 		   (EXTENSION_FAIL | EXTENSION_CREATE | EXTENSION_RETURN_NULL |
-			EXTENSION_DONT_OPEN));
+			EXTENSION_DONT_OPEN | EXTENSION_RETURN_NULL_ANY));
 
 	targetseg = blkno / ((BlockNumber) RELSEG_SIZE);
 
@@ -1840,7 +1851,8 @@ _mdfd_getseg(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 * one is exactly RELSEG_SIZE.  If not (this branch), either
 			 * return NULL or fail.
 			 */
-			if (behavior & EXTENSION_RETURN_NULL)
+			if (behavior & (EXTENSION_RETURN_NULL |
+							EXTENSION_RETURN_NULL_ANY))
 			{
 				/*
 				 * Some callers discern between reasons for _mdfd_getseg()
@@ -1863,8 +1875,9 @@ _mdfd_getseg(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 
 		if (v == NULL)
 		{
-			if ((behavior & EXTENSION_RETURN_NULL) &&
-				FILE_POSSIBLY_DELETED(errno))
+			if ((behavior & EXTENSION_RETURN_NULL_ANY) ||
+				((behavior & EXTENSION_RETURN_NULL) &&
+				 FILE_POSSIBLY_DELETED(errno)))
 				return NULL;
 			ereport(ERROR,
 					(errcode_for_file_access(),
