@@ -488,6 +488,12 @@ sync_free_entry(InflightSyncEntry *entry)
 static void
 sync_cleanup_inflight(int code, Datum arg)
 {
+	int			save_errno = 0;
+	char		path[MAXPGPATH];
+
+	/* Do not let an interrupt abandon the remaining IOs during cleanup. */
+	HOLD_INTERRUPTS();
+
 	while (!dlist_is_empty(&activeSyncEntries))
 	{
 		dlist_node *node = dlist_pop_head_node(&activeSyncEntries);
@@ -496,10 +502,44 @@ sync_cleanup_inflight(int code, Datum arg)
 		entry = dlist_container(InflightSyncEntry, cleanup_node, node);
 
 		if (entry->started)
+		{
+			int			result;
+
 			pgaio_wref_wait(&entry->iow);
+
+			/*
+			 * These IOs have no error-reporting completion callback.  Even
+			 * though the checkpoint has already failed, we must not discard a
+			 * durability error that requires PANIC.  As in sync_drain_one(),
+			 * ignore canceled requests and allow a first failure that could
+			 * be due to deletion.  Leave retries to the next checkpoint.
+			 *
+			 * Save the first such error without allocating memory or raising
+			 * another ERROR, so that all outstanding IOs are cleaned up.
+			 */
+			result = -entry->ioret.result.result;
+			if (result != 0 && save_errno == 0 &&
+				!entry->hash_entry->canceled &&
+				(!FILE_POSSIBLY_DELETED(result) || entry->retry_count > 0) &&
+				data_sync_elevel(ERROR) == PANIC)
+			{
+				save_errno = result;
+				strlcpy(path, entry->path, sizeof(path));
+			}
+		}
 
 		sync_close_file(entry);
 		pfree(entry);
+	}
+
+	RESUME_INTERRUPTS();
+
+	if (save_errno != 0)
+	{
+		errno = save_errno;
+		ereport(data_sync_elevel(ERROR),
+				(errcode_for_file_access(),
+				 errmsg("could not fsync file \"%s\": %m", path)));
 	}
 }
 
@@ -660,6 +700,8 @@ sync_drain_one(SyncState *sync_state)
 					 errmsg_internal("could not fsync file \"%s\" but retrying: %m",
 									 entry->path)));
 
+		/* Cleanup must not check this already-handled result as a retry. */
+		entry->started = false;
 		entry->retry_count++;
 		dlist_push_tail(&sync_state->retry, &entry->node);
 	}
