@@ -38,6 +38,7 @@ tests += {
       't/005_fsync.pl',
       't/006_fsync_targets.pl',
       't/007_fsync_stats.pl',
+      't/008_datadir_fsync.pl',
     ],
   },
 }

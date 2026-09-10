@@ -12,6 +12,8 @@
  */
 #include "postgres.h"
 
+#include <unistd.h>
+
 #include "access/relation.h"
 #include "common/relpath.h"
 #include "fmgr.h"
@@ -46,12 +48,20 @@ typedef struct FsyncTestState
 
 static FsyncTestState *fsync_test;
 
+/* Startup has no SQL connection; TAP controls this gate through files. */
+static bool datadir_test;
+static int	datadir_staged;
+static int	datadir_completed;
+static int	datadir_reaped;
+
 void		test_aio_fsync_init(void);
 void		test_aio_fsync_completion(PgAioHandle *ioh);
 extern PGDLLEXPORT void test_aio_fsync_drain(const char *name,
 											 const void *private_data, void *arg);
 extern PGDLLEXPORT void test_aio_fsync_room(const char *name,
 											const void *private_data, void *arg);
+extern PGDLLEXPORT void test_aio_datadir(const char *name,
+										 const void *private_data, void *arg);
 
 static void
 fsync_test_shmem_request(void *arg)
@@ -76,6 +86,16 @@ fsync_test_init(void *arg)
 						 "test_aio_fsync_room", NULL, 0);
 	InjectionPointAttach("sync-transient-room", "test_aio",
 						 "test_aio_fsync_room", NULL, 0);
+	InjectionPointAttach("datadir-sync-begin", "test_aio",
+						 "test_aio_datadir", NULL, 0);
+	InjectionPointAttach("datadir-sync-staged", "test_aio",
+						 "test_aio_datadir", NULL, 0);
+	InjectionPointAttach("datadir-sync-reaped", "test_aio",
+						 "test_aio_datadir", NULL, 0);
+	InjectionPointAttach("datadir-sync-before-drain", "test_aio",
+						 "test_aio_datadir", NULL, 0);
+	InjectionPointAttach("datadir-sync-end", "test_aio",
+						 "test_aio_datadir", NULL, 0);
 #endif
 }
 
@@ -107,6 +127,15 @@ test_aio_fsync_completion(PgAioHandle *ioh)
 {
 	FileTag		tag = {0};
 	bool		wait;
+
+	if (ioh->target == PGAIO_TID_SYNC && datadir_test)
+	{
+		Assert(AmStartupProcess());
+		/* Return one durability error and check startup's LOG-only policy. */
+		if (++datadir_completed == 1)
+			ioh->result = -EIO;
+		return;
+	}
 
 	if (ioh->target == PGAIO_TID_SMGR)
 	{
@@ -311,4 +340,42 @@ Datum
 fsync_test_limit(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(GetFsyncConcurrencyLimit(PG_GETARG_BOOL(0)));
+}
+
+void
+test_aio_datadir(const char *name, const void *private_data, void *arg)
+{
+	if (strcmp(name, "datadir-sync-begin") == 0)
+	{
+		datadir_test = access("test_aio_datadir", F_OK) == 0;
+		datadir_staged = datadir_completed = datadir_reaped = 0;
+	}
+	if (!datadir_test)
+		return;
+
+	if (strcmp(name, "datadir-sync-staged") == 0)
+		datadir_staged++;
+	else if (strcmp(name, "datadir-sync-reaped") == 0)
+	{
+		datadir_reaped++;
+		elog(LOG, "test datadir synced: %s", (char *) arg);
+	}
+	else if (strcmp(name, "datadir-sync-before-drain") == 0)
+	{
+		elog(LOG, "test datadir final drain: %d pending, %d staged, %d completed, %d reaped",
+			 *(int *) arg, datadir_staged, datadir_completed, datadir_reaped);
+		while (access("test_aio_datadir", F_OK) == 0)
+		{
+			CHECK_FOR_INTERRUPTS();
+			pg_usleep(10000L);
+		}
+	}
+	else if (strcmp(name, "datadir-sync-end") == 0)
+	{
+		if (datadir_staged != datadir_completed ||
+			datadir_staged != datadir_reaped)
+			elog(ERROR, "test datadir synchronization was not drained");
+		elog(LOG, "test datadir synchronization drained");
+		datadir_test = false;
+	}
 }

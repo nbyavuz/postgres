@@ -99,6 +99,7 @@
 #include "storage/ipc.h"
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
+#include "utils/injection_point.h"
 #include "utils/resowner.h"
 #include "utils/varlena.h"
 #include "utils/wait_event.h"
@@ -3762,12 +3763,15 @@ SyncDataDirectory(void)
 	 * in pg_tblspc, they'll get fsync'd twice.  That's not an expected case
 	 * so we don't worry about optimizing it.
 	 */
+	INJECTION_POINT("datadir-sync-begin", NULL);
 	walkdir(".", datadir_fsync_fname, false, LOG, &sync_state_data);
 	if (xlog_is_symlink)
 		walkdir("pg_wal", datadir_fsync_fname, false, LOG, &sync_state_data);
 	walkdir(PG_TBLSPC_DIR, datadir_fsync_fname, true, LOG, &sync_state_data);
 
+	INJECTION_POINT("datadir-sync-before-drain", &sync_state_data.count);
 	datadir_sync_drain_all(&sync_state_data);
+	INJECTION_POINT("datadir-sync-end", NULL);
 
 	pfree(sync_state_data.entries);
 }
@@ -3902,6 +3906,7 @@ datadir_sync_wait_one(DataDirSyncState *state)
 	Assert(entry->in_use);
 
 	pgaio_wref_wait(&entry->iow);
+	INJECTION_POINT("datadir-sync-reaped", entry->path);
 
 	/*
 	 * As we didn't register a completion callback, the IO's status is always
@@ -3965,6 +3970,7 @@ datadir_fsync_fname(const char *fname, bool isdir, int elevel, DataDirSyncState 
 	ioh = pgaio_io_acquire(CurrentResourceOwner, &entry->ioret);
 	pgaio_io_set_target(ioh, PGAIO_TID_SYNC);
 	pgaio_io_get_wref(ioh, &entry->iow);
+	INJECTION_POINT("datadir-sync-staged", entry->path);
 
 	/*
 	 * Interrupts must be held across staging the IO, so that the file
