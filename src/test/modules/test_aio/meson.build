@@ -36,6 +36,7 @@ tests += {
       't/003_initdb.pl',
       't/004_read_stream.pl',
       't/005_fsync.pl',
+      't/006_fsync_targets.pl',
     ],
   },
 }

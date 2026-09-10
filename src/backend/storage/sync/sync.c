@@ -729,6 +729,11 @@ sync_ensure_room(SyncState *sync_state, const FileTag *tag)
 		GetFsyncConcurrencyLimit(syncsw[tag->handler].uses_transient_fd);
 	while (sync_state->inflight_count >= max_inflight)
 		sync_drain_one(sync_state);
+
+	if (syncsw[tag->handler].uses_transient_fd)
+		INJECTION_POINT("sync-transient-room", &sync_state->inflight_count);
+	else
+		INJECTION_POINT("sync-relation-room", &sync_state->inflight_count);
 }
 
 /*

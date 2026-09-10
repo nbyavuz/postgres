@@ -19,6 +19,7 @@
 #include "storage/aio.h"
 #include "storage/aio_internal.h"
 #include "storage/condition_variable.h"
+#include "storage/fd.h"
 #include "storage/spin.h"
 #include "storage/sync.h"
 #include "utils/builtins.h"
@@ -39,6 +40,8 @@ typedef struct FsyncTestState
 	int			worker_attempts;	/* matching attempts made by I/O workers */
 	char		cleanup;		/* checkpoint cleanup scenario to inject */
 	uint32		wait_event;		/* wait event for blocked completions */
+	int			relation_peak;
+	int			transient_peak;
 } FsyncTestState;
 
 static FsyncTestState *fsync_test;
@@ -47,6 +50,8 @@ void		test_aio_fsync_init(void);
 void		test_aio_fsync_completion(PgAioHandle *ioh);
 extern PGDLLEXPORT void test_aio_fsync_drain(const char *name,
 											 const void *private_data, void *arg);
+extern PGDLLEXPORT void test_aio_fsync_room(const char *name,
+											const void *private_data, void *arg);
 
 static void
 fsync_test_shmem_request(void *arg)
@@ -67,6 +72,10 @@ fsync_test_init(void *arg)
 						 "test_aio_fsync_drain", NULL, 0);
 	InjectionPointAttach("sync-after-retry", "test_aio",
 						 "test_aio_fsync_drain", NULL, 0);
+	InjectionPointAttach("sync-relation-room", "test_aio",
+						 "test_aio_fsync_room", NULL, 0);
+	InjectionPointAttach("sync-transient-room", "test_aio",
+						 "test_aio_fsync_room", NULL, 0);
 #endif
 }
 
@@ -213,6 +222,8 @@ fsync_test_configure(PG_FUNCTION_ARGS)
 	fsync_test->cleanup = cleanup[0];
 	fsync_test->total_attempts = 0;
 	fsync_test->worker_attempts = 0;
+	fsync_test->relation_peak = 0;
+	fsync_test->transient_peak = 0;
 	SpinLockRelease(&fsync_test->lock);
 	PG_RETURN_VOID();
 }
@@ -258,4 +269,46 @@ fsync_test_count(PG_FUNCTION_ARGS)
 		fsync_test->worker_attempts : fsync_test->total_attempts;
 	SpinLockRelease(&fsync_test->lock);
 	PG_RETURN_INT32(count);
+}
+
+/* Observe admission, including retries, rather than timing worker execution. */
+void
+test_aio_fsync_room(const char *name, const void *private_data, void *arg)
+{
+	int			count = *(int *) arg + 1;
+	bool		transient;
+	int		   *peak;
+
+	if (strcmp(name, "sync-transient-room") == 0)
+		transient = true;
+	else if (strcmp(name, "sync-relation-room") == 0)
+		transient = false;
+	else
+		elog(ERROR, "unexpected injection point name \"%s\"", name);
+
+	if (count > GetFsyncConcurrencyLimit(transient))
+		elog(ERROR, "fsync concurrency limit exceeded");
+	SpinLockAcquire(&fsync_test->lock);
+	peak = transient ? &fsync_test->transient_peak : &fsync_test->relation_peak;
+	*peak = Max(*peak, count);
+	SpinLockRelease(&fsync_test->lock);
+}
+
+PG_FUNCTION_INFO_V1(fsync_test_peak);
+Datum
+fsync_test_peak(PG_FUNCTION_ARGS)
+{
+	int			peak;
+
+	SpinLockAcquire(&fsync_test->lock);
+	peak = PG_GETARG_BOOL(0) ? fsync_test->transient_peak : fsync_test->relation_peak;
+	SpinLockRelease(&fsync_test->lock);
+	PG_RETURN_INT32(peak);
+}
+
+PG_FUNCTION_INFO_V1(fsync_test_limit);
+Datum
+fsync_test_limit(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(GetFsyncConcurrencyLimit(PG_GETARG_BOOL(0)));
 }
