@@ -128,3 +128,18 @@ AS 'MODULE_PATHNAME' LANGUAGE C;
 CREATE FUNCTION inj_io_reopen_detach()
 RETURNS pg_catalog.void STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION fsync_test_configure(rel regclass,
+    error text DEFAULT '', failures int DEFAULT 0, wait bool DEFAULT false,
+    cleanup text DEFAULT '', fork text DEFAULT 'main', segno bigint DEFAULT 0,
+    handler int DEFAULT 0)
+RETURNS void STRICT AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION fsync_test_request()
+RETURNS void STRICT AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION fsync_test_release()
+RETURNS void STRICT AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION fsync_test_count(workers bool DEFAULT false)
+RETURNS int STRICT AS 'MODULE_PATHNAME' LANGUAGE C;
