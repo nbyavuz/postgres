@@ -37,6 +37,7 @@ tests += {
       't/004_read_stream.pl',
       't/005_fsync.pl',
       't/006_fsync_targets.pl',
+      't/007_fsync_stats.pl',
     ],
   },
 }
