@@ -42,6 +42,9 @@
 
 PG_MODULE_MAGIC;
 
+extern void test_aio_fsync_init(void);
+extern void test_aio_fsync_completion(PgAioHandle *ioh);
+
 
 /* In shared memory */
 typedef struct InjIoErrorState
@@ -148,6 +151,7 @@ _PG_init(void)
 		return;
 
 	RegisterShmemCallbacks(&inj_io_shmem_callbacks);
+	test_aio_fsync_init();
 }
 
 
@@ -1145,6 +1149,14 @@ inj_io_short_read_hook(const char *name, const void *private_data, void *arg)
 void
 inj_io_completion_hook(const char *name, const void *private_data, void *arg)
 {
+	PgAioHandle *ioh = arg;
+
+	if (pgaio_io_get_op(ioh) == PGAIO_OP_FSYNC)
+	{
+		test_aio_fsync_completion(ioh);
+		return;
+	}
+
 	inj_io_completion_wait_hook(name, private_data, arg);
 	inj_io_short_read_hook(name, private_data, arg);
 }

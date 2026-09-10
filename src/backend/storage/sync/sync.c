@@ -33,6 +33,7 @@
 #include "storage/latch.h"
 #include "storage/md.h"
 #include "utils/hsearch.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
 
@@ -604,6 +605,7 @@ sync_drain_one(SyncState *sync_state)
 	node = dlist_pop_head_node(&sync_state->inflight);
 	entry = dlist_container(InflightSyncEntry, node, node);
 	sync_state->inflight_count--;
+	INJECTION_POINT("sync-before-drain", entry);
 
 	if (entry->started)
 	{
@@ -704,6 +706,7 @@ sync_drain_one(SyncState *sync_state)
 		entry->started = false;
 		entry->retry_count++;
 		dlist_push_tail(&sync_state->retry, &entry->node);
+		INJECTION_POINT("sync-after-retry", entry);
 	}
 }
 

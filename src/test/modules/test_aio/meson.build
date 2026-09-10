@@ -2,6 +2,7 @@
 
 test_aio_sources = files(
   'test_aio.c',
+  'test_aio_fsync.c',
 )
 
 if host_system == 'windows'
@@ -34,6 +35,7 @@ tests += {
       't/002_io_workers.pl',
       't/003_initdb.pl',
       't/004_read_stream.pl',
+      't/005_fsync.pl',
     ],
   },
 }

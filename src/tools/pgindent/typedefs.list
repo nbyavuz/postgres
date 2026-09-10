@@ -1028,6 +1028,7 @@ FreePageSpanLeader
 From
 FromCharDateMode
 FromExpr
+FsyncTestState
 FullTransactionId
 FuncCall
 FuncCallContext
