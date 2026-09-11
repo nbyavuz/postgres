@@ -629,6 +629,7 @@ sync_drain_one(SyncState *sync_state, bool transient_only)
 		}
 		Assert(node != NULL);
 		entry = dlist_container(InflightSyncEntry, node, node);
+		INJECTION_POINT("sync-transient-drain", entry);
 		dlist_delete_from(&sync_state->inflight, node);
 	}
 	else
@@ -772,10 +773,9 @@ sync_ensure_room(SyncState *sync_state, const FileTag *tag)
 					   uses_transient_fd &&
 					   sync_state->transient_count >= max_transient);
 
+	INJECTION_POINT("sync-total-room", &sync_state->inflight_count);
 	if (uses_transient_fd)
-		INJECTION_POINT("sync-transient-room", &sync_state->inflight_count);
-	else
-		INJECTION_POINT("sync-relation-room", &sync_state->inflight_count);
+		INJECTION_POINT("sync-transient-room", &sync_state->transient_count);
 }
 
 /*

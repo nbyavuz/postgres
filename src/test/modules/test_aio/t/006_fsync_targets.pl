@@ -188,12 +188,23 @@ SELECT count(*) FROM pg_aios WHERE operation = 'fsync'
 		$node->safe_psql('postgres', $sql);
 		is($node->safe_psql('postgres', q(SELECT fsync_test_count())),
 			'2', "$method: transient retry in mixed=$mixed batch");
+		is( $node->safe_psql('postgres', q(
+SELECT fsync_test_peak(false) = fsync_test_limit(false)
+)),
+			't',
+			"$method: mixed batch reaches full total concurrency")
+		  if $mixed;
 		is( $node->safe_psql(
 				'postgres', q(
 SELECT fsync_test_peak(true) = fsync_test_limit(true)
 )),
 			't',
 			"$method: transient admission respects its cap, mixed=$mixed");
+		cmp_ok(
+			$node->safe_psql('postgres', q(SELECT fsync_test_drain_count())),
+			'>',
+			0,
+			"$method: transient pressure drains transient fsyncs, mixed=$mixed");
 	}
 	foreach my $file (@fixtures)
 	{

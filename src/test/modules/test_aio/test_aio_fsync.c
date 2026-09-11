@@ -42,8 +42,9 @@ typedef struct FsyncTestState
 	int			worker_attempts;	/* matching attempts made by I/O workers */
 	char		cleanup;		/* checkpoint cleanup scenario to inject */
 	uint32		wait_event;		/* wait event for blocked completions */
-	int			relation_peak;
+	int			total_peak;
 	int			transient_peak;
+	int			transient_drains;
 } FsyncTestState;
 
 static FsyncTestState *fsync_test;
@@ -82,7 +83,9 @@ fsync_test_init(void *arg)
 						 "test_aio_fsync_drain", NULL, 0);
 	InjectionPointAttach("sync-after-retry", "test_aio",
 						 "test_aio_fsync_drain", NULL, 0);
-	InjectionPointAttach("sync-relation-room", "test_aio",
+	InjectionPointAttach("sync-transient-drain", "test_aio",
+						 "test_aio_fsync_drain", NULL, 0);
+	InjectionPointAttach("sync-total-room", "test_aio",
 						 "test_aio_fsync_room", NULL, 0);
 	InjectionPointAttach("sync-transient-room", "test_aio",
 						 "test_aio_fsync_room", NULL, 0);
@@ -188,6 +191,16 @@ test_aio_fsync_drain(const char *name, const void *private_data, void *arg)
 	InflightSyncEntry *entry = arg;
 	char		cleanup;
 
+	if (strcmp(name, "sync-transient-drain") == 0)
+	{
+		if (entry->close_method != SYNC_CLOSE_TRANSIENT)
+			elog(ERROR, "transient pressure selected non-transient fsync");
+		SpinLockAcquire(&fsync_test->lock);
+		fsync_test->transient_drains++;
+		SpinLockRelease(&fsync_test->lock);
+		return;
+	}
+
 	SpinLockAcquire(&fsync_test->lock);
 	cleanup = fsync_test_matches(&entry->tag) ? fsync_test->cleanup : '\0';
 	SpinLockRelease(&fsync_test->lock);
@@ -251,8 +264,9 @@ fsync_test_configure(PG_FUNCTION_ARGS)
 	fsync_test->cleanup = cleanup[0];
 	fsync_test->total_attempts = 0;
 	fsync_test->worker_attempts = 0;
-	fsync_test->relation_peak = 0;
+	fsync_test->total_peak = 0;
 	fsync_test->transient_peak = 0;
+	fsync_test->transient_drains = 0;
 	SpinLockRelease(&fsync_test->lock);
 	PG_RETURN_VOID();
 }
@@ -300,7 +314,7 @@ fsync_test_count(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(count);
 }
 
-/* Observe admission, including retries, rather than timing worker execution. */
+/* Observe total and transient admission, including retries. */
 void
 test_aio_fsync_room(const char *name, const void *private_data, void *arg)
 {
@@ -310,7 +324,7 @@ test_aio_fsync_room(const char *name, const void *private_data, void *arg)
 
 	if (strcmp(name, "sync-transient-room") == 0)
 		transient = true;
-	else if (strcmp(name, "sync-relation-room") == 0)
+	else if (strcmp(name, "sync-total-room") == 0)
 		transient = false;
 	else
 		elog(ERROR, "unexpected injection point name \"%s\"", name);
@@ -318,7 +332,7 @@ test_aio_fsync_room(const char *name, const void *private_data, void *arg)
 	if (count > GetFsyncConcurrencyLimit(transient))
 		elog(ERROR, "fsync concurrency limit exceeded");
 	SpinLockAcquire(&fsync_test->lock);
-	peak = transient ? &fsync_test->transient_peak : &fsync_test->relation_peak;
+	peak = transient ? &fsync_test->transient_peak : &fsync_test->total_peak;
 	*peak = Max(*peak, count);
 	SpinLockRelease(&fsync_test->lock);
 }
@@ -330,7 +344,7 @@ fsync_test_peak(PG_FUNCTION_ARGS)
 	int			peak;
 
 	SpinLockAcquire(&fsync_test->lock);
-	peak = PG_GETARG_BOOL(0) ? fsync_test->transient_peak : fsync_test->relation_peak;
+	peak = PG_GETARG_BOOL(0) ? fsync_test->transient_peak : fsync_test->total_peak;
 	SpinLockRelease(&fsync_test->lock);
 	PG_RETURN_INT32(peak);
 }
@@ -340,6 +354,18 @@ Datum
 fsync_test_limit(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(GetFsyncConcurrencyLimit(PG_GETARG_BOOL(0)));
+}
+
+PG_FUNCTION_INFO_V1(fsync_test_drain_count);
+Datum
+fsync_test_drain_count(PG_FUNCTION_ARGS)
+{
+	int			count;
+
+	SpinLockAcquire(&fsync_test->lock);
+	count = fsync_test->transient_drains;
+	SpinLockRelease(&fsync_test->lock);
+	PG_RETURN_INT32(count);
 }
 
 void
