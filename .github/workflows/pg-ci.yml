@@ -872,6 +872,10 @@ jobs:
         -Dssl=openssl
         -Dtap_tests=enabled
 
+      CCACHE_MAXSIZE: "500M"
+      CCACHE_SLOPPINESS: pch_defines,time_macros
+      CCACHE_DEPEND: 1
+
     defaults:
       run:
         shell: cmd
@@ -956,6 +960,11 @@ jobs:
       - name: Install dependencies
         shell: pwsh
         run: |
+          echo ::group::choco
+          choco install ccache --version=4.14.0 --no-progress --yes
+          if (!$?) { throw 'cmdfail' }
+          echo ::endgroup::
+
           # meson is not preinstalled on windows-2022. Install via pip
           echo ::group::pip
           python -m pip install --upgrade meson
@@ -995,6 +1004,9 @@ jobs:
         shell: pwsh
         run: src/tools/ci/gha_setup_windows_debugger.ps1
 
+      - *ccache_restore_default_step
+      - *ccache_restore_branch_step
+
       - name: Configure
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
@@ -1013,18 +1025,30 @@ jobs:
           ninja -C build ${{env.MBUILD_TARGET}} || exit 1
           ninja -C build -t missingdeps
 
-      - name: Test world
-        env:
-          # As described at the top of the task, split the tests across two
-          # runners for performance.  It's not the prettiest to implement this
-          # by prepending to MTEST_TARGET, but a more complicated solution
-          # doesn't seem worth it.
-          MTEST_TARGET: --slice ${{ matrix.slice}}/${{ matrix.num_slices}} ${{env.MTEST_TARGET}}
-          ADDITIONAL_SETUP: |
-            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
-        run: *meson_test_world_cmd
+      # Both matrix entries perform the same build. Let only the first one
+      # prepare and upload a cache to avoid racing on the same cache key.
+      - name: "ccache: Decide whether to upload"
+        id: ccache-decide
+        if: |
+          always() &&
+          matrix.slice == 1 &&
+          steps.ccache-restore-branch.conclusion == 'success'
+        run: python src/tools/ci/gha_ccache_decide.py
 
-      - *upload_logs_step
+      - *ccache_save_step
+
+      # - name: Test world
+      #   env:
+      #     # As described at the top of the task, split the tests across two
+      #     # runners for performance.  It's not the prettiest to implement this
+      #     # by prepending to MTEST_TARGET, but a more complicated solution
+      #     # doesn't seem worth it.
+      #     MTEST_TARGET: --slice ${{ matrix.slice}}/${{ matrix.num_slices}} ${{env.MTEST_TARGET}}
+      #     ADDITIONAL_SETUP: |
+      #       call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+      #   run: *meson_test_world_cmd
+
+      # - *upload_logs_step
 
 
   # Job: Windows - MinGW - Meson
