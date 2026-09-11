@@ -93,6 +93,7 @@ typedef struct SyncState
 	dlist_head	inflight;		/* InflightSyncEntry being fsync'd right now */
 	dlist_head	retry;			/* InflightSyncEntry to be retried */
 	int			inflight_count; /* number of entries in "inflight" */
+	int			transient_count; /* entries holding transient descriptors */
 	int			absorb_counter;
 
 	/* stats */
@@ -549,6 +550,7 @@ sync_start_one(SyncState *sync_state, InflightSyncEntry *entry)
 {
 	struct PgAioHandle *ioh;
 	instr_time	io_start;
+	bool		holds_transient_fd;
 
 	entry->started = false;
 	entry->open_errno = 0;
@@ -585,26 +587,61 @@ sync_start_one(SyncState *sync_state, InflightSyncEntry *entry)
 	Assert(!entry->started ||
 		   (entry->close_method == SYNC_CLOSE_TRANSIENT) ==
 		   syncsw[entry->tag.handler].uses_transient_fd);
+	Assert(entry->started || entry->close_method == SYNC_CLOSE_NONE);
+	holds_transient_fd = entry->close_method == SYNC_CLOSE_TRANSIENT;
 
 	dlist_push_tail(&sync_state->inflight, &entry->node);
 	sync_state->inflight_count++;
+	if (holds_transient_fd)
+		sync_state->transient_count++;
 
 	Assert(sync_state->inflight_count <= io_max_concurrency);
+	Assert(sync_state->transient_count <=
+		   GetFsyncConcurrencyLimit(true));
 }
 
 static void
-sync_drain_one(SyncState *sync_state)
+sync_drain_one(SyncState *sync_state, bool transient_only)
 {
 	dlist_node *node;
 	InflightSyncEntry *entry;
 	int			result;
 	instr_time	io_time;
+	bool		held_transient_fd;
 
 	Assert(sync_state->inflight_count > 0);
 
-	node = dlist_pop_head_node(&sync_state->inflight);
-	entry = dlist_container(InflightSyncEntry, node, node);
+	/* Descriptor pressure must release a descriptor, not an unrelated IO. */
+	if (transient_only)
+	{
+		dlist_iter	iter;
+
+		Assert(sync_state->transient_count > 0);
+		node = NULL;
+		dlist_foreach(iter, &sync_state->inflight)
+		{
+			entry = dlist_container(InflightSyncEntry, node, iter.cur);
+			if (entry->close_method == SYNC_CLOSE_TRANSIENT)
+			{
+				node = iter.cur;
+				break;
+			}
+		}
+		Assert(node != NULL);
+		entry = dlist_container(InflightSyncEntry, node, node);
+		dlist_delete_from(&sync_state->inflight, node);
+	}
+	else
+	{
+		node = dlist_pop_head_node(&sync_state->inflight);
+		entry = dlist_container(InflightSyncEntry, node, node);
+	}
+
+	held_transient_fd = entry->close_method == SYNC_CLOSE_TRANSIENT;
 	sync_state->inflight_count--;
+	if (held_transient_fd)
+		sync_state->transient_count--;
+	Assert(sync_state->transient_count <= sync_state->inflight_count);
 	INJECTION_POINT("sync-before-drain", entry);
 
 	if (entry->started)
@@ -714,7 +751,8 @@ static void
 sync_drain_all(SyncState *sync_state)
 {
 	while (sync_state->inflight_count)
-		sync_drain_one(sync_state);
+		sync_drain_one(sync_state, false);
+	Assert(sync_state->transient_count == 0);
 }
 
 /*
@@ -723,14 +761,18 @@ sync_drain_all(SyncState *sync_state)
 static void
 sync_ensure_room(SyncState *sync_state, const FileTag *tag)
 {
-	int			max_inflight;
+	bool		uses_transient_fd = syncsw[tag->handler].uses_transient_fd;
+	int			max_inflight = GetFsyncConcurrencyLimit(false);
+	int			max_transient = GetFsyncConcurrencyLimit(true);
 
-	max_inflight =
-		GetFsyncConcurrencyLimit(syncsw[tag->handler].uses_transient_fd);
-	while (sync_state->inflight_count >= max_inflight)
-		sync_drain_one(sync_state);
+	while (sync_state->inflight_count >= max_inflight ||
+		   (uses_transient_fd &&
+			sync_state->transient_count >= max_transient))
+		sync_drain_one(sync_state,
+					   uses_transient_fd &&
+					   sync_state->transient_count >= max_transient);
 
-	if (syncsw[tag->handler].uses_transient_fd)
+	if (uses_transient_fd)
 		INJECTION_POINT("sync-transient-room", &sync_state->inflight_count);
 	else
 		INJECTION_POINT("sync-relation-room", &sync_state->inflight_count);
@@ -892,6 +934,7 @@ ProcessSyncRequestsInternal(void)
 	dlist_init(&sync_state.inflight);
 	dlist_init(&sync_state.retry);
 	sync_state.inflight_count = 0;
+	sync_state.transient_count = 0;
 	sync_state.processed = 0;
 	INSTR_TIME_SET_ZERO(sync_state.longest);
 	INSTR_TIME_SET_ZERO(sync_state.total_elapsed);
