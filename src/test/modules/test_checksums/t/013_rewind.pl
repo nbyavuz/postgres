@@ -71,7 +71,9 @@ my $node_b = PostgreSQL::Test::Cluster->new('node_b');
 $node_b->init_from_backup($node_a, 'backup', has_streaming => 1);
 $node_b->start;
 
-$node_a->wait_for_catchup($node_b, 'replay', $node_a->lsn('insert'));
+# Wait for written WAL, not the insert position, which can be ahead of it
+# after the backup's WAL switch on an otherwise idle primary.
+$node_a->wait_for_catchup($node_b);
 test_checksum_state($node_a, 'off');
 test_checksum_state($node_b, 'off');
 
@@ -83,7 +85,7 @@ $node_b->safe_psql('postgres',
 # in a background session; it will block on the injection point with
 # the checkpointer busy until released.
 $node_a->safe_psql('postgres', "CHECKPOINT;");
-$node_a->wait_for_catchup($node_b, 'replay', $node_a->lsn('insert'));
+$node_a->wait_for_catchup($node_b);
 
 my $bg_psql = $node_b->background_psql('postgres', on_error_stop => 0);
 $bg_psql->query_until(
@@ -150,6 +152,12 @@ $backup_label =~ /^CHECKPOINT LOCATION: ([0-9A-F\/]+)$/m
   or die "checkpoint location missing from backup_label";
 is($1, $shutdown_ckpt, 'replay starts at the switchover checkpoint');
 
+# Specify the segment so pg_waldump does not try to read the segment size
+# from a preallocated WAL file whose header has not been written yet.
+$backup_label =~ /^START WAL LOCATION: .* \(file ([0-9A-F]{24})\)$/m
+  or die "WAL file missing from backup_label";
+my $shutdown_walfile = $1;
+
 ($stdout, $stderr) = run_command(
 	[
 		'pg_waldump',
@@ -157,6 +165,7 @@ is($1, $shutdown_ckpt, 'replay starts at the switchover checkpoint');
 		'-t' => 1,
 		'-s' => $shutdown_ckpt,
 		'-n' => 1,
+		$shutdown_walfile,
 	]);
 like($stdout, qr/CHECKPOINT_SHUTDOWN/,
 	'last common checkpoint is a shutdown checkpoint');
@@ -182,9 +191,14 @@ port = @{[$node_a->port]}
 primary_conninfo = '$connstr application_name=@{[$node_a->name]}'
 ]);
 $node_a->set_standby_mode;
+
+# Flush WAL through the minimum recovery point chosen by pg_rewind.  The
+# full_page_writes change can leave an unflushed record on the idle source,
+# delaying startup until the background writer logs its next snapshot.
+$node_b->safe_psql('postgres', 'SELECT pg_switch_wal();');
 $node_a->start;
 
-$node_b->wait_for_catchup($node_a, 'replay', $node_b->lsn('insert'));
+$node_b->wait_for_catchup($node_a);
 test_checksum_state($node_a, 'on');
 
 is($node_a->safe_psql('postgres', "SELECT count(*) FROM t;"),
