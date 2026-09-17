@@ -151,15 +151,21 @@ $backup_label =~ /^CHECKPOINT LOCATION: ([0-9A-F\/]+)$/m
   or die "checkpoint location missing from backup_label";
 is($1, $shutdown_ckpt, 'replay starts at the switchover checkpoint');
 
-($stdout, $stderr) = run_command(
+# Specify the WAL file so that pg_waldump does not try to determine the
+# segment size from an arbitrary, possibly preallocated, file in pg_wal.
+$backup_label =~ /^START WAL LOCATION: [0-9A-F\/]+ \(file ([0-9A-F]{24})\)$/m
+  or die "WAL file name missing from backup_label";
+my $shutdown_wal = $1;
+
+command_like(
 	[
 		'pg_waldump',
 		'-p' => $node_a->data_dir . '/pg_wal',
-		'-t' => 1,
 		'-s' => $shutdown_ckpt,
 		'-n' => 1,
-	]);
-like($stdout, qr/CHECKPOINT_SHUTDOWN/,
+		$shutdown_wal,
+	],
+	qr/CHECKPOINT_SHUTDOWN/,
 	'last common checkpoint is a shutdown checkpoint');
 
 # pg_rewind keeps the target's own checksum state in the control file it
