@@ -920,8 +920,7 @@ jobs:
 
       - name: Sysinfo
         run: |
-          echo Number of cores:
-          bash -c nproc
+          echo Number of logical processors: %NUMBER_OF_PROCESSORS%
 
           echo codepage:
           chcp
