@@ -1189,10 +1189,6 @@ jobs:
   # with various combinations of cassert/dtrace flags. Trace probes have
   # a history of getting accidentally broken; the matrix is there to
   # catch that.
-  #
-  # The autoconf cache files (gcc.cache / clang.cache) are intentionally
-  # reused across the matrix entries that share a compiler, so we don't
-  # pay for full feature detection on every entry.
   compiler-warnings:
     name: CompilerWarnings
     needs: [setup, sanity-check]
@@ -1209,7 +1205,6 @@ jobs:
       # Use larger ccache cache as this job compiles with multiple
       # compilers / flag combinations.
       CCACHE_MAXSIZE: "1G"
-      DEFAULT_BUILD: world-bin
       CCACHE_SLOPPINESS: pch_defines,time_macros
       CCACHE_DEPEND: 1
       MESON_LINUX_FEATURES: >-
@@ -1229,10 +1224,6 @@ jobs:
       - *ccache_restore_default_step
       - *ccache_restore_branch_step
 
-      - name: Setup workspace
-        run: |
-          echo "COPT=-Werror" > src/Makefile.custom
-
       # gcc, cassert off, dtrace on
       - name: gcc warnings + (dtrace)
         if: ${{ !cancelled() }}
@@ -1248,6 +1239,21 @@ jobs:
           echo "::endgroup::"
 
           ninja -C build-meson --quiet ${{env.MBUILD_TARGET}}
+
+      ###
+      # Verify headerscheck / cpluspluscheck succeed using the native GCC
+      # build, before the next configuration replaces it.
+      #
+      # - Run both in same script to increase parallelism, use -k to get
+      #   result of both
+      # - Use -fmax-errors, as particularly cpluspluscheck can be very verbose
+      ###
+      - name: headerscheck + cpluspluscheck
+        if: ${{ !cancelled() }}
+        env:
+          EXTRAFLAGS: -Werror -fmax-errors=10
+        run: |
+          ninja -C build-meson -k 0 headerscheck cpluspluscheck
 
       # gcc, cassert on, dtrace off
       - name: gcc warnings + (cassert)
@@ -1297,28 +1303,6 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           ninja -C build-meson docs
-
-      ###
-      # Verify headerscheck / cpluspluscheck succeed
-      #
-      # - Run both in same script to increase parallelism, use -k to get
-      #   result of both
-      # - Use -fmax-errors, as particularly cpluspluscheck can be very verbose
-      ###
-      - name: headerscheck + cpluspluscheck
-        if: ${{ !cancelled() }}
-        run: |
-          echo "::group::configure"
-          ./configure \
-            ${{env.LINUX_CONFIGURE_FEATURES}} \
-            --quiet \
-            CC="ccache gcc" CXX="ccache g++" CLANG="ccache clang"
-          echo "::endgroup::"
-
-          make -s -j$(nproc) clean
-          make -s -j$(nproc) -k ${{env.CHECKFLAGS}} \
-            headerscheck cpluspluscheck \
-            EXTRAFLAGS='-fmax-errors=10'
 
       - *ccache_decide_save_step
       - *ccache_save_step
