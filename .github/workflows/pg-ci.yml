@@ -772,10 +772,10 @@ jobs:
           macos_major=$(sw_vers -productVersion | sed 's/\..*//')
           pkglist_hash=$(printf '%s' "$MACOS_PACKAGE_LIST" | md5 -q)
           script_hash=$(md5 -q src/tools/ci/ci_macports_packages.sh)
-          echo "key=macports-${macos_major}-${pkglist_hash}-${script_hash}" >> "$GITHUB_OUTPUT"
+          echo "key=macports-${macos_major}-${{runner.arch}}-${pkglist_hash}-${script_hash}" >> "$GITHUB_OUTPUT"
           # It's faster to start with a partial cache for the same macos
-          # version than from scratch
-          echo "restore-key=macports-${macos_major}-" >> "$GITHUB_OUTPUT"
+          # version and architecture than from scratch
+          echo "restore-key=macports-${macos_major}-${{runner.arch}}-" >> "$GITHUB_OUTPUT"
 
       - name: "MacPorts: Restore cache"
         id: mp-restore
@@ -887,6 +887,8 @@ jobs:
     env:
       # Avoid port conflicts between concurrent tap tests
       PG_TEST_USE_UNIX_SOCKETS: 1
+      # Note that long workspace paths can exceed the 107-byte Unix-domain
+      # socket path limit.
       PG_REGRESS_SOCK_DIR: ${{ github.workspace }}/pgsock
       TAR: "c:/windows/system32/tar.exe"
 
@@ -1077,6 +1079,8 @@ jobs:
     env:
       # Avoid port conflicts between concurrent tap tests
       PG_TEST_USE_UNIX_SOCKETS: 1
+      # XXX: Long workspace paths can exceed the 107-byte Unix-domain socket
+      # path limit, including the socket filename. Use a shorter directory.
       PG_REGRESS_SOCK_DIR: ${{ github.workspace }}/pgsock
       TAR: "c:/windows/system32/tar.exe"
 
