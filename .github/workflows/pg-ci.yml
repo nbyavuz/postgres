@@ -1203,7 +1203,6 @@ jobs:
     timeout-minutes: 60
     container:
       image: ${{ needs.setup.outputs.container_linux_ci_base }}/compiler-warnings:${{ needs.setup.outputs.container_tag }}
-      options: *linux_container_options
     env:
       # Use larger ccache cache as this job compiles with multiple
       # compilers / flag combinations.
