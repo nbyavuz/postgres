@@ -7,7 +7,7 @@
 # PGAC_PATH_PYTHON
 # ----------------
 # Look for Python and set the output variable 'PYTHON' if found,
-# fail otherwise.
+# fail otherwise, unless the optional argument is "optional".
 #
 # Since we are supporting only Python 3.x, prefer python3 to plain python.  If
 # the latter exists at all, it very possibly points to python2.
@@ -21,9 +21,11 @@
 AC_DEFUN([PGAC_PATH_PYTHON],
 [PGAC_PATH_PROGS(PYTHON, [python3 python])
 AC_ARG_VAR(PYTHON, [Python program])dnl
+m4_if([$1], [optional], [], [
 if test x"$PYTHON" = x""; then
   AC_MSG_ERROR([Python not found])
 fi
+])
 ])
 
 

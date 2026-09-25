@@ -8,6 +8,7 @@
 
 subdir = src/pl/plpgsql/src
 top_builddir = ../../../..
+GETTEXT_GENERATED = pl_gram.c
 include $(top_builddir)/src/Makefile.global
 
 PGFILEDESC = "PL/pgSQL - procedural language"

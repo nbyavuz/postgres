@@ -13,6 +13,7 @@ PGAPPICON=win32
 
 subdir = src/interfaces/ecpg/preproc
 top_builddir = ../../../..
+GETTEXT_GENERATED = pgc.c preproc.c
 include $(top_builddir)/src/Makefile.global
 
 override CPPFLAGS := -I../include -I$(top_srcdir)/src/interfaces/ecpg/include \

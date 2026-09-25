@@ -3,6 +3,7 @@
 
 subdir = src/pl/plperl
 top_builddir = ../../..
+GETTEXT_GENERATED = SPI.c
 include $(top_builddir)/src/Makefile.global
 
 ifeq ($(PORTNAME), win32)

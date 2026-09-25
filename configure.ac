@@ -1308,6 +1308,10 @@ fi
 if test "$with_python" = yes; then
   PGAC_PATH_PYTHON
   PGAC_CHECK_PYTHON_EMBED_SETUP
+elif test "$enable_nls" = yes; then
+  # Catalog maintenance needs an interpreter, not PL/Python or its headers.
+  # Its absence must not prevent building and installing existing catalogs.
+  PGAC_PATH_PYTHON([optional])
 fi
 
 if test x"$cross_compiling" = x"yes" && test -z "$with_system_tzdata"; then

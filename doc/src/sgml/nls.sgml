@@ -46,6 +46,16 @@
    </para>
 
    <para>
+    Catalog maintenance also requires a Python 3 interpreter (version 3.7
+    or later).  With <application>configure</application>, this is detected
+    when NLS is enabled, independently of PL/Python support.  If it was not
+    available at configuration time, set the Make variable
+    <varname>PYTHON</varname> to the interpreter when running the maintenance
+    targets.  With the Make build, building and installing existing
+    translations does not require Python.
+   </para>
+
+   <para>
     Your local gettext implementation should come with its own
     documentation.  Some of that is probably duplicated in what
     follows, but for additional details you should look there.
@@ -492,6 +502,12 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
      If extraction requires generated sources, include their Meson targets
      in the catalog's <literal>generated</literal> list so that catalog
      maintenance also works in a fresh build directory.
+     For the Make build, list these files in <varname>GETTEXT_GENERATED</varname>
+     before including <filename>Makefile.global</filename>.  If a generator
+     runs in another directory, set <varname>GETTEXT_GENERATOR_DIR</varname>
+     accordingly, following the backend and <application>psql</application>
+     examples.  Both builds use <filename>src/tools/maintain-po.py</filename>
+     for core catalog maintenance.
     </para>
    </step>
   </procedure>

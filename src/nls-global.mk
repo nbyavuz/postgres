@@ -43,6 +43,7 @@ PO_FILES = $(addprefix po/, $(addsuffix .po, $(LANGUAGES)))
 ALL_PO_FILES = $(addprefix po/, $(addsuffix .po, $(AVAIL_LANGUAGES)))
 MO_FILES = $(addprefix po/, $(addsuffix .mo, $(LANGUAGES)))
 
+ifdef PGXS
 ifdef XGETTEXT
 XGETTEXT += -ctranslator --copyright-holder='PostgreSQL Global Development Group' --msgid-bugs-address=pgsql-bugs@lists.postgresql.org --no-wrap --sort-by-file --package-name='$(CATALOG_NAME) (PostgreSQL)' --package-version='$(MAJORVERSION)'
 endif
@@ -50,6 +51,7 @@ endif
 ifdef MSGMERGE
 MSGMERGE += --no-wrap --previous --sort-by-file
 endif
+endif # PGXS
 
 # _ is defined in c.h, so it's global
 GETTEXT_TRIGGERS += _
@@ -65,6 +67,28 @@ all-po: $(MO_FILES)
 %.mo: %.po
 	$(MSGFMT) $(MSGFMT_FLAGS) -o $@ $<
 
+# Core maintenance is shared with Meson.  PGXS retains its Make interface,
+# including arbitrary extension nls.mk expressions and recipes.
+ifndef PGXS
+maintain_po = $(top_srcdir)/src/tools/maintain-po.py
+maintain_po_cmd = $(if $(strip $(PYTHON)),,$(error Python is required for message catalog maintenance; set PYTHON to a Python 3 interpreter)) \
+    $(PYTHON) $(maintain_po) \
+    --source-root '$(abs_top_srcdir)' --build-root '$(abs_top_builddir)' \
+    --catalog-dir '$(abspath $(srcdir))' --version '$(MAJORVERSION)' \
+    --xgettext '$(XGETTEXT)' --msgmerge '$(MSGMERGE)'
+
+# Most generators run in this component's directory.  The backend overrides
+# this expression because it invokes generators through subdirectory makes.
+GETTEXT_GENERATOR_DIR ?= .
+gettext_generated_args = $(foreach file,$(GETTEXT_GENERATED),--generated-cwd '$(abspath $(file))' '$(abspath $(GETTEXT_GENERATOR_DIR))')
+
+ifeq ($(word 1,$(GETTEXT_FILES)),+)
+po/$(CATALOG_NAME).pot: $(word 2,$(GETTEXT_FILES)) $(MAKEFILE_LIST) $(maintain_po)
+else
+po/$(CATALOG_NAME).pot: $(GETTEXT_FILES) $(MAKEFILE_LIST) $(maintain_po)
+endif
+	$(maintain_po_cmd) init-po $(gettext_generated_args)
+else # PGXS
 ifeq ($(word 1,$(GETTEXT_FILES)),+)
 po/$(CATALOG_NAME).pot: $(word 2, $(GETTEXT_FILES)) $(MAKEFILE_LIST)
 ifdef XGETTEXT
@@ -85,6 +109,7 @@ endif # GETTEXT_FILES
 	@$(MKDIR_P) $(dir $@)
 	sed -e '1,18 { s/SOME DESCRIPTIVE TITLE./LANGUAGE message translation file for $(CATALOG_NAME)/;s/PACKAGE/PostgreSQL/g;s/VERSION/$(MAJORVERSION)/g;s/YEAR/'`date +%Y`'/g; }' messages.po >$@
 	rm messages.po
+endif # PGXS
 
 
 # catalog name extensions must match behavior of PG_TEXTDOMAIN() in c.h
@@ -134,14 +159,22 @@ endif
 update-po: $(ALL_LANGUAGES:%=po/%.po.new)
 
 $(AVAIL_LANGUAGES:%=po/%.po.new): po/%.po.new: po/%.po po/$(CATALOG_NAME).pot $(all_compendia)
+ifdef PGXS
 	$(MSGMERGE) --lang=$* $(word 1, $^) $(word 2,$^) -o $@ $(addprefix --compendium=,$(filter %/$*.po,$(wordlist 3,$(words $^),$^)))
+else
+	$(maintain_po_cmd) update-po --skip-extraction --language '$*'
+endif
 
 # For languages not yet available, merge against oneself, to pick
 # up translations from the compendia.  (Merging against /dev/null
 # doesn't work so well; it inserts the headers from the first-named
 # compendium.)
 po/%.po.new: po/$(CATALOG_NAME).pot $(all_compendia)
+ifdef PGXS
 	$(MSGMERGE) --lang=$* $(word 1,$^) $(word 1,$^) -o $@ $(addprefix --compendium=,$(filter %/$*.po,$(wordlist 2,$(words $^),$^)))
+else
+	$(maintain_po_cmd) update-po --skip-extraction --language '$*'
+endif
 
 
 all: all-po

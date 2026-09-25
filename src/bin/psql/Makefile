@@ -14,6 +14,8 @@ PGAPPICON=win32
 
 subdir = src/bin/psql
 top_builddir = ../../..
+GETTEXT_GENERATED = psqlscanslash.c sql_help.c sql_help.h tab-complete.c ../../fe_utils/psqlscan.c
+GETTEXT_GENERATOR_DIR = $(if $(filter ../../fe_utils/psqlscan.c,$(file)),../../fe_utils,.)
 include $(top_builddir)/src/Makefile.global
 
 # make this available to TAP test scripts
@@ -60,6 +62,11 @@ sql_help.h: create_help.pl $(wildcard $(REFDOCDIR)/*.sgml)
 
 psqlscanslash.c: FLEXFLAGS = -Cfe -p -p
 psqlscanslash.c: FLEX_NO_BACKUP=yes
+
+# Use the same generator working directory whether the scanner is needed for
+# catalog extraction or for the frontend utility library.
+../../fe_utils/psqlscan.c: $(top_srcdir)/src/fe_utils/psqlscan.l
+	$(MAKE) -C ../../fe_utils psqlscan.c
 
 tab-complete.c: gen_tabcomplete.pl tab-complete.in.c
 	$(PERL) $^ --outfile $@

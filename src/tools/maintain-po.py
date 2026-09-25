@@ -52,13 +52,16 @@ def source_files(args, variables, directory):
     if names == ['+', 'gettext-files'] and directory == Path('src/backend'):
         # The backend deliberately includes sources for every platform and
         # optional feature, not just those compiled in this configuration.
-        # Match the search in src/backend/Makefile.  Generated inputs come from
-        # Meson targets explicitly, never from a scan of a possibly stale build.
+        # Generated inputs come from the build system explicitly, never from
+        # a scan of a possibly stale build.  In an in-source Make build the
+        # scan also sees generated files and header-directory symlinks; exclude
+        # those identities and add each declared generated input exactly once.
         names = []
+        generated = {Path(path).resolve() for path in args.generated}
         for subdir in ('backend', 'common', 'port', 'include'):
             for path in (args.source_root / 'src' / subdir).rglob('*'):
-                if path.is_file() and (path.suffix == '.c' or
-                                      path.name == 'proctypelist.h'):
+                if (path.is_file() and path.resolve() not in generated and
+                        (path.suffix == '.c' or path.name == 'proctypelist.h')):
                     names.append(os.path.relpath(path, args.catalog_dir))
         names += [os.path.relpath(path, args.build_root / directory)
                   for path in args.generated if Path(path).suffix == '.c']
@@ -100,7 +103,8 @@ def make_template(args, variables, directory, catalog, output, work):
         def rewrite(match):
             filename = re.sub(r'\\([\\"])', r'\1', match[2])
             filename = line_filename(filename, str(args.source_root),
-                                     str(args.build_root), str(directory))
+                                     str(args.build_root), str(directory),
+                                     cwd=args.generator_dirs.get(str(path)))
             return match[1] + filename.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
         text = re.sub(r'^(\s*#\s*(?:line\s+)?\d+\s+")((?:[^"\\]|\\.)*)"',
@@ -143,11 +147,12 @@ def make_template(args, variables, directory, catalog, output, work):
     os.replace(raw, output)
 
 
-def line_filename(filename, source_root, build_root, directory, path=os.path):
+def line_filename(filename, source_root, build_root, directory, path=os.path,
+                  cwd=None):
     """Convert a generator's #line filename to a component-relative path."""
-    if not path.dirname(filename):
+    if cwd is None and not path.dirname(filename):
         return filename
-    absolute = path.normpath(path.join(build_root, filename))
+    absolute = path.normpath(path.join(cwd or build_root, filename))
     # Test the build root first because it may be inside the source tree.
     # Only compute a relative path after identifying its own tree: Windows
     # cannot compute relpath(source_root, build_root) across different drives.
@@ -191,8 +196,10 @@ def update_catalogs(args, template, output_dir, work):
     # WANTED_LANGUAGES has the same role as in nls-global.mk.  Read it at target
     # execution time, allowing a translator to select languages without a
     # reconfiguration or changing which installed translations are built.
-    wanted = os.environ.get('WANTED_LANGUAGES', '').split()
-    for language in sorted(compendia):
+    wanted = args.language or os.environ.get('WANTED_LANGUAGES', '').split()
+    # An explicit language also supports Make's direct po/LANG.po.new target
+    # when no source-tree catalog for that language exists yet.
+    for language in sorted(set(compendia) | set(args.language)):
         if wanted and language not in wanted:
             continue
         original = args.catalog_dir / 'po' / (language + '.po')
@@ -205,7 +212,7 @@ def update_catalogs(args, template, output_dir, work):
                    '--lang=' + language, str(original), str(template),
                    '-o', str(merged)]
         command += ['--compendium=' + str(path)
-                    for path in sorted(compendia[language])]
+                    for path in sorted(compendia.get(language, []))]
         subprocess.run(command, check=True)
         os.replace(merged, output_dir / merged.name)
 
@@ -220,6 +227,11 @@ def main():
     parser.add_argument('--xgettext', default='xgettext')
     parser.add_argument('--msgmerge', default='msgmerge')
     parser.add_argument('--generated', nargs='*', default=[])
+    parser.add_argument('--generated-cwd', nargs=2, action='append', default=[],
+                        metavar=('FILE', 'DIRECTORY'),
+                        help='generated input and the working directory of its generator')
+    parser.add_argument('--language', action='append', default=[],
+                        help='merge only this language, even if it has no compendium')
     parser.add_argument('--stamp', type=Path)
     parser.add_argument('--skip-extraction', action='store_true',
                         help='use a template already generated by init-po')
@@ -227,6 +239,8 @@ def main():
     args.source_root = args.source_root.resolve()
     args.build_root = args.build_root.resolve()
     args.catalog_dir = args.catalog_dir.resolve()
+    args.generator_dirs = dict(args.generated_cwd)
+    args.generated += list(args.generator_dirs)
 
     try:
         # Check tools only when requested.  Ordinary builds need msgfmt, but

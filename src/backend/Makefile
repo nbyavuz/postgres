@@ -14,6 +14,17 @@ PGAPPICON=win32
 
 subdir = src/backend
 top_builddir = ../..
+# Keep this list independent of the compiled objects: translation catalogs
+# cover all platforms and include generated C fragments as well as parsers.
+GETTEXT_GENERATED = parser/gram.c parser/scan.c \
+    bootstrap/bootparse.c bootstrap/bootscanner.c \
+    replication/repl_gram.c replication/repl_scanner.c \
+    replication/syncrep_gram.c replication/syncrep_scanner.c \
+    utils/adt/jsonpath_gram.c utils/adt/jsonpath_scan.c utils/misc/guc-file.c \
+    utils/guc_tables.inc.c utils/fmgrtab.c \
+    utils/pgstat_wait_event.c utils/wait_event_funcs_data.c \
+    $(foreach name,copyfuncs equalfuncs outfuncs readfuncs queryjumblefuncs,nodes/$(name).funcs.c nodes/$(name).switch.c)
+GETTEXT_GENERATOR_DIR = $(dir $(file))
 include $(top_builddir)/src/Makefile.global
 
 SUBDIRS = \
