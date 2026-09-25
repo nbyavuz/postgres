@@ -193,7 +193,17 @@ utils/probes.o: utils/probes.d $(SUBDIROBJS)
 
 ##########################################################################
 
-# This target is only needed by nls.mk.
+# These targets provide the source list requested by nls.mk.  Keep recipes
+# here so that nls.mk can also be read as metadata by the Meson build.
+gettext-files: generated-parser-sources generated-headers
+	find $(srcdir) $(srcdir)/../common $(srcdir)/../port $(srcdir)/../include/ \( -name '*.c' -o -name "proctypelist.h" \) -print | LC_ALL=C sort >$@
+
+.PHONY: clean-gettext-files
+clean-gettext-files:
+	rm -f gettext-files
+
+clean: clean-gettext-files
+
 .PHONY: generated-parser-sources
 generated-parser-sources:
 	$(MAKE) -C parser	gram.c gram.h scan.c

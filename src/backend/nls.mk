@@ -26,12 +26,3 @@ GETTEXT_FLAGS    = $(BACKEND_COMMON_GETTEXT_FLAGS) \
                    ereport_startup_progress:1:c-format \
                    json_token_error:2:c-format \
                    error_cb:2:c-format
-
-gettext-files: generated-parser-sources generated-headers
-	find $(srcdir) $(srcdir)/../common $(srcdir)/../port $(srcdir)/../include/ \( -name '*.c' -o -name "proctypelist.h" \) -print | LC_ALL=C sort >$@
-
-my-clean:
-	rm -f gettext-files
-
-.PHONY: my-clean
-clean: my-clean

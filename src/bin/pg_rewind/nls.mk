@@ -1,5 +1,6 @@
 # src/bin/pg_rewind/nls.mk
 CATALOG_NAME     = pg_rewind
+# Use the original source path, not the symlink created only by Make.
 GETTEXT_FILES    = $(FRONTEND_COMMON_GETTEXT_FILES) \
                    datapagemap.c \
                    file_ops.c \
@@ -9,7 +10,7 @@ GETTEXT_FILES    = $(FRONTEND_COMMON_GETTEXT_FILES) \
                    parsexlog.c \
                    pg_rewind.c \
                    timeline.c \
-                   xlogreader.c \
+                   ../../backend/access/transam/xlogreader.c \
                    ../../common/controldata_utils.c \
                    ../../common/fe_memutils.c \
                    ../../common/file_utils.c \
