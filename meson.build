@@ -3372,6 +3372,10 @@ pl_targets = []
 contrib_targets = []
 testprep_targets = []
 nls_targets = []
+# Catalog maintenance has different semantics from i18n.gettext()'s in-place
+# update targets.  Collect metadata locations and generated inputs separately
+# from the targets used to compile and install existing translations.
+nls_catalogs = []
 update_unicode_targets = []
 
 
@@ -3701,6 +3705,8 @@ subdir('src/test')
 subdir('src/interfaces/ecpg/test')
 
 subdir('doc/src/sgml')
+
+subdir('src/tools/po')
 
 generated_sources_ac += {'': ['GNUmakefile']}
 

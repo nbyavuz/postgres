@@ -26,6 +26,7 @@ plperl_sources += custom_target('plperl_opmask.h',
   command: [perl, '@INPUT@', '@OUTPUT@']
 )
 
+plperl_nls_sources = []
 foreach n : ['SPI', 'Util']
   xs = files(n + '.xs')
   xs_c_name = n + '.c'
@@ -35,6 +36,9 @@ foreach n : ['SPI', 'Util']
     command: [perl, xsubpp, '-typemap', typemap, '-output', '@OUTPUT@', '@INPUT@']
   )
   plperl_sources += xs_c
+  if n == 'SPI'
+    plperl_nls_sources += xs_c
+  endif
 endforeach
 
 plperl_inc = include_directories('.')
