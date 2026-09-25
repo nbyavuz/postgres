@@ -25,7 +25,9 @@
     software tools.  Theoretically, you only need a text editor.  But
     this is only in the unlikely event that you do not want to try out
     your translated messages.  When you configure your source tree, be
-    sure to use the <option>--enable-nls</option> option.  This will
+    sure to use the <option>--enable-nls</option> option with
+    <application>configure</application>, or <option>-Dnls=enabled</option>
+    with <application>Meson</application>.  This will
     also check for the <application>libintl</application> library and the
     <filename>msgfmt</filename> program, which all end users will need
     anyway.  To try out your work, follow the applicable portions of
@@ -167,13 +169,23 @@ msgstr "another translated"
 <programlisting>
 make init-po
 </programlisting>
+    With <application>Meson</application>, run the corresponding catalog
+    target from the top-level source directory instead.  For example, for
+    <application>psql</application>:
+<programlisting>
+ninja -C build psql-init-po
+</programlisting>
     This will create a file
-    <filename><replaceable>progname</replaceable>.pot</filename>.
+    <filename>po/<replaceable>progname</replaceable>.pot</filename>
+    in the program's build directory (for example,
+    <filename>build/src/bin/psql/po/psql.pot</filename> with
+    <application>Meson</application>).
     (<filename>.pot</filename> to distinguish it from PO files that
     are <quote>in production</quote>. The <literal>T</literal> stands for
     <quote>template</quote>.)
     Copy this file to
-    <filename><replaceable>language</replaceable>.po</filename> and
+    <filename>po/<replaceable>language</replaceable>.po</filename>
+    in the program's source directory and
     edit it.  To make it known that the new language is available,
     also edit the file <filename>po/LINGUAS</filename> and add the
     language (or language and country) code next to languages already listed,
@@ -191,11 +203,52 @@ de fr
 <programlisting>
 make update-po
 </programlisting>
-    which will create a new blank message catalog file (the pot file
+    or, with <application>Meson</application>:
+<programlisting>
+ninja -C build psql-update-po
+</programlisting>
+    This will create a new blank message catalog file (the pot file
     you started with) and will merge it with the existing PO files.
     If the merge algorithm is not sure about a particular message it
     marks it <quote>fuzzy</quote> as explained above.  The new PO file
     is saved with a <filename>.po.new</filename> extension.
+    With <application>Meson</application>, these files are written in the
+    program's build-directory <filename>po</filename> subdirectory; the
+    source PO files are not overwritten.  Review the resulting files before
+    copying them back to the source directory.
+   </para>
+
+   <para>
+    The <application>Meson</application> targets use the catalog name given
+    by <varname>CATALOG_NAME</varname> in <filename>nls.mk</filename> (for
+    example, <literal>postgres</literal> for the server and
+    <literal>pgscripts</literal> for the SQL command-line utilities).
+    The aggregate targets <literal>init-po</literal> and
+    <literal>update-po</literal> process all catalogs enabled in the build.
+    Generated sources needed for extraction are built automatically; it is
+    not necessary to compile the programs first.
+   </para>
+
+   <para>
+    Updating catalogs also reuses translations from other PO files in the
+    source tree, and can create <filename>.po.new</filename> files for
+    languages not yet provided by the program.  To restrict the languages
+    processed with <application>Meson</application>, set
+    <envar>WANTED_LANGUAGES</envar> for the command:
+<programlisting>
+WANTED_LANGUAGES="de fr" ninja -C build psql-update-po
+</programlisting>
+   </para>
+
+   <para>
+    To remove the generated templates and <filename>.po.new</filename>
+    files with <application>Meson</application>, run
+    <command>ninja -C build clean-po</command>, or a per-catalog target such
+    as <literal>psql-clean-po</literal>.  These maintenance files are not
+    removed by the ordinary <literal>clean</literal> target.  Cleanup
+    removes all generated languages regardless of
+    <envar>WANTED_LANGUAGES</envar>, and preserves source PO files and
+    compiled translations.
    </para>
   </sect2>
 
@@ -366,7 +419,13 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
    <step>
     <para>
      Add a file <filename>nls.mk</filename> in the directory with the
-     program sources.  This file will be read as a makefile.  The
+     program sources.  This file is shared by the Make and
+     <application>Meson</application> builds.  Use simple
+     <literal>NAME = value</literal> assignments, optionally with backslash
+     continuations and <literal>$(VARIABLE)</literal> references; put Make
+     recipes and functions in the <filename>Makefile</filename> instead.
+     Shared frontend and backend extraction definitions are in
+     <filename>src/nls-common.mk</filename>.  The
      following variable assignments need to be made here:
 
      <variablelist>
@@ -424,6 +483,15 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
     <para>
      Add a file <filename>po/LINGUAS</filename>, which will contain the list
      of provided translations &mdash; initially empty.
+    </para>
+   </step>
+   <step>
+    <para>
+     Register the catalog in <filename>po/meson.build</filename> using
+     <varname>nls_catalogs</varname>, following the existing programs.
+     If extraction requires generated sources, include their Meson targets
+     in the catalog's <literal>generated</literal> list so that catalog
+     maintenance also works in a fresh build directory.
     </para>
    </step>
   </procedure>

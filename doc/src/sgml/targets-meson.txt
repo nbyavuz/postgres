@@ -17,6 +17,9 @@ Developer Targets:
   reformat-dat-files            Rewrite catalog data files into standard format
   expand-dat-files              Expand all data files to include defaults
   update-unicode                Update Unicode data to new version
+  init-po                       Extract message catalog templates
+  update-po                     Merge translations into .po.new files
+  clean-po                      Remove message catalog templates and .po.new files
   headerscheck                  Check that all headers compile standalone
   cpluspluscheck                Check that all headers compile as C++
 
