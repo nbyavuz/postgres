@@ -247,6 +247,7 @@ $envar_node->run_log(
 	local $ENV{PGPORT} = $envar_node->port;
 	local $ENV{PGUSER} = $restore_super;
 	$result = run_log([ 'psql', '--no-psqlrc', '--file' => $plain ],
+		'>' => sub { print STDOUT $_[0]; },
 		'2>' => \$stderr);
 }
 ok($result,
@@ -286,6 +287,7 @@ $cmdline_node->run_log(
 			'--no-psqlrc',
 			'--file' => $plain,
 		],
+		'>' => sub { print STDOUT $_[0]; },
 		'2>' => \$stderr);
 }
 ok($result,

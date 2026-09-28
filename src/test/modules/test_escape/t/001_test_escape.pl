@@ -20,7 +20,9 @@ my $cmd =
 # There currently is no good other way to transport test results from a C
 # program that requires just the node being set-up...
 my ($stderr, $stdout);
-my $result = IPC::Run::run $cmd, '>', \$stdout, '2>', \$stderr;
+my $result = ipc_run $cmd,
+  '>' => \$stdout,
+  '2>' => \$stderr;
 
 is($result, 1, "test_escape returns 0");
 is($stderr, '', "test_escape stderr is empty");

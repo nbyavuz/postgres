@@ -505,11 +505,10 @@ sub config_data
 
 	my ($stdout, $stderr);
 	my $result =
-	  IPC::Run::run [ $self->installed_command('pg_config'), @options ],
+	  PostgreSQL::Test::Utils::ipc_run
+	  [ $self->installed_command('pg_config'), @options ],
 	  '>', \$stdout, '2>', \$stderr
 	  or croak "could not execute pg_config";
-	# standardize line endings
-	$stdout =~ s/\r(?=\n)//g;
 	# no options, scalar context: just hand back the output
 	return $stdout unless (wantarray || @options);
 	chomp($stdout);
@@ -2271,11 +2270,31 @@ sub psql
 		local $@;
 		eval {
 			my @ipcrun_opts = (\@psql_params, '<' => \$sql);
-			push @ipcrun_opts, '>' => $stdout if defined $stdout;
-			push @ipcrun_opts, '2>' => $stderr if defined $stderr;
+
+			# ipc_run() defaults these to text mode, so tests aren't
+			# tripped up by platform-specific line endings.
+			if (defined $stdout)
+			{
+				push @ipcrun_opts, '>' => $stdout;
+			}
+			elsif ($PostgreSQL::Test::Utils::windows_os)
+			{
+				# Preserve pass-through behavior explicitly on Windows.
+				push @ipcrun_opts, '>' => sub { print STDOUT $_[0]; };
+			}
+
+			if (defined $stderr)
+			{
+				push @ipcrun_opts, '2>' => $stderr;
+			}
+			elsif ($PostgreSQL::Test::Utils::windows_os)
+			{
+				push @ipcrun_opts, '2>' => sub { print STDERR $_[0]; };
+			}
+
 			push @ipcrun_opts, $timeout if defined $timeout;
 
-			IPC::Run::run @ipcrun_opts;
+			PostgreSQL::Test::Utils::ipc_run @ipcrun_opts;
 			$ret = $?;
 		};
 		my $exc_save = $@;
@@ -2787,7 +2806,7 @@ sub poll_query_until
 
 	while ($attempts < $max_attempts)
 	{
-		my $result = IPC::Run::run $cmd,
+		my $result = PostgreSQL::Test::Utils::ipc_run $cmd,
 		  '<' => \$query,
 		  '>' => \$stdout,
 		  '2>' => \$stderr;
@@ -3811,7 +3830,11 @@ sub pg_recvlogical_upto
 	{
 		local $@;
 		eval {
-			IPC::Run::run(\@cmd, '>' => \$stdout, '2>' => \$stderr, $timeout);
+			PostgreSQL::Test::Utils::ipc_run(
+				\@cmd,
+				'>' => \$stdout,
+				'2>' => \$stderr,
+				$timeout);
 			$ret = $?;
 		};
 		my $exc_save = $@;
@@ -3923,7 +3946,7 @@ sub create_logical_slot_on_standby
 
 	my $handle;
 
-	$handle = IPC::Run::start(
+	$handle = PostgreSQL::Test::Utils::ipc_start(
 		[
 			'pg_recvlogical',
 			'--dbname' => $self->connstr($dbname),

@@ -83,6 +83,9 @@ our @EXPORT = qw(
   scan_server_header
   system_or_bail
   system_log
+  ipc_run_text_mode
+  ipc_run
+  ipc_start
   run_log
   run_command
   pump_until
@@ -421,9 +424,80 @@ sub system_or_bail
 
 =pod
 
+=item ipc_run_text_mode()
+
+Return a filter suitable for C<IPC::Run> redirections that requests text mode.
+Most callers should use C<ipc_run()>/C<ipc_start()> instead, which apply this
+automatically; this is exposed for the rare filter chain that needs it
+explicitly (e.g. a non-terminal stage of a filter chain).
+
+=cut
+
+sub ipc_run_text_mode
+{
+	return IPC::Run::binary(0);
+}
+
+=pod
+
+=item ipc_run(@args)
+
+Wrapper for C<IPC::Run::run()> that defaults every non-PTY stream
+redirection ('<', '>', '>>', '2>', '2>>') to text mode, so that command
+output TAP tests treat as text doesn't retain platform-specific line
+endings (notably CRLF on Windows).  Callers do not need to request this
+themselves; pass an explicit C<IPC::Run::binary(1)> filter to opt out for a
+particular redirection.  PTY redirections ('<pty<', '>pty>') are left
+untouched, since IPC::Run handles ptys differently and text mode does not
+apply to them.
+
+=cut
+
+sub ipc_run
+{
+	return IPC::Run::run(_ipc_run_default_text_mode(@_));
+}
+
+=pod
+
+=item ipc_start(@args)
+
+As C<ipc_run()> above, but wraps C<IPC::Run::start()>.
+
+=cut
+
+sub ipc_start
+{
+	return IPC::Run::start(_ipc_run_default_text_mode(@_));
+}
+
+# Insert an explicit ipc_run_text_mode() filter after every non-PTY stream
+# redirection token in @args that doesn't already have one, so ipc_run()
+# and ipc_start() apply it by default without every call site needing to
+# remember to ask for it.
+sub _ipc_run_default_text_mode
+{
+	my @args = @_;
+	my @out;
+	for my $i (0 .. $#args)
+	{
+		push @out, $args[$i];
+		next if ref $args[$i];
+		next unless $args[$i] =~ /^\d*>>?$/;
+		my $next_arg = $args[$i + 1];
+		next
+		  if ref $next_arg
+		  && UNIVERSAL::isa($next_arg, 'IPC::Run::binmode_pseudo_filter');
+		push @out, ipc_run_text_mode();
+	}
+	return @out;
+}
+
+=pod
+
 =item run_log(@cmd)
 
-Run the given command via C<IPC::Run::run()>, noting it in the log.
+Run the given command via C<ipc_run()>, noting it in the log.
 The return value from the command is passed through.
 
 =cut
@@ -431,14 +505,14 @@ The return value from the command is passed through.
 sub run_log
 {
 	print("# Running: " . join(" ", @{ $_[0] }) . "\n");
-	return IPC::Run::run(@_);
+	return ipc_run(@_);
 }
 
 =pod
 
 =item run_command(cmd)
 
-Run (via C<IPC::Run::run()>) the command passed as argument.
+Run (via C<ipc_run()>) the command passed as argument.
 The return value from the command is ignored.
 The return value is C<($stdout, $stderr)>.
 
@@ -448,7 +522,7 @@ sub run_command
 {
 	my ($cmd) = @_;
 	my ($stdout, $stderr);
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = ipc_run $cmd, '>' => \$stdout, '2>' => \$stderr;
 	chomp($stdout);
 	chomp($stderr);
 	return ($stdout, $stderr);
@@ -801,12 +875,11 @@ sub scan_server_header
 	my ($header_path, $regexp) = @_;
 
 	my ($stdout, $stderr);
-	my $result = IPC::Run::run [ 'pg_config', '--includedir-server' ],
+	my $result = ipc_run [ 'pg_config', '--includedir-server' ],
 	  '>' => \$stdout,
 	  '2>' => \$stderr
 	  or croak "could not execute pg_config";
 	chomp($stdout);
-	$stdout =~ s/\r$//;
 
 	open my $header_h, '<', "$stdout/$header_path" or croak "$!";
 
@@ -840,12 +913,11 @@ sub check_pg_config
 {
 	my ($regexp) = @_;
 	my ($stdout, $stderr);
-	my $result = IPC::Run::run [ 'pg_config', '--includedir' ],
+	my $result = ipc_run [ 'pg_config', '--includedir' ],
 	  '>' => \$stdout,
 	  '2>' => \$stderr
 	  or croak "could not execute pg_config";
 	chomp($stdout);
-	$stdout =~ s/\r$//;
 
 	open my $pg_config_h, '<', "$stdout/pg_config.h" or croak "$!";
 	my $match = (grep { /^$regexp/ } <$pg_config_h>);
@@ -1009,8 +1081,12 @@ sub command_ok
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
 	my ($cmd, $test_name) = @_;
 	my ($stdout, $stderr);
+	my $stdin = '';
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = ipc_run $cmd,
+	  '<' => \$stdin,
+	  '>' => \$stdout,
+	  '2>' => \$stderr;
 	ok($result, $test_name) or do
 	{
 		diag("---------- command failed ----------");
@@ -1033,7 +1109,7 @@ sub command_fails
 	my ($cmd, $test_name) = @_;
 	my ($stdout, $stderr);
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = ipc_run $cmd, '>' => \$stdout, '2>' => \$stderr;
 	ok(!$result, $test_name) or do
 	{
 		diag("-- command succeeded unexpectedly --");
@@ -1055,7 +1131,7 @@ sub command_exit_is
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
 	my ($cmd, $expected, $test_name) = @_;
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $h = IPC::Run::start $cmd;
+	my $h = ipc_start $cmd;
 	$h->finish();
 
 	# Normally, if the child called exit(N), IPC::Run::result() returns N.  On
@@ -1083,9 +1159,7 @@ sub program_help_ok
 	my ($cmd) = @_;
 	my ($stdout, $stderr);
 	print("# Running: $cmd --help\n");
-	my $result = IPC::Run::run [ $cmd, '--help' ],
-	  '>' => \$stdout,
-	  '2>' => \$stderr;
+	my $result = ipc_run [ $cmd, '--help' ], '>' => \$stdout, '2>' => \$stderr;
 	ok($result, "$cmd --help exit code 0");
 	isnt($stdout, '', "$cmd --help goes to stdout");
 	is($stderr, '', "$cmd --help nothing to stderr");
@@ -1115,9 +1189,8 @@ sub program_version_ok
 	my ($cmd) = @_;
 	my ($stdout, $stderr);
 	print("# Running: $cmd --version\n");
-	my $result = IPC::Run::run [ $cmd, '--version' ],
-	  '>' => \$stdout,
-	  '2>' => \$stderr;
+	my $result =
+	  ipc_run [ $cmd, '--version' ], '>' => \$stdout, '2>' => \$stderr;
 	ok($result, "$cmd --version exit code 0");
 	isnt($stdout, '', "$cmd --version goes to stdout");
 	is($stderr, '', "$cmd --version nothing to stderr");
@@ -1139,7 +1212,7 @@ sub program_options_handling_ok
 	my ($cmd) = @_;
 	my ($stdout, $stderr);
 	print("# Running: $cmd --not-a-valid-option\n");
-	my $result = IPC::Run::run [ $cmd, '--not-a-valid-option' ],
+	my $result = ipc_run [ $cmd, '--not-a-valid-option' ],
 	  '>' => \$stdout,
 	  '2>' => \$stderr;
 	ok(!$result, "$cmd with invalid option nonzero exit code");
@@ -1162,7 +1235,7 @@ sub command_like
 	my ($cmd, $expected_stdout, $test_name) = @_;
 	my ($stdout, $stderr);
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = ipc_run $cmd, '>' => \$stdout, '2>' => \$stderr;
 	ok($result, "$test_name: exit code 0");
 	is($stderr, '', "$test_name: no stderr");
 	like($stdout, $expected_stdout, "$test_name: matches");
@@ -1191,7 +1264,7 @@ sub command_like_safe
 	my $stdoutfile = File::Temp->new();
 	my $stderrfile = File::Temp->new();
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $result = IPC::Run::run $cmd, '>' => $stdoutfile, '2>' => $stderrfile;
+	my $result = ipc_run $cmd, '>' => $stdoutfile, '2>' => $stderrfile;
 	$stdout = slurp_file($stdoutfile);
 	$stderr = slurp_file($stderrfile);
 	ok($result, "$test_name: exit code 0");
@@ -1215,7 +1288,7 @@ sub command_fails_like
 	my ($cmd, $expected_stderr, $test_name) = @_;
 	my ($stdout, $stderr);
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = ipc_run $cmd, '>' => \$stdout, '2>' => \$stderr;
 	ok(!$result, "$test_name: exit code not 0");
 	like($stderr, $expected_stderr, "$test_name: matches");
 	return;
@@ -1235,8 +1308,12 @@ sub command_ok_or_fails_like
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
 	my ($cmd, $expected_stdout, $expected_stderr, $test_name) = @_;
 	my ($stdout, $stderr);
+	my $stdin = '';
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	my $result = IPC::Run::run $cmd, '>' => \$stdout, '2>' => \$stderr;
+	my $result = ipc_run $cmd,
+	  '<' => \$stdin,
+	  '>' => \$stdout,
+	  '2>' => \$stderr;
 	if (!$result)
 	{
 		like($stdout, $expected_stdout, "$test_name: stdout matches");
@@ -1277,7 +1354,7 @@ sub command_checks_all
 	# run command
 	my ($stdout, $stderr);
 	print("# Running: " . join(" ", @{$cmd}) . "\n");
-	IPC::Run::run($cmd, '>' => \$stdout, '2>' => \$stderr);
+	ipc_run($cmd, '>' => \$stdout, '2>' => \$stderr);
 
 	# See http://perldoc.perl.org/perlvar.html#%24CHILD_ERROR
 	my $ret = $?;

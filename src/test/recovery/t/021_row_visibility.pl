@@ -37,7 +37,7 @@ my $psql_timeout =
 # One psql to primary and standby each, for all queries. That allows
 # to check uncommitted changes being replicated and such.
 my %psql_primary = (stdin => '', stdout => '', stderr => '');
-$psql_primary{run} = IPC::Run::start(
+$psql_primary{run} = ipc_start(
 	[
 		'psql', '--no-psqlrc', '--no-align',
 		'--file' => '-',
@@ -49,7 +49,7 @@ $psql_primary{run} = IPC::Run::start(
 	$psql_timeout);
 
 my %psql_standby = ('stdin' => '', 'stdout' => '', 'stderr' => '');
-$psql_standby{run} = IPC::Run::start(
+$psql_standby{run} = ipc_start(
 	[
 		'psql', '--no-psqlrc', '--no-align',
 		'--file' => '-',

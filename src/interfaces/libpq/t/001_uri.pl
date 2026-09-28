@@ -4,7 +4,6 @@ use warnings FATAL => 'all';
 
 use PostgreSQL::Test::Utils;
 use Test::More;
-use IPC::Run;
 
 
 # List of URIs tests. For each test the first element is the input string, the
@@ -268,7 +267,7 @@ sub test_uri
 	%ENV = (%ENV, %envvars);
 
 	my $cmd = [ 'libpq_uri_regress', $uri ];
-	$result{exit} = IPC::Run::run $cmd,
+	$result{exit} = ipc_run $cmd,
 	  '>' => \$result{stdout},
 	  '2>' => \$result{stderr};
 

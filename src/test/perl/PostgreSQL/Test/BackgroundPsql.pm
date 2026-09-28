@@ -59,7 +59,7 @@ use warnings FATAL => 'all';
 use Carp;
 use Config;
 use IPC::Run;
-use PostgreSQL::Test::Utils qw(pump_until);
+use PostgreSQL::Test::Utils qw(ipc_start pump_until);
 use Test::More;
 
 =pod
@@ -107,7 +107,9 @@ sub new
 
 	if ($interactive)
 	{
-		$run = IPC::Run::start $psql_params,
+		# The pty streams are left alone; the stderr pipe is a plain
+		# (non-pty) stream, so ipc_start() still defaults it to text mode.
+		$run = ipc_start $psql_params,
 		  '<pty<' => \$psql->{stdin},
 		  '>pty>' => \$psql->{stdout},
 		  '2>' => \$psql->{stderr},
@@ -115,7 +117,7 @@ sub new
 	}
 	else
 	{
-		$run = IPC::Run::start $psql_params,
+		$run = ipc_start $psql_params,
 		  '<' => \$psql->{stdin},
 		  '>' => \$psql->{stdout},
 		  '2>' => \$psql->{stderr},

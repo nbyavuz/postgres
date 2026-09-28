@@ -38,7 +38,6 @@ use Carp;
 use Exporter 'import';
 use File::Copy;
 use File::Path qw(rmtree);
-use IPC::Run   qw(run);
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::RecursiveCopy;
 use PostgreSQL::Test::Utils;
@@ -96,14 +95,13 @@ sub check_query
 	my ($stdout, $stderr);
 
 	# we want just the output, no formatting
-	my $result = run [
+	my $result = ipc_run [
 		'psql', '--quiet', '--no-align', '--tuples-only', '--no-psqlrc',
 		'--dbname' => $node_primary->connstr('postgres'),
 		'--command' => $query
 	  ],
 	  '>' => \$stdout,
 	  '2>' => \$stderr;
-
 	is($result, 1, "$test_name: psql exit code");
 	is($stderr, '', "$test_name: psql no stderr");
 	is($stdout, $expected_stdout, "$test_name: query result matches");
