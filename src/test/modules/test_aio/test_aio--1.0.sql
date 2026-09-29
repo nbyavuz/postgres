@@ -150,3 +150,7 @@ CREATE FUNCTION fsync_rel(rel regclass, datasync bool, enabled bool DEFAULT true
     invalid_fd bool DEFAULT false, writethrough bool DEFAULT false)
 RETURNS int STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION fsync_missing(slru bool)
+RETURNS int STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;

@@ -33,6 +33,8 @@ io_method = $method
 fsync = on
 data_sync_retry = on
 io_max_concurrency = 2
+io_min_workers = 1
+io_max_workers = 1
 autovacuum = off
 checkpoint_timeout = '1h'
 ));
@@ -52,6 +54,7 @@ INSERT INTO fsync_$slot VALUES (0);
 	$node->safe_psql('postgres', 'CHECKPOINT');
 	test_fsync_requests($node, $method);
 	test_worker_settings($node) if $method eq 'worker';
+	test_worker_reopen($node) if $method eq 'worker';
 	configure_slots($node, $num_slots, 'false');
 	dirty_relations($node, $num_slots);
 	$node->safe_psql('postgres', 'CHECKPOINT');
@@ -298,5 +301,49 @@ SELECT fsync_calls, datasync_calls, writethrough_calls FROM inj_fsync_stats(0)
 				"worker: issuer selects $op despite conflicting worker settings"
 			);
 		}
+	}
+}
+
+sub test_worker_reopen
+{
+	my ($node) = @_;
+	my $worker_query =
+	  q(SELECT pid FROM pg_stat_activity WHERE backend_type = 'io worker');
+	my $pid = $node->safe_psql('postgres', $worker_query);
+	my $enoent =
+	  $node->safe_psql('postgres', "SELECT -errno_from_string('ENOENT')");
+	for my $slru ('false', 'true')
+	{
+		my $target = $slru eq 'true' ? 'SLRU' : 'relation';
+		my $result;
+		for (1 .. 100)
+		{
+			$result =
+			  $node->safe_psql('postgres', "SELECT fsync_missing($slru)");
+			# Local fallback can use the issuer's descriptor.
+			last if $result ne '0';
+		}
+		is($result, $enoent, "worker: $target reopen preserves ENOENT");
+		is($node->safe_psql('postgres', $worker_query),
+			$pid,
+			"worker: $target reopen failure does not terminate the worker");
+
+		# Require subsequent work in that same worker, not just its continued
+		# presence in pg_stat_activity while it is on the way out.
+		$node->safe_psql('postgres',
+			"SELECT inj_fsync_configure(0, 'fsync_0', false)");
+		my $completed = 0;
+		for (1 .. 100)
+		{
+			$node->safe_psql('postgres',
+				"SELECT fsync_rel('fsync_0', false)");
+			$completed = $node->safe_psql('postgres',
+				'SELECT worker_completions FROM inj_fsync_stats(0)');
+			last if $completed > 0;
+		}
+		cmp_ok($completed, '>', 0,
+			"worker: accepts work after $target reopen failure");
+		is($node->safe_psql('postgres', $worker_query),
+			$pid, "worker: same worker completes subsequent IO");
 	}
 }

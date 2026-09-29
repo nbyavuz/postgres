@@ -18,9 +18,12 @@
 
 #include "postgres.h"
 
+#include <fcntl.h>
+
 #include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/xlog.h"
+#include "catalog/pg_tablespace_d.h"
 #include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -37,6 +40,7 @@
 #include "storage/procnumber.h"
 #include "storage/read_stream.h"
 #include "storage/spin.h"
+#include "storage/sync.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/injection_point.h"
@@ -208,6 +212,8 @@ errno_from_string(PG_FUNCTION_ARGS)
 		PG_RETURN_INT32(ENOSPC);
 	else if (strcmp(sym, "EROFS") == 0)
 		PG_RETURN_INT32(EROFS);
+	else if (strcmp(sym, "ENOENT") == 0)
+		PG_RETURN_INT32(ENOENT);
 
 	ereport(ERROR,
 			errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -1564,5 +1570,48 @@ fsync_rel(PG_FUNCTION_ARGS)
 	pgaio_wref_wait(&iow);
 	CloseTransientFile(fd);
 	relation_close(rel, AccessShareLock);
+	PG_RETURN_INT32(ioret.result.result);
+}
+
+/*
+ * The issuer has a valid descriptor, but the target names a nonexistent file.
+ * Worker reopening must return ENOENT; synchronous fallback succeeds instead.
+ * No real relation or SLRU file needs to be removed to test this race.
+ */
+PG_FUNCTION_INFO_V1(fsync_missing);
+Datum
+fsync_missing(PG_FUNCTION_ARGS)
+{
+	bool		slru = PG_GETARG_BOOL(0);
+	PgAioReturn ioret;
+	PgAioHandle *ioh;
+	PgAioWaitRef iow;
+	int			fd = OpenTransientFile("pg_xact/0000", O_RDWR | PG_BINARY);
+
+	if (fd < 0)
+		elog(ERROR, "could not open test file: %m");
+	ioh = pgaio_io_acquire(CurrentResourceOwner, &ioret);
+	pgaio_io_get_wref(ioh, &iow);
+	if (slru)
+	{
+		FileTag		tag = {0};
+
+		tag.handler = SYNC_HANDLER_CLOG;
+		tag.segno = 0xFFFFFF;
+		pgaio_io_set_target_sync_filetag(ioh, &tag);
+	}
+	else
+	{
+		RelFileLocator locator = {DEFAULTTABLESPACE_OID, MyDatabaseId, PG_UINT32_MAX};
+		SMgrRelation smgr = smgropen(locator, INVALID_PROC_NUMBER);
+
+		pgaio_io_set_target_smgr(ioh, smgr, MAIN_FORKNUM, 0, 0, false);
+		pgaio_io_register_callbacks(ioh, PGAIO_HCB_MD_FSYNC, 0);
+	}
+	HOLD_INTERRUPTS();
+	pgaio_io_start_fsync(ioh, fd, false, WAIT_EVENT_DATA_FILE_SYNC);
+	RESUME_INTERRUPTS();
+	pgaio_wref_wait(&iow);
+	CloseTransientFile(fd);
 	PG_RETURN_INT32(ioret.result.result);
 }
