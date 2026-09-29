@@ -50,6 +50,7 @@ INSERT INTO fsync_$slot VALUES (0);
 ));
 	}
 	$node->safe_psql('postgres', 'CHECKPOINT');
+	test_fsync_requests($node, $method);
 	configure_slots($node, $num_slots, 'false');
 	dirty_relations($node, $num_slots);
 	$node->safe_psql('postgres', 'CHECKPOINT');
@@ -216,4 +217,41 @@ UPDATE fsync_0 SET i = i + 1;
 		"$method: next checkpoint retries the retained fsync request");
 	isnt(checkpoint_lsn($node), $before,
 		"$method: checkpoint succeeds after fsync failure is removed");
+}
+
+sub test_fsync_requests
+{
+	my ($node, $method) = @_;
+	for my $datasync ('false', 'true')
+	{
+		my $op = $datasync eq 'true' ? 'fdatasync' : 'fsync';
+		$node->safe_psql('postgres',
+			"SELECT inj_fsync_configure(0, 'fsync_0', false)");
+		is( $node->safe_psql(
+				'postgres', "SELECT fsync_rel('fsync_0', $datasync)"),
+			'0',
+			"$method: explicit $op succeeds");
+		is( $node->safe_psql(
+				'postgres',
+				'SELECT attempts, successes FROM inj_fsync_stats(0)'),
+			'1|1',
+			"$method: explicit $op completes through AIO");
+
+		# An invalid descriptor distinguishes a no-op from successful syncing.
+		# Also require local synchronous completion, including with io_uring.
+		$node->safe_psql('postgres',
+			"SELECT inj_fsync_configure(0, 'fsync_0', false)");
+		is( $node->safe_psql(
+				'postgres',
+				"SELECT fsync_rel('fsync_0', $datasync, false, true)"),
+			'0',
+			"$method: disabled $op ignores an invalid descriptor");
+		is( $node->safe_psql(
+				'postgres', q(
+SELECT attempts, successes, worker_completions, synchronous_completions
+FROM inj_fsync_stats(0)
+)),
+			'1|1|0|1',
+			"$method: disabled $op completes synchronously in the issuer");
+	}
 }

@@ -141,6 +141,11 @@ AS 'MODULE_PATHNAME' LANGUAGE C;
 
 CREATE FUNCTION inj_fsync_stats(slot int,
     OUT attempts int, OUT successes int, OUT worker_completions int,
-    OUT waiting bool)
+    OUT waiting bool, OUT synchronous_completions int)
 RETURNS record STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION fsync_rel(rel regclass, datasync bool, enabled bool DEFAULT true,
+    invalid_fd bool DEFAULT false)
+RETURNS int STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;

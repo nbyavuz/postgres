@@ -20,6 +20,7 @@
 
 #include "access/htup_details.h"
 #include "access/relation.h"
+#include "access/xlog.h"
 #include "catalog/pg_type.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -29,7 +30,9 @@
 #include "storage/bufmgr.h"
 #include "storage/checksum.h"
 #include "storage/condition_variable.h"
+#include "storage/fd.h"
 #include "storage/lwlock.h"
+#include "storage/md.h"
 #include "storage/proc.h"
 #include "storage/procnumber.h"
 #include "storage/read_stream.h"
@@ -55,6 +58,7 @@ typedef struct InjFsyncState
 	int			attempts;
 	int			successes;
 	int			worker_completions;
+	int			synchronous_completions;
 	int			failures_left;
 } InjFsyncState;
 
@@ -1224,6 +1228,8 @@ inj_fsync_completion(PgAioHandle *ioh)
 		slot->successes++;
 	if (pgaio_io_get_owner(ioh) != MyProcNumber)
 		slot->worker_completions++;
+	if (ioh->flags & PGAIO_HF_SYNCHRONOUS)
+		slot->synchronous_completions++;
 	SpinLockRelease(&inj_io_error_state->fsync_lock);
 }
 
@@ -1417,8 +1423,8 @@ inj_fsync_stats(PG_FUNCTION_ARGS)
 	InjFsyncState *slot = inj_fsync_slot(PG_GETARG_INT32(0));
 	InjFsyncState snapshot;
 	TupleDesc	tupdesc;
-	Datum		values[4];
-	bool		nulls[4] = {false};
+	Datum		values[5];
+	bool		nulls[5] = {false};
 
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
@@ -1431,5 +1437,51 @@ inj_fsync_stats(PG_FUNCTION_ARGS)
 	values[1] = Int32GetDatum(snapshot.successes);
 	values[2] = Int32GetDatum(snapshot.worker_completions);
 	values[3] = BoolGetDatum(snapshot.waiting);
+	values[4] = Int32GetDatum(snapshot.synchronous_completions);
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/* Issue one relation fsync without going through the checkpointer. */
+PG_FUNCTION_INFO_V1(fsync_rel);
+Datum
+fsync_rel(PG_FUNCTION_ARGS)
+{
+	Relation	rel = relation_open(PG_GETARG_OID(0), AccessShareLock);
+	bool		datasync = PG_GETARG_BOOL(1);
+	bool		enabled = PG_GETARG_BOOL(2);
+	bool		invalid_fd = PG_GETARG_BOOL(3);
+	bool		save_fsync = enableFsync;
+	SMgrRelation smgr = RelationGetSmgr(rel);
+	PgAioReturn ioret;
+	PgAioHandle *ioh;
+	PgAioWaitRef iow;
+	int			fd;
+
+	fd = mdfsyncfd(smgr, MAIN_FORKNUM, 0);
+	if (fd < 0)
+		elog(ERROR, "could not open test relation: %m");
+	ioh = pgaio_io_acquire(CurrentResourceOwner, &ioret);
+	pgaio_io_get_wref(ioh, &iow);
+	pgaio_io_set_target_smgr(ioh, smgr, MAIN_FORKNUM, 0, 0, false);
+	pgaio_io_register_callbacks(ioh, PGAIO_HCB_MD_FSYNC, 0);
+
+	/* Change only this issuer, and restore its setting even on error. */
+	PG_TRY();
+	{
+		enableFsync = enabled;
+		HOLD_INTERRUPTS();
+		pgaio_io_start_fsync(ioh, invalid_fd ? -1 : fd, datasync,
+							 WAIT_EVENT_DATA_FILE_SYNC);
+		RESUME_INTERRUPTS();
+	}
+	PG_FINALLY();
+	{
+		enableFsync = save_fsync;
+	}
+	PG_END_TRY();
+
+	pgaio_wref_wait(&iow);
+	CloseTransientFile(fd);
+	relation_close(rel, AccessShareLock);
+	PG_RETURN_INT32(ioret.result.result);
 }
