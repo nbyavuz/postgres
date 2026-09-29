@@ -1,4 +1,13 @@
 CREATE EXTENSION test_slru;
+-- A registered SLRU handler allows worker-side reopening.  Segment 0 exists
+-- in this fresh cluster; worker submission may still fall back to local IO.
+SELECT test_slru_clog_sync(0);
+NOTICE:  Called SlruSyncFileTag() for segment 0 on path pg_xact/0000
+ test_slru_clog_sync 
+---------------------
+ 
+(1 row)
+
 SELECT test_slru_page_exists(12345);
  test_slru_page_exists 
 -----------------------

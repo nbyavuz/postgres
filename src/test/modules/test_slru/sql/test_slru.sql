@@ -1,5 +1,9 @@
 CREATE EXTENSION test_slru;
 
+-- A registered SLRU handler allows worker-side reopening.  Segment 0 exists
+-- in this fresh cluster; worker submission may still fall back to local IO.
+SELECT test_slru_clog_sync(0);
+
 SELECT test_slru_page_exists(12345);
 SELECT test_slru_page_write(12345, 'Test SLRU');
 SELECT test_slru_page_read(12345);

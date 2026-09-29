@@ -14,6 +14,7 @@
 
 #include "postgres.h"
 
+#include "access/clog.h"
 #include "access/slru.h"
 #include "access/transam.h"
 #include "miscadmin.h"
@@ -36,6 +37,7 @@ PG_FUNCTION_INFO_V1(test_slru_page_read);
 PG_FUNCTION_INFO_V1(test_slru_page_readonly);
 PG_FUNCTION_INFO_V1(test_slru_page_exists);
 PG_FUNCTION_INFO_V1(test_slru_page_sync);
+PG_FUNCTION_INFO_V1(test_slru_clog_sync);
 PG_FUNCTION_INFO_V1(test_slru_page_delete);
 PG_FUNCTION_INFO_V1(test_slru_page_truncate);
 PG_FUNCTION_INFO_V1(test_slru_delete_all);
@@ -151,16 +153,16 @@ test_slru_page_exists(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(found);
 }
 
-Datum
-test_slru_page_sync(PG_FUNCTION_ARGS)
+static void
+test_slru_sync(int64 pageno, bool clog)
 {
-	int64		pageno = PG_GETARG_INT64(0);
 	InflightSyncEntry entry = {0};
 	PgAioHandle *ioh;
 	int			result;
 
 	/* note that this flushes the full file a segment is located in */
 	entry.tag.segno = pageno / SLRU_PAGES_PER_SEGMENT;
+	entry.tag.handler = clog ? SYNC_HANDLER_CLOG : SYNC_HANDLER_NONE;
 
 	/*
 	 * SlruSyncFileTag() now performs the fsync asynchronously.  Drive it the
@@ -171,7 +173,10 @@ test_slru_page_sync(PG_FUNCTION_ARGS)
 	pgaio_io_get_wref(ioh, &entry.iow);
 
 	HOLD_INTERRUPTS();
-	SlruSyncFileTag(TestSlruCtl, ioh, &entry);
+	if (clog)
+		clogsyncfiletag(ioh, &entry);
+	else
+		SlruSyncFileTag(TestSlruCtl, ioh, &entry);
 	RESUME_INTERRUPTS();
 
 	if (entry.started)
@@ -196,7 +201,19 @@ test_slru_page_sync(PG_FUNCTION_ARGS)
 
 	elog(NOTICE, "Called SlruSyncFileTag() for segment %" PRIu64 " on path %s",
 		 entry.tag.segno, entry.path);
+}
 
+Datum
+test_slru_page_sync(PG_FUNCTION_ARGS)
+{
+	test_slru_sync(PG_GETARG_INT64(0), false);
+	PG_RETURN_VOID();
+}
+
+Datum
+test_slru_clog_sync(PG_FUNCTION_ARGS)
+{
+	test_slru_sync(PG_GETARG_INT64(0), true);
 	PG_RETURN_VOID();
 }
 
