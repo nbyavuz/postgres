@@ -18,6 +18,7 @@
 
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/relation.h"
 #include "catalog/pg_type.h"
 #include "fmgr.h"
@@ -32,6 +33,7 @@
 #include "storage/proc.h"
 #include "storage/procnumber.h"
 #include "storage/read_stream.h"
+#include "storage/spin.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/injection_point.h"
@@ -42,11 +44,28 @@
 
 PG_MODULE_MAGIC;
 
+#define MAX_FSYNC_TEST_SLOTS 8
+
+/* One slot per relation, so tests need not depend on checkpoint scan order. */
+typedef struct InjFsyncState
+{
+	RelFileLocator locator;
+	bool		hold;
+	bool		waiting;
+	int			attempts;
+	int			successes;
+	int			worker_completions;
+} InjFsyncState;
 
 /* In shared memory */
 typedef struct InjIoErrorState
 {
 	ConditionVariable cv;
+
+	/* Protects all fields in fsync_slots. */
+	slock_t		fsync_lock;
+	InjFsyncState fsync_slots[MAX_FSYNC_TEST_SLOTS];
+	uint32		fsync_wait_event;
 
 	bool		enabled_short_read;
 	bool		enabled_reopen;
@@ -107,6 +126,10 @@ test_aio_shmem_init(void *arg)
 	inj_io_error_state->enabled_completion_wait = false;
 
 	ConditionVariableInit(&inj_io_error_state->cv);
+	SpinLockInit(&inj_io_error_state->fsync_lock);
+	memset(inj_io_error_state->fsync_slots, 0,
+		   sizeof(inj_io_error_state->fsync_slots));
+	inj_io_error_state->fsync_wait_event = WaitEventInjectionPointNew("fsync_completion_wait");
 	inj_io_error_state->completion_wait_event = WaitEventInjectionPointNew("completion_wait");
 
 #ifdef USE_INJECTION_POINTS
@@ -1142,10 +1165,72 @@ inj_io_short_read_hook(const char *name, const void *private_data, void *arg)
 	}
 }
 
+/*
+ * Hold selected fsyncs before publishing their completion.  This hook also
+ * observes the raw result and whether completion ran in an IO worker.  It runs
+ * in a critical section, so use only preallocated state and do not raise errors.
+ */
+static void
+inj_fsync_completion(PgAioHandle *ioh)
+{
+	PgAioTargetData *td = pgaio_io_get_target_data(ioh);
+	InjFsyncState *slot = NULL;
+
+	if (td->smgr.forkNum != MAIN_FORKNUM || td->smgr.blockNum != 0)
+		return;
+
+	SpinLockAcquire(&inj_io_error_state->fsync_lock);
+	for (int i = 0; i < MAX_FSYNC_TEST_SLOTS; i++)
+	{
+		if (RelFileLocatorEquals(inj_io_error_state->fsync_slots[i].locator,
+								 td->smgr.rlocator))
+		{
+			slot = &inj_io_error_state->fsync_slots[i];
+			break;
+		}
+	}
+	if (slot != NULL)
+		slot->attempts++;
+	SpinLockRelease(&inj_io_error_state->fsync_lock);
+
+	if (slot == NULL)
+		return;
+
+	ConditionVariablePrepareToSleep(&inj_io_error_state->cv);
+	for (;;)
+	{
+		bool		hold;
+
+		SpinLockAcquire(&inj_io_error_state->fsync_lock);
+		hold = slot->hold;
+		slot->waiting = hold;
+		SpinLockRelease(&inj_io_error_state->fsync_lock);
+		if (!hold)
+			break;
+		ConditionVariableSleep(&inj_io_error_state->cv,
+							   inj_io_error_state->fsync_wait_event);
+	}
+	ConditionVariableCancelSleep();
+
+	SpinLockAcquire(&inj_io_error_state->fsync_lock);
+	if (ioh->result == 0)
+		slot->successes++;
+	if (pgaio_io_get_owner(ioh) != MyProcNumber)
+		slot->worker_completions++;
+	SpinLockRelease(&inj_io_error_state->fsync_lock);
+}
+
 void
 inj_io_completion_hook(const char *name, const void *private_data, void *arg)
 {
 	PgAioHandle *ioh = (PgAioHandle *) arg;
+
+	if (pgaio_io_get_op(ioh) == PGAIO_OP_FSYNC &&
+		ioh->target == PGAIO_TID_SMGR)
+	{
+		inj_fsync_completion(ioh);
+		return;
+	}
 
 	/* These hooks inspect SMGR block ranges and read-specific iovecs. */
 	if (pgaio_io_get_op(ioh) != PGAIO_OP_READV ||
@@ -1267,4 +1352,72 @@ inj_io_reopen_detach(PG_FUNCTION_ARGS)
 	elog(ERROR, "injection points not supported");
 #endif
 	PG_RETURN_VOID();
+}
+
+static InjFsyncState *
+inj_fsync_slot(int slotno)
+{
+	if (inj_io_error_state == NULL)
+		elog(ERROR, "test_aio must be loaded via shared_preload_libraries");
+	if (slotno < 0 || slotno >= MAX_FSYNC_TEST_SLOTS)
+		elog(ERROR, "invalid fsync test slot");
+
+	return &inj_io_error_state->fsync_slots[slotno];
+}
+
+/* Configure only between checkpoints, when no callback can be using the slot. */
+PG_FUNCTION_INFO_V1(inj_fsync_configure);
+Datum
+inj_fsync_configure(PG_FUNCTION_ARGS)
+{
+	InjFsyncState *slot = inj_fsync_slot(PG_GETARG_INT32(0));
+	Relation	rel = relation_open(PG_GETARG_OID(1), AccessShareLock);
+	bool		hold = PG_GETARG_BOOL(2);
+
+	SpinLockAcquire(&inj_io_error_state->fsync_lock);
+	memset(slot, 0, sizeof(*slot));
+	slot->locator = rel->rd_locator;
+	slot->hold = hold;
+	SpinLockRelease(&inj_io_error_state->fsync_lock);
+	relation_close(rel, AccessShareLock);
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(inj_fsync_release);
+Datum
+inj_fsync_release(PG_FUNCTION_ARGS)
+{
+	InjFsyncState *slot = inj_fsync_slot(PG_GETARG_INT32(0));
+
+	SpinLockAcquire(&inj_io_error_state->fsync_lock);
+	slot->hold = false;
+	SpinLockRelease(&inj_io_error_state->fsync_lock);
+	ConditionVariableBroadcast(&inj_io_error_state->cv);
+
+	PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(inj_fsync_stats);
+Datum
+inj_fsync_stats(PG_FUNCTION_ARGS)
+{
+	InjFsyncState *slot = inj_fsync_slot(PG_GETARG_INT32(0));
+	InjFsyncState snapshot;
+	TupleDesc	tupdesc;
+	Datum		values[4];
+	bool		nulls[4] = {false};
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	SpinLockAcquire(&inj_io_error_state->fsync_lock);
+	snapshot = *slot;
+	SpinLockRelease(&inj_io_error_state->fsync_lock);
+
+	values[0] = Int32GetDatum(snapshot.attempts);
+	values[1] = Int32GetDatum(snapshot.successes);
+	values[2] = Int32GetDatum(snapshot.worker_completions);
+	values[3] = BoolGetDatum(snapshot.waiting);
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }

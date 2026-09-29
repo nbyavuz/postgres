@@ -1345,6 +1345,7 @@ InheritableSocket
 InitSampleScan_function
 InitializeDSMForeignScan_function
 InitializeWorkerForeignScan_function
+InjFsyncState
 InjIoErrorState
 InjectionPointCacheEntry
 InjectionPointCallback
