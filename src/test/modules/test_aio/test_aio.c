@@ -60,6 +60,10 @@ typedef struct InjFsyncState
 	int			worker_completions;
 	int			synchronous_completions;
 	int			failures_left;
+	bool		stale_settings;
+	int			fsync_calls;
+	int			datasync_calls;
+	int			writethrough_calls;
 } InjFsyncState;
 
 /* In shared memory */
@@ -151,6 +155,12 @@ test_aio_shmem_init(void *arg)
 						 NULL,
 						 0);
 	InjectionPointLoad("aio-worker-after-reopen");
+	InjectionPointAttach("fsync-syscall", "test_aio", "inj_fsync_syscall", NULL, 0);
+	InjectionPointAttach("fdatasync-syscall", "test_aio", "inj_fsync_syscall", NULL, 0);
+	InjectionPointAttach("fsync-writethrough-syscall", "test_aio", "inj_fsync_syscall", NULL, 0);
+	InjectionPointLoad("fsync-syscall");
+	InjectionPointLoad("fdatasync-syscall");
+	InjectionPointLoad("fsync-writethrough-syscall");
 
 #endif
 }
@@ -165,6 +175,9 @@ test_aio_shmem_attach(void *arg)
 #ifdef USE_INJECTION_POINTS
 	InjectionPointLoad("aio-process-completion-before-shared");
 	InjectionPointLoad("aio-worker-after-reopen");
+	InjectionPointLoad("fsync-syscall");
+	InjectionPointLoad("fdatasync-syscall");
+	InjectionPointLoad("fsync-writethrough-syscall");
 	elog(LOG, "injection point loaded");
 #endif
 }
@@ -1014,6 +1027,13 @@ batch_end(PG_FUNCTION_ARGS)
 }
 
 #ifdef USE_INJECTION_POINTS
+/* Only set between worker reopen and completion of the selected fsync. */
+static InjFsyncState *fsync_worker_slot;
+static bool fsync_saved_enabled;
+static int	fsync_saved_wal_method;
+
+extern PGDLLEXPORT void inj_fsync_syscall(const char *name,
+										  const void *private_data, void *arg);
 extern PGDLLEXPORT void inj_io_completion_hook(const char *name,
 											   const void *private_data,
 											   void *arg);
@@ -1181,6 +1201,13 @@ inj_fsync_completion(PgAioHandle *ioh)
 	PgAioTargetData *td = pgaio_io_get_target_data(ioh);
 	InjFsyncState *slot = NULL;
 
+	if (fsync_worker_slot != NULL)
+	{
+		enableFsync = fsync_saved_enabled;
+		wal_sync_method = fsync_saved_wal_method;
+		fsync_worker_slot = NULL;
+	}
+
 	if (td->smgr.forkNum != MAIN_FORKNUM || td->smgr.blockNum != 0)
 		return;
 
@@ -1259,6 +1286,34 @@ inj_io_reopen(const char *name, const void *private_data, void *arg)
 {
 	PgAioHandle *ioh = (PgAioHandle *) arg;
 
+	if (pgaio_io_get_op(ioh) == PGAIO_OP_FSYNC &&
+		ioh->target == PGAIO_TID_SMGR)
+	{
+		SpinLockAcquire(&inj_io_error_state->fsync_lock);
+		for (int i = 0; i < MAX_FSYNC_TEST_SLOTS; i++)
+		{
+			InjFsyncState *slot = &inj_io_error_state->fsync_slots[i];
+
+			if (slot->stale_settings &&
+				RelFileLocatorEquals(slot->locator, ioh->target_data.smgr.rlocator))
+			{
+				fsync_worker_slot = slot;
+				break;
+			}
+		}
+		SpinLockRelease(&inj_io_error_state->fsync_lock);
+		if (fsync_worker_slot != NULL)
+		{
+			/* Model a stale reload; completion restores these local settings. */
+			fsync_saved_enabled = enableFsync;
+			fsync_saved_wal_method = wal_sync_method;
+			enableFsync = false;
+			wal_sync_method = ioh->op_data.fsync.writethrough ?
+				WAL_SYNC_METHOD_FSYNC : WAL_SYNC_METHOD_FSYNC_WRITETHROUGH;
+		}
+		return;
+	}
+
 	/* Read-error injection must not fail a concurrent checkpoint fsync. */
 	if (pgaio_io_get_op(ioh) != PGAIO_OP_READV ||
 		ioh->target != PGAIO_TID_SMGR)
@@ -1271,6 +1326,22 @@ inj_io_reopen(const char *name, const void *private_data, void *arg)
 
 	if (inj_io_error_state->enabled_reopen)
 		elog(ERROR, "injection point triggering failure to reopen ");
+}
+
+void
+inj_fsync_syscall(const char *name, const void *private_data, void *arg)
+{
+	if (fsync_worker_slot == NULL)
+		return;
+
+	SpinLockAcquire(&inj_io_error_state->fsync_lock);
+	if (strcmp(name, "fsync-syscall") == 0)
+		fsync_worker_slot->fsync_calls++;
+	else if (strcmp(name, "fdatasync-syscall") == 0)
+		fsync_worker_slot->datasync_calls++;
+	else
+		fsync_worker_slot->writethrough_calls++;
+	SpinLockRelease(&inj_io_error_state->fsync_lock);
 }
 #endif
 
@@ -1387,6 +1458,7 @@ inj_fsync_configure(PG_FUNCTION_ARGS)
 	Relation	rel = relation_open(PG_GETARG_OID(1), AccessShareLock);
 	bool		hold = PG_GETARG_BOOL(2);
 	int			failures = PG_GETARG_INT32(3);
+	bool		stale_settings = PG_GETARG_BOOL(4);
 
 	if (failures < 0)
 		elog(ERROR, "invalid fsync failure count");
@@ -1396,6 +1468,7 @@ inj_fsync_configure(PG_FUNCTION_ARGS)
 	slot->locator = rel->rd_locator;
 	slot->hold = hold;
 	slot->failures_left = failures;
+	slot->stale_settings = stale_settings;
 	SpinLockRelease(&inj_io_error_state->fsync_lock);
 	relation_close(rel, AccessShareLock);
 
@@ -1423,8 +1496,8 @@ inj_fsync_stats(PG_FUNCTION_ARGS)
 	InjFsyncState *slot = inj_fsync_slot(PG_GETARG_INT32(0));
 	InjFsyncState snapshot;
 	TupleDesc	tupdesc;
-	Datum		values[5];
-	bool		nulls[5] = {false};
+	Datum		values[8];
+	bool		nulls[8] = {false};
 
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
@@ -1438,6 +1511,9 @@ inj_fsync_stats(PG_FUNCTION_ARGS)
 	values[2] = Int32GetDatum(snapshot.worker_completions);
 	values[3] = BoolGetDatum(snapshot.waiting);
 	values[4] = Int32GetDatum(snapshot.synchronous_completions);
+	values[5] = Int32GetDatum(snapshot.fsync_calls);
+	values[6] = Int32GetDatum(snapshot.datasync_calls);
+	values[7] = Int32GetDatum(snapshot.writethrough_calls);
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
@@ -1450,7 +1526,9 @@ fsync_rel(PG_FUNCTION_ARGS)
 	bool		datasync = PG_GETARG_BOOL(1);
 	bool		enabled = PG_GETARG_BOOL(2);
 	bool		invalid_fd = PG_GETARG_BOOL(3);
+	bool		writethrough = PG_GETARG_BOOL(4);
 	bool		save_fsync = enableFsync;
+	int			save_wal_method = wal_sync_method;
 	SMgrRelation smgr = RelationGetSmgr(rel);
 	PgAioReturn ioret;
 	PgAioHandle *ioh;
@@ -1469,6 +1547,8 @@ fsync_rel(PG_FUNCTION_ARGS)
 	PG_TRY();
 	{
 		enableFsync = enabled;
+		wal_sync_method = writethrough ? WAL_SYNC_METHOD_FSYNC_WRITETHROUGH :
+			WAL_SYNC_METHOD_FSYNC;
 		HOLD_INTERRUPTS();
 		pgaio_io_start_fsync(ioh, invalid_fd ? -1 : fd, datasync,
 							 WAIT_EVENT_DATA_FILE_SYNC);
@@ -1477,6 +1557,7 @@ fsync_rel(PG_FUNCTION_ARGS)
 	PG_FINALLY();
 	{
 		enableFsync = save_fsync;
+		wal_sync_method = save_wal_method;
 	}
 	PG_END_TRY();
 

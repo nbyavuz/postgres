@@ -99,6 +99,7 @@
 #include "storage/ipc.h"
 #include "utils/guc.h"
 #include "utils/guc_hooks.h"
+#include "utils/injection_point.h"
 #include "utils/resowner.h"
 #include "utils/varlena.h"
 #include "utils/wait_event.h"
@@ -511,6 +512,8 @@ pg_fsync_no_writethrough_unconditional(int fd)
 	int			rc;
 
 retry:
+	/* Also called before shared memory exists; tests must preload this hook. */
+	INJECTION_POINT_CACHED("fsync-syscall", NULL);
 	rc = fsync(fd);
 
 	if (rc == -1 && errno == EINTR)
@@ -535,7 +538,11 @@ static int
 pg_fsync_writethrough_unconditional(int fd)
 {
 #if defined(F_FULLFSYNC)
-	return (fcntl(fd, F_FULLFSYNC, 0) == -1) ? -1 : 0;
+	int			rc;
+
+	INJECTION_POINT_CACHED("fsync-writethrough-syscall", NULL);
+	rc = fcntl(fd, F_FULLFSYNC, 0);
+	return rc == -1 ? -1 : 0;
 #else
 	errno = ENOSYS;
 	return -1;
@@ -561,6 +568,7 @@ pg_fdatasync_unconditional(int fd)
 	int			rc;
 
 retry:
+	INJECTION_POINT_CACHED("fdatasync-syscall", NULL);
 	rc = fdatasync(fd);
 
 	if (rc == -1 && errno == EINTR)

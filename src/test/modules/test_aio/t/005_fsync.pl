@@ -51,6 +51,7 @@ INSERT INTO fsync_$slot VALUES (0);
 	}
 	$node->safe_psql('postgres', 'CHECKPOINT');
 	test_fsync_requests($node, $method);
+	test_worker_settings($node) if $method eq 'worker';
 	configure_slots($node, $num_slots, 'false');
 	dirty_relations($node, $num_slots);
 	$node->safe_psql('postgres', 'CHECKPOINT');
@@ -253,5 +254,49 @@ FROM inj_fsync_stats(0)
 )),
 			'1|1|0|1',
 			"$method: disabled $op completes synchronously in the issuer");
+	}
+}
+
+sub test_worker_settings
+{
+	my ($node) = @_;
+	my $writethrough = $node->safe_psql(
+		'postgres', q(
+SELECT 'fsync_writethrough' = ANY(enumvals)
+FROM pg_settings WHERE name = 'wal_sync_method'
+));
+	for my $op ('fsync', 'fdatasync', 'writethrough')
+	{
+	  SKIP:
+		{
+			skip 'fsync_writethrough is not supported', 1
+			  if $op eq 'writethrough' && $writethrough ne 't';
+			my $datasync = $op eq 'fdatasync' ? 'true' : 'false';
+			my $full = $op eq 'writethrough' ? 'true' : 'false';
+			my $counts;
+			$node->safe_psql('postgres',
+				"SELECT inj_fsync_configure(0, 'fsync_0', false, 0, true)");
+			# Retry submissions only to accommodate legitimate local fallback.
+			# The observation points count real syscall paths in the worker.
+			for (1 .. 100)
+			{
+				my $result = $node->safe_psql('postgres',
+					"SELECT fsync_rel('fsync_0', $datasync, true, false, $full)"
+				);
+				die "$op failed: $result" if $result ne '0';
+				$counts = $node->safe_psql(
+					'postgres', q(
+SELECT fsync_calls, datasync_calls, writethrough_calls FROM inj_fsync_stats(0)
+));
+				last if $counts ne '0|0|0';
+			}
+			my $expected =
+				$op eq 'fsync'     ? qr/^[1-9]\d*\|0\|0$/
+			  : $op eq 'fdatasync' ? qr/^0\|[1-9]\d*\|0$/
+			  :                      qr/^0\|0\|[1-9]\d*$/;
+			like($counts, $expected,
+				"worker: issuer selects $op despite conflicting worker settings"
+			);
+		}
 	}
 }
