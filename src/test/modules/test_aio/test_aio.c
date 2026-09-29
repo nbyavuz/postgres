@@ -68,6 +68,9 @@ typedef struct InjFsyncState
 	int			fsync_calls;
 	int			datasync_calls;
 	int			writethrough_calls;
+	bool		cleanup_error;
+	bool		cleanup_triggered;
+	bool		cleanup_entered;
 } InjFsyncState;
 
 /* In shared memory */
@@ -165,6 +168,10 @@ test_aio_shmem_init(void *arg)
 	InjectionPointLoad("fsync-syscall");
 	InjectionPointLoad("fdatasync-syscall");
 	InjectionPointLoad("fsync-writethrough-syscall");
+	InjectionPointAttach("sync-after-start", "test_aio", "inj_fsync_cleanup", NULL, 0);
+	InjectionPointAttach("sync-cleanup-inflight", "test_aio", "inj_fsync_cleanup", NULL, 0);
+	InjectionPointLoad("sync-after-start");
+	InjectionPointLoad("sync-cleanup-inflight");
 
 #endif
 }
@@ -182,6 +189,8 @@ test_aio_shmem_attach(void *arg)
 	InjectionPointLoad("fsync-syscall");
 	InjectionPointLoad("fdatasync-syscall");
 	InjectionPointLoad("fsync-writethrough-syscall");
+	InjectionPointLoad("sync-after-start");
+	InjectionPointLoad("sync-cleanup-inflight");
 	elog(LOG, "injection point loaded");
 #endif
 }
@@ -1040,6 +1049,8 @@ static int	fsync_saved_wal_method;
 
 extern PGDLLEXPORT void inj_fsync_syscall(const char *name,
 										  const void *private_data, void *arg);
+extern PGDLLEXPORT void inj_fsync_cleanup(const char *name,
+										  const void *private_data, void *arg);
 extern PGDLLEXPORT void inj_io_completion_hook(const char *name,
 											   const void *private_data,
 											   void *arg);
@@ -1349,6 +1360,42 @@ inj_fsync_syscall(const char *name, const void *private_data, void *arg)
 		fsync_worker_slot->writethrough_calls++;
 	SpinLockRelease(&inj_io_error_state->fsync_lock);
 }
+
+void
+inj_fsync_cleanup(const char *name, const void *private_data, void *arg)
+{
+	InflightSyncEntry *entry = arg;
+	bool		fail = false;
+
+	if (entry != NULL &&
+		(entry->tag.handler != SYNC_HANDLER_MD || !entry->started ||
+		 entry->ioret.result.status != PGAIO_RS_UNKNOWN ||
+		 pgaio_wref_check_done(&entry->iow)))
+		return;
+
+	SpinLockAcquire(&inj_io_error_state->fsync_lock);
+	for (int i = 0; i < MAX_FSYNC_TEST_SLOTS; i++)
+	{
+		InjFsyncState *slot = &inj_io_error_state->fsync_slots[i];
+
+		if (entry == NULL)
+		{
+			if (slot->cleanup_triggered)
+				slot->cleanup_entered = true;
+		}
+		else if (slot->cleanup_error &&
+				 RelFileLocatorEquals(slot->locator, entry->tag.rlocator))
+		{
+			slot->cleanup_triggered = true;
+			fail = true;
+		}
+	}
+	SpinLockRelease(&inj_io_error_state->fsync_lock);
+
+	/* This point is outside the submission critical section. */
+	if (fail)
+		elog(ERROR, "test_aio: error with checkpoint fsync outstanding");
+}
 #endif
 
 PG_FUNCTION_INFO_V1(inj_io_completion_wait);
@@ -1465,6 +1512,7 @@ inj_fsync_configure(PG_FUNCTION_ARGS)
 	bool		hold = PG_GETARG_BOOL(2);
 	int			failures = PG_GETARG_INT32(3);
 	bool		stale_settings = PG_GETARG_BOOL(4);
+	bool		cleanup_error = PG_GETARG_BOOL(5);
 
 	if (failures < 0)
 		elog(ERROR, "invalid fsync failure count");
@@ -1475,6 +1523,7 @@ inj_fsync_configure(PG_FUNCTION_ARGS)
 	slot->hold = hold;
 	slot->failures_left = failures;
 	slot->stale_settings = stale_settings;
+	slot->cleanup_error = cleanup_error;
 	SpinLockRelease(&inj_io_error_state->fsync_lock);
 	relation_close(rel, AccessShareLock);
 
@@ -1502,8 +1551,8 @@ inj_fsync_stats(PG_FUNCTION_ARGS)
 	InjFsyncState *slot = inj_fsync_slot(PG_GETARG_INT32(0));
 	InjFsyncState snapshot;
 	TupleDesc	tupdesc;
-	Datum		values[8];
-	bool		nulls[8] = {false};
+	Datum		values[9];
+	bool		nulls[9] = {false};
 
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
@@ -1520,6 +1569,7 @@ inj_fsync_stats(PG_FUNCTION_ARGS)
 	values[5] = Int32GetDatum(snapshot.fsync_calls);
 	values[6] = Int32GetDatum(snapshot.datasync_calls);
 	values[7] = Int32GetDatum(snapshot.writethrough_calls);
+	values[8] = BoolGetDatum(snapshot.cleanup_entered);
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 

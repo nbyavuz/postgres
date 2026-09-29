@@ -136,6 +136,7 @@ SELECT count(*) FROM generate_series(0, $num_slots - 1) slot,
 
 	test_retries($node, $method);
 	test_cancel($node, $method);
+	test_cleanup($node, $method) if $method ne 'sync';
 	$node->stop();
 }
 
@@ -391,4 +392,77 @@ SELECT inj_fsync_release(0);
 			'postgres', 'SELECT attempts, successes FROM inj_fsync_stats(0)'),
 		'2|1',
 		"$method: a new request for the canceled relation is synchronized");
+}
+
+sub test_cleanup
+{
+	my ($node, $method) = @_;
+	my $exercised = 0;
+	for (1 .. 100)
+	{
+		$node->safe_psql(
+			'postgres', q(
+SELECT inj_fsync_configure(0, 'fsync_0', true, 0, false, true);
+UPDATE fsync_0 SET i = i + 1;
+));
+		my $before = checkpoint_lsn($node);
+		my $checkpoint =
+		  $node->background_psql('postgres', on_error_stop => 0);
+		my $pid = $checkpoint->query_safe('SELECT pg_backend_pid()');
+		$checkpoint->query_until(
+			qr/cleanup_checkpoint_started/, q(
+\echo cleanup_checkpoint_started
+CHECKPOINT;
+));
+		$node->poll_query_until('postgres',
+			'SELECT waiting FROM inj_fsync_stats(0)')
+		  or die 'fsync did not reach cleanup gate';
+
+		# Local fallback holds the checkpointer inside submission.  Otherwise
+		# it must enter error cleanup, where it waits for our held completion.
+		$node->poll_query_until(
+			'postgres', q(
+SELECT cleanup_entered OR EXISTS
+  (SELECT FROM pg_stat_activity WHERE backend_type = 'checkpointer'
+   AND wait_event = 'fsync_completion_wait') FROM inj_fsync_stats(0)
+)) or die 'checkpointer did not reach cleanup';
+		my $entered = $node->safe_psql('postgres',
+			'SELECT cleanup_entered FROM inj_fsync_stats(0)');
+		if ($entered eq 't')
+		{
+			$node->poll_query_until('postgres',
+				"SELECT wait_event = 'CheckpointDone' FROM pg_stat_activity WHERE pid = $pid"
+			) or die 'CHECKPOINT returned before cleanup finished';
+			is(checkpoint_lsn($node), $before,
+				"$method: error cleanup waits without publishing the checkpoint"
+			);
+			$exercised = 1;
+		}
+		$node->safe_psql('postgres', 'SELECT inj_fsync_release(0)');
+		$checkpoint->query('');
+		if ($exercised)
+		{
+			like(
+				$checkpoint->{stderr},
+				qr/checkpoint request failed/,
+				"$method: failure reported after outstanding fsync is cleaned up"
+			);
+		}
+		$checkpoint->{stderr} = '';
+		$checkpoint->quit;
+		last if $exercised;
+	}
+	ok($exercised, "$method: exercised cleanup with outstanding fsync");
+
+	# Reset the injection, but do not dirty the relation.  Cleanup must leave
+	# pending work available for the next checkpoint, without leaked handles.
+	$node->safe_psql(
+		'postgres', q(
+SELECT inj_fsync_configure(0, 'fsync_0', false);
+CHECKPOINT;
+));
+	is( $node->safe_psql(
+			'postgres', 'SELECT attempts, successes FROM inj_fsync_stats(0)'),
+		'1|1',
+		"$method: next checkpoint synchronizes work retained by cleanup");
 }

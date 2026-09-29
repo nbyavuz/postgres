@@ -33,6 +33,7 @@
 #include "storage/latch.h"
 #include "storage/md.h"
 #include "utils/hsearch.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
 
@@ -494,6 +495,8 @@ sync_cleanup_inflight(int code, Datum arg)
 	/* Do not let an interrupt abandon the remaining IOs during cleanup. */
 	HOLD_INTERRUPTS();
 
+	INJECTION_POINT("sync-cleanup-inflight", NULL);
+
 	while (!dlist_is_empty(&activeSyncEntries))
 	{
 		dlist_node *node = dlist_pop_head_node(&activeSyncEntries);
@@ -591,6 +594,8 @@ sync_start_one(SyncState *sync_state, InflightSyncEntry *entry)
 	sync_state->inflight_count++;
 
 	Assert(sync_state->inflight_count <= io_max_concurrency);
+
+	INJECTION_POINT("sync-after-start", entry);
 }
 
 static void

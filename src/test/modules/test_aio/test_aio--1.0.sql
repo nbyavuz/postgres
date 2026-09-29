@@ -131,7 +131,8 @@ AS 'MODULE_PATHNAME' LANGUAGE C;
 
 -- Configure slots only while no checkpoint is running.
 CREATE FUNCTION inj_fsync_configure(slot int, rel regclass, hold bool,
-    failures int DEFAULT 0, stale_settings bool DEFAULT false)
+    failures int DEFAULT 0, stale_settings bool DEFAULT false,
+    cleanup_error bool DEFAULT false)
 RETURNS pg_catalog.void STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
@@ -142,7 +143,8 @@ AS 'MODULE_PATHNAME' LANGUAGE C;
 CREATE FUNCTION inj_fsync_stats(slot int,
     OUT attempts int, OUT successes int, OUT worker_completions int,
     OUT waiting bool, OUT synchronous_completions int,
-    OUT fsync_calls int, OUT datasync_calls int, OUT writethrough_calls int)
+    OUT fsync_calls int, OUT datasync_calls int, OUT writethrough_calls int,
+    OUT cleanup_entered bool)
 RETURNS record STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
