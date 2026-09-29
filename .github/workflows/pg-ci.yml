@@ -963,16 +963,8 @@ jobs:
           echo ::endgroup::
 
           # Install IPC::Run.
-          # - recommends_policy=0 keeps cpan from pulling in IO::Tty / IO::Pty,
-          #   which don't build on Windows ("This module requires a POSIX
-          #   compliant system to work").
-          # - Pin to NJM/IPC-Run-20250809.0 because TODDR/IPC-Run-20260322.0
-          #   broke postgres tap tests on Windows (changed pipe stdio
-          #   handling). See upstream pg-vm-images commit ff5238afa3 and
-          #   the thread at
-          #   https://postgr.es/m/CAN55FZ06xanSbJdHe-CurjX_qNuBWZDEvS1kAk36L38YCtZXnw%40mail.gmail.com
           echo ::group::cpan_ipc_run
-          "o conf recommends_policy 0`no conf commit`nnotest install NJM/IPC-Run-20250809.0.tar.gz" | cpan
+          "o conf recommends_policy 0`nnotest install IPC::Run" | cpan
           if (!$?) { throw 'cmdfail' }
           perl -mIPC::Run -e 1
           if (!$?) { throw 'cmdfail' }
@@ -1106,11 +1098,9 @@ jobs:
 
       - name: Install additional dependencies
         run: |
-          # Pin IPC::Run to NJM/IPC-Run-20250809.0; TODDR/IPC-Run-20260322.0
-          # broke postgres tap tests on Windows (pipe stdio handling).
-          # See pg-vm-images commit ff5238afa3.
+          # Install IPC::Run.
           echo ::group::cpan_ipc_run
-          (echo; echo o conf recommends_policy 0; echo notest install NJM/IPC-Run-20250809.0.tar.gz) | cpan
+          (echo; echo o conf recommends_policy 0; echo notest install IPC::Run) | cpan
           perl -mIPC::Run -e 1
           echo ::endgroup::
 
