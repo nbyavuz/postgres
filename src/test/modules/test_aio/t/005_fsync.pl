@@ -135,6 +135,7 @@ SELECT count(*) FROM generate_series(0, $num_slots - 1) slot,
 		"$method: all held fsyncs completed successfully");
 
 	test_retries($node, $method);
+	test_cancel($node, $method);
 	$node->stop();
 }
 
@@ -346,4 +347,48 @@ sub test_worker_reopen
 		is($node->safe_psql('postgres', $worker_query),
 			$pid, "worker: same worker completes subsequent IO");
 	}
+}
+
+sub test_cancel
+{
+	my ($node, $method) = @_;
+	$node->safe_psql(
+		'postgres', q(
+SELECT inj_fsync_configure(0, 'fsync_0', true, 1);
+UPDATE fsync_0 SET i = i + 1;
+));
+	my $checkpoint = $node->background_psql('postgres');
+	$checkpoint->query_until(
+		qr/cancel_checkpoint_started/, q(
+\echo cancel_checkpoint_started
+CHECKPOINT;
+));
+	$node->poll_query_until('postgres',
+		'SELECT waiting FROM inj_fsync_stats(0)')
+	  or die 'fsync did not reach cancellation gate';
+
+	# Queue the forget while completion is outstanding.  Once the injected
+	# ENOENT is seen, the checkpointer must absorb the forget and skip retrying.
+	$node->safe_psql(
+		'postgres', q(
+SELECT fsync_forget('fsync_0');
+SELECT inj_fsync_release(0);
+));
+	$checkpoint->query_safe('');
+	$checkpoint->quit;
+	is( $node->safe_psql(
+			'postgres', 'SELECT attempts, successes FROM inj_fsync_stats(0)'),
+		'1|0',
+		"$method: canceled in-flight fsync is not retried");
+
+	$node->safe_psql('postgres', 'CHECKPOINT');
+	is( $node->safe_psql(
+			'postgres', 'SELECT attempts FROM inj_fsync_stats(0)'),
+		'1',
+		"$method: canceled fsync does not survive to the next checkpoint");
+	$node->safe_psql('postgres', 'UPDATE fsync_0 SET i = i + 1; CHECKPOINT');
+	is( $node->safe_psql(
+			'postgres', 'SELECT attempts, successes FROM inj_fsync_stats(0)'),
+		'2|1',
+		"$method: a new request for the canceled relation is synchronized");
 }
