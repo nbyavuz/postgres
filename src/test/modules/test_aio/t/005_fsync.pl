@@ -31,6 +31,7 @@ sub test_io_method
 		'postgresql.conf', qq(
 io_method = $method
 fsync = on
+data_sync_retry = on
 io_max_concurrency = 2
 autovacuum = off
 checkpoint_timeout = '1h'
@@ -127,6 +128,8 @@ SELECT count(*) FROM generate_series(0, $num_slots - 1) slot,
 )),
 		$num_slots,
 		"$method: all held fsyncs completed successfully");
+
+	test_retries($node, $method);
 	$node->stop();
 }
 
@@ -154,4 +157,63 @@ sub checkpoint_lsn
 	my ($node) = @_;
 	return $node->safe_psql('postgres',
 		'SELECT checkpoint_lsn FROM pg_control_checkpoint()');
+}
+
+sub test_retries
+{
+	my ($node, $method) = @_;
+	my $path =
+	  $node->safe_psql('postgres', "SELECT pg_relation_filepath('fsync_0')");
+
+	# A possible deletion error must be retried, even though this relation
+	# still exists.  The second attempt receives the real, successful result.
+	$node->safe_psql(
+		'postgres', q(
+SELECT inj_fsync_configure(0, 'fsync_0', false, 1);
+UPDATE fsync_0 SET i = i + 1;
+));
+	my $offset = -s $node->logfile;
+	$node->safe_psql('postgres', 'CHECKPOINT');
+	is( $node->safe_psql(
+			'postgres', 'SELECT attempts, successes FROM inj_fsync_stats(0)'),
+		'2|1',
+		"$method: missing-file error is retried successfully");
+	ok( $node->log_contains(
+			qr/could not fsync file "\Q$path\E" but retrying/, $offset),
+		"$method: retry reports the affected relation");
+
+	# The same error on the retry must fail the checkpoint, rather than being
+	# ignored or retried indefinitely.  data_sync_retry keeps this an ERROR.
+	$node->safe_psql(
+		'postgres', q(
+SELECT inj_fsync_configure(0, 'fsync_0', false, 2);
+UPDATE fsync_0 SET i = i + 1;
+));
+	my $before = checkpoint_lsn($node);
+	$offset = -s $node->logfile;
+	my ($ret, $stdout, $stderr) = $node->psql('postgres', 'CHECKPOINT');
+	isnt($ret, 0, "$method: repeated fsync failure fails CHECKPOINT");
+	like(
+		$stderr,
+		qr/checkpoint request failed/,
+		"$method: CHECKPOINT reports failure to its caller");
+	is( $node->safe_psql(
+			'postgres', 'SELECT attempts, successes FROM inj_fsync_stats(0)'),
+		'2|0',
+		"$method: repeated missing-file error stops after one retry");
+	ok( $node->log_contains(
+			qr/ERROR:  could not fsync file "\Q$path\E":/, $offset),
+		"$method: checkpoint failure reports the affected relation");
+	is(checkpoint_lsn($node), $before,
+		"$method: failed checkpoint is not published");
+
+	# Both injected failures have been consumed.  Do not dirty the relation
+	# again: the failed checkpoint must have retained its pending fsync request.
+	$node->safe_psql('postgres', 'CHECKPOINT');
+	is( $node->safe_psql(
+			'postgres', 'SELECT attempts, successes FROM inj_fsync_stats(0)'),
+		'3|1',
+		"$method: next checkpoint retries the retained fsync request");
+	isnt(checkpoint_lsn($node), $before,
+		"$method: checkpoint succeeds after fsync failure is removed");
 }

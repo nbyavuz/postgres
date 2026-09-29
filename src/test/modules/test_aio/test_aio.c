@@ -55,6 +55,7 @@ typedef struct InjFsyncState
 	int			attempts;
 	int			successes;
 	int			worker_completions;
+	int			failures_left;
 } InjFsyncState;
 
 /* In shared memory */
@@ -1213,6 +1214,12 @@ inj_fsync_completion(PgAioHandle *ioh)
 	ConditionVariableCancelSleep();
 
 	SpinLockAcquire(&inj_io_error_state->fsync_lock);
+	/* Preserve real failures; only replace a successful syscall result. */
+	if (ioh->result == 0 && slot->failures_left > 0)
+	{
+		ioh->result = -ENOENT;
+		slot->failures_left--;
+	}
 	if (ioh->result == 0)
 		slot->successes++;
 	if (pgaio_io_get_owner(ioh) != MyProcNumber)
@@ -1373,11 +1380,16 @@ inj_fsync_configure(PG_FUNCTION_ARGS)
 	InjFsyncState *slot = inj_fsync_slot(PG_GETARG_INT32(0));
 	Relation	rel = relation_open(PG_GETARG_OID(1), AccessShareLock);
 	bool		hold = PG_GETARG_BOOL(2);
+	int			failures = PG_GETARG_INT32(3);
+
+	if (failures < 0)
+		elog(ERROR, "invalid fsync failure count");
 
 	SpinLockAcquire(&inj_io_error_state->fsync_lock);
 	memset(slot, 0, sizeof(*slot));
 	slot->locator = rel->rd_locator;
 	slot->hold = hold;
+	slot->failures_left = failures;
 	SpinLockRelease(&inj_io_error_state->fsync_lock);
 	relation_close(rel, AccessShareLock);
 

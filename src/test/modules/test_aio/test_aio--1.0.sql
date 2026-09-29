@@ -130,7 +130,8 @@ RETURNS pg_catalog.void STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
 -- Configure slots only while no checkpoint is running.
-CREATE FUNCTION inj_fsync_configure(slot int, rel regclass, hold bool)
+CREATE FUNCTION inj_fsync_configure(slot int, rel regclass, hold bool,
+    failures int DEFAULT 0)
 RETURNS pg_catalog.void STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
 
