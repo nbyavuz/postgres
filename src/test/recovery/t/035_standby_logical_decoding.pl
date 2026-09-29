@@ -79,7 +79,7 @@ sub make_slot_active
 	my $slot_user_handle;
 
 	my $active_slot = $slot_prefix . 'activeslot';
-	$slot_user_handle = IPC::Run::start(
+	$slot_user_handle = ipc_start(
 		[
 			'pg_recvlogical',
 			'--dbname' => $node->connstr('testdb'),
@@ -354,7 +354,7 @@ my %psql_subscriber = (
 	'subscriber_stdin' => '',
 	'subscriber_stdout' => '',
 	'subscriber_stderr' => '');
-$psql_subscriber{run} = IPC::Run::start(
+$psql_subscriber{run} = ipc_start(
 	[
 		'psql', '--no-psqlrc', '--no-align',
 		'--file' => '-',
@@ -1106,7 +1106,7 @@ $node_cascading_standby->wait_for_event('startup',
 
 # Start pg_recvlogical.
 my ($stdout2, $stderr2);
-my $handle2 = IPC::Run::start(
+my $handle2 = ipc_start(
 	[
 		'pg_recvlogical',
 		'--dbname' => $node_cascading_standby->connstr('testdb'),
