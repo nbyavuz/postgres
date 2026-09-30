@@ -128,3 +128,18 @@ AS 'MODULE_PATHNAME' LANGUAGE C;
 CREATE FUNCTION inj_io_reopen_detach()
 RETURNS pg_catalog.void STRICT
 AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION inj_fsync_configure(slot int, rel regclass, fork text,
+    segno int, hold bool)
+RETURNS pg_catalog.void STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION inj_fsync_release(slot int)
+RETURNS pg_catalog.void STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
+
+CREATE FUNCTION inj_fsync_stats(slot int,
+    OUT attempts int, OUT successes int, OUT worker_completions int,
+    OUT waiting bool)
+RETURNS record STRICT
+AS 'MODULE_PATHNAME' LANGUAGE C;
