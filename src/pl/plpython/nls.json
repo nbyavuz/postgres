@@ -1,0 +1,13 @@
+{
+  "name": "plpython",
+  "files": [
+    "plpy_cursorobject.c", "plpy_elog.c", "plpy_exec.c", "plpy_main.c", "plpy_planobject.c",
+    "plpy_plpymodule.c", "plpy_procedure.c", "plpy_resultobject.c", "plpy_spi.c",
+    "plpy_subxactobject.c", "plpy_typeio.c", "plpy_util.c"
+  ],
+  "keywords": ["@backend_keywords@", "PLy_elog:2", "PLy_exception_set:2", "PLy_exception_set_plural:2,3"],
+  "flags": [
+    "@backend_flags@", "PLy_elog:2:c-format", "PLy_exception_set:2:c-format",
+    "PLy_exception_set_plural:2:c-format", "PLy_exception_set_plural:3:c-format"
+  ]
+}

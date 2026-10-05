@@ -3372,6 +3372,7 @@ pl_targets = []
 contrib_targets = []
 testprep_targets = []
 nls_targets = []
+po_catalogs = {}
 update_unicode_targets = []
 
 
@@ -4151,6 +4152,52 @@ run_target('cpluspluscheck',
 ###############################################################
 # Pseudo targets
 ###############################################################
+
+# Message catalog maintenance is independent of runtime NLS support.  Only
+# generated extraction inputs are prerequisites; no compiled code is needed.
+po_maintenance = files('src/tools/po/maintain_po.py')
+po_tools = []
+foreach tool : ['xgettext', 'msgmerge']
+  program = find_program(tool, required: false, native: true)
+  if program.found()
+    po_tools += ['--' + tool, program.full_path()]
+  endif
+endforeach
+po_subdirs = []
+po_all_generated = []
+foreach po_subdir, po_generated : po_catalogs
+  po_metadata = files(po_subdir / 'nls.json')
+  # Reading the metadata registers it as a reconfiguration dependency.
+  fs.read(po_metadata[0])
+  po_name = run_command(python, po_maintenance, 'name',
+    '--metadata', po_metadata, check: true).stdout().strip()
+  po_command = [
+    '--source-root', meson.project_source_root(),
+    '--build-root', meson.project_build_root(),
+    '--subdir', po_subdir,
+    '--version', pg_version_major.to_string(),
+  ] + po_tools
+  run_target(po_name + '-init-po',
+    command: [python, po_maintenance, 'init', po_command],
+    depends: po_generated,
+  )
+  run_target(po_name + '-update-po',
+    command: [python, po_maintenance, 'update', po_command],
+    depends: po_generated,
+  )
+  po_subdirs += po_subdir
+  po_all_generated += po_generated
+endforeach
+foreach operation : ['init', 'update']
+  run_target(operation + '-po',
+    command: [python, po_maintenance, operation,
+      '--source-root', meson.project_source_root(),
+      '--build-root', meson.project_build_root(),
+      '--version', pg_version_major.to_string(),
+      po_tools, '--subdir', po_subdirs],
+    depends: po_all_generated,
+  )
+endforeach
 
 alias_target('backend', backend_targets)
 alias_target('bin', bin_targets + libpq_targets)

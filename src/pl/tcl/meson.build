@@ -4,6 +4,8 @@ if not tcl_dep.found()
   subdir_done()
 endif
 
+po_catalogs += {'src/pl/tcl': []}
+
 pltcl_sources = files(
   'pltcl.c',
 )

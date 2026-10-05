@@ -1,0 +1,6 @@
+{
+  "name": "plperl",
+  "files": ["plperl.c", "SPI.c"],
+  "keywords": ["@backend_keywords@"],
+  "flags": ["@backend_flags@"]
+}

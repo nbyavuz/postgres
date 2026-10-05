@@ -193,7 +193,7 @@ utils/probes.o: utils/probes.d $(SUBDIROBJS)
 
 ##########################################################################
 
-# This target is only needed by nls.mk.
+# This target is only needed for message catalog extraction.
 .PHONY: generated-parser-sources
 generated-parser-sources:
 	$(MAKE) -C parser	gram.c gram.h scan.c
@@ -201,6 +201,9 @@ generated-parser-sources:
 	$(MAKE) -C replication	repl_gram.c repl_gram.h repl_scanner.c syncrep_gram.c syncrep_gram.h syncrep_scanner.c
 	$(MAKE) -C utils/adt	jsonpath_gram.c jsonpath_gram.h jsonpath_scan.c
 	$(MAKE) -C utils/misc	guc-file.c
+
+gettext-files: generated-parser-sources generated-headers
+	find $(foreach dir,$(GETTEXT_SCAN),$(if $(filter .,$(dir)),$(srcdir),$(srcdir)/$(dir))) \( -name '*.c' -o -name "proctypelist.h" \) -print | LC_ALL=C sort >$@
 
 
 ##########################################################################
@@ -291,7 +294,7 @@ endif
 ##########################################################################
 
 clean:
-	rm -f $(LOCALOBJS) postgres$(X) $(POSTGRES_IMP)
+	rm -f $(LOCALOBJS) postgres$(X) $(POSTGRES_IMP) gettext-files
 ifeq ($(PORTNAME), cygwin)
 	rm -f postgres.dll libpostgres.a
 endif

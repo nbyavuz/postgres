@@ -3,8 +3,9 @@
 # Common rules for Native Language Support (NLS)
 #
 # If some subdirectory of the source tree wants to provide NLS, it
-# needs to contain a file 'nls.mk' with the following make variable
-# assignments:
+# needs to contain a file 'nls.json'.  read-nls.pl maps its fields to
+# the following Make variables.  External PGXS extensions can also provide
+# these variables in a legacy 'nls.mk' file:
 #
 # CATALOG_NAME          -- name of the message catalog (xxx.po); probably
 #                          name of the program
@@ -26,8 +27,26 @@
 # order to merge the changes into the existing .po files.
 
 
-# existence checked by Makefile.global; otherwise we won't get here
+# Existence checked by Makefile.global; otherwise we won't get here.
+nls_metadata = $(top_srcdir)/src/nls-common.json
+nls_reader = $(top_srcdir)/src/tools/po/read-nls.pl
+ifneq (,$(wildcard $(srcdir)/nls.json))
+nls_metadata += $(srcdir)/nls.json
+else
 include $(srcdir)/nls.mk
+endif
+nls_settings := $(shell $(PERL) $(nls_reader) $(nls_metadata))
+
+# Do not use .SHELLSTATUS, which requires GNU make 4.2 or newer.  The
+# reader produces no output on error, including when Perl cannot start.
+ifeq ($(strip $(nls_settings)),)
+$(error could not read NLS metadata from $(nls_metadata))
+endif
+define nls_newline
+
+
+endef
+$(eval $(subst |,$(nls_newline),$(nls_settings)))
 
 AVAIL_LANGUAGES := $(shell cat $(srcdir)/po/LINGUAS)
 
@@ -56,52 +75,20 @@ GETTEXT_TRIGGERS += _
 GETTEXT_FLAGS    += _:1:pass-c-format
 
 
-# common settings that apply to backend and all backend modules
-BACKEND_COMMON_GETTEXT_TRIGGERS = \
-    $(FRONTEND_COMMON_GETTEXT_TRIGGERS) \
-    errmsg errmsg_plural:1,2 \
-    errdetail errdetail_log errdetail_plural:1,2 \
-    errhint errhint_plural:1,2 \
-    errcontext \
-    XactLockTableWait:4 \
-    MultiXactIdWait:6 \
-    ConditionalMultiXactIdWait:6
-BACKEND_COMMON_GETTEXT_FLAGS = \
-    $(FRONTEND_COMMON_GETTEXT_FLAGS) \
-    errmsg:1:c-format errmsg_plural:1:c-format errmsg_plural:2:c-format \
-    errdetail:1:c-format errdetail_log:1:c-format errdetail_plural:1:c-format errdetail_plural:2:c-format \
-    errhint:1:c-format errhint_plural:1:c-format errhint_plural:2:c-format \
-    errcontext:1:c-format
-
-FRONTEND_COMMON_GETTEXT_FILES = $(top_srcdir)/src/common/logging.c
-
-FRONTEND_COMMON_GETTEXT_TRIGGERS = \
-    pg_log_error pg_log_error_detail pg_log_error_hint \
-    pg_log_warning pg_log_warning_detail pg_log_warning_hint \
-    pg_log_info pg_log_info_detail pg_log_info_hint \
-    pg_fatal pg_log_generic:3 pg_log_generic_v:3
-
-FRONTEND_COMMON_GETTEXT_FLAGS = \
-    pg_log_error:1:c-format pg_log_error_detail:1:c-format pg_log_error_hint:1:c-format \
-    pg_log_warning:1:c-format pg_log_warning_detail:1:c-format pg_log_warning_hint:1:c-format \
-    pg_log_info:1:c-format pg_log_info_detail:1:c-format pg_log_info_hint:1:c-format \
-    pg_fatal:1:c-format pg_log_generic:3:c-format pg_log_generic_v:3:c-format
-
-
 all-po: $(MO_FILES)
 
 %.mo: %.po
 	$(MSGFMT) $(MSGFMT_FLAGS) -o $@ $<
 
 ifeq ($(word 1,$(GETTEXT_FILES)),+)
-po/$(CATALOG_NAME).pot: $(word 2, $(GETTEXT_FILES)) $(MAKEFILE_LIST)
+po/$(CATALOG_NAME).pot: $(word 2, $(GETTEXT_FILES)) $(MAKEFILE_LIST) $(nls_metadata) $(nls_reader)
 ifdef XGETTEXT
 	$(XGETTEXT) -D $(srcdir) -D . -n $(addprefix -k, $(GETTEXT_TRIGGERS)) $(addprefix --flag=, $(GETTEXT_FLAGS)) -f $<
 else
 	@echo "You don't have 'xgettext'."; exit 1
 endif
 else # GETTEXT_FILES
-po/$(CATALOG_NAME).pot: $(GETTEXT_FILES) $(MAKEFILE_LIST)
+po/$(CATALOG_NAME).pot: $(GETTEXT_FILES) $(MAKEFILE_LIST) $(nls_metadata) $(nls_reader)
 # Change to srcdir explicitly, don't rely on $^.  That way we get
 # consistent #: file references in the po files.
 ifdef XGETTEXT

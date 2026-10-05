@@ -4,6 +4,8 @@ if not python3_dep.found()
   subdir_done()
 endif
 
+po_catalogs += {'src/pl/plpython': []}
+
 plpython_sources = files(
   'plpy_cursorobject.c',
   'plpy_elog.c',

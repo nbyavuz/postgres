@@ -1,0 +1,13 @@
+{
+  "name": "pgscripts",
+  "files": [
+    "@frontend_files@", "createdb.c", "createuser.c", "dropdb.c", "dropuser.c", "clusterdb.c",
+    "vacuumdb.c", "vacuuming.c", "reindexdb.c", "pg_isready.c", "common.c",
+    "../../fe_utils/parallel_slot.c", "../../fe_utils/cancel.c", "../../fe_utils/print.c",
+    "../../fe_utils/connect_utils.c", "../../fe_utils/option_utils.c", "../../fe_utils/query_utils.c",
+    "../../fe_utils/string_utils.c", "../../common/fe_memutils.c", "../../common/file_utils.c",
+    "../../common/username.c"
+  ],
+  "keywords": ["@frontend_keywords@", "simple_prompt", "yesno_prompt"],
+  "flags": ["@frontend_flags@"]
+}

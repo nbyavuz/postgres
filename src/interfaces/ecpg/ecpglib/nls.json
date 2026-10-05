@@ -1,0 +1,6 @@
+{
+  "name": "ecpglib",
+  "files": ["connect.c", "descriptor.c", "error.c", "execute.c", "misc.c"],
+  "keywords": ["ecpg_gettext"],
+  "flags": ["ecpg_gettext:1:pass-c-format"]
+}

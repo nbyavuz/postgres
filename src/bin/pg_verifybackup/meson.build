@@ -43,3 +43,5 @@ tests += {
 }
 
 subdir('po', if_found: libintl)
+
+po_catalogs += {'src/bin/pg_verifybackup': []}

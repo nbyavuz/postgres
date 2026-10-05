@@ -137,7 +137,7 @@ msgstr "another translated"
     OK, so how does one create a <quote>blank</quote> message
     catalog?  First, go into the directory that contains the program
     whose messages you want to translate.  If there is a file
-    <filename>nls.mk</filename>, then this program has been prepared
+    <filename>nls.json</filename>, then this program has been prepared
     for translation.
    </para>
 
@@ -185,6 +185,26 @@ de fr
    </para>
 
    <para>
+    With a Meson build, run the following command from the source directory,
+    replacing <replaceable>build</replaceable> with the build directory and
+    <replaceable>progname</replaceable> with the catalog name (for example,
+    <literal>psql</literal>, <literal>postgres</literal>, or
+    <literal>pgscripts</literal>):
+<programlisting>
+meson compile -C <replaceable>build</replaceable> <replaceable>progname</replaceable>-init-po
+</programlisting>
+    The template is written to the program's <filename>po</filename>
+    directory in the build tree, for example
+    <filename><replaceable>build</replaceable>/src/bin/psql/po/psql.pot</filename>.
+    The <literal>init-po</literal> target creates templates for all catalogs
+    in the configured build.  These targets require <command>xgettext</command>
+    but do not require runtime native language support to be enabled.
+    Catalogs for optional procedural languages are included only when those
+    languages are enabled in the build.  Required generated source files are
+    built automatically, without compiling the programs.
+   </para>
+
+   <para>
     As the underlying program or library changes, messages might be
     changed or added by the programmers.  In this case you do not need
     to start from scratch.  Instead, run the command:
@@ -196,6 +216,24 @@ make update-po
     If the merge algorithm is not sure about a particular message it
     marks it <quote>fuzzy</quote> as explained above.  The new PO file
     is saved with a <filename>.po.new</filename> extension.
+   </para>
+
+   <para>
+    The corresponding Meson command is:
+<programlisting>
+meson compile -C <replaceable>build</replaceable> <replaceable>progname</replaceable>-update-po
+</programlisting>
+    Use the <literal>update-po</literal> target to update all catalogs in
+    the configured build.  These targets require <command>xgettext</command>
+    and <command>msgmerge</command>.  The <filename>.po.new</filename> files
+    are written alongside the template in the build tree; review them before
+    replacing the source <filename>.po</filename> files.  Translations from
+    other catalogs in the source tree are used to fill in matching messages,
+    including for languages not yet available in the selected catalog.
+    To restrict the languages processed, set the environment variable
+    <envar>WANTED_LANGUAGES</envar> to a space-separated list of language codes.
+    An unset or empty value processes all languages found in source catalogs;
+    codes not found in any source catalog are ignored.
    </para>
   </sect2>
 
@@ -365,13 +403,14 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
 
    <step>
     <para>
-     Add a file <filename>nls.mk</filename> in the directory with the
-     program sources.  This file will be read as a makefile.  The
-     following variable assignments need to be made here:
+     Add a file <filename>nls.json</filename> in the directory with the
+     program sources.  Both build systems read this metadata directly;
+     no regeneration step is required after editing it.  The file contains
+     a JSON object with the following fields:
 
      <variablelist>
       <varlistentry>
-       <term><varname>CATALOG_NAME</varname></term>
+       <term><literal>name</literal></term>
 
        <listitem>
         <para>
@@ -382,32 +421,30 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
       </varlistentry>
 
       <varlistentry>
-       <term><varname>GETTEXT_FILES</varname></term>
+       <term><literal>files</literal></term>
 
        <listitem>
         <para>
-         List of files that contain translatable strings, i.e., those
+         Array of file names, relative to the program's directory, that
+         contain translatable strings, i.e., those
          marked with <function>gettext</function> or an alternative
          solution.  Eventually, this will include nearly all source
-         files of the program.  If this list gets too long you can
-         make the first <quote>file</quote> be a <literal>+</literal>
-         and the second word be a file that contains one file name per
-         line.
+         files of the program.  File order affects catalog order and
+         should be kept stable.
         </para>
        </listitem>
       </varlistentry>
 
       <varlistentry>
-       <term><varname>GETTEXT_TRIGGERS</varname></term>
+       <term><literal>keywords</literal></term>
 
        <listitem>
         <para>
          The tools that generate message catalogs for the translators
          to work on need to know what function calls contain
-         translatable strings.  By default, only
-         <function>gettext()</function> calls are known.  If you used
-         <function>_</function> or other identifiers you need to list
-         them here.  If the translatable string is not the first
+         translatable strings.  List additional identifiers in this array;
+         standard gettext functions and <function>_</function> are
+         recognized automatically.  If the translatable string is not the first
          argument, the item needs to be of the form
          <literal>func:2</literal> (for the second argument).
          If you have a function that supports pluralized messages,
@@ -416,7 +453,28 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
         </para>
        </listitem>
       </varlistentry>
+      <varlistentry>
+       <term><literal>flags</literal></term>
+       <listitem>
+        <para>
+         Array of format annotations for the extraction tool, for example
+         <literal>notice:1:c-format</literal> for a function whose first
+         argument is a <function>printf</function>-style format string.
+        </para>
+       </listitem>
+      </varlistentry>
      </variablelist>
+    </para>
+    <para>
+     Entries such as <literal>@frontend_keywords@</literal> include shared
+     lists from <filename>src/nls-common.json</filename>.
+     See <filename>src/tools/po/README</filename> and existing catalogs for
+     examples.  Register the catalog directory and any generated extraction
+     inputs in its <filename>meson.build</filename>.  External PGXS
+     extensions can continue to use <filename>nls.mk</filename>, with the
+     corresponding Make variables <varname>CATALOG_NAME</varname>,
+     <varname>GETTEXT_FILES</varname>, <varname>GETTEXT_TRIGGERS</varname>,
+     and <varname>GETTEXT_FLAGS</varname>.
     </para>
    </step>
 

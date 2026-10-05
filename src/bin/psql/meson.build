@@ -48,6 +48,8 @@ sql_help = custom_target('psql_help',
 generated_sources += sql_help.to_list()
 psql_sources += sql_help
 
+po_catalogs += {'src/bin/psql': [psqlscanslash, tabcomplete, sql_help, psqlscan]}
+
 if host_system == 'windows'
   psql_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'psql',

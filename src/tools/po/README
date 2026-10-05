@@ -1,0 +1,41 @@
+Message catalog maintenance
+===========================
+
+Each program's nls.json contains its catalog name, extraction inputs,
+keywords, and format flags.  Edit these files directly; there are no
+generated adapters or metadata regeneration steps.
+
+File names are relative to the catalog directory.  @source@ denotes the
+source root; @name@ includes a list from src/nls-common.json, which holds
+shared frontend and backend settings.  Keep file order stable: it affects
+catalog order.  The backend uses a scan list of directories searched
+recursively for C sources and proctypelist.h instead of individual files.
+
+Make reads the JSON through read-nls.pl using Perl's core JSON::PP module.
+The reader returns Make assignments in memory, and errors stop Make.
+Catalog templates depend on both the local and common JSON files.  PGXS
+installs the reader and common metadata and accepts either nls.json or
+legacy nls.mk files in external extensions.  If both exist, nls.json wins.
+
+Each catalog directory registers itself in po_catalogs in its meson.build,
+with the generated inputs needed for extraction.  Optional languages
+register only when enabled.  Meson tracks the local JSON files so changing
+a catalog name triggers reconfiguration.  Other metadata is read on every
+maintenance invocation.  Build dependencies belong in the respective
+Makefiles and meson.build files, not in the JSON metadata.
+
+maintain_po.py implements the Meson init-po and update-po targets without
+Make or Autoconf.  It writes templates and .po.new files into the build
+tree and leaves source translations untouched.  WANTED_LANGUAGES limits
+the update operation to languages in its space-separated value.  An unset
+or empty value processes all languages found in source catalogs; codes
+with no source catalog are ignored.
+
+Each output file is replaced only after its gettext command succeeds.  If
+an operation fails, earlier successful outputs are retained; the operation
+as a whole is not atomic.
+
+The backend file search deliberately matches Make's source-tree search,
+including the spelling and ordering of paths.  In an out-of-tree build
+that search does not include generated build-tree sources.  Changing that
+coverage should be done separately for both build systems.

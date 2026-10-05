@@ -1,0 +1,6 @@
+{
+  "name": "postgresql-regress",
+  "files": ["regress.c"],
+  "keywords": ["@backend_keywords@"],
+  "flags": ["@backend_flags@"]
+}

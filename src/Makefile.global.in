@@ -1001,11 +1001,11 @@ endif # autodepend
 # Native language support
 
 ifeq ($(enable_nls), yes)
-ifneq (,$(wildcard $(srcdir)/nls.mk))
+ifneq (,$(wildcard $(srcdir)/nls.json $(srcdir)/nls.mk))
 
 include $(top_srcdir)/src/nls-global.mk
 
-endif # nls.mk
+endif # nls.json or nls.mk
 endif # enable_nls
 
 

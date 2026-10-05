@@ -1,0 +1,9 @@
+{
+  "name": "pg_walsummary",
+  "files": [
+    "@frontend_files@", "pg_walsummary.c", "../../common/fe_memutils.c",
+    "../../common/file_utils.c", "../../fe_utils/option_utils.c"
+  ],
+  "keywords": ["@frontend_keywords@"],
+  "flags": ["@frontend_flags@"]
+}

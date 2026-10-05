@@ -222,3 +222,6 @@ subdir('replication/pgoutput')
 subdir('replication/pgrepack')
 subdir('snowball')
 subdir('utils/mb/conversion_procs')
+
+# Catalog extraction scans source files only; no generated inputs are needed.
+po_catalogs += {'src/backend': []}

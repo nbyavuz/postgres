@@ -1,0 +1,6 @@
+{
+  "name": "pg_archivecleanup",
+  "files": ["@frontend_files@", "pg_archivecleanup.c", "../../common/fe_memutils.c"],
+  "keywords": ["@frontend_keywords@"],
+  "flags": ["@frontend_flags@"]
+}

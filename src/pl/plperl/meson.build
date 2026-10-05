@@ -35,6 +35,9 @@ foreach n : ['SPI', 'Util']
     command: [perl, xsubpp, '-typemap', typemap, '-output', '@OUTPUT@', '@INPUT@']
   )
   plperl_sources += xs_c
+  if n == 'SPI'
+    po_catalogs += {'src/pl/plperl': [xs_c]}
+  endif
 endforeach
 
 plperl_inc = include_directories('.')

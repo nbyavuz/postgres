@@ -1,0 +1,6 @@
+{
+  "name": "pg_controldata",
+  "files": ["pg_controldata.c", "../../common/controldata_utils.c", "../../common/fe_memutils.c"],
+  "keywords": ["@frontend_keywords@"],
+  "flags": ["@frontend_flags@"]
+}

@@ -66,3 +66,5 @@ pkgconfig.generate(
 )
 
 subdir('po', if_found: libintl)
+
+po_catalogs += {'src/interfaces/ecpg/ecpglib': []}

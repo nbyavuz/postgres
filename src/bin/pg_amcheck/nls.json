@@ -1,0 +1,11 @@
+{
+  "name": "pg_amcheck",
+  "files": [
+    "@frontend_files@", "pg_amcheck.c", "../../common/fe_memutils.c", "../../common/file_utils.c",
+    "../../common/username.c", "../../fe_utils/cancel.c", "../../fe_utils/connect_utils.c",
+    "../../fe_utils/option_utils.c", "../../fe_utils/parallel_slot.c", "../../fe_utils/query_utils.c",
+    "../../fe_utils/string_utils.c"
+  ],
+  "keywords": ["@frontend_keywords@", "log_no_match"],
+  "flags": ["@frontend_flags@", "log_no_match:1:c-format"]
+}

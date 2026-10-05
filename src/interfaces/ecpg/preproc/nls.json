@@ -1,0 +1,6 @@
+{
+  "name": "ecpg",
+  "files": ["descriptor.c", "ecpg.c", "pgc.c", "preproc.c", "type.c", "util.c", "variable.c"],
+  "keywords": ["mmerror:3", "mmfatal:2"],
+  "flags": ["mmerror:3:c-format", "mmfatal:2:c-format"]
+}

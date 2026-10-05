@@ -1,0 +1,12 @@
+{
+  "name": "pg_combinebackup",
+  "files": [
+    "@frontend_files@", "backup_label.c", "copy_file.c", "load_manifest.c", "pg_combinebackup.c",
+    "reconstruct.c", "write_manifest.c", "../../common/controldata_utils.c", "../../common/cryptohash.c",
+    "../../common/cryptohash_openssl.c", "../../common/fe_memutils.c", "../../common/file_utils.c",
+    "../../common/jsonapi.c", "../../common/parse_manifest.c", "../../fe_utils/option_utils.c",
+    "../../fe_utils/version.c"
+  ],
+  "keywords": ["@frontend_keywords@", "json_token_error:2", "json_manifest_parse_failure:2", "error_cb:2"],
+  "flags": ["@frontend_flags@", "json_token_error:2:c-format", "error_cb:2:c-format"]
+}

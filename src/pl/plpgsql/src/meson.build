@@ -15,6 +15,8 @@ pl_gram = custom_target('gram',
 generated_sources += pl_gram.to_list()
 plpgsql_sources += pl_gram
 
+po_catalogs += {'src/pl/plpgsql/src': [pl_gram]}
+
 gen_plerrcodes = files('generate-plerrcodes.pl')
 pl_errcodes = custom_target('plerrcodes',
   input: ['../../../../src/backend/utils/errcodes.txt'],

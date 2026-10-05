@@ -52,6 +52,8 @@ preproc = custom_target('preproc.c',
 generated_sources += preproc.to_list()
 ecpg_sources += preproc
 
+po_catalogs += {'src/interfaces/ecpg/preproc': [pgc, preproc]}
+
 c_kwlist = custom_target('c_kwlist_d.h',
   input: ['c_kwlist.h'],
   output: ['c_kwlist_d.h'],

@@ -1,0 +1,9 @@
+{
+  "name": "pg_waldump",
+  "files": [
+    "@frontend_files@", "archive_waldump.c", "pg_waldump.c", "xlogreader.c", "xlogstats.c",
+    "../../common/fe_memutils.c", "../../common/file_utils.c"
+  ],
+  "keywords": ["@frontend_keywords@", "report_invalid_record:2"],
+  "flags": ["@frontend_flags@", "report_invalid_record:2:c-format"]
+}

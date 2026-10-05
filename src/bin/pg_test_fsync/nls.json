@@ -1,0 +1,6 @@
+{
+  "name": "pg_test_fsync",
+  "files": ["@frontend_files@", "pg_test_fsync.c", "../../common/fe_memutils.c"],
+  "keywords": ["@frontend_keywords@", "die"],
+  "flags": ["@frontend_flags@"]
+}
