@@ -1,7 +1,9 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
+scripts_common_sources = files('common.c')
+scripts_po_sources = scripts_common_sources
 scripts_common = static_library('libscripts_common',
-  files('common.c'),
+  scripts_common_sources,
   dependencies: [frontend_code, libpq],
   kwargs: internal_lib_args,
 )
@@ -18,6 +20,7 @@ binaries = [
 
 foreach binary : binaries
   binary_sources = files('@0@.c'.format(binary))
+  scripts_po_sources += binary_sources
 
   if host_system == 'windows'
     binary_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
@@ -34,8 +37,10 @@ foreach binary : binaries
   bin_targets += binary
 endforeach
 
+vacuuming_common_sources = scripts_common_sources + files('vacuuming.c')
+scripts_po_sources += vacuuming_common_sources
 vacuuming_common = static_library('libvacuuming_common',
-  files('common.c', 'vacuuming.c'),
+  vacuuming_common_sources,
   dependencies: [frontend_code, libpq],
   kwargs: internal_lib_args,
 )
@@ -45,6 +50,7 @@ binaries = [
 ]
 foreach binary : binaries
   binary_sources = files('@0@.c'.format(binary))
+  scripts_po_sources += binary_sources
 
   if host_system == 'windows'
     binary_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
@@ -85,4 +91,12 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/scripts': {
+  'name': 'pgscripts', 'frontend': true,
+  'sources': scripts_po_sources + files(
+    '../../common/logging.c', '../../common/fe_memutils.c', '../../common/file_utils.c',
+    '../../common/username.c', '../../fe_utils/cancel.c', '../../fe_utils/connect_utils.c',
+    '../../fe_utils/option_utils.c', '../../fe_utils/parallel_slot.c', '../../fe_utils/print.c',
+    '../../fe_utils/query_utils.c', '../../fe_utils/string_utils.c'),
+  'keywords': ['simple_prompt', 'yesno_prompt'],
+}}

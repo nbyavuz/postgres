@@ -5,6 +5,7 @@ pg_verifybackup_sources = files(
   'pg_verifybackup.c'
 )
 
+pg_verifybackup_po_sources = pg_verifybackup_sources
 if host_system == 'windows'
   pg_verifybackup_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_verifybackup',
@@ -42,4 +43,16 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_verifybackup': {
+  'name': 'pg_verifybackup', 'frontend': true,
+  'sources': pg_verifybackup_po_sources + files(
+    '../../common/logging.c', '../../common/controldata_utils.c',
+    '../../common/cryptohash.c', '../../common/cryptohash_openssl.c',
+    '../../common/fe_memutils.c', '../../common/jsonapi.c', '../../common/parse_manifest.c',
+    '../../fe_utils/astreamer_gzip.c', '../../fe_utils/astreamer_lz4.c',
+    '../../fe_utils/astreamer_tar.c', '../../fe_utils/astreamer_zstd.c'),
+  'keywords': ['error_cb:2', 'json_manifest_parse_failure:2', 'json_token_error:2',
+               'report_backup_error:2', 'report_fatal_error'],
+  'flags': ['error_cb:2:c-format', 'json_token_error:2:c-format',
+            'report_backup_error:2:c-format', 'report_fatal_error:1:c-format'],
+}}

@@ -3,8 +3,9 @@
 # Common rules for Native Language Support (NLS)
 #
 # If some subdirectory of the source tree wants to provide NLS, it
-# needs to contain a file 'nls.mk' with the following make variable
-# assignments:
+# needs to contain a file 'nls.mk' setting CATALOG_NAME.  In-tree message
+# extraction and merging use Meson.  External PGXS extensions can also set
+# the following extraction variables to use the legacy maintenance targets:
 #
 # CATALOG_NAME          -- name of the message catalog (xxx.po); probably
 #                          name of the program
@@ -20,7 +21,7 @@
 #
 # That's all, the rest is done here, if --enable-nls was specified.
 #
-# The only user-visible targets here are 'init-po', to make an initial
+# For PGXS, the maintenance targets are 'init-po', to make an initial
 # "blank" catalog from program sources, and 'update-po', which is to
 # be called if the messages in the program source have changed, in
 # order to merge the changes into the existing .po files.
@@ -43,6 +44,19 @@ PO_FILES = $(addprefix po/, $(addsuffix .po, $(LANGUAGES)))
 ALL_PO_FILES = $(addprefix po/, $(addsuffix .po, $(AVAIL_LANGUAGES)))
 MO_FILES = $(addprefix po/, $(addsuffix .mo, $(LANGUAGES)))
 
+ifdef PGXS
+
+# Defaults are also needed when PGXS was installed by Meson.
+ifeq ($(MSGFMT),)
+MSGFMT = msgfmt
+endif
+ifeq ($(XGETTEXT),)
+XGETTEXT = xgettext
+endif
+ifeq ($(MSGMERGE),)
+MSGMERGE = msgmerge
+endif
+
 ifdef XGETTEXT
 XGETTEXT += -ctranslator --copyright-holder='PostgreSQL Global Development Group' --msgid-bugs-address=pgsql-bugs@lists.postgresql.org --no-wrap --sort-by-file --package-name='$(CATALOG_NAME) (PostgreSQL)' --package-version='$(MAJORVERSION)'
 endif
@@ -55,17 +69,23 @@ endif
 GETTEXT_TRIGGERS += _
 GETTEXT_FLAGS    += _:1:pass-c-format
 
-
-# common settings that apply to backend and all backend modules
+FRONTEND_COMMON_GETTEXT_FILES = $(top_srcdir)/src/common/logging.c
+FRONTEND_COMMON_GETTEXT_TRIGGERS = \
+    pg_log_error pg_log_error_detail pg_log_error_hint \
+    pg_log_warning pg_log_warning_detail pg_log_warning_hint \
+    pg_log_info pg_log_info_detail pg_log_info_hint \
+    pg_fatal pg_log_generic:3 pg_log_generic_v:3
+FRONTEND_COMMON_GETTEXT_FLAGS = \
+    pg_log_error:1:c-format pg_log_error_detail:1:c-format pg_log_error_hint:1:c-format \
+    pg_log_warning:1:c-format pg_log_warning_detail:1:c-format pg_log_warning_hint:1:c-format \
+    pg_log_info:1:c-format pg_log_info_detail:1:c-format pg_log_info_hint:1:c-format \
+    pg_fatal:1:c-format pg_log_generic:3:c-format pg_log_generic_v:3:c-format
 BACKEND_COMMON_GETTEXT_TRIGGERS = \
     $(FRONTEND_COMMON_GETTEXT_TRIGGERS) \
     errmsg errmsg_plural:1,2 \
     errdetail errdetail_log errdetail_plural:1,2 \
-    errhint errhint_plural:1,2 \
-    errcontext \
-    XactLockTableWait:4 \
-    MultiXactIdWait:6 \
-    ConditionalMultiXactIdWait:6
+    errhint errhint_plural:1,2 errcontext \
+    XactLockTableWait:4 MultiXactIdWait:6 ConditionalMultiXactIdWait:6
 BACKEND_COMMON_GETTEXT_FLAGS = \
     $(FRONTEND_COMMON_GETTEXT_FLAGS) \
     errmsg:1:c-format errmsg_plural:1:c-format errmsg_plural:2:c-format \
@@ -73,19 +93,7 @@ BACKEND_COMMON_GETTEXT_FLAGS = \
     errhint:1:c-format errhint_plural:1:c-format errhint_plural:2:c-format \
     errcontext:1:c-format
 
-FRONTEND_COMMON_GETTEXT_FILES = $(top_srcdir)/src/common/logging.c
-
-FRONTEND_COMMON_GETTEXT_TRIGGERS = \
-    pg_log_error pg_log_error_detail pg_log_error_hint \
-    pg_log_warning pg_log_warning_detail pg_log_warning_hint \
-    pg_log_info pg_log_info_detail pg_log_info_hint \
-    pg_fatal pg_log_generic:3 pg_log_generic_v:3
-
-FRONTEND_COMMON_GETTEXT_FLAGS = \
-    pg_log_error:1:c-format pg_log_error_detail:1:c-format pg_log_error_hint:1:c-format \
-    pg_log_warning:1:c-format pg_log_warning_detail:1:c-format pg_log_warning_hint:1:c-format \
-    pg_log_info:1:c-format pg_log_info_detail:1:c-format pg_log_info_hint:1:c-format \
-    pg_fatal:1:c-format pg_log_generic:3:c-format pg_log_generic_v:3:c-format
+endif # PGXS
 
 
 all-po: $(MO_FILES)
@@ -93,6 +101,7 @@ all-po: $(MO_FILES)
 %.mo: %.po
 	$(MSGFMT) $(MSGFMT_FLAGS) -o $@ $<
 
+ifdef PGXS
 ifeq ($(word 1,$(GETTEXT_FILES)),+)
 po/$(CATALOG_NAME).pot: $(word 2, $(GETTEXT_FILES)) $(MAKEFILE_LIST)
 ifdef XGETTEXT
@@ -113,6 +122,7 @@ endif # GETTEXT_FILES
 	@$(MKDIR_P) $(dir $@)
 	sed -e '1,18 { s/SOME DESCRIPTIVE TITLE./LANGUAGE message translation file for $(CATALOG_NAME)/;s/PACKAGE/PostgreSQL/g;s/VERSION/$(MAJORVERSION)/g;s/YEAR/'`date +%Y`'/g; }' messages.po >$@
 	rm messages.po
+endif # PGXS
 
 
 # catalog name extensions must match behavior of PG_TEXTDOMAIN() in c.h
@@ -136,19 +146,15 @@ clean-po:
 	rm -f po/$(CATALOG_NAME).pot
 
 
+ifdef PGXS
 init-po: po/$(CATALOG_NAME).pot
 
 
 # For performance reasons, only calculate these when the user actually
 # requested update-po or a specific file.
 ifneq (,$(filter update-po %.po.new,$(MAKECMDGOALS)))
-ifdef PGXS
 ALL_LANGUAGES := $(shell find . -name '*.po' -print | sed 's,^.*/\([^/]*\).po$$,\1,' | LC_ALL=C sort -u)
 all_compendia := $(shell find . -name '*.po' -print | LC_ALL=C sort)
-else
-ALL_LANGUAGES := $(shell find $(top_srcdir) -name '*.po' -print | sed 's,^.*/\([^/]*\).po$$,\1,' | LC_ALL=C sort -u)
-all_compendia := $(shell find $(top_srcdir) -name '*.po' -print | LC_ALL=C sort)
-endif
 else
 ALL_LANGUAGES = $(AVAIL_LANGUAGES)
 all_compendia = FORCE
@@ -171,6 +177,9 @@ $(AVAIL_LANGUAGES:%=po/%.po.new): po/%.po.new: po/%.po po/$(CATALOG_NAME).pot $(
 po/%.po.new: po/$(CATALOG_NAME).pot $(all_compendia)
 	$(MSGMERGE) --lang=$* $(word 1,$^) $(word 1,$^) -o $@ $(addprefix --compendium=,$(filter %/$*.po,$(wordlist 2,$(words $^),$^)))
 
+.PHONY: init-po update-po
+endif # PGXS
+
 
 all: all-po
 install: install-po
@@ -178,5 +187,4 @@ installdirs: installdirs-po
 uninstall: uninstall-po
 clean distclean: clean-po
 
-.PHONY: all-po install-po installdirs-po uninstall-po clean-po \
-        init-po update-po
+.PHONY: all-po install-po installdirs-po uninstall-po clean-po

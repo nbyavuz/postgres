@@ -14,8 +14,10 @@ ecpg_sources = files(
   'variable.c',
 )
 
+pgc_input = files('pgc.l')
+ecpg_po_sources = ecpg_sources
 pgc = custom_target('pgc.c',
-  input: 'pgc.l',
+  input: pgc_input,
   output: 'pgc.c',
   command: flex_cmd,
 )
@@ -85,7 +87,12 @@ ecpg_exe = executable('ecpg',
 )
 ecpg_targets += ecpg_exe
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/interfaces/ecpg/preproc': {
+  'name': 'ecpg', 'sources': ecpg_po_sources,
+  'generated': [pgc, preproc_y],
+  'keywords': ['mmerror:3', 'mmfatal:2'],
+  'flags': ['mmerror:3:c-format', 'mmfatal:2:c-format'],
+}}
 
 tests += {
   'name': 'ecpg',

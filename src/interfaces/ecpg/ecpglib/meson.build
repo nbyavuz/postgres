@@ -65,4 +65,7 @@ pkgconfig.generate(
   requires_private: ['libpgtypes', 'libpq'],
 )
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/interfaces/ecpg/ecpglib': {
+  'name': 'ecpglib', 'sources': ecpglib_sources,
+  'keywords': ['ecpg_gettext'], 'flags': ['ecpg_gettext:1:pass-c-format'],
+}}

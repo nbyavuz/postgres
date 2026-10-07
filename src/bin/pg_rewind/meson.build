@@ -13,6 +13,7 @@ pg_rewind_sources = files(
 
 pg_rewind_sources += xlogreader_sources
 
+pg_rewind_po_sources = pg_rewind_sources
 if host_system == 'windows'
   pg_rewind_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_rewind',
@@ -49,4 +50,12 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_rewind': {
+  'name': 'pg_rewind', 'frontend': true,
+  'sources': pg_rewind_po_sources + files(
+    '../../common/logging.c', '../../common/controldata_utils.c', '../../common/fe_memutils.c',
+    '../../common/file_utils.c', '../../common/percentrepl.c', '../../common/restricted_token.c',
+    '../../fe_utils/archive.c', '../../fe_utils/option_utils.c',
+    '../../fe_utils/recovery_gen.c', '../../fe_utils/string_utils.c'),
+  'keywords': ['report_invalid_record:2'], 'flags': ['report_invalid_record:2:c-format'],
+}}

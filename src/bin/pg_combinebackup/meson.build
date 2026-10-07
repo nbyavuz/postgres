@@ -9,6 +9,7 @@ pg_combinebackup_sources = files(
   'write_manifest.c',
 )
 
+pg_combinebackup_po_sources = pg_combinebackup_sources
 if host_system == 'windows'
   pg_combinebackup_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_combinebackup',
@@ -44,4 +45,13 @@ tests += {
   }
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_combinebackup': {
+  'name': 'pg_combinebackup', 'frontend': true,
+  'sources': pg_combinebackup_po_sources + files(
+    '../../common/logging.c', '../../common/controldata_utils.c',
+    '../../common/cryptohash.c', '../../common/cryptohash_openssl.c',
+    '../../common/fe_memutils.c', '../../common/file_utils.c', '../../common/jsonapi.c',
+    '../../common/parse_manifest.c', '../../fe_utils/option_utils.c', '../../fe_utils/version.c'),
+  'keywords': ['error_cb:2', 'json_manifest_parse_failure:2', 'json_token_error:2'],
+  'flags': ['error_cb:2:c-format', 'json_token_error:2:c-format'],
+}}

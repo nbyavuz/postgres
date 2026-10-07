@@ -28,28 +28,31 @@ pgport_sources = [
   'tar.c',
 ]
 
+port_po_sources = files(pgport_sources)
+pgport_windows_sources = files(
+  'dirmod.c',
+  'kill.c',
+  'open.c',
+  'system.c',
+  'win32common.c',
+  'win32dlopen.c',
+  'win32env.c',
+  'win32error.c',
+  'win32fdatasync.c',
+  'win32fseek.c',
+  'win32gai_strerror.c',
+  'win32getrusage.c',
+  'win32link.c',
+  'win32ntdll.c',
+  'win32pread.c',
+  'win32pwrite.c',
+  'win32security.c',
+  'win32setlocale.c',
+  'win32stat.c',
+)
+port_po_sources += pgport_windows_sources
 if host_system == 'windows'
-  pgport_sources += files(
-    'dirmod.c',
-    'kill.c',
-    'open.c',
-    'system.c',
-    'win32common.c',
-    'win32dlopen.c',
-    'win32env.c',
-    'win32error.c',
-    'win32fdatasync.c',
-    'win32fseek.c',
-    'win32gai_strerror.c',
-    'win32getrusage.c',
-    'win32link.c',
-    'win32ntdll.c',
-    'win32pread.c',
-    'win32pwrite.c',
-    'win32security.c',
-    'win32setlocale.c',
-    'win32stat.c',
-  )
+  pgport_sources += pgport_windows_sources
 elif host_system == 'cygwin'
   pgport_sources += files(
     'dirmod.c',
@@ -111,6 +114,7 @@ foreach f : replace_funcs_neg
   func = f.get(0)
   varname = f.get(1, 'HAVE_@0@'.format(func.to_upper()))
   filename = '@0@.c'.format(func)
+  port_po_sources += files(filename)
 
   val = '@0@'.format(cdata.get(varname, 'false'))
   if val == 'false' or val == '0'
@@ -122,6 +126,7 @@ foreach f : replace_funcs_pos
   func = f.get(0)
   varname = f.get(1, 'HAVE_@0@'.format(func.to_upper()))
   filename = '@0@.c'.format(func)
+  port_po_sources += files(filename)
 
   val = '@0@'.format(cdata.get(varname, 'false'))
   if val == 'true' or val == '1'

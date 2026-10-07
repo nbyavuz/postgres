@@ -26,17 +26,22 @@ backend_sources += files(
 # parser is slow, and building this separately avoids other parts of the
 # backend having to wait till gram.h is generated.
 parser_sources = files('parser.c')
+backend_po_sources += parser_sources
+backend_scanner_input = files('scan.l')
+backend_parser_input = files('gram.y')
+backend_po_sources += backend_parser_input
 
 backend_scanner = custom_target('scan',
-  input: 'scan.l',
+  input: backend_scanner_input,
   output: 'scan.c',
   command: [flex_cmd, '--no-backup', '--', '-CF', '-p', '-p'],
 )
 generated_sources += backend_scanner
+backend_po_generated += backend_scanner
 parser_sources += backend_scanner
 
 backend_parser = custom_target('gram',
-  input: 'gram.y',
+  input: backend_parser_input,
   kwargs: bison_kw,
 )
 generated_sources += backend_parser.to_list()

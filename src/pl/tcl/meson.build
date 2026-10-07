@@ -9,6 +9,7 @@ pltcl_sources = files(
 )
 
 gen_pltclerrcodes = files('generate-pltclerrcodes.pl')
+pltcl_po_sources = pltcl_sources
 pltcl_sources += custom_target('pltclerrcodes.h',
   input: files('../../backend/utils/errcodes.txt'),
   output: 'pltclerrcodes.h',
@@ -61,4 +62,6 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/pl/tcl': {
+  'name': 'pltcl', 'backend': true, 'sources': pltcl_po_sources,
+}}

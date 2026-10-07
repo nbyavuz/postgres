@@ -18,24 +18,24 @@ libpq_sources = files(
   'pqexpbuffer.c',
 )
 libpq_so_sources = [] # for shared lib, in addition to the above
+libpq_windows_sources = files('pthread-win32.c', 'win32.c')
+libpq_ssl_sources = files('fe-secure-common.c', 'fe-secure-openssl.c')
+libpq_gss_sources = files('fe-gssapi-common.c', 'fe-secure-gssapi.c')
+libpq_po_sources = libpq_sources + libpq_windows_sources + libpq_ssl_sources + libpq_gss_sources
 
 if host_system == 'windows'
-  libpq_sources += files('pthread-win32.c', 'win32.c')
+  libpq_sources += libpq_windows_sources
   libpq_so_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'libpq',
     '--FILEDESC', 'PostgreSQL Access Library',])
 endif
 
 if ssl.found()
-  libpq_sources += files('fe-secure-common.c')
-  libpq_sources += files('fe-secure-openssl.c')
+  libpq_sources += libpq_ssl_sources
 endif
 
 if gssapi.found()
-  libpq_sources += files(
-    'fe-gssapi-common.c',
-    'fe-secure-gssapi.c',
-  )
+  libpq_sources += libpq_gss_sources
 endif
 
 export_file = custom_target('libpq.exports',
@@ -171,4 +171,15 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/interfaces/libpq': {
+  'name': 'libpq',
+  'sources': libpq_po_sources,
+  'keywords': ['actx_error:2', 'libpq_append_conn_error:2', 'libpq_append_error:2',
+               'libpq_gettext', 'libpq_ngettext:1,2', 'oauth_json_set_error:2',
+               'oauth_parse_set_error:2', 'pqInternalNotice:2'],
+  'flags': ['actx_error:2:c-format', 'libpq_append_conn_error:2:c-format',
+            'libpq_append_error:2:c-format', 'libpq_gettext:1:pass-c-format',
+            'libpq_ngettext:1:pass-c-format', 'libpq_ngettext:2:pass-c-format',
+            'oauth_json_set_error:2:c-format', 'oauth_parse_set_error:2:c-format',
+            'pqInternalNotice:2:c-format'],
+}}

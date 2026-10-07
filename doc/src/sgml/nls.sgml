@@ -25,7 +25,8 @@
     software tools.  Theoretically, you only need a text editor.  But
     this is only in the unlikely event that you do not want to try out
     your translated messages.  When you configure your source tree, be
-    sure to use the <option>--enable-nls</option> option.  This will
+    sure to use the <option>-Dnls=enabled</option> Meson option (or
+    <option>--enable-nls</option> with <command>configure</command>).  This will
     also check for the <application>libintl</application> library and the
     <filename>msgfmt</filename> program, which all end users will need
     anyway.  To try out your work, follow the applicable portions of
@@ -34,8 +35,8 @@
 
    <para>
     If you want to start a new translation effort or want to do a
-    message catalog merge (described later), you will need the
-    programs <filename>xgettext</filename> and
+    message catalog merge (described later), you will need
+    Meson and the programs <filename>xgettext</filename> and
     <filename>msgmerge</filename>, respectively, in a GNU-compatible
     implementation.  Later, we will try to arrange it so that if you
     use a packaged source distribution, you won't need
@@ -163,9 +164,12 @@ msgstr "another translated"
 
    <para>
     If you need to start a new translation effort, then first run the
-    command:
+    command from the source directory, replacing <replaceable>build</replaceable>
+    with the Meson build directory and <replaceable>progname</replaceable>
+    with the catalog name (for example, <literal>psql</literal>,
+    <literal>postgres</literal>, or <literal>pgscripts</literal>):
 <programlisting>
-make init-po
+meson compile -C <replaceable>build</replaceable> <replaceable>progname</replaceable>-init-po
 </programlisting>
     This will create a file
     <filename><replaceable>progname</replaceable>.pot</filename>.
@@ -185,17 +189,56 @@ de fr
    </para>
 
    <para>
+    The template is written to the program's <filename>po</filename>
+    directory in the build tree, for example
+    <filename><replaceable>build</replaceable>/src/bin/psql/po/psql.pot</filename>.
+    The <literal>init-po</literal> target creates templates for all catalogs
+    in the configured build.  These targets require <command>xgettext</command>
+    but do not require runtime native language support to be enabled.
+    Catalogs for optional procedural languages are included only when those
+    languages are enabled in the build.  Required generated source files are
+    built automatically, without compiling the programs.
+    Templates are tracked build outputs: an unchanged <literal>init-po</literal>
+    does no work.  Changes to extraction inputs or metadata cause the affected
+    templates to be rebuilt.  Removing a template forces extraction on the
+    next invocation; the build system's clean command also removes templates.
+   </para>
+
+   <para>
     As the underlying program or library changes, messages might be
     changed or added by the programmers.  In this case you do not need
     to start from scratch.  Instead, run the command:
 <programlisting>
-make update-po
+meson compile -C <replaceable>build</replaceable> <replaceable>progname</replaceable>-update-po
 </programlisting>
     which will create a new blank message catalog file (the pot file
     you started with) and will merge it with the existing PO files.
     If the merge algorithm is not sure about a particular message it
     marks it <quote>fuzzy</quote> as explained above.  The new PO file
     is saved with a <filename>.po.new</filename> extension.
+   </para>
+
+   <para>
+    Use the <literal>update-po</literal> target to update all catalogs in
+    the configured build.  These targets first bring the templates up to date,
+    then merge translations whose inputs have changed.  They require <command>xgettext</command>
+    and <command>msgmerge</command>.  The <filename>.po.new</filename> files
+    are written alongside the template in the build tree; review them before
+    replacing the source <filename>.po</filename> files.  Translations from
+    other catalogs in the source tree are used to fill in matching messages,
+    including for languages not yet available in the selected catalog.
+    To restrict the languages processed, configure the build with
+    <option>-Dpo_languages=de,fr</option>, for example.
+    An empty list (the default) processes all languages listed in source
+    <filename>po/LINGUAS</filename> files;
+    codes not found in any source catalog are ignored.
+   </para>
+   <para>
+    In-tree catalog maintenance requires Meson, even if the programs themselves
+    are built with Make.  External PGXS extensions can continue to use
+    <command>make init-po</command> and <command>make update-po</command>.
+    Source references in Meson-generated catalogs are relative to the program's
+    source directory and do not depend on the location of the build directory.
    </para>
   </sect2>
 
@@ -365,13 +408,13 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
 
    <step>
     <para>
-     Add a file <filename>nls.mk</filename> in the directory with the
-     program sources.  This file will be read as a makefile.  The
-     following variable assignments need to be made here:
+     Register the program in <varname>po_catalogs</varname> in its
+     <filename>meson.build</filename>.  The dictionary entry is keyed by
+     the source-root-relative directory and contains the following fields:
 
      <variablelist>
       <varlistentry>
-       <term><varname>CATALOG_NAME</varname></term>
+       <term><literal>name</literal></term>
 
        <listitem>
         <para>
@@ -382,32 +425,30 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
       </varlistentry>
 
       <varlistentry>
-       <term><varname>GETTEXT_FILES</varname></term>
+       <term><literal>sources</literal></term>
 
        <listitem>
         <para>
-         List of files that contain translatable strings, i.e., those
-         marked with <function>gettext</function> or an alternative
-         solution.  Eventually, this will include nearly all source
-         files of the program.  If this list gets too long you can
-         make the first <quote>file</quote> be a <literal>+</literal>
-         and the second word be a file that contains one file name per
-         line.
+         Reuse the program's Meson source collections, together with any shared
+         sources and message-bearing headers.  Include all platform and feature
+         variants.  Supply generated inputs in a separate <literal>generated</literal>
+         list of Meson targets, so their producers run before extraction.
+         See <filename>src/tools/po/README</filename>
+         for the treatment of scanners and parsers.
         </para>
        </listitem>
       </varlistentry>
 
       <varlistentry>
-       <term><varname>GETTEXT_TRIGGERS</varname></term>
+       <term><literal>keywords</literal></term>
 
        <listitem>
         <para>
          The tools that generate message catalogs for the translators
          to work on need to know what function calls contain
-         translatable strings.  By default, only
-         <function>gettext()</function> calls are known.  If you used
-         <function>_</function> or other identifiers you need to list
-         them here.  If the translatable string is not the first
+         translatable strings.  List additional identifiers in this array;
+         standard gettext functions and <function>_</function> are
+         recognized automatically.  If the translatable string is not the first
          argument, the item needs to be of the form
          <literal>func:2</literal> (for the second argument).
          If you have a function that supports pluralized messages,
@@ -416,7 +457,32 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
         </para>
        </listitem>
       </varlistentry>
+      <varlistentry>
+       <term><literal>flags</literal></term>
+       <listitem>
+        <para>
+         Array of format annotations for the extraction tool, for example
+         <literal>notice:1:c-format</literal> for a function whose first
+         argument is a <function>printf</function>-style format string.
+        </para>
+       </listitem>
+      </varlistentry>
      </variablelist>
+    </para>
+    <para>
+     Set <literal>frontend</literal> or <literal>backend</literal> to
+     <literal>true</literal> to include the corresponding common extraction
+     keywords and format flags.
+     See <filename>src/tools/po/README</filename> and existing catalogs for
+     examples.  Also add <filename>nls.mk</filename> setting
+     <varname>CATALOG_NAME</varname> for Make's compilation and installation
+     of translations, and <filename>po/meson.build</filename> following the
+     existing catalogs.  Register the directory in the compendium inventory in
+     <filename>src/tools/po/meson.build</filename>.  External PGXS
+     extensions can continue to use <filename>nls.mk</filename>, with the
+     corresponding Make variables <varname>CATALOG_NAME</varname>,
+     <varname>GETTEXT_FILES</varname>, <varname>GETTEXT_TRIGGERS</varname>,
+     and <varname>GETTEXT_FLAGS</varname>.
     </para>
    </step>
 

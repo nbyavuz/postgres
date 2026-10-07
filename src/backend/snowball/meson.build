@@ -66,6 +66,7 @@ dict_snowball_sources += files(
 stemmer_inc = include_directories('../../include/snowball',
                                   '../../include/snowball/libstemmer')
 
+backend_po_sources += dict_snowball_sources
 if host_system == 'windows'
   dict_snowball_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'dict_snowball',

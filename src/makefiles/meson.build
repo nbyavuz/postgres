@@ -177,7 +177,7 @@ pgxs_empty = [
   'GCOV',
   'MSGFMT_FLAGS',
 
-  # translation doesn't appear to be supported by pgxs
+  # nls-global.mk supplies tool defaults for PGXS catalog maintenance
   'MSGFMT',
   'XGETTEXT',
   'MSGMERGE',

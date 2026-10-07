@@ -19,6 +19,7 @@ plpython_sources = files(
   'plpy_util.c',
 )
 
+plpython_po_sources = plpython_sources
 plpython_sources += custom_target('spiexceptions.h',
   input: files('../../backend/utils/errcodes.txt'),
   output: 'spiexceptions.h',
@@ -106,4 +107,9 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/pl/plpython': {
+  'name': 'plpython', 'backend': true, 'sources': plpython_po_sources,
+  'keywords': ['PLy_elog:2', 'PLy_exception_set:2', 'PLy_exception_set_plural:2,3'],
+  'flags': ['PLy_elog:2:c-format', 'PLy_exception_set:2:c-format',
+            'PLy_exception_set_plural:2:c-format', 'PLy_exception_set_plural:3:c-format'],
+}}

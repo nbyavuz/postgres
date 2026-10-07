@@ -7,6 +7,7 @@ endif
 plperl_sources = files(
   'plperl.c',
 )
+plperl_po_sources = plperl_sources
 
 subppdir = run_command(perl, '-e', 'use List::Util qw(first); print first { -r "$_/ExtUtils/xsubpp" } @INC',
   check: true).stdout()
@@ -35,6 +36,9 @@ foreach n : ['SPI', 'Util']
     command: [perl, xsubpp, '-typemap', typemap, '-output', '@OUTPUT@', '@INPUT@']
   )
   plperl_sources += xs_c
+  if n == 'SPI'
+    plperl_po_generated = [xs_c]
+  endif
 endforeach
 
 plperl_inc = include_directories('.')
@@ -102,4 +106,7 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/pl/plperl': {
+  'name': 'plperl', 'backend': true, 'sources': plperl_po_sources,
+  'generated': plperl_po_generated,
+}}

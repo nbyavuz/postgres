@@ -1,8 +1,10 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
 # Some code benefits from auto-vectorization
+vectorize_backend_sources = files('numeric.c', 'varbit.c')
+backend_po_sources += vectorize_backend_sources
 vectorize_backend_lib = static_library('vectorize_backend_lib',
-  ['numeric.c', 'varbit.c'],
+  vectorize_backend_sources,
   dependencies: backend_build_deps,
   kwargs: internal_lib_args,
   c_args: vectorize_cflags,
@@ -129,15 +131,19 @@ backend_sources += files(
 )
 
 
+jsonpath_scan_input = files('jsonpath_scan.l')
+jsonpath_gram_input = files('jsonpath_gram.y')
+backend_po_sources += jsonpath_gram_input + files('like_match.c', 'levenshtein.c')
 jsonpath_scan = custom_target('jsonpath_scan',
-  input: 'jsonpath_scan.l',
+  input: jsonpath_scan_input,
   output: 'jsonpath_scan.c',
   command: [flex_cmd, '--no-backup', '--', '-CF', '-p', '-p'],
 )
 generated_sources += jsonpath_scan
+backend_po_generated += jsonpath_scan
 
 jsonpath_gram = custom_target('jsonpath_parse',
-  input: 'jsonpath_gram.y',
+  input: jsonpath_gram_input,
   kwargs: bison_kw,
 )
 generated_sources += jsonpath_gram.to_list()

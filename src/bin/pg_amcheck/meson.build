@@ -4,6 +4,7 @@ pg_amcheck_sources = files(
   'pg_amcheck.c',
 )
 
+pg_amcheck_po_sources = pg_amcheck_sources
 if host_system == 'windows'
   pg_amcheck_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_amcheck',
@@ -32,4 +33,12 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_amcheck': {
+  'name': 'pg_amcheck', 'frontend': true,
+  'sources': pg_amcheck_po_sources + files(
+    '../../common/logging.c', '../../common/fe_memutils.c', '../../common/file_utils.c',
+    '../../common/username.c', '../../fe_utils/cancel.c', '../../fe_utils/connect_utils.c',
+    '../../fe_utils/option_utils.c', '../../fe_utils/parallel_slot.c',
+    '../../fe_utils/query_utils.c', '../../fe_utils/string_utils.c'),
+  'keywords': ['log_no_match'], 'flags': ['log_no_match:1:c-format'],
+}}

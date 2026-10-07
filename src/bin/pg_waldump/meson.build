@@ -11,6 +11,7 @@ pg_waldump_sources += rmgr_desc_sources
 pg_waldump_sources += xlogreader_sources
 pg_waldump_sources += files('../../backend/access/transam/xlogstats.c')
 
+pg_waldump_po_sources = pg_waldump_sources
 if host_system == 'windows'
   pg_waldump_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_waldump',
@@ -38,4 +39,9 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_waldump': {
+  'name': 'pg_waldump', 'frontend': true,
+  'sources': pg_waldump_po_sources + files(
+    '../../common/logging.c', '../../common/fe_memutils.c', '../../common/file_utils.c'),
+  'keywords': ['report_invalid_record:2'], 'flags': ['report_invalid_record:2:c-format'],
+}}

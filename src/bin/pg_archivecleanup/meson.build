@@ -4,6 +4,7 @@ pg_archivecleanup_sources = files(
   'pg_archivecleanup.c',
 )
 
+pg_archivecleanup_po_sources = pg_archivecleanup_sources
 if host_system == 'windows'
   pg_archivecleanup_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_archivecleanup',
@@ -28,4 +29,7 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_archivecleanup': {
+  'name': 'pg_archivecleanup', 'frontend': true,
+  'sources': pg_archivecleanup_po_sources + files('../../common/logging.c', '../../common/fe_memutils.c'),
+}}

@@ -37,8 +37,9 @@ pg_regress = executable('pg_regress',
 )
 bin_targets += pg_regress
 
+regress_module_sources = files('regress.c')
 regress_module = shared_module('regress',
-  ['regress.c'],
+  regress_module_sources,
   kwargs: pg_test_mod_args,
 )
 test_install_libs += regress_module
@@ -58,4 +59,6 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/test/regress': {
+  'name': 'postgresql-regress', 'backend': true, 'sources': regress_module_sources,
+}}

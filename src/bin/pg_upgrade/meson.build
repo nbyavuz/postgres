@@ -22,6 +22,7 @@ pg_upgrade_sources = files(
   'version.c',
 )
 
+pg_upgrade_po_sources = pg_upgrade_sources
 if host_system == 'windows'
   pg_upgrade_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_upgrade',
@@ -75,4 +76,13 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_upgrade': {
+  'name': 'pg_upgrade',
+  'sources': pg_upgrade_po_sources + files(
+    '../../common/fe_memutils.c', '../../common/file_utils.c', '../../common/restricted_token.c',
+    '../../common/username.c', '../../fe_utils/option_utils.c',
+    '../../fe_utils/string_utils.c', '../../fe_utils/version.c'),
+  'keywords': ['pg_fatal', 'pg_log:2', 'prep_status', 'prep_status_progress', 'report_status:2'],
+  'flags': ['pg_fatal:1:c-format', 'pg_log:2:c-format', 'prep_status:1:c-format',
+            'prep_status_progress:1:c-format', 'report_status:2:c-format'],
+}}

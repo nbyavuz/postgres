@@ -8,8 +8,10 @@ plpgsql_sources = files(
   'pl_scanner.c',
 )
 
+pl_gram_input = files('pl_gram.y')
+plpgsql_po_sources = plpgsql_sources + pl_gram_input
 pl_gram = custom_target('gram',
-  input: 'pl_gram.y',
+  input: pl_gram_input,
   kwargs: bison_kw,
 )
 generated_sources += pl_gram.to_list()
@@ -92,4 +94,7 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/pl/plpgsql/src': {
+  'name': 'plpgsql', 'backend': true, 'sources': plpgsql_po_sources,
+  'keywords': ['plpgsql_yyerror:4', 'yyerror:4'],
+}}

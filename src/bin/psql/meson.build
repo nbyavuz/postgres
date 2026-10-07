@@ -16,8 +16,10 @@ psql_sources = files(
   'variables.c',
 )
 
+psqlscanslash_input = files('psqlscanslash.l')
+psql_po_sources = psql_sources
 psqlscanslash = custom_target('psqlscanslash',
-  input: 'psqlscanslash.l',
+  input: psqlscanslash_input,
   output: 'psqlscanslash.c',
   command: [flex_cmd, '--no-backup', '--', '-Cfe', '-p', '-p'])
 generated_sources += psqlscanslash
@@ -82,4 +84,13 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/psql': {
+  'name': 'psql', 'frontend': true,
+  'generated': [psqlscanslash, psqlscan, tabcomplete] + sql_help.to_list(),
+  'sources': psql_po_sources + files(
+    '../../common/logging.c', '../../common/exec.c', '../../common/fe_memutils.c',
+    '../../common/username.c', '../../common/wait_error.c', '../../fe_utils/cancel.c',
+    '../../fe_utils/print.c', '../../fe_utils/string_utils.c'),
+  'keywords': ['HELP0', 'HELPN', 'N_', 'simple_prompt', 'simple_prompt_extended'],
+  'flags': ['HELPN:1:c-format'],
+}}

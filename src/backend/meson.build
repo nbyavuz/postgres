@@ -2,6 +2,8 @@
 
 backend_build_deps = [backend_code]
 backend_sources = []
+backend_po_sources = []
+backend_po_generated = []
 backend_link_with = [pgport_srv, common_srv]
 
 generated_backend_sources = []
@@ -33,8 +35,6 @@ subdir('storage')
 subdir('tcop')
 subdir('tsearch')
 subdir('utils')
-
-subdir('po', if_found: libintl)
 
 
 backend_link_args = []
@@ -222,3 +222,19 @@ subdir('replication/pgoutput')
 subdir('replication/pgrepack')
 subdir('snowball')
 subdir('utils/mb/conversion_procs')
+
+po_catalogs += {'src/backend': {
+  'name': 'postgres', 'backend': true,
+  'sources': backend_sources + backend_po_sources + common_po_sources + port_po_sources +
+    files('../include/postmaster/proctypelist.h'),
+  'generated': backend_po_generated + [guc_tables],
+  'keywords': ['GUC_check_errdetail', 'GUC_check_errhint', 'GUC_check_errmsg',
+    'ereport_startup_progress', 'error_cb:2', 'json_manifest_parse_failure:2',
+    'json_token_error:2', 'jsonpath_yyerror:4', 'parser_yyerror',
+    'replication_yyerror:3', 'report_invalid_record:2', 'scanner_yyerror',
+    'syncrep_yyerror:4', 'write_stderr', 'yyerror'],
+  'flags': ['GUC_check_errdetail:1:c-format', 'GUC_check_errhint:1:c-format',
+    'GUC_check_errmsg:1:c-format', 'ereport_startup_progress:1:c-format',
+    'error_cb:2:c-format', 'json_token_error:2:c-format',
+    'report_invalid_record:2:c-format', 'write_stderr:1:c-format'],
+}}

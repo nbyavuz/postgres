@@ -32,6 +32,7 @@ pg_dump_sources = files(
   'pg_dump.c',
   'pg_dump_sort.c',
 )
+pg_dump_po_sources = pg_dump_common_sources + pg_dump_sources
 
 if host_system == 'windows'
   pg_dump_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
@@ -51,6 +52,7 @@ bin_targets += pg_dump
 pg_dumpall_sources = files(
   'pg_dumpall.c',
 )
+pg_dump_po_sources += pg_dumpall_sources
 
 if host_system == 'windows'
   pg_dumpall_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
@@ -70,6 +72,7 @@ bin_targets += pg_dumpall
 pg_restore_sources = files(
   'pg_restore.c',
 )
+pg_dump_po_sources += pg_restore_sources
 
 if host_system == 'windows'
   pg_restore_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
@@ -108,4 +111,12 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_dump': {
+  'name': 'pg_dump', 'frontend': true,
+  'sources': pg_dump_po_sources + files(
+    'parallel.h', 'pg_backup_utils.h', '../../common/logging.c', '../../common/compression.c',
+    '../../common/exec.c', '../../common/fe_memutils.c', '../../common/file_utils.c',
+    '../../common/wait_error.c', '../../fe_utils/option_utils.c', '../../fe_utils/string_utils.c'),
+  'keywords': ['ExecuteSqlCommand:3', 'simple_prompt', 'warn_or_exit_horribly:2'],
+  'flags': ['warn_or_exit_horribly:2:c-format'],
+}}

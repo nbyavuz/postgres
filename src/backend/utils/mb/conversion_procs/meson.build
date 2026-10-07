@@ -29,6 +29,7 @@ encodings = {
 
 foreach encoding, sources : encodings
   source_files = files(sources)
+  backend_po_sources += source_files
 
   if host_system == 'windows'
     source_files += rc_lib_gen.process(win32ver_rc, extra_args: [

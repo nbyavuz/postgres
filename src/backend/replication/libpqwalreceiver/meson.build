@@ -4,6 +4,7 @@ libpqwalreceiver_sources = files(
   'libpqwalreceiver.c',
 )
 
+backend_po_sources += libpqwalreceiver_sources
 if host_system == 'windows'
   libpqwalreceiver_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pqwalreceiver',

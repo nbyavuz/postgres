@@ -3372,6 +3372,7 @@ pl_targets = []
 contrib_targets = []
 testprep_targets = []
 nls_targets = []
+po_catalogs = {}
 update_unicode_targets = []
 
 
@@ -3765,6 +3766,88 @@ above, or by running configure and then make maintainer-clean.
   error(errmsg_nonclean_base.format(errmsg_cleanup))
 endif
 
+
+
+###############################################################
+# Message catalogs
+###############################################################
+
+subdir('src/tools/po')
+po_templates = []
+po_updates = []
+foreach po_subdir, catalog : po_catalogs
+  po_name = catalog['name']
+  po_keywords = catalog.get('keywords', [])
+  po_flags = catalog.get('flags', [])
+  if catalog.get('backend', false)
+    po_keywords += po_backend_keywords
+    po_flags += po_backend_flags
+  elif catalog.get('frontend', false)
+    po_keywords += po_frontend_keywords
+    po_flags += po_frontend_flags
+  endif
+  po_args = ['--keyword=_', '--flag=_:1:pass-c-format']
+  foreach keyword : po_keywords
+    po_args += '--keyword=' + keyword
+  endforeach
+  foreach flag : po_flags
+    po_args += '--flag=' + flag
+  endforeach
+  po_command = [python, maintain_po,
+    '--source-root', meson.project_source_root(),
+    '--build-root', meson.project_build_root(),
+    '--subdir', po_subdir, '--name', po_name,
+    '--version', pg_version_major.to_string(), po_tools]
+  po_input_paths = []
+  foreach source : catalog['sources']
+    if meson.version().version_compare('>=0.59')
+      po_input_paths += meson.project_source_root() / fs.parent(source) / fs.name(source)
+    else
+      po_input_paths += meson.project_source_root() / '@0@'.format(source)
+    endif
+  endforeach
+  foreach generated : catalog.get('generated', [])
+    po_input_paths += generated.full_path()
+  endforeach
+  # A manifest avoids command-line length limits, particularly on Windows.
+  po_input_config = configuration_data()
+  po_input_config.set('INPUTS', '\n'.join(po_input_paths))
+  po_input_file = configure_file(
+    input: 'src/tools/po/inputs.in',
+    output: po_name + '-po-inputs',
+    configuration: po_input_config,
+  )
+  po_template_kwargs = {
+    'input': [po_input_file] + catalog.get('generated', []),
+    'depend_files': catalog['sources'] + po_tool_files.get('xgettext', []),
+    'output': po_name + '.pot',
+    'command': po_command + ['extract', '--output', '@OUTPUT@',
+      po_args, '--files-from', '@INPUT0@'],
+    'build_by_default': false,
+  }
+  po_available = fs.read(meson.project_source_root() / po_subdir / 'po/LINGUAS').split()
+  po_merge_kwargs = {}
+  foreach language, compendia : po_compendia
+    if get_option('po_languages').length() > 0 and language not in get_option('po_languages')
+      continue
+    endif
+    original = []
+    if language in po_available
+      original = ['--original', meson.project_source_root() / po_subdir / 'po' / (language + '.po')]
+    endif
+    po_merge_kwargs += {language: {
+      'output': language + '.po.new',
+      'depend_files': compendia + po_tool_files.get('msgmerge', []),
+      'command': po_command + ['merge', '--output', '@OUTPUT@',
+        '--template', '@INPUT@', '--language', language, original,
+        '--compendia', compendia],
+      'build_by_default': false,
+    }}
+  endforeach
+  subdir(po_subdir / 'po')
+endforeach
+alias_target('init-po', po_templates)
+alias_target('update-po', po_templates + po_updates)
 
 
 ###############################################################

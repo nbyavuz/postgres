@@ -193,18 +193,6 @@ utils/probes.o: utils/probes.d $(SUBDIROBJS)
 
 ##########################################################################
 
-# This target is only needed by nls.mk.
-.PHONY: generated-parser-sources
-generated-parser-sources:
-	$(MAKE) -C parser	gram.c gram.h scan.c
-	$(MAKE) -C bootstrap	bootparse.c bootparse.h bootscanner.c
-	$(MAKE) -C replication	repl_gram.c repl_gram.h repl_scanner.c syncrep_gram.c syncrep_gram.h syncrep_scanner.c
-	$(MAKE) -C utils/adt	jsonpath_gram.c jsonpath_gram.h jsonpath_scan.c
-	$(MAKE) -C utils/misc	guc-file.c
-
-
-##########################################################################
-
 install: all installdirs install-bin
 ifeq ($(PORTNAME), cygwin)
 ifeq ($(MAKE_DLL), true)

@@ -4,6 +4,7 @@ pg_walsummary_sources = files(
   'pg_walsummary.c',
 )
 
+pg_walsummary_po_sources = pg_walsummary_sources
 if host_system == 'windows'
   pg_walsummary_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_walsummary',
@@ -30,4 +31,9 @@ tests += {
   }
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_walsummary': {
+  'name': 'pg_walsummary', 'frontend': true,
+  'sources': pg_walsummary_po_sources + files(
+    '../../common/logging.c', '../../common/fe_memutils.c', '../../common/file_utils.c',
+    '../../fe_utils/option_utils.c'),
+}}

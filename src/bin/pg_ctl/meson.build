@@ -4,6 +4,7 @@ pg_ctl_sources = files(
   'pg_ctl.c',
 )
 
+pg_ctl_po_sources = pg_ctl_sources
 if host_system == 'windows'
   pg_ctl_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_ctl',
@@ -31,4 +32,9 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_ctl': {
+  'name': 'pg_ctl',
+  'sources': pg_ctl_po_sources + files(
+    '../../common/controldata_utils.c', '../../common/exec.c', '../../common/fe_memutils.c',
+    '../../common/wait_error.c', '../../port/path.c'),
+}}

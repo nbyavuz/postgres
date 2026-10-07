@@ -4,6 +4,7 @@ test_fsync_sources = files(
   'pg_test_fsync.c',
 )
 
+test_fsync_po_sources = test_fsync_sources
 if host_system == 'windows'
   test_fsync_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_test_fsync',
@@ -28,4 +29,8 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_test_fsync': {
+  'name': 'pg_test_fsync', 'frontend': true,
+  'sources': test_fsync_po_sources + files('../../common/logging.c', '../../common/fe_memutils.c'),
+  'keywords': ['die'],
+}}

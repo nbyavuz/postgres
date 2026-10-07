@@ -20,11 +20,13 @@ backend_sources += files(
   'tzparser.c',
 )
 
+guc_scan_input = files('guc-file.l')
 guc_scan = custom_target('guc_scan',
-  input: 'guc-file.l',
+  input: guc_scan_input,
   output: 'guc-file.c',
   command: flex_cmd)
 generated_sources += guc_scan
+backend_po_generated += guc_scan
 
 # so we don't need to add . as an include dir for the whole backend
 backend_link_with += static_library('guc-file',

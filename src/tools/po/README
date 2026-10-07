@@ -1,0 +1,101 @@
+Message catalog maintenance
+===========================
+
+Meson provides init-po and update-po, and <catalog>-init-po and
+<catalog>-update-po for each configured catalog.  Outputs live in the
+component's po directory in the build tree.  xgettext and msgmerge are
+maintenance tools; ordinary builds do not require them.  Runtime NLS need
+not be enabled.  Enable optional procedural languages explicitly when
+preparing catalogs for Babel.
+
+Both .pot and .po.new files are declared custom-target outputs.  An unchanged
+invocation does no work.  Changes to sources, generator inputs, extraction
+commands, original translations or same-language compendia rebuild the
+affected outputs.  Clean removes the outputs.  Configure -Dpo_languages=de,fr
+to restrict merging; the empty default includes all languages listed in the
+source LINGUAS files.  Unknown codes are ignored.  LINGUAS changes trigger
+reconfiguration.  Compendia include disabled optional components too.
+
+Catalog registrations
+---------------------
+
+Each component registers a dictionary in po_catalogs, keyed by its
+source-root-relative directory.  name is the unversioned catalog name;
+sources contains ordinary Meson file objects; generated contains producer
+targets for generated extraction inputs.  frontend and
+backend select common keyword and format-flag sets.  keywords and flags add
+component-specific settings.  The po/meson.build file declares outputs in
+the appropriate directory and retains the existing i18n.gettext installation
+rules and versioned text domains.
+
+Reuse ordinary compilation source lists before adding resource files.  For
+conditional sources, declare the collections before selecting the compilation
+variant and include all variants in extraction.  Do not use directory scans:
+they miss generated inputs in fresh builds and can pick up stale files.
+Message-bearing headers and included C fragments need explicit entries.
+Shared sources belong in each catalog that translates them at runtime;
+linking libpq does not make its messages part of the caller's text domain.
+
+Generated inputs
+----------------
+
+Pass generators in generated, not filenames guessed in the build tree.
+This includes GUC tables, psql SQL help and tab completion, and PL/Perl SPI.c.
+Extract Bison grammars before Bison adds its implementation: ordinary .y files
+are inputs directly, while ECPG's preproc.y is a generated target.
+
+Flex syntax is not C and feeding raw .l files to xgettext produces lexical
+warnings.  Instead, scanners are generated normally, and maintain_po.py keeps
+only regions attributed to .l inputs by Flex's #line directives.  This retains
+PostgreSQL's scanner actions and comments without extracting Flex scaffolding.
+
+The helper stages inputs in a temporary source-shaped tree, normalizes #line
+paths and invokes xgettext using catalog-relative filenames.  Line numbers
+are preserved; compiler inputs are never modified.  Files without source
+mappings, such as sql_help.c and guc_tables.inc.c, retain stable logical
+generated-file references.  Normalization precedes sorting, making reference
+spelling and order independent of the build location.  Each output replaces
+its predecessor only after gettext succeeds.
+
+Make and PGXS
+-------------
+
+In-tree nls.mk files contain only CATALOG_NAME for compiling and installing
+existing translations.  In-tree extraction uses Meson.  nls-global.mk retains
+legacy extraction settings and targets for external PGXS extensions; it does
+not need Python, JSON metadata or an adapter.  Older branches, particularly
+14 and 15, continue to use their existing Make maintenance workflow.
+
+Shared translations
+-------------------
+
+Sharing extraction inputs and compendia preserves existing text domains but
+does not eliminate repeated translation maintenance.  A follow-up can give
+shared components translator-facing catalogs and compose program catalogs in
+the build tree before msgfmt.  That requires coordinated Babel publication,
+seeding translations and resolving conflicts, defining precedence and plural
+headers, and providing composition in both Make and Meson.  It must also
+handle missing languages, fuzzy translations, and context-specific overrides.
+
+Verification
+------------
+
+With xgettext and msgmerge installed, meson test --suite po exercises scanner
+filtering, source references across build locations, plurals, translator
+comments, compendium initialization, manifests, and failed-output preservation.
+The tests do not need a database server.
+
+When changing source selection, compare every catalog with a fully generated
+Make baseline, not a VPATH backend scan that omits generated files.  Compare
+message IDs, plural forms, format flags and translator comments separately
+from references and creation dates.  Reusing the complete compilation lists
+also extracts messages previously omitted from libpq's fe-print.c, ECPG's
+parser.c and the LLVM C++ sources.
+
+For build-graph changes, test a fresh init-po, a repeated no-op invocation,
+changes to ordinary and generated inputs, a same-language compendium edit,
+and source additions/removals in the compilation list.  Compare catalogs in
+different build locations with SSL, GSSAPI and OAuth disabled as well as
+enabled.  Test optional languages separately, and verify that clean removes
+the declared outputs.  Make all-po and an installed PGXS extension's
+init-po/update-po/all-po cover the compatibility boundary.

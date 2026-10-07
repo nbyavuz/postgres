@@ -5,17 +5,21 @@ backend_sources += files(
 
 # see ../parser/meson.build
 boot_parser_sources = []
+bootscanner_input = files('bootscanner.l')
+bootparse_input = files('bootparse.y')
+backend_po_sources += bootparse_input
 
 bootscanner = custom_target('bootscanner',
-  input: 'bootscanner.l',
+  input: bootscanner_input,
   output: 'bootscanner.c',
   command: flex_cmd,
 )
 generated_sources += bootscanner
+backend_po_generated += bootscanner
 boot_parser_sources += bootscanner
 
 bootparse = custom_target('bootparse',
-  input: 'bootparse.y',
+  input: bootparse_input,
   kwargs: bison_kw,
 )
 generated_sources += bootparse.to_list()

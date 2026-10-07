@@ -14,6 +14,8 @@ Code Targets:
   pl                            Build procedural languages
 
 Developer Targets:
+  init-po                       Create message catalog templates
+  update-po                     Merge message changes into .po.new files
   reformat-dat-files            Rewrite catalog data files into standard format
   expand-dat-files              Expand all data files to include defaults
   update-unicode                Update Unicode data to new version

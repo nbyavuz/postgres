@@ -4,6 +4,7 @@ pg_resetwal_sources = files(
   'pg_resetwal.c',
 )
 
+pg_resetwal_po_sources = pg_resetwal_sources
 if host_system == 'windows'
   pg_resetwal_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_resetwal',
@@ -29,4 +30,10 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_resetwal': {
+  'name': 'pg_resetwal', 'frontend': true,
+  'sources': pg_resetwal_po_sources + files(
+    '../../common/logging.c', '../../common/controldata_utils.c', '../../common/fe_memutils.c',
+    '../../common/file_utils.c', '../../common/restricted_token.c',
+    '../../fe_utils/option_utils.c', '../../fe_utils/version.c'),
+}}

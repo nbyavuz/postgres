@@ -1,9 +1,5 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
-if not llvm.found()
-  subdir_done()
-endif
-
 # Build LLVM JIT backend module
 
 llvmjit_sources = []
@@ -22,6 +18,11 @@ llvmjit_sources += files(
   'llvmjit_deform.c',
   'llvmjit_expr.c',
 )
+
+backend_po_sources += llvmjit_sources
+if not llvm.found()
+  subdir_done()
+endif
 
 if host_system == 'windows'
   llvmjit_sources += rc_lib_gen.process(win32ver_rc, extra_args: [

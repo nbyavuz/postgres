@@ -42,19 +42,22 @@ common_sources = files(
   'wchar.c',
 )
 
+common_ssl_sources = files(
+  'cryptohash_openssl.c',
+  'hmac_openssl.c',
+)
+common_builtin_crypto_sources = files(
+  'cryptohash.c',
+  'hmac.c',
+  'md5.c',
+  'sha1.c',
+  'sha2.c',
+)
+common_po_sources = common_sources + common_ssl_sources + common_builtin_crypto_sources
 if ssl.found()
-  common_sources += files(
-    'cryptohash_openssl.c',
-    'hmac_openssl.c',
-  )
+  common_sources += common_ssl_sources
 else
-  common_sources += files(
-    'cryptohash.c',
-    'hmac.c',
-    'md5.c',
-    'sha1.c',
-    'sha2.c',
-  )
+  common_sources += common_builtin_crypto_sources
 endif
 
 common_kwlist = custom_target('kwlist',
@@ -110,10 +113,11 @@ common_sources_cflags = {
 # shlib rules.
 
 common_sources_frontend_shlib = common_sources
-common_sources_frontend_shlib += files(
+common_frontend_only_sources = files(
   'restricted_token.c',
   'sprompt.c',
 )
+common_sources_frontend_shlib += common_frontend_only_sources
 
 common_sources_excluded_shlib = files(
   'fe_memutils.c',
@@ -124,6 +128,7 @@ common_sources_frontend_static = [
   common_sources_frontend_shlib,
   common_sources_excluded_shlib,
 ]
+common_po_sources += common_frontend_only_sources + common_sources_excluded_shlib + config_info_sources
 
 # Build pgcommon once for backend, once for use in frontend binaries, and
 # once for use in shared libraries

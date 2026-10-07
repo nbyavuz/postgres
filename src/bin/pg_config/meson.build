@@ -4,6 +4,7 @@ pg_config_sources = files(
   'pg_config.c',
 )
 
+pg_config_po_sources = pg_config_sources
 if host_system == 'windows'
   pg_config_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_config',
@@ -28,4 +29,8 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+po_catalogs += {'src/bin/pg_config': {
+  'name': 'pg_config',
+  'sources': pg_config_po_sources + files(
+    '../../common/config_info.c', '../../common/exec.c', '../../common/fe_memutils.c'),
+}}

@@ -1,9 +1,5 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
-if not oauth_flow_supported
-  subdir_done()
-endif
-
 libpq_oauth_sources = files(
   'oauth-curl.c',
 )
@@ -12,6 +8,15 @@ libpq_oauth_sources = files(
 libpq_oauth_so_sources = files(
   'oauth-utils.c',
 )
+libpq_catalog = po_catalogs['src/interfaces/libpq']
+po_catalogs += {'src/interfaces/libpq': libpq_catalog + {
+  'sources': libpq_catalog['sources'] + libpq_oauth_sources + libpq_oauth_so_sources,
+}}
+
+if not oauth_flow_supported
+  subdir_done()
+endif
+
 libpq_oauth_so_c_args = [
   '-DUSE_DYNAMIC_OAUTH',
 
