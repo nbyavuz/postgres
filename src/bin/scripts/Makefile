@@ -12,6 +12,8 @@
 PGFILEDESC = "PostgreSQL utility"
 PGAPPICON=win32
 
+CATALOG_NAME = pgscripts
+
 subdir = src/bin/scripts
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

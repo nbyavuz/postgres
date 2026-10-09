@@ -5,6 +5,8 @@ PGAPPICON = win32
 
 EXTRA_INSTALL=contrib/test_decoding src/test/modules/dummy_seclabel src/test/modules/test_extensions
 
+CATALOG_NAME = pg_upgrade
+
 subdir = src/bin/pg_upgrade
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

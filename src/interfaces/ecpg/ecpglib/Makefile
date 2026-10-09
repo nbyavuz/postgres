@@ -9,6 +9,8 @@
 #
 #-------------------------------------------------------------------------
 
+CATALOG_NAME = ecpglib
+
 subdir = src/interfaces/ecpg/ecpglib
 top_builddir = ../../../..
 include $(top_builddir)/src/Makefile.global

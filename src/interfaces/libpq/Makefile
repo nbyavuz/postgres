@@ -11,6 +11,8 @@
 
 EXTRA_INSTALL=src/test/modules/injection_points
 
+CATALOG_NAME = libpq
+
 subdir = src/interfaces/libpq
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

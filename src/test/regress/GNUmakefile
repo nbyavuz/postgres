@@ -13,6 +13,8 @@
 PGFILEDESC = "pg_regress - test driver"
 PGAPPICON = win32
 
+CATALOG_NAME = postgresql-regress
+
 subdir = src/test/regress
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

@@ -3,6 +3,8 @@
 PGFILEDESC = "pg_test_fsync - test various disk sync methods"
 PGAPPICON = win32
 
+CATALOG_NAME = pg_test_fsync
+
 subdir = src/bin/pg_test_fsync
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

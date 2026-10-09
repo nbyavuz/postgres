@@ -12,6 +12,8 @@
 PGFILEDESC = "PostgreSQL Server"
 PGAPPICON=win32
 
+CATALOG_NAME = postgres
+
 subdir = src/backend
 top_builddir = ../..
 include $(top_builddir)/src/Makefile.global

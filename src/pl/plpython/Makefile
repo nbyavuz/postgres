@@ -1,5 +1,7 @@
 # src/pl/plpython/Makefile
 
+CATALOG_NAME = plpython
+
 subdir = src/pl/plpython
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

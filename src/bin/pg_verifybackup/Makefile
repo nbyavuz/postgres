@@ -12,6 +12,8 @@ export GZIP_PROGRAM=$(GZIP)
 export LZ4=$(LZ4)
 export ZSTD=$(ZSTD)
 
+CATALOG_NAME = pg_verifybackup
+
 subdir = src/bin/pg_verifybackup
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

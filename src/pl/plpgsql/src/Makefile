@@ -6,6 +6,8 @@
 #
 #-------------------------------------------------------------------------
 
+CATALOG_NAME = plpgsql
+
 subdir = src/pl/plpgsql/src
 top_builddir = ../../../..
 include $(top_builddir)/src/Makefile.global

@@ -12,6 +12,8 @@
 PGFILEDESC = "pg_dump/pg_restore/pg_dumpall - backup and restore PostgreSQL databases"
 PGAPPICON=win32
 
+CATALOG_NAME = pg_dump
+
 subdir = src/bin/pg_dump
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

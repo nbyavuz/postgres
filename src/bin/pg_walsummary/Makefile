@@ -12,6 +12,8 @@
 PGFILEDESC = "pg_walsummary - print contents of WAL summary files"
 PGAPPICON=win32
 
+CATALOG_NAME = pg_walsummary
+
 subdir = src/bin/pg_walsummary
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

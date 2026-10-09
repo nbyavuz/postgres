@@ -1,6 +1,8 @@
 # Makefile for PL/Perl
 # src/pl/plperl/GNUmakefile
 
+CATALOG_NAME = plperl
+
 subdir = src/pl/plperl
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

@@ -12,6 +12,8 @@
 PGFILEDESC = "initdb - initialize a new database cluster"
 PGAPPICON=win32
 
+CATALOG_NAME = initdb
+
 subdir = src/bin/initdb
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

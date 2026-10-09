@@ -3,9 +3,10 @@
 # Common rules for Native Language Support (NLS)
 #
 # If some subdirectory of the source tree wants to provide NLS, it
-# needs to contain a file 'nls.mk' setting CATALOG_NAME.  In-tree message
-# extraction and merging use Meson.  External PGXS extensions can also set
-# the following extraction variables to use the legacy maintenance targets:
+# needs to set CATALOG_NAME in its Makefile before including Makefile.global.
+# In-tree message extraction and merging use Meson.  External PGXS extensions
+# can set CATALOG_NAME and the following extraction variables in nls.mk to
+# use the legacy maintenance targets:
 #
 # CATALOG_NAME          -- name of the message catalog (xxx.po); probably
 #                          name of the program
@@ -26,9 +27,6 @@
 # be called if the messages in the program source have changed, in
 # order to merge the changes into the existing .po files.
 
-
-# existence checked by Makefile.global; otherwise we won't get here
-include $(srcdir)/nls.mk
 
 AVAIL_LANGUAGES := $(shell cat $(srcdir)/po/LINGUAS)
 

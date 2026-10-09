@@ -3,6 +3,8 @@
 PGFILEDESC = "pg_test_timing - test timing overhead"
 PGAPPICON = win32
 
+CATALOG_NAME = pg_test_timing
+
 subdir = src/bin/pg_test_timing
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

@@ -1001,11 +1001,16 @@ endif # autodepend
 # Native language support
 
 ifeq ($(enable_nls), yes)
+ifdef PGXS
+# External extensions can still provide their NLS settings in nls.mk.
 ifneq (,$(wildcard $(srcdir)/nls.mk))
+include $(srcdir)/nls.mk
+endif
+endif # PGXS
 
+ifdef CATALOG_NAME
 include $(top_srcdir)/src/nls-global.mk
-
-endif # nls.mk
+endif # CATALOG_NAME
 endif # enable_nls
 
 

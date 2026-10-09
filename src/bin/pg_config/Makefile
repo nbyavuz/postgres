@@ -11,6 +11,8 @@
 PGFILEDESC = "pg_config - report configuration information"
 PGAPPICON=win32
 
+CATALOG_NAME = pg_config
+
 subdir = src/bin/pg_config
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

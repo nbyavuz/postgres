@@ -14,6 +14,8 @@ PGAPPICON=win32
 
 EXTRA_INSTALL=contrib/amcheck contrib/pageinspect
 
+CATALOG_NAME = pg_amcheck
+
 subdir = src/bin/pg_amcheck
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

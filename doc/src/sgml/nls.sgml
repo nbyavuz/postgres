@@ -138,7 +138,7 @@ msgstr "another translated"
     OK, so how does one create a <quote>blank</quote> message
     catalog?  First, go into the directory that contains the program
     whose messages you want to translate.  If there is a file
-    <filename>nls.mk</filename>, then this program has been prepared
+    <filename>po/LINGUAS</filename>, then this program has been prepared
     for translation.
    </para>
 
@@ -474,10 +474,12 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
      <literal>true</literal> to include the corresponding common extraction
      keywords and format flags.
      See <filename>src/tools/po/README</filename> and existing catalogs for
-     examples.  Also add <filename>nls.mk</filename> setting
-     <varname>CATALOG_NAME</varname> for Make's compilation and installation
-     of translations, and <filename>po/meson.build</filename> following the
-     existing catalogs.  Register the directory in the compendium inventory in
+     examples.  Also set <varname>CATALOG_NAME</varname> in the component's
+     <filename>Makefile</filename> before including
+     <filename>Makefile.global</filename> for Make's compilation and
+     installation of translations, and add <filename>po/meson.build</filename>
+     following the existing catalogs.  Register the directory in the compendium
+     inventory in
      <filename>src/tools/po/meson.build</filename>.  External PGXS
      extensions can continue to use <filename>nls.mk</filename>, with the
      corresponding Make variables <varname>CATALOG_NAME</varname>,

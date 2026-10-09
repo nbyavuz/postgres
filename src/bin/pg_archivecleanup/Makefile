@@ -3,6 +3,8 @@
 PGFILEDESC = "pg_archivecleanup - cleans archive when used with streaming replication"
 PGAPPICON = win32
 
+CATALOG_NAME = pg_archivecleanup
+
 subdir = src/bin/pg_archivecleanup
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

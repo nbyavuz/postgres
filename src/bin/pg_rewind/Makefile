@@ -11,6 +11,8 @@
 PGFILEDESC = "pg_rewind - synchronize a data directory with another one forked from"
 PGAPPICON = win32
 
+CATALOG_NAME = pg_rewind
+
 subdir = src/bin/pg_rewind
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

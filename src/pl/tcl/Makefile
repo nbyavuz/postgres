@@ -6,6 +6,8 @@
 #
 #-------------------------------------------------------------------------
 
+CATALOG_NAME = pltcl
+
 subdir = src/pl/tcl
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global

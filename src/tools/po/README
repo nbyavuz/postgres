@@ -60,8 +60,9 @@ its predecessor only after gettext succeeds.
 Make and PGXS
 -------------
 
-In-tree nls.mk files contain only CATALOG_NAME for compiling and installing
-existing translations.  In-tree extraction uses Meson.  nls-global.mk retains
+In-tree Makefiles set CATALOG_NAME before including Makefile.global for
+compiling and installing existing translations.  In-tree extraction uses
+Meson.  External PGXS extensions can still provide nls.mk.  nls-global.mk retains
 legacy extraction settings and targets for external PGXS extensions; it does
 not need Python, JSON metadata or an adapter.  Older branches, particularly
 14 and 15, continue to use their existing Make maintenance workflow.

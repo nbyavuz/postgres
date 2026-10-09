@@ -14,6 +14,8 @@ PGAPPICON=win32
 
 EXTRA_INSTALL=contrib/pg_visibility
 
+CATALOG_NAME = pg_combinebackup
+
 subdir = src/bin/pg_combinebackup
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
