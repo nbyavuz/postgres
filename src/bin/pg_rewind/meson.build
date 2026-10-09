@@ -52,10 +52,10 @@ tests += {
 
 po_catalogs += {'src/bin/pg_rewind': {
   'name': 'pg_rewind', 'frontend': true,
-  'sources': pg_rewind_po_sources + files(
-    '../../common/logging.c', '../../common/controldata_utils.c', '../../common/fe_memutils.c',
-    '../../common/file_utils.c', '../../common/percentrepl.c', '../../common/restricted_token.c',
-    '../../fe_utils/archive.c', '../../fe_utils/option_utils.c',
-    '../../fe_utils/recovery_gen.c', '../../fe_utils/string_utils.c'),
+  'sources': pg_rewind_po_sources +
+    common_logging_source + common_controldata_utils_source + common_fe_memutils_source +
+    common_file_utils_source + common_percentrepl_source + common_restricted_token_source +
+    fe_utils_archive_source + fe_utils_option_utils_source +
+    fe_utils_recovery_gen_source + fe_utils_string_utils_source,
   'keywords': ['report_invalid_record:2'], 'flags': ['report_invalid_record:2:c-format'],
 }}

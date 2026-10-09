@@ -31,5 +31,5 @@ tests += {
 
 po_catalogs += {'src/bin/pg_test_timing': {
   'name': 'pg_test_timing',
-  'sources': pg_test_timing_po_sources + files('../../common/fe_memutils.c'),
+  'sources': pg_test_timing_po_sources + common_fe_memutils_source,
 }}

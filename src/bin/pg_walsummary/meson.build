@@ -33,7 +33,7 @@ tests += {
 
 po_catalogs += {'src/bin/pg_walsummary': {
   'name': 'pg_walsummary', 'frontend': true,
-  'sources': pg_walsummary_po_sources + files(
-    '../../common/logging.c', '../../common/fe_memutils.c', '../../common/file_utils.c',
-    '../../fe_utils/option_utils.c'),
+  'sources': pg_walsummary_po_sources +
+    common_logging_source + common_fe_memutils_source + common_file_utils_source +
+    fe_utils_option_utils_source,
 }}

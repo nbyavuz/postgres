@@ -31,6 +31,6 @@ tests += {
 
 po_catalogs += {'src/bin/pg_controldata': {
   'name': 'pg_controldata', 'frontend': true,
-  'sources': pg_controldata_po_sources + files(
-    '../../common/controldata_utils.c', '../../common/fe_memutils.c'),
+  'sources': pg_controldata_po_sources +
+    common_controldata_utils_source + common_fe_memutils_source,
 }}

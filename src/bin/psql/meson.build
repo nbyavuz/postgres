@@ -87,10 +87,10 @@ tests += {
 po_catalogs += {'src/bin/psql': {
   'name': 'psql', 'frontend': true,
   'generated': [psqlscanslash, psqlscan, tabcomplete] + sql_help.to_list(),
-  'sources': psql_po_sources + files(
-    '../../common/logging.c', '../../common/exec.c', '../../common/fe_memutils.c',
-    '../../common/username.c', '../../common/wait_error.c', '../../fe_utils/cancel.c',
-    '../../fe_utils/print.c', '../../fe_utils/string_utils.c'),
+  'sources': psql_po_sources +
+    common_logging_source + common_exec_source + common_fe_memutils_source +
+    common_username_source + common_wait_error_source + fe_utils_cancel_source +
+    fe_utils_print_source + fe_utils_string_utils_source,
   'keywords': ['HELP0', 'HELPN', 'N_', 'simple_prompt', 'simple_prompt_extended'],
   'flags': ['HELPN:1:c-format'],
 }}

@@ -93,10 +93,10 @@ tests += {
 
 po_catalogs += {'src/bin/scripts': {
   'name': 'pgscripts', 'frontend': true,
-  'sources': scripts_po_sources + files(
-    '../../common/logging.c', '../../common/fe_memutils.c', '../../common/file_utils.c',
-    '../../common/username.c', '../../fe_utils/cancel.c', '../../fe_utils/connect_utils.c',
-    '../../fe_utils/option_utils.c', '../../fe_utils/parallel_slot.c', '../../fe_utils/print.c',
-    '../../fe_utils/query_utils.c', '../../fe_utils/string_utils.c'),
+  'sources': scripts_po_sources +
+    common_logging_source + common_fe_memutils_source + common_file_utils_source +
+    common_username_source + fe_utils_cancel_source + fe_utils_connect_utils_source +
+    fe_utils_option_utils_source + fe_utils_parallel_slot_source + fe_utils_print_source +
+    fe_utils_query_utils_source + fe_utils_string_utils_source,
   'keywords': ['simple_prompt', 'yesno_prompt'],
 }}

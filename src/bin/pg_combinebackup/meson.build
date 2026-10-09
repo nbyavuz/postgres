@@ -47,11 +47,11 @@ tests += {
 
 po_catalogs += {'src/bin/pg_combinebackup': {
   'name': 'pg_combinebackup', 'frontend': true,
-  'sources': pg_combinebackup_po_sources + files(
-    '../../common/logging.c', '../../common/controldata_utils.c',
-    '../../common/cryptohash.c', '../../common/cryptohash_openssl.c',
-    '../../common/fe_memutils.c', '../../common/file_utils.c', '../../common/jsonapi.c',
-    '../../common/parse_manifest.c', '../../fe_utils/option_utils.c', '../../fe_utils/version.c'),
+  'sources': pg_combinebackup_po_sources +
+    common_logging_source + common_controldata_utils_source +
+    common_cryptohash_source + common_cryptohash_openssl_source +
+    common_fe_memutils_source + common_file_utils_source + common_jsonapi_source +
+    common_parse_manifest_source + fe_utils_option_utils_source + fe_utils_version_source,
   'keywords': ['error_cb:2', 'json_manifest_parse_failure:2', 'json_token_error:2'],
   'flags': ['error_cb:2:c-format', 'json_token_error:2:c-format'],
 }}

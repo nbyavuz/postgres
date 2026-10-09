@@ -1,35 +1,44 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
+# Shared by compilation and per-program message catalog extraction.
+common_compression_source = files('compression.c')
+common_controldata_utils_source = files('controldata_utils.c')
+common_cryptohash_source = files('cryptohash.c')
+common_cryptohash_openssl_source = files('cryptohash_openssl.c')
+common_exec_source = files('exec.c')
+common_fe_memutils_source = files('fe_memutils.c')
+common_file_utils_source = files('file_utils.c')
+common_jsonapi_source = files('jsonapi.c')
+common_logging_source = files('logging.c')
+common_parse_manifest_source = files('parse_manifest.c')
+common_percentrepl_source = files('percentrepl.c')
+common_pgfnames_source = files('pgfnames.c')
+common_restricted_token_source = files('restricted_token.c')
+common_rmtree_source = files('rmtree.c')
+common_username_source = files('username.c')
+common_wait_error_source = files('wait_error.c')
+
 common_sources = files(
   'archive.c',
   'base64.c',
   'binaryheap.c',
   'blkreftable.c',
   'checksum_helper.c',
-  'compression.c',
-  'controldata_utils.c',
   'encnames.c',
-  'exec.c',
   'file_perm.c',
-  'file_utils.c',
   'hashfn.c',
   'instr_time.c',
   'ip.c',
-  'jsonapi.c',
   'keywords.c',
   'kwlookup.c',
   'link-canary.c',
   'md5_common.c',
-  'parse_manifest.c',
-  'percentrepl.c',
   'pg_get_line.c',
   'pg_lzcompress.c',
   'pg_parse_lsn.c',
   'pg_prng.c',
-  'pgfnames.c',
   'psprintf.c',
   'relpath.c',
-  'rmtree.c',
   'saslprep.c',
   'scram-common.c',
   'string.c',
@@ -37,22 +46,24 @@ common_sources = files(
   'unicode_case.c',
   'unicode_category.c',
   'unicode_norm.c',
-  'username.c',
-  'wait_error.c',
   'wchar.c',
+)
+common_sources += (
+  common_compression_source + common_controldata_utils_source +
+  common_exec_source + common_file_utils_source + common_jsonapi_source +
+  common_parse_manifest_source + common_percentrepl_source + common_pgfnames_source +
+  common_rmtree_source + common_username_source + common_wait_error_source
 )
 
 common_ssl_sources = files(
-  'cryptohash_openssl.c',
   'hmac_openssl.c',
-)
+) + common_cryptohash_openssl_source
 common_builtin_crypto_sources = files(
-  'cryptohash.c',
   'hmac.c',
   'md5.c',
   'sha1.c',
   'sha2.c',
-)
+) + common_cryptohash_source
 common_po_sources = common_sources + common_ssl_sources + common_builtin_crypto_sources
 if ssl.found()
   common_sources += common_ssl_sources
@@ -114,15 +125,11 @@ common_sources_cflags = {
 
 common_sources_frontend_shlib = common_sources
 common_frontend_only_sources = files(
-  'restricted_token.c',
   'sprompt.c',
-)
+) + common_restricted_token_source
 common_sources_frontend_shlib += common_frontend_only_sources
 
-common_sources_excluded_shlib = files(
-  'fe_memutils.c',
-  'logging.c',
-)
+common_sources_excluded_shlib = common_fe_memutils_source + common_logging_source
 
 common_sources_frontend_static = [
   common_sources_frontend_shlib,

@@ -113,12 +113,12 @@ tests += {
 
 po_catalogs += {'src/bin/pg_basebackup': {
   'name': 'pg_basebackup', 'frontend': true,
-  'sources': pg_basebackup_po_sources + files(
-    '../../common/logging.c', '../../common/compression.c', '../../common/controldata_utils.c',
-    '../../common/fe_memutils.c', '../../common/file_utils.c', '../../common/restricted_token.c',
-    '../../fe_utils/astreamer_file.c', '../../fe_utils/astreamer_gzip.c',
-    '../../fe_utils/astreamer_lz4.c', '../../fe_utils/astreamer_tar.c',
-    '../../fe_utils/astreamer_zstd.c', '../../fe_utils/option_utils.c',
-    '../../fe_utils/recovery_gen.c', '../../fe_utils/string_utils.c', '../../fe_utils/version.c'),
+  'sources': pg_basebackup_po_sources +
+    common_logging_source + common_compression_source + common_controldata_utils_source +
+    common_fe_memutils_source + common_file_utils_source + common_restricted_token_source +
+    fe_utils_astreamer_file_source + fe_utils_astreamer_gzip_source +
+    fe_utils_astreamer_lz4_source + fe_utils_astreamer_tar_source +
+    fe_utils_astreamer_zstd_source + fe_utils_option_utils_source +
+    fe_utils_recovery_gen_source + fe_utils_string_utils_source + fe_utils_version_source,
   'keywords': ['simple_prompt'],
 }}

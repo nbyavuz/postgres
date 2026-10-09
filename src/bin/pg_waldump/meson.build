@@ -41,7 +41,7 @@ tests += {
 
 po_catalogs += {'src/bin/pg_waldump': {
   'name': 'pg_waldump', 'frontend': true,
-  'sources': pg_waldump_po_sources + files(
-    '../../common/logging.c', '../../common/fe_memutils.c', '../../common/file_utils.c'),
+  'sources': pg_waldump_po_sources +
+    common_logging_source + common_fe_memutils_source + common_file_utils_source,
   'keywords': ['report_invalid_record:2'], 'flags': ['report_invalid_record:2:c-format'],
 }}

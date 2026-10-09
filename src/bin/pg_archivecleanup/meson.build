@@ -31,5 +31,5 @@ tests += {
 
 po_catalogs += {'src/bin/pg_archivecleanup': {
   'name': 'pg_archivecleanup', 'frontend': true,
-  'sources': pg_archivecleanup_po_sources + files('../../common/logging.c', '../../common/fe_memutils.c'),
+  'sources': pg_archivecleanup_po_sources + common_logging_source + common_fe_memutils_source,
 }}

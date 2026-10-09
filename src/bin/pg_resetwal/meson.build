@@ -32,8 +32,8 @@ tests += {
 
 po_catalogs += {'src/bin/pg_resetwal': {
   'name': 'pg_resetwal', 'frontend': true,
-  'sources': pg_resetwal_po_sources + files(
-    '../../common/logging.c', '../../common/controldata_utils.c', '../../common/fe_memutils.c',
-    '../../common/file_utils.c', '../../common/restricted_token.c',
-    '../../fe_utils/option_utils.c', '../../fe_utils/version.c'),
+  'sources': pg_resetwal_po_sources +
+    common_logging_source + common_controldata_utils_source + common_fe_memutils_source +
+    common_file_utils_source + common_restricted_token_source +
+    fe_utils_option_utils_source + fe_utils_version_source,
 }}

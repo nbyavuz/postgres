@@ -113,10 +113,10 @@ tests += {
 
 po_catalogs += {'src/bin/pg_dump': {
   'name': 'pg_dump', 'frontend': true,
-  'sources': pg_dump_po_sources + files(
-    'parallel.h', 'pg_backup_utils.h', '../../common/logging.c', '../../common/compression.c',
-    '../../common/exec.c', '../../common/fe_memutils.c', '../../common/file_utils.c',
-    '../../common/wait_error.c', '../../fe_utils/option_utils.c', '../../fe_utils/string_utils.c'),
+  'sources': pg_dump_po_sources + files('parallel.h', 'pg_backup_utils.h') +
+    common_logging_source + common_compression_source +
+    common_exec_source + common_fe_memutils_source + common_file_utils_source +
+    common_wait_error_source + fe_utils_option_utils_source + fe_utils_string_utils_source,
   'keywords': ['ExecuteSqlCommand:3', 'simple_prompt', 'warn_or_exit_horribly:2'],
   'flags': ['warn_or_exit_horribly:2:c-format'],
 }}

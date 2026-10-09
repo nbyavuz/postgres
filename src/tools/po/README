@@ -35,6 +35,11 @@ they miss generated inputs in fresh builds and can pick up stale files.
 Message-bearing headers and included C fragments need explicit entries.
 Shared sources belong in each catalog that translates them at runtime;
 linking libpq does not make its messages part of the caller's text domain.
+Declare shared files with files() in their owning directory's meson.build
+and reuse those variables in compilation lists and catalog registrations.
+Keep feature- and platform-specific extraction inputs available regardless
+of the build configuration.  Select only the shared files needed by each
+catalog, rather than adding an entire library's sources to every program.
 
 Generated inputs
 ----------------

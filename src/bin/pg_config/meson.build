@@ -31,6 +31,6 @@ tests += {
 
 po_catalogs += {'src/bin/pg_config': {
   'name': 'pg_config',
-  'sources': pg_config_po_sources + files(
-    '../../common/config_info.c', '../../common/exec.c', '../../common/fe_memutils.c'),
+  'sources': pg_config_po_sources +
+    config_info_sources + common_exec_source + common_fe_memutils_source,
 }}

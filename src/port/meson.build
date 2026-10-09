@@ -1,11 +1,13 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
-pgport_sources = [
+port_dirmod_source = files('dirmod.c')
+port_path_source = files('path.c')
+
+pgport_sources = files(
   'bsearch_arg.c',
   'chklocale.c',
   'inet_net_ntop.c',
   'noblock.c',
-  'path.c',
   'pg_bitutils.c',
   'pg_cpu_x86.c',
   'pg_getopt_ctx.c',
@@ -26,11 +28,10 @@ pgport_sources = [
   'snprintf.c',
   'strerror.c',
   'tar.c',
-]
+) + port_path_source
 
-port_po_sources = files(pgport_sources)
+port_po_sources = pgport_sources
 pgport_windows_sources = files(
-  'dirmod.c',
   'kill.c',
   'open.c',
   'system.c',
@@ -49,14 +50,12 @@ pgport_windows_sources = files(
   'win32security.c',
   'win32setlocale.c',
   'win32stat.c',
-)
+) + port_dirmod_source
 port_po_sources += pgport_windows_sources
 if host_system == 'windows'
   pgport_sources += pgport_windows_sources
 elif host_system == 'cygwin'
-  pgport_sources += files(
-    'dirmod.c',
-  )
+  pgport_sources += port_dirmod_source
 endif
 
 if cc.get_id() == 'msvc'

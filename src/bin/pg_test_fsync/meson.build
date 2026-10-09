@@ -31,6 +31,6 @@ tests += {
 
 po_catalogs += {'src/bin/pg_test_fsync': {
   'name': 'pg_test_fsync', 'frontend': true,
-  'sources': test_fsync_po_sources + files('../../common/logging.c', '../../common/fe_memutils.c'),
+  'sources': test_fsync_po_sources + common_logging_source + common_fe_memutils_source,
   'keywords': ['die'],
 }}
