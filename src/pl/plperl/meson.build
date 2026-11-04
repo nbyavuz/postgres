@@ -1,12 +1,14 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
-if not perl_dep.found()
-  subdir_done()
-endif
-
 plperl_sources = files(
   'plperl.c',
 )
+
+subdir('po')
+
+if not perl_dep.found()
+  subdir_done()
+endif
 
 subppdir = run_command(perl, '-e', 'use List::Util qw(first); print first { -r "$_/ExtUtils/xsubpp" } @INC',
   check: true).stdout()
@@ -101,5 +103,3 @@ tests += {
     'regress_args': ['--dlpath', meson.project_build_root() / 'src/test/regress'],
   },
 }
-
-subdir('po', if_found: libintl)

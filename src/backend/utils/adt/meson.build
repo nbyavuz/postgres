@@ -1,8 +1,10 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
 # Some code benefits from auto-vectorization
+vectorize_backend_sources = files('numeric.c', 'varbit.c')
+backend_nls_sources += vectorize_backend_sources
 vectorize_backend_lib = static_library('vectorize_backend_lib',
-  ['numeric.c', 'varbit.c'],
+  vectorize_backend_sources,
   dependencies: backend_build_deps,
   kwargs: internal_lib_args,
   c_args: vectorize_cflags,

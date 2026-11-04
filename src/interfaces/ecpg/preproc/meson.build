@@ -85,7 +85,7 @@ ecpg_exe = executable('ecpg',
 )
 ecpg_targets += ecpg_exe
 
-subdir('po', if_found: libintl)
+subdir('po')
 
 tests += {
   'name': 'ecpg',

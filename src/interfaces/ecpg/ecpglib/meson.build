@@ -65,4 +65,4 @@ pkgconfig.generate(
   requires_private: ['libpgtypes', 'libpq'],
 )
 
-subdir('po', if_found: libintl)
+subdir('po')

@@ -19,23 +19,24 @@ libpq_sources = files(
 )
 libpq_so_sources = [] # for shared lib, in addition to the above
 
+libpq_windows_sources = files('pthread-win32.c', 'win32.c')
+libpq_ssl_sources = files('fe-secure-common.c', 'fe-secure-openssl.c')
+libpq_gss_sources = files('fe-gssapi-common.c', 'fe-secure-gssapi.c')
+libpq_nls_sources = libpq_sources + libpq_windows_sources + libpq_ssl_sources + libpq_gss_sources
+
 if host_system == 'windows'
-  libpq_sources += files('pthread-win32.c', 'win32.c')
+  libpq_sources += libpq_windows_sources
   libpq_so_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'libpq',
     '--FILEDESC', 'PostgreSQL Access Library',])
 endif
 
 if ssl.found()
-  libpq_sources += files('fe-secure-common.c')
-  libpq_sources += files('fe-secure-openssl.c')
+  libpq_sources += libpq_ssl_sources
 endif
 
 if gssapi.found()
-  libpq_sources += files(
-    'fe-gssapi-common.c',
-    'fe-secure-gssapi.c',
-  )
+  libpq_sources += libpq_gss_sources
 endif
 
 export_file = custom_target('libpq.exports',
@@ -171,4 +172,4 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+subdir('po')

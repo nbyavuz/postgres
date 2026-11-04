@@ -42,19 +42,22 @@ common_sources = files(
   'wchar.c',
 )
 
+common_ssl_sources = files(
+  'cryptohash_openssl.c',
+  'hmac_openssl.c',
+)
+common_builtin_crypto_sources = files(
+  'cryptohash.c',
+  'hmac.c',
+  'md5.c',
+  'sha1.c',
+  'sha2.c',
+)
+common_nls_sources = common_sources + common_ssl_sources + common_builtin_crypto_sources
 if ssl.found()
-  common_sources += files(
-    'cryptohash_openssl.c',
-    'hmac_openssl.c',
-  )
+  common_sources += common_ssl_sources
 else
-  common_sources += files(
-    'cryptohash.c',
-    'hmac.c',
-    'md5.c',
-    'sha1.c',
-    'sha2.c',
-  )
+  common_sources += common_builtin_crypto_sources
 endif
 
 common_kwlist = custom_target('kwlist',
@@ -76,6 +79,7 @@ ryu_cflags = []
 ryu_cflags += cflags_no_decl_after_statement
 
 config_info_sources = files('config_info.c',)
+common_nls_sources += config_info_sources
 config_info_cflags = [
   '-DVAL_CC="@0@"'.format(var_cc),
   '-DVAL_CPPFLAGS="@0@"'.format(var_cppflags),
@@ -119,6 +123,7 @@ common_sources_excluded_shlib = files(
   'fe_memutils.c',
   'logging.c',
 )
+common_nls_sources += common_sources_excluded_shlib + files('restricted_token.c')
 
 common_sources_frontend_static = [
   common_sources_frontend_shlib,

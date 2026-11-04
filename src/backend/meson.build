@@ -2,6 +2,7 @@
 
 backend_build_deps = [backend_code]
 backend_sources = []
+backend_nls_sources = []
 backend_link_with = [pgport_srv, common_srv]
 
 generated_backend_sources = []
@@ -33,8 +34,6 @@ subdir('storage')
 subdir('tcop')
 subdir('tsearch')
 subdir('utils')
-
-subdir('po', if_found: libintl)
 
 
 backend_link_args = []
@@ -222,3 +221,5 @@ subdir('replication/pgoutput')
 subdir('replication/pgrepack')
 subdir('snowball')
 subdir('utils/mb/conversion_procs')
+
+subdir('po')

@@ -28,4 +28,4 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+subdir('po')

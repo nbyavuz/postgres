@@ -1,9 +1,5 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
-if not python3_dep.found()
-  subdir_done()
-endif
-
 plpython_sources = files(
   'plpy_cursorobject.c',
   'plpy_elog.c',
@@ -18,6 +14,12 @@ plpython_sources = files(
   'plpy_typeio.c',
   'plpy_util.c',
 )
+
+subdir('po')
+
+if not python3_dep.found()
+  subdir_done()
+endif
 
 plpython_sources += custom_target('spiexceptions.h',
   input: files('../../backend/utils/errcodes.txt'),
@@ -105,5 +107,3 @@ tests += {
     'sql': plpython_regress,
   },
 }
-
-subdir('po', if_found: libintl)

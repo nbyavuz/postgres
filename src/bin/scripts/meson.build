@@ -1,7 +1,9 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
+scripts_common_sources = files('common.c')
+scripts_nls_sources = scripts_common_sources
 scripts_common = static_library('libscripts_common',
-  files('common.c'),
+  scripts_common_sources,
   dependencies: [frontend_code, libpq],
   kwargs: internal_lib_args,
 )
@@ -18,6 +20,7 @@ binaries = [
 
 foreach binary : binaries
   binary_sources = files('@0@.c'.format(binary))
+  scripts_nls_sources += binary_sources
 
   if host_system == 'windows'
     binary_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
@@ -34,8 +37,10 @@ foreach binary : binaries
   bin_targets += binary
 endforeach
 
+vacuuming_sources = scripts_common_sources + files('vacuuming.c')
+scripts_nls_sources += vacuuming_sources
 vacuuming_common = static_library('libvacuuming_common',
-  files('common.c', 'vacuuming.c'),
+  vacuuming_sources,
   dependencies: [frontend_code, libpq],
   kwargs: internal_lib_args,
 )
@@ -45,6 +50,7 @@ binaries = [
 ]
 foreach binary : binaries
   binary_sources = files('@0@.c'.format(binary))
+  scripts_nls_sources += binary_sources
 
   if host_system == 'windows'
     binary_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
@@ -85,4 +91,4 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+subdir('po')

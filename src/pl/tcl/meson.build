@@ -1,12 +1,14 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
-if not tcl_dep.found()
-  subdir_done()
-endif
-
 pltcl_sources = files(
   'pltcl.c',
 )
+
+subdir('po')
+
+if not tcl_dep.found()
+  subdir_done()
+endif
 
 gen_pltclerrcodes = files('generate-pltclerrcodes.pl')
 pltcl_sources += custom_target('pltclerrcodes.h',
@@ -60,5 +62,3 @@ tests += {
     'regress_args': ['--load-extension=pltcl'],
   },
 }
-
-subdir('po', if_found: libintl)

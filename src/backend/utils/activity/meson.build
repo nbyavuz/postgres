@@ -29,6 +29,7 @@ waitevent_sources = files(
   'wait_event.c',
   'wait_event_funcs.c',
 )
+backend_nls_sources += waitevent_sources
 
 wait_event = static_library('wait_event_names',
   waitevent_sources,

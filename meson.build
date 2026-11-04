@@ -3315,6 +3315,30 @@ cdata.set_quoted('PG_VERSION_STR',
 
 nlsopt = get_option('nls')
 libintl = not_found_dep
+nls_catalogs = {}
+nls_frontend_keywords = [
+  'pg_log_error', 'pg_log_error_detail', 'pg_log_error_hint',
+  'pg_log_warning', 'pg_log_warning_detail', 'pg_log_warning_hint',
+  'pg_log_info', 'pg_log_info_detail', 'pg_log_info_hint',
+  'pg_fatal', 'pg_log_generic:3', 'pg_log_generic_v:3',
+]
+nls_frontend_flags = []
+foreach keyword : nls_frontend_keywords
+  parts = keyword.split(':')
+  nls_frontend_flags += parts[0] + ':' + parts.get(1, '1') + ':c-format'
+endforeach
+nls_backend_keywords = nls_frontend_keywords + [
+  'errmsg', 'errmsg_plural:1,2', 'errdetail', 'errdetail_log',
+  'errdetail_plural:1,2', 'errhint', 'errhint_plural:1,2', 'errcontext',
+  'XactLockTableWait:4', 'MultiXactIdWait:6', 'ConditionalMultiXactIdWait:6',
+]
+nls_backend_flags = nls_frontend_flags + [
+  'errmsg:1:c-format', 'errmsg_plural:1:c-format', 'errmsg_plural:2:c-format',
+  'errdetail:1:c-format', 'errdetail_log:1:c-format',
+  'errdetail_plural:1:c-format', 'errdetail_plural:2:c-format',
+  'errhint:1:c-format', 'errhint_plural:1:c-format', 'errhint_plural:2:c-format',
+  'errcontext:1:c-format',
+]
 
 if not nlsopt.disabled()
   # otherwise there'd be lots of

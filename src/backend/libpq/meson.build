@@ -17,15 +17,16 @@ backend_sources += files(
   'pqsignal.c',
 )
 
+be_ssl_sources = files('be-secure-openssl.c')
+be_gss_sources = files('be-secure-gssapi.c', 'be-gssapi-common.c')
+backend_nls_sources += be_ssl_sources + be_gss_sources
+
 if ssl.found()
-  backend_sources += files('be-secure-openssl.c')
+  backend_sources += be_ssl_sources
 endif
 
 if gssapi.found()
-  backend_sources += files(
-    'be-secure-gssapi.c',
-    'be-gssapi-common.c'
-  )
+  backend_sources += be_gss_sources
 endif
 
 install_data(
