@@ -117,6 +117,18 @@ def write_output(filename, text):
         os.replace(result, output)
 
 
+def merge(args):
+    output = Path(args.output).absolute()
+    with tempfile.TemporaryDirectory(dir=output.parent, prefix='nls-') as tmp:
+        result = Path(tmp) / output.name
+        command = [args.msgmerge, '--quiet', '--no-wrap', '--previous', '--sort-by-file',
+                   '--lang=' + args.language, args.po or args.pot, args.pot,
+                   '--output-file=' + str(result)]
+        command += ['--compendium=' + filename for filename in args.compendium]
+        subprocess.run(command, check=True)
+        os.replace(result, output)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -127,8 +139,16 @@ def main():
     pot.add_argument('--keyword', action='append', default=[])
     pot.add_argument('--flag', action='append', default=[])
     pot.add_argument('inputs', nargs='+')
+    po = commands.add_parser('merge')
+    for name in ('msgmerge', 'language', 'pot', 'output'):
+        po.add_argument('--' + name, required=True)
+    po.add_argument('--po')
+    po.add_argument('--compendium', action='append', default=[])
     args = parser.parse_args()
-    extract(args)
+    if args.command == 'extract':
+        extract(args)
+    else:
+        merge(args)
 
 
 if __name__ == '__main__':
