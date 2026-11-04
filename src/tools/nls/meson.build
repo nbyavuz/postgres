@@ -89,3 +89,11 @@ if xgettext.found()
     alias_target('update-po', nls_updates)
   endif
 endif
+
+if xgettext.found() and msgmerge.found()
+  test('nls/catalogs', python,
+    args: [files('test_nls.py'), '--tool', nls_tool,
+      '--xgettext', xgettext.full_path(), '--msgmerge', msgmerge.full_path()],
+    suite: 'nls',
+  )
+endif
