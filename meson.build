@@ -3724,6 +3724,8 @@ subdir('contrib')
 subdir('src/test')
 subdir('src/interfaces/ecpg/test')
 
+subdir('src/tools/nls')
+
 subdir('doc/src/sgml')
 
 generated_sources_ac += {'': ['GNUmakefile']}
