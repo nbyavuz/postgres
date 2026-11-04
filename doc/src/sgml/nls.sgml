@@ -25,7 +25,7 @@
     software tools.  Theoretically, you only need a text editor.  But
     this is only in the unlikely event that you do not want to try out
     your translated messages.  When you configure your source tree, be
-    sure to use the <option>--enable-nls</option> option.  This will
+    sure to use Meson with the <option>-Dnls=enabled</option> option.  This will
     also check for the <application>libintl</application> library and the
     <filename>msgfmt</filename> program, which all end users will need
     anyway.  To try out your work, follow the applicable portions of
@@ -37,10 +37,9 @@
     message catalog merge (described later), you will need the
     programs <filename>xgettext</filename> and
     <filename>msgmerge</filename>, respectively, in a GNU-compatible
-    implementation.  Later, we will try to arrange it so that if you
-    use a packaged source distribution, you won't need
-    <filename>xgettext</filename>.  (If working from Git, you will still need
-    it.)  <application>GNU Gettext 0.10.36</application> or later is currently recommended.
+    implementation.  Catalog maintenance is supported only with Meson.
+    These tools must be available when Meson configures the build directory.
+    They are not required to compile or install existing translations.
    </para>
 
    <para>
@@ -135,10 +134,10 @@ msgstr "another translated"
 
    <para>
     OK, so how does one create a <quote>blank</quote> message
-    catalog?  First, go into the directory that contains the program
-    whose messages you want to translate.  If there is a file
-    <filename>nls.mk</filename>, then this program has been prepared
-    for translation.
+    catalog?  First, configure a Meson build directory as described in
+    <xref linkend="install-meson"/>.  Programs prepared for translation
+    have a <filename>po/meson.build</filename> file that registers their
+    message catalog.
    </para>
 
    <para>
@@ -165,15 +164,17 @@ msgstr "another translated"
     If you need to start a new translation effort, then first run the
     command:
 <programlisting>
-make init-po
+ninja -C build psql-init-po
 </programlisting>
     This will create a file
-    <filename><replaceable>progname</replaceable>.pot</filename>.
+    <filename>build/src/tools/nls/psql.pot</filename>.
+    Replace <literal>psql</literal> with the catalog name, or use the
+    <literal>init-po</literal> target to generate all catalogs.
     (<filename>.pot</filename> to distinguish it from PO files that
     are <quote>in production</quote>. The <literal>T</literal> stands for
     <quote>template</quote>.)
-    Copy this file to
-    <filename><replaceable>language</replaceable>.po</filename> and
+    Copy this file to the program's source directory as
+    <filename>po/<replaceable>language</replaceable>.po</filename> and
     edit it.  To make it known that the new language is available,
     also edit the file <filename>po/LINGUAS</filename> and add the
     language (or language and country) code next to languages already listed,
@@ -189,13 +190,28 @@ de fr
     changed or added by the programmers.  In this case you do not need
     to start from scratch.  Instead, run the command:
 <programlisting>
-make update-po
+ninja -C build psql-update-po
 </programlisting>
     which will create a new blank message catalog file (the pot file
     you started with) and will merge it with the existing PO files.
     If the merge algorithm is not sure about a particular message it
     marks it <quote>fuzzy</quote> as explained above.  The new PO file
-    is saved with a <filename>.po.new</filename> extension.
+    is saved as
+    <filename>build/src/tools/nls/psql-<replaceable>language</replaceable>.po.new</filename>.
+    Existing source PO files are not modified.  The <literal>update-po</literal>
+    target updates all catalogs.  Translations from other catalogs in the
+    same language are used as compendia, including to initialize languages
+    not yet available for this catalog.
+   </para>
+
+   <para>
+    Catalog generation includes messages for all supported platforms and
+    optional features, even when those features are disabled in this build.
+    It does not require compiling the programs.  Generated extraction inputs
+    are built as needed.  POT files and merged PO files are regenerated only
+    when their inputs change.  Source references are relative to the
+    program's source directory; generated files use the corresponding path
+    in the build tree.
    </para>
   </sect2>
 
@@ -365,54 +381,66 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
 
    <step>
     <para>
-     Add a file <filename>nls.mk</filename> in the directory with the
-     program sources.  This file will be read as a makefile.  The
-     following variable assignments need to be made here:
+     Register the catalog in <filename>po/meson.build</filename> by adding
+     an entry to <varname>nls_catalogs</varname>.  Its key is the catalog
+     name provided to <function>textdomain()</function>, before version
+     suffixes are added.  The entry contains these fields:
 
      <variablelist>
       <varlistentry>
-       <term><varname>CATALOG_NAME</varname></term>
+       <term><literal>directory</literal></term>
 
        <listitem>
         <para>
-         The program name, as provided in the
-         <function>textdomain()</function> call.
+         The program's source directory, relative to the source root.
         </para>
        </listitem>
       </varlistentry>
 
       <varlistentry>
-       <term><varname>GETTEXT_FILES</varname></term>
+       <term><literal>sources</literal></term>
 
        <listitem>
         <para>
-         List of files that contain translatable strings, i.e., those
-         marked with <function>gettext</function> or an alternative
-         solution.  Eventually, this will include nearly all source
-         files of the program.  If this list gets too long you can
-         make the first <quote>file</quote> be a <literal>+</literal>
-         and the second word be a file that contains one file name per
-         line.
+         Reuse the program's Meson source lists and add shared sources,
+         included fragments, or generated inputs containing translatable
+         strings.  Include platform-specific and optional sources regardless
+         of the current build configuration.  Generated inputs must be
+         represented by their Meson targets so dependencies are tracked.
         </para>
        </listitem>
       </varlistentry>
 
       <varlistentry>
-       <term><varname>GETTEXT_TRIGGERS</varname></term>
+       <term><literal>keywords</literal></term>
 
        <listitem>
         <para>
          The tools that generate message catalogs for the translators
          to work on need to know what function calls contain
          translatable strings.  By default, only
-         <function>gettext()</function> calls are known.  If you used
-         <function>_</function> or other identifiers you need to list
-         them here.  If the translatable string is not the first
+         the standard Gettext functions and <function>_</function> are
+         recognized.  List additional identifiers here, reusing
+         <varname>nls_frontend_keywords</varname> or
+         <varname>nls_backend_keywords</varname> as appropriate.
+         If the translatable string is not the first
          argument, the item needs to be of the form
          <literal>func:2</literal> (for the second argument).
          If you have a function that supports pluralized messages,
          the item should look like <literal>func:1,2</literal>
          (identifying the singular and plural message arguments).
+        </para>
+       </listitem>
+      </varlistentry>
+      <varlistentry>
+       <term><literal>flags</literal></term>
+       <listitem>
+        <para>
+         Additional <command>xgettext</command> format flags, such as
+         <literal>errmsg:1:c-format</literal>.  Reuse
+         <varname>nls_frontend_flags</varname> or
+         <varname>nls_backend_flags</varname> for the standard reporting
+         functions.
         </para>
        </listitem>
       </varlistentry>
@@ -423,7 +451,11 @@ fprintf(stderr, gettext("panic level %d\n"), lvl);
    <step>
     <para>
      Add a file <filename>po/LINGUAS</filename>, which will contain the list
-     of provided translations &mdash; initially empty.
+     of provided translations &mdash; initially empty.  Register catalog
+     compilation and installation with <function>i18n.gettext()</function>
+     when NLS and the corresponding component are enabled.  Visit the
+     <filename>po</filename> subdirectory even when that component is
+     disabled, so catalog maintenance remains available.
     </para>
    </step>
   </procedure>

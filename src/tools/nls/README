@@ -1,0 +1,42 @@
+Message catalog maintenance
+===========================
+
+Each po/meson.build registers a catalog in nls_catalogs.  Sources normally
+come from the corresponding compilation lists.  Shared sources must be
+assigned to the domains that use their messages; linking a static library
+does not imply that every message in that library belongs in every client.
+Include conditional sources in extraction even when they are not compiled.
+
+The common targets are defined after all catalogs have been registered.
+init-po and <catalog>-init-po generate <catalog>.pot in the build tree's
+src/tools/nls directory.  update-po and <catalog>-update-po generate
+<catalog>-<language>.po.new there, using same-language catalogs as compendia.
+The source PO files are never overwritten.  Languages are taken from the
+registered catalogs' LINGUAS files; add a new translation there so Meson
+reconfigures the language and dependency lists.
+
+The nls.py helper stages extraction inputs under stable source-root-relative
+names, rewrites generated #line references, and converts the resulting
+references to catalog-directory-relative names.  This avoids build-root
+paths in catalogs without rewriting message text.  Generated files with no
+source counterpart retain their logical build-tree-relative names.
+
+Register grammar .y files explicitly alongside the compilation sources.
+When both a .y file and its generated .c file are present, extraction uses
+the grammar, excluding Bison skeleton messages.  Scanner .l files are build
+dependencies, but extraction uses their generated C: parsing Flex regular
+expressions as C can lose messages.  Other generated inputs, such as
+sql_help.c and guc_tables.inc.c, must be passed as Meson targets.  Included
+C fragments and headers with messages also need explicit registration.
+
+The targets are incremental and are not part of the default build.
+xgettext and msgmerge are optional native maintainer tools.  Compilation
+and installation of existing translations continue to use i18n.gettext()
+and only apply to enabled components.
+
+The nls/catalogs Meson test exercises extraction and merging with gettext,
+including generated references, plural flags, compendia, and failed merges.
+When changing source selection, compare message IDs, plurals, contexts,
+format flags, and translator comments against the previous catalogs.  Also
+compare catalogs from minimal and feature-rich configurations and check
+that a second init-po or update-po invocation does no work.

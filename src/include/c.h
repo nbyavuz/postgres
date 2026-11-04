@@ -1402,7 +1402,7 @@ typedef struct PGAlignedXLogBlock PGAlignedXLogBlock;
  * about multiple states of premangling and postmangling as the values
  * are being passed around.
  *
- * Make sure this matches the installation rules in nls-global.mk.
+ * Make sure this matches the domain names in the po/meson.build files.
  */
 #ifdef SO_MAJOR_VERSION
 #define PG_TEXTDOMAIN(domain) (domain CppAsString2(SO_MAJOR_VERSION) "-" PG_MAJORVERSION)

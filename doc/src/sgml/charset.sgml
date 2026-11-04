@@ -201,7 +201,7 @@ initdb --locale=sv_SE
    <para>
     To enable messages to be translated to the user's preferred language,
     <acronym>NLS</acronym> must have been selected at build time
-    (<literal>configure --enable-nls</literal>).  All other locale support is
+    (<literal>meson setup -Dnls=enabled</literal>).  All other locale support is
     built in automatically.
    </para>
   </sect2>

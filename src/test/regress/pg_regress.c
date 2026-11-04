@@ -762,8 +762,8 @@ initialize_environment(void)
 		/*
 		 * Most platforms have adopted the POSIX locale as their
 		 * implementation-defined default locale.  Exceptions include native
-		 * Windows, macOS with --enable-nls, and Cygwin with --enable-nls.
-		 * (Use of --enable-nls matters because libintl replaces setlocale().)
+		 * Windows, macOS with NLS, and Cygwin with NLS.
+		 * (NLS matters because libintl replaces setlocale().)
 		 * Also, PostgreSQL does not support macOS with locale environment
 		 * variables unset; see PostmasterMain().
 		 */

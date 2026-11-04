@@ -275,7 +275,7 @@
      <para>
       To enable Native Language Support (<acronym>NLS</acronym>), that
       is, the ability to display a program's messages in a language
-      other than English, you need an implementation of the
+      other than English, build with Meson and an implementation of the
       <application>Gettext</application> <acronym>API</acronym>.  Some operating
       systems have this built-in (e.g., <systemitem
       class="osname">Linux</systemitem>, <systemitem class="osname">NetBSD</systemitem>,
@@ -880,29 +880,6 @@ build-postgresql:
     </para>
 
      <variablelist>
-
-      <varlistentry id="configure-option-enable-nls">
-       <term><option>--enable-nls<optional>=<replaceable>LANGUAGES</replaceable></optional></option></term>
-       <listitem>
-        <para>
-         Enables Native Language Support (<acronym>NLS</acronym>),
-         that is, the ability to display a program's messages in a
-         language other than English.
-         <replaceable>LANGUAGES</replaceable> is an optional space-separated
-         list of codes of the languages that you want supported, for
-         example <literal>--enable-nls='de fr'</literal>.  (The intersection
-         between your list and the set of actually provided
-         translations will be computed automatically.)  If you do not
-         specify a list, then all available translations are
-         installed.
-        </para>
-
-        <para>
-         To use this option, you will need an implementation of the
-         <application>Gettext</application> API.
-        </para>
-       </listitem>
-      </varlistentry>
 
       <varlistentry id="configure-option-with-perl">
        <term><option>--with-perl</option></term>
@@ -1895,15 +1872,6 @@ build-postgresql:
         <para>
          <command>llvm-config</command> program used to locate the
          <productname>LLVM</productname> installation
-        </para>
-       </listitem>
-      </varlistentry>
-
-      <varlistentry id="configure-envvars-msgfmt">
-       <term><envar>MSGFMT</envar></term>
-       <listitem>
-        <para>
-         <command>msgfmt</command> program for native language support
         </para>
        </listitem>
       </varlistentry>
