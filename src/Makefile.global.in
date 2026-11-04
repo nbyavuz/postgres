@@ -19,7 +19,7 @@
 #
 # Meta configuration
 
-standard_targets = all install installdirs uninstall clean distclean coverage check checkprep installcheck init-po update-po
+standard_targets = all install installdirs uninstall clean distclean coverage check checkprep installcheck
 # these targets should recurse even into subdirectories not being built:
 standard_always_targets = clean distclean
 
@@ -205,7 +205,6 @@ with_system_tzdata = @with_system_tzdata@
 with_uuid	= @with_uuid@
 with_zlib	= @with_zlib@
 enable_rpath	= @enable_rpath@
-enable_nls	= @enable_nls@
 enable_debug	= @enable_debug@
 enable_dtrace	= @enable_dtrace@
 enable_coverage	= @enable_coverage@
@@ -353,13 +352,9 @@ LN_S	= @LN_S@
 LIBCURL_CPPFLAGS = @LIBCURL_CPPFLAGS@
 LIBCURL_LDFLAGS = @LIBCURL_LDFLAGS@
 LIBCURL_LDLIBS = @LIBCURL_LDLIBS@
-MSGFMT  = @MSGFMT@
-MSGFMT_FLAGS = @MSGFMT_FLAGS@
-MSGMERGE = @MSGMERGE@
 OPENSSL	= @OPENSSL@
 PYTHON	= @PYTHON@
 TAR	= @TAR@
-XGETTEXT = @XGETTEXT@
 
 GZIP	= gzip
 BZIP2	= bzip2
@@ -551,7 +546,6 @@ GENHTML = @GENHTML@
 # Feature settings
 
 DEF_PGPORT = @default_port@
-WANTED_LANGUAGES = @WANTED_LANGUAGES@
 
 
 ##########################################################################
@@ -994,19 +988,6 @@ clean-deps:
 	@rm -rf $(DEPDIR)
 
 endif # autodepend
-
-
-##########################################################################
-#
-# Native language support
-
-ifeq ($(enable_nls), yes)
-ifneq (,$(wildcard $(srcdir)/nls.mk))
-
-include $(top_srcdir)/src/nls-global.mk
-
-endif # nls.mk
-endif # enable_nls
 
 
 ##########################################################################

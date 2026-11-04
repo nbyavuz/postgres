@@ -214,34 +214,6 @@ fi
 
 
 
-# PGAC_CHECK_GETTEXT
-# ------------------
-# We check for bind_textdomain_codeset() not just gettext().  GNU gettext
-# before 0.10.36 does not have that function, and is generally too incomplete
-# to be usable.
-
-AC_DEFUN([PGAC_CHECK_GETTEXT],
-[
-  AC_SEARCH_LIBS(bind_textdomain_codeset, intl, [],
-                 [AC_MSG_ERROR([a gettext implementation is required for NLS])])
-  AC_CHECK_HEADER([libintl.h], [],
-                  [AC_MSG_ERROR([header file <libintl.h> is required for NLS])])
-  PGAC_PATH_PROGS(MSGFMT, msgfmt)
-  AC_ARG_VAR(MSGFMT, [msgfmt program for NLS])dnl
-  if test -z "$MSGFMT"; then
-    AC_MSG_ERROR([msgfmt is required for NLS])
-  fi
-  AC_CACHE_CHECK([for msgfmt flags], pgac_cv_msgfmt_flags,
-[if test x"$MSGFMT" != x"" && "$MSGFMT" --version 2>&1 | grep "GNU" >/dev/null; then
-    pgac_cv_msgfmt_flags=-c
-fi])
-  AC_SUBST(MSGFMT_FLAGS, $pgac_cv_msgfmt_flags)
-  PGAC_PATH_PROGS(MSGMERGE, msgmerge)
-  PGAC_PATH_PROGS(XGETTEXT, xgettext)
-])# PGAC_CHECK_GETTEXT
-
-
-
 # PGAC_CHECK_STRIP
 # ----------------
 # Check for a 'strip' program, and figure out if that program can

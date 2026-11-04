@@ -132,20 +132,6 @@ PGAC_ARG_BOOL(enable, integer-datetimes, yes, [obsolete option, no longer suppor
 
 
 #
-# NLS
-#
-AC_MSG_CHECKING([whether NLS is wanted])
-PGAC_ARG_OPTARG(enable, nls,
-                [LANGUAGES], [enable Native Language Support],
-                [],
-                [WANTED_LANGUAGES=$enableval],
-                [AC_DEFINE(ENABLE_NLS, 1,
-                           [Define to 1 if you want National Language Support. (--enable-nls)])])
-AC_MSG_RESULT([$enable_nls])
-AC_SUBST(enable_nls)
-AC_SUBST(WANTED_LANGUAGES)
-
-#
 # Default port number (--with-pgport), default 5432
 #
 AC_MSG_CHECKING([for default port number])
@@ -2421,10 +2407,6 @@ if test x"$MEMSET_LOOP_LIMIT" = x"" ; then
 fi
 AC_DEFINE_UNQUOTED(MEMSET_LOOP_LIMIT, ${MEMSET_LOOP_LIMIT}, [Define bytes to use libc memset().])
 
-
-if test "$enable_nls" = yes ; then
-  PGAC_CHECK_GETTEXT
-fi
 
 # Check for Tcl configuration script tclConfig.sh
 if test "$with_tcl" = yes; then

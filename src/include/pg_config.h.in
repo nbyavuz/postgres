@@ -45,9 +45,6 @@
 /* Define to build with GSSAPI support. (--with-gssapi) */
 #undef ENABLE_GSS
 
-/* Define to 1 if you want National Language Support. (--enable-nls) */
-#undef ENABLE_NLS
-
 /* Define to 1 if you have the `append_history' function. */
 #undef HAVE_APPEND_HISTORY
 

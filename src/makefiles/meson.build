@@ -53,7 +53,6 @@ pgxs_kv = {
   'abs_top_srcdir': meson.project_source_root(),
 
   'enable_rpath': get_option('rpath') ? 'yes' : 'no',
-  'enable_nls': libintl.found() ? 'yes' : 'no',
   'enable_injection_points': get_option('injection_points') ? 'yes' : 'no',
   'enable_tap_tests': tap_tests_enabled ? 'yes' : 'no',
   'enable_debug': get_option('debug') ? 'yes' : 'no',
@@ -175,13 +174,6 @@ pgxs_empty = [
   'GENHTML',
   'LCOV',
   'GCOV',
-  'MSGFMT_FLAGS',
-
-  # translation doesn't appear to be supported by pgxs
-  'MSGFMT',
-  'XGETTEXT',
-  'MSGMERGE',
-  'WANTED_LANGUAGES',
 
   # Not needed because we don't build the server / PLs with the generated makefile
   'LIBOBJS', 'PG_CRC32C_OBJS',
