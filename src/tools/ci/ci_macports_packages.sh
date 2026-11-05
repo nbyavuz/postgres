@@ -19,7 +19,7 @@ echo "macOS major version: $macos_major_version"
 # Scan the available MacPorts releases to find one that matches the running
 # macOS release.
 macports_release_list_url="https://api.github.com/repos/macports/macports-base/releases"
-macports_version_pattern="2\.10\.1"
+macports_version_pattern="2\.12\.7"
 # Authenticate the GitHub API request when a token is available (e.g. on
 # GitHub Actions). Unauthenticated requests share a 60/h/IP rate limit
 # with every other job on the runner's IP and frequently return an error

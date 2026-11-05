@@ -202,9 +202,9 @@ jobs:
       # used centrally. We don't just want to use ubuntu-latest, as it's not
       # implausible there will be breakage when that switches to the next
       # ubuntu version.
-      runs_on_linux: ${{ case(vars.PG_CI_RUNS_ON_LINUX != '', vars.PG_CI_RUNS_ON_LINUX, 'ubuntu-24.04') }}
-      runs_on_windows: ${{ case(vars.PG_CI_RUNS_ON_WINDOWS != '', vars.PG_CI_RUNS_ON_WINDOWS, 'windows-2022') }}
-      runs_on_macos: ${{ case(vars.PG_CI_RUNS_ON_MACOS != '', vars.PG_CI_RUNS_ON_MACOS, 'macos-15') }}
+      runs_on_linux: ${{ case(vars.PG_CI_RUNS_ON_LINUX != '', vars.PG_CI_RUNS_ON_LINUX, 'ubuntu-26.04') }}
+      runs_on_windows: ${{ case(vars.PG_CI_RUNS_ON_WINDOWS != '', vars.PG_CI_RUNS_ON_WINDOWS, 'windows-2025') }}
+      runs_on_macos: ${{ case(vars.PG_CI_RUNS_ON_MACOS != '', vars.PG_CI_RUNS_ON_MACOS, 'macos-26') }}
       # runs_on_setup: an output can't be used as the input of the setup job
       # itself, so it's done inline below.
 
@@ -1032,9 +1032,18 @@ jobs:
         shell: pwsh
         run: src/tools/ci/gha_setup_windows_debugger.ps1
 
+      # The Visual Studio version and edition depend on the runner image.
+      - name: Locate Visual Studio
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$? -or !$vs) { throw 'Could not locate Visual Studio C++ tools' }
+          Add-Content $env:GITHUB_ENV "VCVARSALL=$vs\VC\Auxiliary\Build\vcvarsall.bat"
+
       - name: Configure
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          call "%VCVARSALL%" x64
           meson setup ^
             --backend ninja ^
             ${{env.MESON_COMMON_PG_CONFIG_ARGS}} ^
@@ -1046,7 +1055,7 @@ jobs:
 
       - name: Build
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          call "%VCVARSALL%" x64
           ninja -C build ${{env.MBUILD_TARGET}} || exit 1
           ninja -C build -t missingdeps
 
@@ -1058,7 +1067,7 @@ jobs:
           # doesn't seem worth it.
           MTEST_TARGET: --slice ${{ matrix.slice}}/${{ matrix.num_slices}} ${{env.MTEST_TARGET}}
           ADDITIONAL_SETUP: |
-            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+            call "%VCVARSALL%" x64
         run: *meson_test_world_cmd
 
       - *upload_logs_step
