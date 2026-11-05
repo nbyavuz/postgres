@@ -445,7 +445,7 @@ jobs:
               **/*.diffs
               **/regress_log_*
               **/crashlog-*.txt
-              build/meson-logs/**
+              build/**/meson-logs/**
               **/config.log
           if-no-files-found: ignore
 
@@ -1230,76 +1230,84 @@ jobs:
       - *ccache_restore_default_step
       - *ccache_restore_branch_step
 
-      # gcc, cassert off, dtrace on
-      - name: gcc warnings + (dtrace)
-        if: ${{ !cancelled() }}
-        env:
-          CONF: ${{env.MESON_COMMON_FEATURES}} ${{env.MESON_FEATURES}} -Ddtrace=enabled
-          CC: ccache gcc
-          CXX: ccache g++
-        run: &compiler_warnings_cmd |
-          echo "::group::configure"
-          rm -rf build
-          meson setup \
-            -Dwerror=true \
-            -Ddebug=false \
-            ${{env.CONF}} \
-            build
-          echo "::endgroup::"
+      # Run configure/build checks in pairs, using two ninja jobs per check
+      # to share a four-core runner. Each check needs its own build directory.
+      - parallel:
+          # gcc, cassert off, dtrace on
+          - name: gcc warnings + (dtrace)
+            if: ${{ !cancelled() }}
+            env:
+              BUILD_DIR: build/gcc-dtrace
+              CONF: ${{env.MESON_COMMON_FEATURES}} ${{env.MESON_FEATURES}} -Ddtrace=enabled
+              CC: ccache gcc
+              CXX: ccache g++
+            run: &compiler_warnings_cmd |
+              meson setup \
+                -Dwerror=true \
+                -Ddebug=false \
+                ${{env.CONF}} \
+                "$BUILD_DIR"
 
-          ninja -C build --quiet ${{env.MBUILD_TARGET}}
+              ninja -C "$BUILD_DIR" --quiet -j 2 ${{env.MBUILD_TARGET}}
 
-      # gcc, cassert on, dtrace off
-      - name: gcc warnings + (cassert)
-        if: ${{ !cancelled() }}
-        env:
-          CONF: ${{env.MESON_COMMON_FEATURES}} ${{env.MESON_FEATURES}} -Dcassert=true
-          CC: ccache gcc
-          CXX: ccache g++
-        run: *compiler_warnings_cmd
+          # gcc, cassert on, dtrace off
+          - name: gcc warnings + (cassert)
+            if: ${{ !cancelled() }}
+            env:
+              BUILD_DIR: build/gcc-cassert
+              CONF: ${{env.MESON_COMMON_FEATURES}} ${{env.MESON_FEATURES}} -Dcassert=true
+              CC: ccache gcc
+              CXX: ccache g++
+            run: *compiler_warnings_cmd
 
-      # clang, cassert off, dtrace off
-      - name: clang warnings
-        if: ${{ !cancelled() }}
-        env:
-          CONF: ${{env.MESON_COMMON_FEATURES}} ${{env.MESON_FEATURES}}
-          CC: ccache clang
-          CXX: ccache clang++
-        run: *compiler_warnings_cmd
+      - parallel:
+          # clang, cassert off, dtrace off
+          - name: clang warnings
+            if: ${{ !cancelled() }}
+            env:
+              BUILD_DIR: build/clang
+              CONF: ${{env.MESON_COMMON_FEATURES}} ${{env.MESON_FEATURES}}
+              CC: ccache clang
+              CXX: ccache clang++
+            run: *compiler_warnings_cmd
 
-      # clang, cassert on, dtrace on
-      - name: clang warnings + (cassert + dtrace)
-        if: ${{ !cancelled() }}
-        env:
-          CONF: ${{env.MESON_COMMON_FEATURES}} ${{env.MESON_FEATURES}} -Dcassert=true -Ddtrace=enabled
-          CC: ccache clang
-          CXX: ccache clang++
-        run: *compiler_warnings_cmd
+          # clang, cassert on, dtrace on
+          - name: clang warnings + (cassert + dtrace)
+            if: ${{ !cancelled() }}
+            env:
+              BUILD_DIR: build/clang-cassert-dtrace
+              CONF: ${{env.MESON_COMMON_FEATURES}} ${{env.MESON_FEATURES}} -Dcassert=true -Ddtrace=enabled
+              CC: ccache clang
+              CXX: ccache clang++
+            run: *compiler_warnings_cmd
 
-      - name: mingw warnings (cross compilation)
-        if: ${{ !cancelled() }}
-        env:
-          CONF: >-
-            --cross-file src/tools/ci/mingw-cross-file.txt
-            -Db_pch=true
-            -Dcassert=true
-            -Dauto_features=disabled
-            -Dzlib=enabled
-          MBUILD_TARGET: all
-        run: *compiler_warnings_cmd
+      - parallel:
+          - name: mingw warnings (cross compilation)
+            if: ${{ !cancelled() }}
+            env:
+              BUILD_DIR: build/mingw
+              CONF: >-
+                --cross-file src/tools/ci/mingw-cross-file.txt
+                -Db_pch=true
+                -Dcassert=true
+                -Dauto_features=disabled
+                -Dzlib=enabled
+              MBUILD_TARGET: all
+            run: *compiler_warnings_cmd
 
-      ###
-      # Verify docs can be built
-      ###
-      # XXX: Only do this if there have been changes in doc/ since last build
-      - name: Build documentation
-        if: ${{ !cancelled() }}
-        env:
-          CONF: -Dauto_features=disabled -Ddocs=enabled
-          CC: ccache gcc
-          CXX: ccache g++
-          MBUILD_TARGET: docs
-        run: *compiler_warnings_cmd
+          ###
+          # Verify docs can be built
+          ###
+          # XXX: Only do this if there have been changes in doc/ since last build
+          - name: Build documentation
+            if: ${{ !cancelled() }}
+            env:
+              BUILD_DIR: build/docs
+              CONF: -Dauto_features=disabled -Ddocs=enabled
+              CC: ccache gcc
+              CXX: ccache g++
+              MBUILD_TARGET: docs
+            run: *compiler_warnings_cmd
 
       ###
       # Verify headerscheck / cpluspluscheck succeed
@@ -1307,25 +1315,24 @@ jobs:
       # - Run both in the same ninja invocation to increase parallelism, use
       #   -k 0 to get the result of both
       # - Use -fmax-errors, as particularly cpluspluscheck can be very verbose
+      # - This unpaired check uses ninja's default concurrency
       ###
       - name: headerscheck + cpluspluscheck
         if: ${{ !cancelled() }}
         env:
+          BUILD_DIR: build/headers
           CONF: ${{env.MESON_COMMON_FEATURES}} ${{env.MESON_FEATURES}}
           CC: ccache gcc
           CXX: ccache g++
           EXTRAFLAGS: -fmax-errors=10
         run: |
-          echo "::group::configure"
-          rm -rf build
           meson setup \
             -Dwerror=true \
             -Ddebug=false \
             ${{env.CONF}} \
-            build
-          echo "::endgroup::"
+            "$BUILD_DIR"
 
-          ninja -C build --quiet -k 0 \
+          ninja -C "$BUILD_DIR" --quiet -k 0 \
             headerscheck cpluspluscheck
 
       - *ccache_decide_save_step
