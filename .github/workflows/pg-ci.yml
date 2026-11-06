@@ -1103,6 +1103,30 @@ jobs:
       - *window_setup_hosts_step
       - *checkout_step
 
+      # Unlike ccache, a complete installation must not be overlaid with a
+      # second cache or restored using a partial key. GitHub's default-branch
+      # fallback still lets feature branches reuse the same installation.
+      - name: "MSYS2: Compute cache key"
+        id: msys2-key
+        shell: pwsh
+        env:
+          MSYS2_RUNNER: ${{ needs.setup.outputs.runs_on_windows }}
+          MSYS2_CONFIG: ${{ hashFiles('.github/workflows/pg-ci.yml') }}
+        run: |
+          # Cache hits skip setup-msys2 and its update step, so packages would
+          # otherwise stay frozen until the workflow changes or cache eviction.
+          # Refresh weekly to pick up updates while reusing most installations.
+          $now = [DateTime]::UtcNow.Date
+          $week = $now.AddDays(-(([int]$now.DayOfWeek + 6) % 7)).ToString('yyyy-MM-dd')
+          "key=msys2-install-v1-$env:MSYS2_RUNNER-$env:RUNNER_ARCH-$env:MSYS2_CONFIG-$week" >> $env:GITHUB_OUTPUT
+
+      - name: "MSYS2: Restore cache"
+        id: msys2-restore
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/msys64
+          key: ${{ steps.msys2-key.outputs.key }}
+
       # The pre-existing msys install is on C:\, often a rather slow system
       # disk, whereas the workspace is often on a faster, ephemeral disk.
       # Using the pre-existing msys would often increase the total runtime of
@@ -1114,6 +1138,7 @@ jobs:
       # a path relative to the temp dir, which is not on C:\ for GitHub hosted
       # runners.
       - name: Install MSYS2
+        if: steps.msys2-restore.outputs.cache-hit != 'true'
         uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: UCRT64
@@ -1140,9 +1165,29 @@ jobs:
             zlib:p
             zstd:p
 
+      # setup-msys2 refuses an existing installation. Recreate its shell
+      # wrapper and environment on cache hits, using the current temp path.
+      - name: "MSYS2: Set up cached environment"
+        if: steps.msys2-restore.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          $wrapper = Join-Path $env:RUNNER_TEMP 'setup-msys2'
+          New-Item -ItemType Directory -Force $wrapper | Out-Null
+          @'
+          @echo off
+          setlocal
+          IF NOT DEFINED MSYSTEM set MSYSTEM=UCRT64
+          IF NOT DEFINED MSYS2_PATH_TYPE set MSYS2_PATH_TYPE=inherit
+          set CHERE_INVOKING=1
+          "%RUNNER_TEMP%\msys64\usr\bin\bash.exe" -leo pipefail %*
+          '@ | Set-Content (Join-Path $wrapper 'msys2.cmd')
+          $wrapper >> $env:GITHUB_PATH
+          'MSYSTEM=UCRT64' >> $env:GITHUB_ENV
+
       - *nix_sysinfo_step
 
       - name: Install additional dependencies
+        if: steps.msys2-restore.outputs.cache-hit != 'true'
         run: |
           # Pin IPC::Run to NJM/IPC-Run-20250809.0; TODDR/IPC-Run-20260322.0
           # broke postgres tap tests on Windows (pipe stdio handling).
@@ -1151,6 +1196,24 @@ jobs:
           (echo; echo o conf recommends_policy 0; echo notest install NJM/IPC-Run-20250809.0.tar.gz) | cpan
           perl -mIPC::Run -e 1
           echo ::endgroup::
+
+      - name: "MSYS2: Check dependencies"
+        run: |
+          # Check that all package files survived the cache round trip.
+          pacman -Qkq
+          gcc --version
+          meson --version
+          perl -mIPC::Run -e 1
+
+      # Save before building/testing so that a later failure doesn't require
+      # reinstalling dependencies. setup-msys2's package-download cache is
+      # still useful when we need to create a fresh installation.
+      - name: "MSYS2: Save cache"
+        if: steps.msys2-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/msys64
+          key: ${{ steps.msys2-key.outputs.key }}
 
       - *windows_setup_socket_dir_step
 
