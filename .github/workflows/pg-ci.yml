@@ -208,9 +208,9 @@ jobs:
       # used centrally. We don't just want to use ubuntu-latest, as it's not
       # implausible there will be breakage when that switches to the next
       # ubuntu version.
-      runs_on_linux: ${{ vars.PG_CI_RUNS_ON_LINUX || 'ubuntu-24.04' }}
-      runs_on_windows: ${{ vars.PG_CI_RUNS_ON_WINDOWS || 'windows-2022' }}
-      runs_on_macos: ${{ vars.PG_CI_RUNS_ON_MACOS || 'macos-15' }}
+      runs_on_linux: ${{ vars.PG_CI_RUNS_ON_LINUX || 'ubuntu-26.04' }}
+      runs_on_windows: ${{ vars.PG_CI_RUNS_ON_WINDOWS || 'windows-2025' }}
+      runs_on_macos: ${{ vars.PG_CI_RUNS_ON_MACOS || 'macos-26' }}
 
       # Exports:
       #
