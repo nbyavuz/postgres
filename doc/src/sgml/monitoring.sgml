@@ -1975,6 +1975,14 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         </listitem>
         <listitem>
          <para>
+          <literal>feedback</literal>: WAL receiver reports archive or local
+          replay progress without receiving WAL. Received-WAL positions do
+          not advance in this mode; use
+          <function>pg_last_wal_replay_lsn()</function> for replay progress.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
           <literal>waiting</literal>: WAL receiver has stopped streaming and
           is waiting for new instructions from the startup process.
          </para>

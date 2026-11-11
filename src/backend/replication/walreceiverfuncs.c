@@ -145,6 +145,11 @@ WalRcvStreaming(void)
 	pg_time_t	startTime;
 
 	SpinLockAcquire(&walrcv->mutex);
+	if (walrcv->feedbackOnly)
+	{
+		SpinLockRelease(&walrcv->mutex);
+		return false;
+	}
 
 	state = walrcv->walRcvState;
 	startTime = walrcv->startTime;
@@ -213,6 +218,7 @@ ShutdownWalRcv(void)
 
 		case WALRCV_CONNECTING:
 		case WALRCV_STREAMING:
+		case WALRCV_FEEDBACK:
 		case WALRCV_WAITING:
 		case WALRCV_RESTARTING:
 			walrcv->walRcvState = WALRCV_STOPPING;
@@ -247,19 +253,21 @@ ShutdownWalRcv(void)
 /*
  * Request postmaster to start walreceiver.
  *
- * "recptr" indicates the position where streaming should begin.  "conninfo"
+ * "recptr" indicates the position where streaming should begin, or the initial
+ * replay acknowledgement for a feedback-only receiver.  "conninfo"
  * is a libpq connection string to use.  "slotname" is, optionally, the name
  * of a replication slot to acquire.  "create_temp_slot" indicates to create
- * a temporary slot when no "slotname" is given.
+ * a temporary slot when no "slotname" is given.  Feedback-only receivers do
+ * not create temporary slots or publish received-WAL positions.
  *
  * WAL receivers do not directly load GUC parameters used for the connection
  * to the primary, and rely on the values passed down by the caller of this
  * routine instead.  Hence, the addition of any new parameters should happen
  * through this code path.
  */
-void
-RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
-					 const char *slotname, bool create_temp_slot)
+static void
+RequestWalReceiver(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
+				   const char *slotname, bool create_temp_slot, bool feedback_only)
 {
 	WalRcvData *walrcv = WalRcv;
 	bool		launch = false;
@@ -272,7 +280,7 @@ RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
 	 * being created by XLOG streaming, which might cause trouble later on if
 	 * the segment is e.g archived.
 	 */
-	if (XLogSegmentOffset(recptr, wal_segment_size) != 0)
+	if (!feedback_only && XLogSegmentOffset(recptr, wal_segment_size) != 0)
 		recptr -= XLogSegmentOffset(recptr, wal_segment_size);
 
 	SpinLockAcquire(&walrcv->mutex);
@@ -280,6 +288,7 @@ RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
 	/* It better be stopped if we try to restart it */
 	Assert(walrcv->walRcvState == WALRCV_STOPPED ||
 		   walrcv->walRcvState == WALRCV_WAITING);
+	walrcv->feedbackOnly = feedback_only;
 
 	/*
 	 * Use configured replication slot if present, and ignore the value of
@@ -320,7 +329,8 @@ RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
 	 * If this is the first startup of walreceiver (on this timeline),
 	 * initialize flushedUpto and latestChunkStart to the starting point.
 	 */
-	if (!XLogRecPtrIsValid(walrcv->receiveStart) || walrcv->receivedTLI != tli)
+	if (!feedback_only &&
+		(!XLogRecPtrIsValid(walrcv->receiveStart) || walrcv->receivedTLI != tli))
 	{
 		walrcv->flushedUpto = recptr;
 		walrcv->receivedTLI = tli;
@@ -343,6 +353,32 @@ RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
 		SendPostmasterSignal(PMSIGNAL_START_WALRECEIVER);
 	else if (walrcv_proc != INVALID_PROC_NUMBER)
 		SetLatch(&GetPGProcByNumber(walrcv_proc)->procLatch);
+}
+
+void
+RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
+					 const char *slotname, bool create_temp_slot)
+{
+	RequestWalReceiver(tli, recptr, conninfo, slotname, create_temp_slot, false);
+}
+
+void
+RequestWalReceiverFeedback(TimeLineID tli, XLogRecPtr recptr,
+						   const char *conninfo, const char *slotname)
+{
+	RequestWalReceiver(tli, recptr, conninfo, slotname, false, true);
+}
+
+/* Includes a feedback receiver that is still starting or connecting. */
+bool
+WalRcvFeedback(void)
+{
+	bool		result;
+
+	SpinLockAcquire(&WalRcv->mutex);
+	result = WalRcv->feedbackOnly && WalRcv->walRcvState != WALRCV_STOPPED;
+	SpinLockRelease(&WalRcv->mutex);
+	return result;
 }
 
 /*

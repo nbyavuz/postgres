@@ -621,7 +621,9 @@ libpqrcv_startstreaming(WalReceiverConn *conn,
 	initStringInfo(&cmd);
 
 	/* Build the command. */
-	appendStringInfoString(&cmd, "START_REPLICATION");
+	appendStringInfoString(&cmd,
+						   !options->logical && options->proto.physical.feedback_only ?
+						   "START_FEEDBACK" : "START_REPLICATION");
 	if (options->slotname != NULL)
 	{
 		appendStringInfoString(&cmd, " SLOT ");

@@ -49,6 +49,7 @@ typedef enum
 								 * initialized yet */
 	WALRCV_CONNECTING,			/* connecting to upstream server */
 	WALRCV_STREAMING,			/* walreceiver is streaming */
+	WALRCV_FEEDBACK,			/* reporting archive/local replay progress */
 	WALRCV_WAITING,				/* stopped streaming, waiting for orders */
 	WALRCV_RESTARTING,			/* asked to restart streaming */
 	WALRCV_STOPPING,			/* requested to stop, but still running */
@@ -70,6 +71,9 @@ typedef struct
 
 	/* Its current state */
 	WalRcvState walRcvState;
+	bool		feedbackOnly;	/* requested operation, including during
+								 * startup */
+	bool		feedbackUnsupported;	/* upstream predates START_FEEDBACK */
 	ConditionVariable walRcvStoppedCV;
 
 	/*
@@ -82,7 +86,8 @@ typedef struct
 	 * receiveStart and receiveStartTLI indicate the first byte position and
 	 * timeline that will be received. When startup process starts the
 	 * walreceiver, it sets these to the point where it wants the streaming to
-	 * begin.
+	 * begin. For feedback-only receivers, these instead identify the initial
+	 * replay acknowledgement and the timeline to which the session is bound.
 	 */
 	XLogRecPtr	receiveStart;
 	TimeLineID	receiveStartTLI;
@@ -177,6 +182,7 @@ typedef struct
 		struct
 		{
 			TimeLineID	startpointTLI;	/* Starting timeline */
+			bool		feedback_only;
 		}			physical;
 		struct
 		{
@@ -497,10 +503,13 @@ extern void WalRcvRequestApplyReply(void);
 extern void ShutdownWalRcv(void);
 extern bool WalRcvStreaming(void);
 extern bool WalRcvRunning(void);
+extern bool WalRcvFeedback(void);
 extern WalRcvState WalRcvGetState(void);
 extern void RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr,
 								 const char *conninfo, const char *slotname,
 								 bool create_temp_slot);
+extern void RequestWalReceiverFeedback(TimeLineID tli, XLogRecPtr recptr,
+									   const char *conninfo, const char *slotname);
 extern XLogRecPtr GetWalRcvFlushRecPtr(XLogRecPtr *latestChunkStart, TimeLineID *receiveTLI);
 extern XLogRecPtr GetWalRcvWriteRecPtr(void);
 extern int	GetReplicationApplyDelay(void);
