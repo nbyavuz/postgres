@@ -2615,6 +2615,41 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
      </listitem>
     </varlistentry>
 
+    <varlistentry id="protocol-replication-start-feedback">
+     <term><literal>START_FEEDBACK</literal> [ <literal>SLOT</literal> <replaceable>slot_name</replaceable> ] <replaceable>XXX/XXX</replaceable> <literal>TIMELINE</literal> <replaceable>tli</replaceable>
+      <indexterm><primary>START_FEEDBACK</primary></indexterm>
+     </term>
+     <listitem>
+      <para>
+       Starts a feedback-only physical replication session. The location is
+       the end of a record already replayed by the standby, on the specified
+       timeline. The server verifies that this position belongs to its history
+       and does not exceed its flushed WAL position, then responds with
+       CopyBothResponse. WAL segments are neither read nor transmitted, so the
+       acknowledged WAL need not still exist on the server.
+      </para>
+      <para>
+       The client sends standby status updates and hot standby feedback using
+       the message formats described below for <literal>START_REPLICATION</literal>.
+       Each status update must contain identical write, flush, and apply
+       positions identifying the end of a fully replayed record on the
+       negotiated timeline. These positions are subject to the same history
+       and flush checks as the initial position. A client must start a new
+       session before reporting progress on another timeline. The server sends
+       keepalives, whose WAL position is its current flush position, and honors
+       the usual replication timeouts and CopyDone exchange.
+      </para>
+      <para>
+       If specified, the slot must be a valid, available physical replication
+       slot. Status updates advance its <literal>restart_lsn</literal> but do
+       not move it backwards when replay trails an earlier acknowledgement.
+       Hot standby feedback updates its transaction horizons. Feedback-only
+       sessions are not candidates for synchronous replication. This command
+       is available beginning with <productname>PostgreSQL</productname> 20.
+      </para>
+     </listitem>
+    </varlistentry>
+
     <varlistentry id="protocol-replication-start-replication">
      <term><literal>START_REPLICATION</literal> [ <literal>SLOT</literal> <replaceable class="parameter">slot_name</replaceable> ] [ <literal>PHYSICAL</literal> ] <replaceable class="parameter">XXX/XXX</replaceable> [ <literal>TIMELINE</literal> <replaceable class="parameter">tli</replaceable> ]
       <indexterm><primary>START_REPLICATION</primary></indexterm>

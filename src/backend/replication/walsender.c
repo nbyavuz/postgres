@@ -183,6 +183,12 @@ static TimeLineID sendTimeLineNextTLI = 0;
 static bool sendTimeLineIsHistoric = false;
 static XLogRecPtr sendTimeLineValidUpto = InvalidXLogRecPtr;
 
+/* A feedback session is bound to one interval of the upstream's history. */
+static bool feedbackOnly = false;
+static TimeLineID feedbackUpstreamTLI;
+static XLogRecPtr feedbackBegin;
+static XLogRecPtr feedbackEnd;
+
 /*
  * How far have we sent WAL already? This is also advertised in
  * MyWalSnd->sentPtr.  (Actually, this is the next WAL location to send.)
@@ -299,6 +305,9 @@ static void ReadReplicationSlot(ReadReplicationSlotCmd *cmd);
 static void CreateReplicationSlot(CreateReplicationSlotCmd *cmd);
 static void DropReplicationSlot(DropReplicationSlotCmd *cmd);
 static void StartReplication(StartReplicationCmd *cmd);
+static void StartFeedback(StartReplicationCmd *cmd);
+static void WalSndFeedbackIdle(void);
+static void ValidateFeedbackPosition(XLogRecPtr lsn);
 static void StartLogicalReplication(StartReplicationCmd *cmd);
 static void ProcessStandbyMessage(void);
 static void ProcessStandbyReplyMessage(void);
@@ -851,6 +860,108 @@ HandleUploadManifestPacket(StringInfo buf, off_t *offset,
 	/* Not reached. */
 	Assert(false);
 	return false;
+}
+
+/* Check an exclusive end position, not the beginning of a WAL record. */
+static void
+ValidateFeedbackPosition(XLogRecPtr lsn)
+{
+	TimeLineID	tli;
+	XLogRecPtr	flush;
+
+	/* An upstream promotion requires a new timeline negotiation. */
+	if (am_cascading_walsender && !RecoveryInProgress())
+		proc_exit(0);
+
+	flush = am_cascading_walsender ? GetStandbyFlushRecPtr(&tli) :
+		GetFlushRecPtr(&tli);
+	if (tli != feedbackUpstreamTLI ||
+		!XLogRecPtrIsValid(lsn) || lsn <= feedbackBegin ||
+		(XLogRecPtrIsValid(feedbackEnd) && lsn > feedbackEnd) ||
+		lsn > flush)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("invalid standby feedback position %X/%08X",
+						LSN_FORMAT_ARGS(lsn)),
+				 errdetail("The acknowledged WAL must belong to the negotiated timeline and must have been flushed on this server.")));
+}
+
+/* No WAL is sent, and this sender must never become a synchronous standby. */
+static void
+WalSndFeedbackIdle(void)
+{
+	WalSndCaughtUp = true;
+}
+
+static void
+StartFeedback(StartReplicationCmd *cmd)
+{
+	List	   *history;
+	ListCell   *lc;
+	bool		found = false;
+	StringInfoData buf;
+
+	am_cascading_walsender = RecoveryInProgress();
+	if (am_cascading_walsender)
+		(void) GetStandbyFlushRecPtr(&feedbackUpstreamTLI);
+	else
+		(void) GetFlushRecPtr(&feedbackUpstreamTLI);
+
+	history = readTimeLineHistory(feedbackUpstreamTLI);
+	foreach(lc, history)
+	{
+		TimeLineHistoryEntry *entry = lfirst(lc);
+
+		if (entry->tli == cmd->timeline)
+		{
+			feedbackBegin = entry->begin;
+			feedbackEnd = entry->end;
+			found = true;
+			break;
+		}
+	}
+	list_free_deep(history);
+	if (!found)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("requested timeline %u is not in this server's history",
+						cmd->timeline)));
+	/* Unlike streaming, validation must not depend on retaining the segment. */
+	ValidateFeedbackPosition(cmd->startpoint);
+
+	if (cmd->slotname)
+	{
+		ReplicationSlotAcquire(cmd->slotname, true, true);
+		if (SlotIsLogical(MyReplicationSlot))
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("cannot use a logical replication slot for physical replication")));
+	}
+
+	feedbackOnly = true;
+	streamingDoneSending = streamingDoneReceiving = false;
+	sentPtr = InvalidXLogRecPtr;
+	SpinLockAcquire(&MyWalSnd->mutex);
+	MyWalSnd->sentPtr = InvalidXLogRecPtr;
+	MyWalSnd->write = MyWalSnd->flush = MyWalSnd->apply = InvalidXLogRecPtr;
+	MyWalSnd->writeLag = MyWalSnd->flushLag = MyWalSnd->applyLag = -1;
+	SpinLockRelease(&MyWalSnd->mutex);
+	WalSndSetState(WALSNDSTATE_FEEDBACK);
+
+	pq_beginmessage(&buf, PqMsg_CopyBothResponse);
+	pq_sendbyte(&buf, 0);
+	pq_sendint16(&buf, 0);
+	pq_endmessage(&buf);
+	pq_flush();
+
+	replication_active = true;
+	WalSndLoop(WalSndFeedbackIdle);
+	replication_active = false;
+	feedbackOnly = false;
+	if (cmd->slotname)
+		ReplicationSlotRelease();
+	WalSndSetState(WALSNDSTATE_STARTUP);
+	EndReplicationCommand("START_FEEDBACK");
 }
 
 /*
@@ -2148,6 +2259,7 @@ exec_replication_command(const char *cmd_string)
 
 	Assert(xlogreader == NULL);
 	Assert(logical_decoding_ctx == NULL);
+	feedbackOnly = false;
 
 	/*
 	 * Prepare to parse and execute the command.
@@ -2294,11 +2406,13 @@ exec_replication_command(const char *cmd_string)
 			{
 				StartReplicationCmd *cmd = (StartReplicationCmd *) cmd_node;
 
-				cmdtag = "START_REPLICATION";
+				cmdtag = cmd->feedback_only ? "START_FEEDBACK" : "START_REPLICATION";
 				set_ps_display(cmdtag);
 				PreventInTransactionBlock(true, cmdtag);
 
-				if (cmd->kind == REPLICATION_KIND_PHYSICAL)
+				if (cmd->feedback_only)
+					StartFeedback(cmd);
+				else if (cmd->kind == REPLICATION_KIND_PHYSICAL)
 					StartReplication(cmd);
 				else
 					StartLogicalReplication(cmd);
@@ -2576,6 +2690,15 @@ ProcessStandbyReplyMessage(void)
 	replyTime = pq_getmsgint64(&reply_message);
 	replyRequested = pq_getmsgbyte(&reply_message);
 
+	if (feedbackOnly)
+	{
+		ValidateFeedbackPosition(flushPtr);
+		if (writePtr != flushPtr || applyPtr != flushPtr)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("feedback-only positions must identify the same replayed WAL record")));
+	}
+
 	if (message_level_is_interesting(DEBUG2))
 	{
 		char	   *replyTimeStr;
@@ -2654,7 +2777,16 @@ ProcessStandbyReplyMessage(void)
 		if (SlotIsLogical(MyReplicationSlot))
 			LogicalConfirmReceivedLocation(flushPtr);
 		else
+		{
+			/* Archive replay can initially trail an earlier streaming flush. */
+			if (feedbackOnly)
+			{
+				SpinLockAcquire(&MyReplicationSlot->mutex);
+				flushPtr = Max(flushPtr, MyReplicationSlot->data.restart_lsn);
+				SpinLockRelease(&MyReplicationSlot->mutex);
+			}
 			PhysicalConfirmReceivedLocation(flushPtr);
+		}
 	}
 }
 
@@ -3102,6 +3234,10 @@ WalSndLoop(WalSndSendDataCallback send_data)
 
 		/* Process any requests or signals received recently */
 		WalSndHandleConfigReload();
+
+		/* A feedback-only session has no final WAL to send at shutdown. */
+		if (feedbackOnly && (got_STOPPING || got_SIGUSR2))
+			proc_exit(0);
 
 		/* Check for input from the client */
 		ProcessRepliesIfAny();
@@ -4139,7 +4275,7 @@ WalSndWait(uint32 socket_events, long timeout, uint32 wait_event)
 	 */
 	if (wait_event == WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION)
 		ConditionVariablePrepareToSleep(&WalSndCtl->wal_confirm_rcv_cv);
-	else if (MyWalSnd->kind == REPLICATION_KIND_PHYSICAL)
+	else if (MyWalSnd->kind == REPLICATION_KIND_PHYSICAL && !feedbackOnly)
 	{
 		ConditionVariablePrepareToSleep(&WalSndCtl->wal_flush_cv);
 
@@ -4296,6 +4432,8 @@ WalSndGetStateString(WalSndState state)
 			return "catchup";
 		case WALSNDSTATE_STREAMING:
 			return "streaming";
+		case WALSNDSTATE_FEEDBACK:
+			return "feedback";
 		case WALSNDSTATE_STOPPING:
 			return "stopping";
 	}
@@ -4423,10 +4561,10 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 
 			/*
 			 * Treat a standby such as a pg_basebackup background process
-			 * which always returns an invalid flush location, as an
-			 * asynchronous standby.
+			 * which always returns an invalid flush location, and
+			 * feedback-only connections, as asynchronous standbys.
 			 */
-			priority = XLogRecPtrIsValid(flush) ? priority : 0;
+			priority = XLogRecPtrIsValid(flush) && state != WALSNDSTATE_FEEDBACK ? priority : 0;
 
 			if (writeLag < 0)
 				nulls[6] = true;
@@ -4493,6 +4631,14 @@ static void
 WalSndKeepalive(bool requestReply, XLogRecPtr writePtr)
 {
 	elog(DEBUG2, "sending replication keepalive");
+
+	if (feedbackOnly)
+	{
+		if (am_cascading_walsender && !RecoveryInProgress())
+			proc_exit(0);
+		writePtr = am_cascading_walsender ? GetStandbyFlushRecPtr(NULL) :
+			GetFlushRecPtr(NULL);
+	}
 
 	/* construct the message... */
 	resetStringInfo(&output_message);

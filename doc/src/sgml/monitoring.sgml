@@ -1520,6 +1520,15 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         </listitem>
         <listitem>
          <para>
+          <literal>feedback</literal>: This WAL sender receives replay progress
+          and hot standby feedback without sending WAL. The
+          <structfield>sent_lsn</structfield> is null; write, flush, and replay
+          positions report the standby's completed replay position. This
+          connection is not a synchronous standby.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
           <literal>stopping</literal>: This WAL sender is stopping.
          </para>
         </listitem>

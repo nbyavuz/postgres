@@ -64,6 +64,7 @@
 %token K_READ_REPLICATION_SLOT
 %token K_SHOW
 %token K_START_REPLICATION
+%token K_START_FEEDBACK
 %token K_CREATE_REPLICATION_SLOT
 %token K_DROP_REPLICATION_SLOT
 %token K_ALTER_REPLICATION_SLOT
@@ -293,6 +294,21 @@ start_replication:
 					cmd->timeline = $5;
 					$$ = (Node *) cmd;
 				}
+			| K_START_FEEDBACK opt_slot RECPTR K_TIMELINE UCONST
+				{
+					StartReplicationCmd *cmd = makeNode(StartReplicationCmd);
+
+					if ($5 == 0)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("invalid timeline %u", $5)));
+					cmd->kind = REPLICATION_KIND_PHYSICAL;
+					cmd->slotname = $2;
+					cmd->startpoint = $3;
+					cmd->timeline = $5;
+					cmd->feedback_only = true;
+					$$ = (Node *) cmd;
+				}
 			;
 
 /* START_REPLICATION SLOT slot LOGICAL %X/%08X options */
@@ -427,6 +443,7 @@ ident_or_keyword:
 			| K_IDENTIFY_SYSTEM				{ $$ = "identify_system"; }
 			| K_SHOW						{ $$ = "show"; }
 			| K_START_REPLICATION			{ $$ = "start_replication"; }
+			| K_START_FEEDBACK				{ $$ = "start_feedback"; }
 			| K_CREATE_REPLICATION_SLOT	{ $$ = "create_replication_slot"; }
 			| K_DROP_REPLICATION_SLOT		{ $$ = "drop_replication_slot"; }
 			| K_ALTER_REPLICATION_SLOT		{ $$ = "alter_replication_slot"; }
