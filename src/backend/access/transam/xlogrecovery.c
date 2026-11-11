@@ -68,6 +68,7 @@
 #include "utils/pg_lsn.h"
 #include "utils/ps_status.h"
 #include "utils/pg_rusage.h"
+#include "utils/timeout.h"
 #include "utils/wait_event.h"
 
 /* Unsupported old recovery command file names (relative to $PGDATA) */
@@ -247,11 +248,15 @@ static XLogSource readSource = XLOG_FROM_ANY;
  * next.
  *
  * pendingWalRcvRestart is set when a config change occurs that requires a
- * walreceiver restart.  This is only valid in XLOG_FROM_STREAM state.
+ * walreceiver restart, including a feedback-only receiver.
  */
 static XLogSource currentSource = XLOG_FROM_ANY;
 static bool lastSourceFailed = false;
 static bool pendingWalRcvRestart = false;
+static bool feedbackInitialized = false;
+static bool feedbackReplayStarted = false;
+static volatile sig_atomic_t feedbackTimerExpired = false;
+static TimestampTz lastFeedbackAttempt = 0;
 
 /*
  * These variables track when we last obtained some WAL data to process,
@@ -366,6 +371,7 @@ static char *getRecoveryStopReason(void);
 static void recoveryPausesHere(bool endOfRecovery);
 static bool recoveryApplyDelay(XLogReaderState *record);
 static void ConfirmRecoveryPaused(void);
+static void StandbyFeedbackTimeoutHandler(void);
 
 static XLogRecord *ReadRecord(XLogPrefetcher *xlogprefetcher,
 							  int emode, bool fetching_ckpt,
@@ -1444,6 +1450,12 @@ FinishWalRecovery(void)
 	TimeLineID	lastRecTLI;
 	XLogRecPtr	endOfLog;
 
+	if (feedbackInitialized)
+	{
+		disable_timeout(STANDBY_FEEDBACK_TIMEOUT, false);
+		feedbackInitialized = false;
+	}
+
 	/*
 	 * Kill WAL receiver, if it's still running, before we continue to write
 	 * the startup checkpoint and aborted-contrecord records. It will trump
@@ -1637,6 +1649,13 @@ PerformWalRecovery(void)
 	XLogRecord *record;
 	bool		reachedRecoveryTarget = false;
 	TimeLineID	replayTLI;
+
+	if (StandbyMode)
+	{
+		RegisterTimeout(STANDBY_FEEDBACK_TIMEOUT, StandbyFeedbackTimeoutHandler);
+		feedbackInitialized = true;
+		enable_timeout_after(STANDBY_FEEDBACK_TIMEOUT, wal_retrieve_retry_interval);
+	}
 
 	/*
 	 * Initialize shared variables for tracking progress of WAL replay, as if
@@ -2008,6 +2027,7 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 	XLogRecoveryCtl->lastReplayedEndRecPtr = xlogreader->EndRecPtr;
 	XLogRecoveryCtl->lastReplayedTLI = *replayTLI;
 	SpinLockRelease(&XLogRecoveryCtl->info_lck);
+	feedbackReplayStarted = true;
 
 	/* ------
 	 * Wakeup walsenders:
@@ -3656,6 +3676,8 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					 * walreceiver if necessary.
 					 */
 					currentSource = XLOG_FROM_STREAM;
+					if (WalRcvFeedback())
+						ShutdownWalRcv();
 					startWalReceiver = true;
 					break;
 
@@ -3791,8 +3813,9 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 			case XLOG_FROM_PG_WAL:
 
 				/*
-				 * WAL receiver must not be running when reading WAL from
-				 * archive or pg_wal.
+				 * A receiver that can write WAL must not be running when
+				 * reading WAL from archive or pg_wal.  Feedback-only
+				 * receivers are safe.
 				 */
 				Assert(!WalRcvStreaming());
 
@@ -4414,13 +4437,76 @@ XLogFileReadAnyTLI(XLogSegNo segno, XLogSource source)
 void
 StartupRequestWalReceiverRestart(void)
 {
-	if (currentSource == XLOG_FROM_STREAM && WalRcvRunning())
+	SpinLockAcquire(&WalRcv->mutex);
+	WalRcv->feedbackUnsupported = false;
+	SpinLockRelease(&WalRcv->mutex);
+	feedbackTimerExpired = true;
+	if (WalRcvRunning())
 	{
 		ereport(LOG,
 				(errmsg("WAL receiver process shutdown requested")));
 
 		pendingWalRcvRestart = true;
 	}
+}
+
+static void
+StandbyFeedbackTimeoutHandler(void)
+{
+	feedbackTimerExpired = true;
+	WakeupRecovery();
+}
+
+/*
+ * Called at startup-process interrupt points, including replay pause/delay
+ * waits.  The timer avoids a clock read for every replayed WAL record.
+ * Connection attempts run in walreceiver, never in the startup process.
+ */
+void
+StartupMaintainWalReceiver(void)
+{
+	TimeLineID	tli;
+	XLogRecPtr	replay;
+	TimestampTz now;
+	bool		unsupported;
+	bool		timeline_changed;
+
+	if (!feedbackInitialized || !feedbackTimerExpired)
+		return;
+	feedbackTimerExpired = false;
+	enable_timeout_after(STANDBY_FEEDBACK_TIMEOUT, wal_retrieve_retry_interval);
+
+	if (!StandbyMode || PromoteIsTriggered() || currentSource == XLOG_FROM_STREAM)
+		return;
+
+	if (pendingWalRcvRestart)
+	{
+		pendingWalRcvRestart = false;
+		ShutdownWalRcv();
+	}
+	if (!feedbackReplayStarted || !PrimaryConnInfo || PrimaryConnInfo[0] == '\0')
+		return;
+
+	replay = GetXLogReplayRecPtr(&tli);
+	SpinLockAcquire(&WalRcv->mutex);
+	unsupported = WalRcv->feedbackUnsupported;
+	timeline_changed = WalRcv->feedbackOnly && WalRcv->receiveStartTLI != tli;
+	SpinLockRelease(&WalRcv->mutex);
+	if (timeline_changed)
+		ShutdownWalRcv();
+	/* An old timeline's idle receiver cannot report archive progress. */
+	if (WalRcvGetState() == WALRCV_WAITING)
+		ShutdownWalRcv();
+	if (unsupported || WalRcvRunning())
+		return;
+
+	now = GetCurrentTimestamp();
+	if (!TimestampDifferenceExceeds(lastFeedbackAttempt, now,
+									wal_retrieve_retry_interval))
+		return;
+	lastFeedbackAttempt = now;
+	if (XLogRecPtrIsValid(replay) && tli != 0)
+		RequestWalReceiverFeedback(tli, replay, PrimaryConnInfo, PrimarySlotName);
 }
 
 

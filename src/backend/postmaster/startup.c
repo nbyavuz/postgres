@@ -192,6 +192,8 @@ ProcessStartupProcInterrupts(void)
 	/* Perform logging of memory contexts of this process */
 	if (LogMemoryContextPending)
 		ProcessLogMemoryContextInterrupt();
+
+	StartupMaintainWalReceiver();
 }
 
 

@@ -652,6 +652,31 @@ protocol to make nodes agree on a serializable transactional order.
    </para>
 
    <para>
+    When <xref linkend="guc-primary-conninfo"/> is configured, a standby also
+    attempts to maintain a feedback-only connection while replaying archive
+    or local WAL. This connection reports completed replay progress and,
+    when enabled, <xref linkend="guc-hot-standby-feedback"/>. It does not
+    transfer WAL or change the order in which WAL sources are tried.
+    Progress reports allow the upstream physical replication slot to advance
+    even while streaming is not in use. They also allow logical replication
+    waiting on <xref linkend="guc-synchronized-standby-slots"/> to proceed
+    up to the acknowledged position. Feedback-only connections do not satisfy
+    synchronous commit waits.
+   </para>
+
+   <para>
+    Reports use <xref linkend="guc-wal-receiver-status-interval"/> and failed
+    connections are retried using <xref linkend="guc-wal-retrieve-retry-interval"/>.
+    Feedback requires a reachable upstream server that supports
+    <link linkend="protocol-replication-start-feedback"><literal>START_FEEDBACK</literal></link>.
+    Connection failures do not interrupt archive replay. Reconnection attempts
+    may be delayed while a restore command is running. A slot retains WAL
+    beyond its acknowledged position, so retained WAL can still grow if replay
+    is slower than WAL generation. Eligible WAL is removed or recycled through
+    the normal checkpoint and archiving mechanisms.
+   </para>
+
+   <para>
     Standby mode is exited and the server switches to normal operation
     when <command>pg_ctl promote</command> is run, or
     <function>pg_promote()</function> is called. Before failover,

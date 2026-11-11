@@ -5556,6 +5556,9 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
        or when <varname>synchronous_commit</varname> is set to
        <literal>remote_apply</literal>.
        Thus, the apply position may lag slightly behind the true position.
+       This interval also controls reports sent over a feedback-only connection
+       while the standby replays archive or local WAL. In that mode, the write,
+       flush, and apply positions all report completed replay progress.
        If this value is specified without units, it is taken as seconds.
        The default value is 10 seconds. This parameter can only be set in
        the <filename>postgresql.conf</filename> file or on the server

@@ -36,6 +36,21 @@ Walreceiver sends information about replication progress to the primary server
 whenever it either writes or flushes new WAL, or the specified interval elapses.
 This is used for reporting purpose.
 
+While replaying archive or local WAL, startup can instead request a feedback-only
+walreceiver.  Such a receiver uses START_FEEDBACK and never writes WAL or timeline
+history files.  It reports the end of the last fully replayed record as its
+write, flush, and apply positions.  Replayed WAL is safe to acknowledge for the
+same reason that cascading walsenders can send it: restored segments have been
+durably installed, and restartpoint cleanup preserves WAL needed to restart.
+It does not advance the shared received-WAL pointers used by the WAL reader.
+
+The requested operation is separate from walRcvState, so archive restoration can
+distinguish a connecting feedback receiver from a connecting WAL writer.  Startup
+stops the feedback receiver before requesting streaming.  Connection failures
+are retried at startup interrupt points, driven by a timeout that also wakes
+replay-delay waits.  A feedback session is bound to a single timeline; startup
+and walreceiver stop it when replay moves to another timeline.
+
 Walsender IPC
 -------------
 
