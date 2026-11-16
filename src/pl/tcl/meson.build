@@ -7,6 +7,7 @@ endif
 pltcl_sources = files(
   'pltcl.c',
 )
+pltcl_nls_sources = pltcl_sources
 
 gen_pltclerrcodes = files('generate-pltclerrcodes.pl')
 pltcl_sources += custom_target('pltclerrcodes.h',

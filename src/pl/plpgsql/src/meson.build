@@ -7,6 +7,7 @@ plpgsql_sources = files(
   'pl_handler.c',
   'pl_scanner.c',
 )
+plpgsql_nls_sources = plpgsql_sources
 
 pl_gram = custom_target('gram',
   input: 'pl_gram.y',
@@ -14,6 +15,7 @@ pl_gram = custom_target('gram',
 )
 generated_sources += pl_gram.to_list()
 plpgsql_sources += pl_gram
+plpgsql_nls_sources += pl_gram
 
 gen_plerrcodes = files('generate-plerrcodes.pl')
 pl_errcodes = custom_target('plerrcodes',

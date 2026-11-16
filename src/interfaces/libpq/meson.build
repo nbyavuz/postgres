@@ -38,6 +38,8 @@ if gssapi.found()
   )
 endif
 
+libpq_nls_sources = libpq_sources
+
 export_file = custom_target('libpq.exports',
   kwargs: gen_export_kwargs,
 )

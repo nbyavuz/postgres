@@ -135,10 +135,12 @@ msgstr "another translated"
 
    <para>
     OK, so how does one create a <quote>blank</quote> message
-    catalog?  First, go into the directory that contains the program
-    whose messages you want to translate.  If there is a file
-    <filename>nls.mk</filename>, then this program has been prepared
-    for translation.
+    catalog?  Configure a Meson build with <option>-Dnls=enabled</option>,
+    and make sure that GNU <command>xgettext</command> is installed before
+    configuring.  The programs and libraries with catalog definitions in
+    their <filename>po/meson.build</filename> files are prepared for
+    translation. Catalog-generation targets are available for the programs and
+    libraries enabled in the Meson build.
    </para>
 
    <para>
@@ -165,14 +167,16 @@ msgstr "another translated"
     If you need to start a new translation effort, then first run the
     command:
 <programlisting>
-make init-po
+ninja -C build init-po
 </programlisting>
     This will create a file
-    <filename><replaceable>progname</replaceable>.pot</filename>.
+    <filename>build/src/nls/<replaceable>progname</replaceable>.pot</filename>
+    for each configured catalog.
     (<filename>.pot</filename> to distinguish it from PO files that
     are <quote>in production</quote>. The <literal>T</literal> stands for
     <quote>template</quote>.)
-    Copy this file to
+    Copy the template for the program you want to translate to its source
+    <filename>po</filename> directory as
     <filename><replaceable>language</replaceable>.po</filename> and
     edit it.  To make it known that the new language is available,
     also edit the file <filename>po/LINGUAS</filename> and add the
@@ -182,6 +186,15 @@ make init-po
 de fr
 </programlisting>
     (Other languages can appear, of course.)
+   </para>
+
+   <para>
+    For example, <command>ninja -C build psql-init-po</command> creates
+    <filename>build/src/nls/psql.pot</filename>.  The
+    <literal>init-po</literal> target creates templates for all configured
+    catalogs.  Templates are regenerated when their inputs change.
+    Source references in them are relative to the source-tree root, including
+    references originating in generated files.
    </para>
 
    <para>

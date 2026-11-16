@@ -3315,6 +3315,36 @@ cdata.set_quoted('PG_VERSION_STR',
 # NLS / Gettext
 ###############################################################
 
+# Catalog definitions are collected alongside the programs' source lists.
+# src/nls/meson.build creates the maintainer targets after visiting them all.
+nls_catalogs = {}
+nls_frontend_sources = files('src/common/logging.c')
+nls_frontend_triggers = [
+  'pg_log_error', 'pg_log_error_detail', 'pg_log_error_hint',
+  'pg_log_warning', 'pg_log_warning_detail', 'pg_log_warning_hint',
+  'pg_log_info', 'pg_log_info_detail', 'pg_log_info_hint',
+  'pg_fatal', 'pg_log_generic:3', 'pg_log_generic_v:3',
+]
+nls_frontend_flags = [
+  'pg_log_error:1:c-format', 'pg_log_error_detail:1:c-format', 'pg_log_error_hint:1:c-format',
+  'pg_log_warning:1:c-format', 'pg_log_warning_detail:1:c-format', 'pg_log_warning_hint:1:c-format',
+  'pg_log_info:1:c-format', 'pg_log_info_detail:1:c-format', 'pg_log_info_hint:1:c-format',
+  'pg_fatal:1:c-format', 'pg_log_generic:3:c-format', 'pg_log_generic_v:3:c-format',
+]
+nls_backend_triggers = nls_frontend_triggers + [
+  'errmsg', 'errmsg_plural:1,2',
+  'errdetail', 'errdetail_log', 'errdetail_plural:1,2',
+  'errhint', 'errhint_plural:1,2',
+  'errcontext',
+  'XactLockTableWait:4', 'MultiXactIdWait:6', 'ConditionalMultiXactIdWait:6',
+]
+nls_backend_flags = nls_frontend_flags + [
+  'errmsg:1:c-format', 'errmsg_plural:1:c-format', 'errmsg_plural:2:c-format',
+  'errdetail:1:c-format', 'errdetail_log:1:c-format', 'errdetail_plural:1:c-format', 'errdetail_plural:2:c-format',
+  'errhint:1:c-format', 'errhint_plural:1:c-format', 'errhint_plural:2:c-format',
+  'errcontext:1:c-format',
+]
+
 nlsopt = get_option('nls')
 libintl = not_found_dep
 
@@ -3703,6 +3733,9 @@ subdir('src/test')
 subdir('src/interfaces/ecpg/test')
 
 subdir('doc/src/sgml')
+
+subdir('src/nls')
+subdir('src/nls/t')
 
 generated_sources_ac += {'': ['GNUmakefile']}
 

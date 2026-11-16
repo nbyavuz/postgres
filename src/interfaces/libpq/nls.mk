@@ -9,6 +9,7 @@ GETTEXT_FILES    = fe-auth.c \
                    fe-gssapi-common.c \
                    fe-lobj.c \
                    fe-misc.c \
+                   fe-print.c \
                    fe-protocol3.c \
                    fe-secure.c \
                    fe-secure-common.c \

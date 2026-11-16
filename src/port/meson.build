@@ -1,6 +1,6 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
-pgport_sources = [
+pgport_sources = files(
   'bsearch_arg.c',
   'chklocale.c',
   'inet_net_ntop.c',
@@ -26,30 +26,32 @@ pgport_sources = [
   'snprintf.c',
   'strerror.c',
   'tar.c',
-]
+)
+
+pgport_windows_sources = files(
+  'dirmod.c',
+  'kill.c',
+  'open.c',
+  'system.c',
+  'win32common.c',
+  'win32dlopen.c',
+  'win32env.c',
+  'win32error.c',
+  'win32fdatasync.c',
+  'win32fseek.c',
+  'win32gai_strerror.c',
+  'win32getrusage.c',
+  'win32link.c',
+  'win32ntdll.c',
+  'win32pread.c',
+  'win32pwrite.c',
+  'win32security.c',
+  'win32setlocale.c',
+  'win32stat.c',
+)
 
 if host_system == 'windows'
-  pgport_sources += files(
-    'dirmod.c',
-    'kill.c',
-    'open.c',
-    'system.c',
-    'win32common.c',
-    'win32dlopen.c',
-    'win32env.c',
-    'win32error.c',
-    'win32fdatasync.c',
-    'win32fseek.c',
-    'win32gai_strerror.c',
-    'win32getrusage.c',
-    'win32link.c',
-    'win32ntdll.c',
-    'win32pread.c',
-    'win32pwrite.c',
-    'win32security.c',
-    'win32setlocale.c',
-    'win32stat.c',
-  )
+  pgport_sources += pgport_windows_sources
 elif host_system == 'cygwin'
   pgport_sources += files(
     'dirmod.c',

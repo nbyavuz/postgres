@@ -18,6 +18,7 @@ plpython_sources = files(
   'plpy_typeio.c',
   'plpy_util.c',
 )
+plpython_nls_sources = plpython_sources
 
 plpython_sources += custom_target('spiexceptions.h',
   input: files('../../backend/utils/errcodes.txt'),

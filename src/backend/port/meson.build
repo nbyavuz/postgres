@@ -25,9 +25,12 @@ if cdata.has('USE_WIN32_SHARED_MEMORY')
   backend_sources += files('win32_shmem.c')
 endif
 
-if host_system == 'windows'
-  subdir('win32')
-endif
+backend_nls_sources += files(
+  'posix_sema.c', 'sysv_sema.c', 'win32_sema.c',
+  'sysv_shmem.c', 'win32_shmem.c',
+)
+
+subdir('win32')
 
 # autoconf generates the file there, ensure we get a conflict
 generated_sources_ac += {'src/backend/port': ['pg_sema.c', 'pg_shmem.c']}
