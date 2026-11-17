@@ -7,6 +7,8 @@ initdb_sources = files(
 
 initdb_sources += timezone_localtime_source
 
+initdb_nls_sources = initdb_sources
+
 if host_system == 'windows'
   initdb_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'initdb',

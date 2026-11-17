@@ -30,3 +30,4 @@ nodefuncs = static_library('nodefuncs',
   kwargs: internal_lib_args,
 )
 backend_link_with += nodefuncs
+backend_nls_sources += nodefunc_sources

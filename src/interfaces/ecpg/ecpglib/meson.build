@@ -12,6 +12,7 @@ ecpglib_sources = files(
   'sqlda.c',
   'typename.c',
 )
+ecpglib_nls_sources = ecpglib_sources
 ecpglib_so_sources = [] # for shared lib, in addition to the above
 
 ecpglib_inc = [include_directories('.'), ecpg_inc]

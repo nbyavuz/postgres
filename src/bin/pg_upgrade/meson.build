@@ -22,6 +22,8 @@ pg_upgrade_sources = files(
   'version.c',
 )
 
+pg_upgrade_nls_sources = pg_upgrade_sources
+
 if host_system == 'windows'
   pg_upgrade_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_upgrade',

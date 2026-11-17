@@ -1,14 +1,19 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
 # Some code benefits from auto-vectorization
+vectorize_sources = files('numeric.c', 'varbit.c')
 vectorize_backend_lib = static_library('vectorize_backend_lib',
-  ['numeric.c', 'varbit.c'],
+  vectorize_sources,
   dependencies: backend_build_deps,
   kwargs: internal_lib_args,
   c_args: vectorize_cflags,
 )
 
 backend_link_with += vectorize_backend_lib
+backend_nls_sources += vectorize_sources
+
+# These templates are included by like.c and varlena.c.
+backend_nls_sources += files('like_match.c', 'levenshtein.c')
 
 backend_sources += files(
   'acl.c',
@@ -151,3 +156,6 @@ backend_link_with += static_library('jsonpath',
 )
 
 #generated_backend_sources += jsonpath_gram.to_list()
+
+backend_nls_sources += [jsonpath_scan, jsonpath_gram]
+backend_nls_scanners += jsonpath_scan

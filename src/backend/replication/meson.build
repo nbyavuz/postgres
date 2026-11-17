@@ -50,4 +50,7 @@ repl_parser = static_library('repl_parser',
 )
 backend_link_with += repl_parser
 
+backend_nls_sources += repl_parser_sources
+backend_nls_scanners += [repl_scanner, syncrep_scanner]
+
 subdir('logical')

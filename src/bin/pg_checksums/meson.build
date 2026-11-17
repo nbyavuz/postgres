@@ -4,6 +4,8 @@ pg_checksums_sources = files(
   'pg_checksums.c',
 )
 
+pg_checksums_nls_sources = pg_checksums_sources
+
 if host_system == 'windows'
   pg_checksums_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_checksums',

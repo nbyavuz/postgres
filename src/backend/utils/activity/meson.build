@@ -37,3 +37,4 @@ wait_event = static_library('wait_event_names',
 )
 
 backend_link_with += wait_event
+backend_nls_sources += waitevent_sources

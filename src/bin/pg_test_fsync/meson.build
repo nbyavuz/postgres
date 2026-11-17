@@ -4,6 +4,8 @@ test_fsync_sources = files(
   'pg_test_fsync.c',
 )
 
+pg_test_fsync_nls_sources = test_fsync_sources
+
 if host_system == 'windows'
   test_fsync_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_test_fsync',

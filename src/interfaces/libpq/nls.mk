@@ -1,4 +1,5 @@
 # src/interfaces/libpq/nls.mk
+# XXX: NLS FIX
 CATALOG_NAME     = libpq
 GETTEXT_FILES    = fe-auth.c \
                    fe-auth-oauth.c \

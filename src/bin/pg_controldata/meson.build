@@ -4,6 +4,8 @@ pg_controldata_sources = files(
   'pg_controldata.c',
 )
 
+pg_controldata_nls_sources = pg_controldata_sources
+
 if host_system == 'windows'
   pg_controldata_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_controldata',

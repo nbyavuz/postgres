@@ -28,3 +28,6 @@ boot_parser = static_library('boot_parser',
   kwargs: internal_lib_args,
 )
 backend_link_with += boot_parser
+
+backend_nls_sources += boot_parser_sources
+backend_nls_scanners += bootscanner

@@ -1,24 +1,31 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
-fe_utils_sources = files(
+# Shared with message catalogs in other directories.
+cancel_c = files('cancel.c')
+option_utils_c = files('option_utils.c')
+string_utils_c = files('string_utils.c')
+version_c = files('version.c')
+
+fe_utils_sources = [
+  cancel_c,
+  option_utils_c,
+  string_utils_c,
+  version_c,
+] + files(
   'archive.c',
   'astreamer_file.c',
   'astreamer_gzip.c',
   'astreamer_lz4.c',
   'astreamer_tar.c',
   'astreamer_zstd.c',
-  'cancel.c',
   'conditional.c',
   'connect_utils.c',
   'mbprint.c',
-  'option_utils.c',
   'parallel_slot.c',
   'print.c',
   'query_utils.c',
   'recovery_gen.c',
   'simple_list.c',
-  'string_utils.c',
-  'version.c',
 )
 
 psqlscan = custom_target('psqlscan',

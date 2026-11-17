@@ -4,6 +4,13 @@ backend_build_deps = [backend_code]
 backend_sources = []
 backend_link_with = [pgport_srv, common_srv]
 
+# Additional sources for the postgres catalog, including subsidiary libraries,
+# backend modules, and included C fragments.
+backend_nls_sources = []
+# Extract only source-authored code from these generated Flex scanners;
+# xgettext cannot reliably parse the original .l files.
+backend_nls_scanners = []
+
 generated_backend_sources = []
 post_export_backend_sources = []
 
@@ -33,9 +40,6 @@ subdir('storage')
 subdir('tcop')
 subdir('tsearch')
 subdir('utils')
-
-subdir('po', if_found: libintl)
-
 
 backend_link_args = []
 backend_link_depends = []
@@ -222,3 +226,9 @@ subdir('replication/pgoutput')
 subdir('replication/pgrepack')
 subdir('snowball')
 subdir('utils/mb/conversion_procs')
+
+postgres_nls_sources = backend_sources + backend_nls_sources
+postgres_nls_sources += generated_backend_sources
+
+# Register the catalog after collecting sources from all backend modules.
+subdir('po', if_found: libintl)

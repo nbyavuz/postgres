@@ -4,6 +4,8 @@ pg_test_timing_sources = files(
   'pg_test_timing.c'
 )
 
+pg_test_timing_nls_sources = pg_test_timing_sources
+
 if host_system == 'windows'
   pg_test_timing_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_test_timing',

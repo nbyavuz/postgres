@@ -4,6 +4,8 @@ pgoutput_sources = files(
   'pgoutput.c',
 )
 
+backend_nls_sources += pgoutput_sources
+
 if host_system == 'windows'
   pgoutput_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pgoutput',

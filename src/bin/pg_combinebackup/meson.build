@@ -9,6 +9,8 @@ pg_combinebackup_sources = files(
   'write_manifest.c',
 )
 
+pg_combinebackup_nls_sources = pg_combinebackup_sources
+
 if host_system == 'windows'
   pg_combinebackup_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_combinebackup',

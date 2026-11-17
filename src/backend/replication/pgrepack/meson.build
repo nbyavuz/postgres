@@ -4,6 +4,8 @@ pgrepack_sources = files(
   'pgrepack.c',
 )
 
+backend_nls_sources += pgrepack_sources
+
 if host_system == 'windows'
   pgrepack_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pgrepack',

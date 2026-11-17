@@ -4,6 +4,8 @@ pg_archivecleanup_sources = files(
   'pg_archivecleanup.c',
 )
 
+pg_archivecleanup_nls_sources = pg_archivecleanup_sources
+
 if host_system == 'windows'
   pg_archivecleanup_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_archivecleanup',

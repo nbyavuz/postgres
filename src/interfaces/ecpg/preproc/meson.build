@@ -52,6 +52,8 @@ preproc = custom_target('preproc.c',
 generated_sources += preproc.to_list()
 ecpg_sources += preproc
 
+ecpg_nls_sources = ecpg_sources
+
 c_kwlist = custom_target('c_kwlist_d.h',
   input: ['c_kwlist.h'],
   output: ['c_kwlist_d.h'],
@@ -85,8 +87,6 @@ ecpg_exe = executable('ecpg',
 )
 ecpg_targets += ecpg_exe
 
-subdir('po', if_found: libintl)
-
 tests += {
   'name': 'ecpg',
   'sd': meson.current_source_dir(),
@@ -99,3 +99,5 @@ tests += {
     'deps': [ecpg_exe],
   },
 }
+
+subdir('po', if_found: libintl)

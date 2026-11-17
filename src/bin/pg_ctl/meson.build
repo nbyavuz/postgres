@@ -4,6 +4,8 @@ pg_ctl_sources = files(
   'pg_ctl.c',
 )
 
+pg_ctl_nls_sources = pg_ctl_sources
+
 if host_system == 'windows'
   pg_ctl_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_ctl',

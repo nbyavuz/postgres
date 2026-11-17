@@ -49,3 +49,6 @@ parser = static_library('parser',
   kwargs: internal_lib_args,
 )
 backend_link_with += parser
+
+backend_nls_sources += parser_sources
+backend_nls_scanners += backend_scanner

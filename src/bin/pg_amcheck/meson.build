@@ -4,6 +4,8 @@ pg_amcheck_sources = files(
   'pg_amcheck.c',
 )
 
+pg_amcheck_nls_sources = pg_amcheck_sources
+
 if host_system == 'windows'
   pg_amcheck_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_amcheck',

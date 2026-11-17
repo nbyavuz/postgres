@@ -29,6 +29,11 @@ if gssapi.found()
   )
 endif
 
+# Catalogs must also cover installations with different optional features.
+backend_nls_sources += files(
+  'be-secure-openssl.c', 'be-secure-gssapi.c', 'be-gssapi-common.c',
+)
+
 install_data(
   'pg_hba.conf.sample',
   'pg_ident.conf.sample',

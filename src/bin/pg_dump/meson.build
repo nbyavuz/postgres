@@ -19,6 +19,8 @@ pg_dump_common_sources = files(
   'pg_backup_utils.c',
 )
 
+pg_dump_nls_sources = pg_dump_common_sources
+
 pg_dump_common = static_library('libpgdump_common',
   pg_dump_common_sources,
   c_pch: pch_postgres_fe_h,
@@ -32,6 +34,8 @@ pg_dump_sources = files(
   'pg_dump.c',
   'pg_dump_sort.c',
 )
+
+pg_dump_nls_sources += pg_dump_sources
 
 if host_system == 'windows'
   pg_dump_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
@@ -52,6 +56,8 @@ pg_dumpall_sources = files(
   'pg_dumpall.c',
 )
 
+pg_dump_nls_sources += pg_dumpall_sources
+
 if host_system == 'windows'
   pg_dumpall_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_dumpall',
@@ -70,6 +76,8 @@ bin_targets += pg_dumpall
 pg_restore_sources = files(
   'pg_restore.c',
 )
+
+pg_dump_nls_sources += pg_restore_sources
 
 if host_system == 'windows'
   pg_restore_sources += rc_bin_gen.process(win32ver_rc, extra_args: [

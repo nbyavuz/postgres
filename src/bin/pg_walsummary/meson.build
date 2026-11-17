@@ -4,6 +4,8 @@ pg_walsummary_sources = files(
   'pg_walsummary.c',
 )
 
+pg_walsummary_nls_sources = pg_walsummary_sources
+
 if host_system == 'windows'
   pg_walsummary_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_walsummary',

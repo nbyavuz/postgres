@@ -1,17 +1,31 @@
 # Copyright (c) 2022-2026, PostgreSQL Global Development Group
 
-common_sources = files(
+# Shared with message catalogs in other directories.
+controldata_utils_c = files('controldata_utils.c')
+cryptohash_c = files('cryptohash.c')
+cryptohash_openssl_c = files('cryptohash_openssl.c')
+exec_c = files('exec.c')
+fe_memutils_c = files('fe_memutils.c')
+file_utils_c = files('file_utils.c')
+restricted_token_c = files('restricted_token.c')
+username_c = files('username.c')
+wait_error_c = files('wait_error.c')
+
+common_sources = [
+  controldata_utils_c,
+  exec_c,
+  file_utils_c,
+  username_c,
+  wait_error_c,
+] + files(
   'archive.c',
   'base64.c',
   'binaryheap.c',
   'blkreftable.c',
   'checksum_helper.c',
   'compression.c',
-  'controldata_utils.c',
   'encnames.c',
-  'exec.c',
   'file_perm.c',
-  'file_utils.c',
   'hashfn.c',
   'instr_time.c',
   'ip.c',
@@ -37,25 +51,21 @@ common_sources = files(
   'unicode_case.c',
   'unicode_category.c',
   'unicode_norm.c',
-  'username.c',
-  'wait_error.c',
   'wchar.c',
 )
 
 if ssl.found()
-  common_sources += files(
-    'cryptohash_openssl.c',
-    'hmac_openssl.c',
-  )
+  common_sources += cryptohash_openssl_c + files('hmac_openssl.c')
 else
-  common_sources += files(
-    'cryptohash.c',
+  common_sources += cryptohash_c + files(
     'hmac.c',
     'md5.c',
     'sha1.c',
     'sha2.c',
   )
 endif
+
+common_nls_sources = common_sources
 
 common_kwlist = custom_target('kwlist',
   input: files('../include/parser/kwlist.h'),
@@ -98,6 +108,10 @@ common_sources_cflags = {
   'config_info': config_info_sources
 }
 
+foreach name, sources : common_sources_cflags
+  common_nls_sources += sources
+endforeach
+
 
 # A few files are currently only built for frontend, not server.
 # logging.c is excluded from OBJS_FRONTEND_SHLIB (shared library) as
@@ -110,15 +124,9 @@ common_sources_cflags = {
 # shlib rules.
 
 common_sources_frontend_shlib = common_sources
-common_sources_frontend_shlib += files(
-  'restricted_token.c',
-  'sprompt.c',
-)
+common_sources_frontend_shlib += restricted_token_c + files('sprompt.c')
 
-common_sources_excluded_shlib = files(
-  'fe_memutils.c',
-  'logging.c',
-)
+common_sources_excluded_shlib = fe_memutils_c + files('logging.c')
 
 common_sources_frontend_static = [
   common_sources_frontend_shlib,

@@ -4,6 +4,8 @@ pg_resetwal_sources = files(
   'pg_resetwal.c',
 )
 
+pg_resetwal_nls_sources = pg_resetwal_sources
+
 if host_system == 'windows'
   pg_resetwal_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
     '--NAME', 'pg_resetwal',

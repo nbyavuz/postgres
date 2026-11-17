@@ -7,6 +7,8 @@ common_sources = files(
   'walmethods.c',
 )
 
+pg_basebackup_nls_sources = common_sources
+
 pg_basebackup_deps = [frontend_code, libpq, lz4, zlib, zstd]
 pg_basebackup_common = static_library('libpg_basebackup_common',
   common_sources,
@@ -17,6 +19,8 @@ pg_basebackup_common = static_library('libpg_basebackup_common',
 pg_basebackup_sources = files(
   'pg_basebackup.c',
 )
+
+pg_basebackup_nls_sources += pg_basebackup_sources
 
 if host_system == 'windows'
   pg_basebackup_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
@@ -37,6 +41,8 @@ pg_createsubscriber_sources = files(
   'pg_createsubscriber.c'
 )
 
+pg_basebackup_nls_sources += pg_createsubscriber_sources
+
 if host_system == 'windows'
   pg_createsubscriber_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
 	'--NAME', 'pg_createsubscriber',
@@ -54,6 +60,8 @@ bin_targets += pg_createsubscriber
 pg_receivewal_sources = files(
   'pg_receivewal.c',
 )
+
+pg_basebackup_nls_sources += pg_receivewal_sources
 
 if host_system == 'windows'
   pg_receivewal_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
@@ -73,6 +81,8 @@ bin_targets += pg_receivewal
 pg_recvlogical_sources = files(
   'pg_recvlogical.c',
 )
+
+pg_basebackup_nls_sources += pg_recvlogical_sources
 
 if host_system == 'windows'
   pg_recvlogical_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
