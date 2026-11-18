@@ -5,16 +5,12 @@ if libintl.found()
 endif
 
 if xgettext.found()
-  pg_test_timing_pot = custom_target('pg_test_timing.pot',
-    input: pg_test_timing_nls_sources,
-    output: 'pg_test_timing.pot',
-    command: [python, files('../../../tools/generate_pot.py'),
-      '--xgettext', xgettext, '--srcdir', meson.current_source_dir() / '..',
-      '--catalog', 'pg_test_timing', '--version', pg_version_major.to_string(),
-      '--output', '@OUTPUT@', '@INPUT@'],
-    build_by_default: false,
+  pg_test_timing_pot = custom_target(po_name + '.pot',
+    command: [po_template_command, '--xgettext', xgettext, '@INPUT@'],
+    kwargs: po_template_kwargs,
   )
-  alias_target('pg_test_timing-init-po', pg_test_timing_pot)
+  po_templates += pg_test_timing_pot
+  alias_target(po_name + '-init-po', pg_test_timing_pot)
 endif
 
 local_languages = fs.read('LINGUAS').split()

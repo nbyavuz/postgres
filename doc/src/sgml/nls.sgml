@@ -185,8 +185,10 @@ de fr
    </para>
 
    <para>
-    For <application>pg_test_timing</application>, you can also generate the
-    template in a Meson build if <command>xgettext</command> is available:
+    For catalogs supported by the Meson build, use
+    <literal><replaceable>catalog</replaceable>-init-po</literal> to generate
+    one template, or <literal>init-po</literal> to generate all supported
+    templates.  These targets require <command>xgettext</command>.  For example:
 <programlisting>
 meson compile -C <replaceable>builddir</replaceable> pg_test_timing-init-po
 </programlisting>

@@ -13,6 +13,8 @@ parser.add_argument('--xgettext', required=True)
 parser.add_argument('--srcdir', required=True, help="the program's source directory")
 parser.add_argument('--catalog', required=True)
 parser.add_argument('--version', required=True)
+parser.add_argument('--keyword', action='append', default=[])
+parser.add_argument('--flag', action='append', default=[])
 parser.add_argument('--output', required=True)
 parser.add_argument('inputs', nargs='+')
 args = parser.parse_args()
@@ -36,6 +38,8 @@ sources = [os.path.relpath(path, args.srcdir).replace(os.sep, '/')
 pot = subprocess.check_output([
     args.xgettext,
     *xgettext_general_flags,
+    *['--keyword=' + keyword for keyword in args.keyword],
+    *['--flag=' + flag for flag in args.flag],
     '-o', '-', *sources,
 ], cwd=args.srcdir, encoding='utf-8')
 

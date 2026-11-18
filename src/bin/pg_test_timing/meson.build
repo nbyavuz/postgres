@@ -30,4 +30,7 @@ tests += {
   },
 }
 
-subdir('po')
+po_catalogs += {'src/bin/pg_test_timing': {
+  'name': 'pg_test_timing',
+  'sources': pg_test_timing_nls_sources,
+}}

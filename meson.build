@@ -3390,6 +3390,7 @@ pl_targets = []
 contrib_targets = []
 testprep_targets = []
 nls_targets = []
+po_catalogs = {}
 update_unicode_targets = []
 
 
@@ -3719,6 +3720,33 @@ subdir('src/test')
 subdir('src/interfaces/ecpg/test')
 
 subdir('doc/src/sgml')
+
+# Declare maintenance targets after all components have registered their
+# catalogs. Enter each po directory to keep its outputs alongside its .mo files.
+po_templates = []
+generate_pot = files('src/tools/generate_pot.py')
+foreach po_subdir, catalog : po_catalogs
+  po_name = catalog['name']
+  po_template_command = [python, generate_pot,
+    '--srcdir', meson.project_source_root() / po_subdir,
+    '--catalog', po_name, '--version', pg_version_major.to_string(),
+    '--output', '@OUTPUT@']
+  foreach keyword : catalog.get('keywords', [])
+    po_template_command += ['--keyword', keyword]
+  endforeach
+  foreach flag : catalog.get('flags', [])
+    po_template_command += ['--flag', flag]
+  endforeach
+  po_template_kwargs = {
+    'input': catalog['sources'],
+    'output': po_name + '.pot',
+    'build_by_default': false,
+  }
+  subdir(po_subdir / 'po')
+endforeach
+if po_templates.length() > 0
+  alias_target('init-po', po_templates)
+endif
 
 generated_sources_ac += {'': ['GNUmakefile']}
 
