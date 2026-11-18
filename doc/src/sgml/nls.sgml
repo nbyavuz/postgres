@@ -207,6 +207,33 @@ make update-po
     marks it <quote>fuzzy</quote> as explained above.  The new PO file
     is saved with a <filename>.po.new</filename> extension.
    </para>
+
+   <para>
+    In a Meson build, you can update a single language for
+    <application>pg_test_timing</application>.  For example, to generate
+    <filename>de.po.new</filename> for German, run:
+<programlisting>
+meson compile -C <replaceable>builddir</replaceable> pg_test_timing-de.po.new
+</programlisting>
+    To update all languages for that program, run:
+<programlisting>
+meson compile -C <replaceable>builddir</replaceable> pg_test_timing-update-po
+</programlisting>
+    Both commands require <command>xgettext</command> and
+    <command>msgmerge</command>.
+    The <filename>.po.new</filename> files are written alongside the template
+    in the build directory.  Even for a language not yet translated for
+    <application>pg_test_timing</application>, matching translations from
+    other programs can supply an initial catalog.
+   </para>
+
+   <para>
+    Meson discovers <filename>.po</filename> files when it configures the
+    build.  After adding or removing a catalog, run
+    <command>meson setup --reconfigure <replaceable>builddir</replaceable></command>
+    from the source root to refresh the list.  Editing an existing translation
+    does not require reconfiguration.
+   </para>
   </sect2>
 
   <sect2 id="nls-translator-editing-po">

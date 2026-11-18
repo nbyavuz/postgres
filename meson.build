@@ -416,6 +416,8 @@ xsltproc_bin = find_program(get_option('XSLTPROC'), native: true, required: fals
 nm = find_program('nm', required: false, native: true)
 ditaa = find_program('ditaa', native: true, required: false)
 dot = find_program('dot', native: true, required: false)
+xgettext = find_program('xgettext', native: true, required: false)
+msgmerge = find_program('msgmerge', native: true, required: false)
 
 bison_flags = []
 if bison.found()
@@ -3344,6 +3346,20 @@ if not nlsopt.disabled()
     i18n = import('i18n')
     cdata.set('ENABLE_NLS', 1)
   endif
+endif
+
+# Index the actual catalogs once for all update-po targets. A translation can
+# be used as a compendium even if its program doesn't list it in LINGUAS.
+po_catalogs_by_language = {}
+if xgettext.found() and msgmerge.found()
+  po_files = run_command(python, files('src/tools/list_po_files.py'),
+    meson.project_source_root(), check: true).stdout().strip()
+  foreach po_file : po_files.split('\n')
+    if po_file != ''
+      lang = fs.stem(po_file)
+      po_catalogs_by_language += {lang: po_catalogs_by_language.get(lang, []) + [po_file]}
+    endif
+  endforeach
 endif
 
 
