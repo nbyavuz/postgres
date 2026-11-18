@@ -3,6 +3,8 @@
 pg_test_timing_sources = files(
   'pg_test_timing.c'
 )
+# Include messages from the frontend allocator, but not Windows resources.
+pg_test_timing_nls_sources = pg_test_timing_sources + files('../../common/fe_memutils.c')
 
 if host_system == 'windows'
   pg_test_timing_sources += rc_bin_gen.process(win32ver_rc, extra_args: [
@@ -28,4 +30,4 @@ tests += {
   },
 }
 
-subdir('po', if_found: libintl)
+subdir('po')

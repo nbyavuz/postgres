@@ -185,6 +185,16 @@ de fr
    </para>
 
    <para>
+    For <application>pg_test_timing</application>, you can also generate the
+    template in a Meson build if <command>xgettext</command> is available:
+<programlisting>
+meson compile -C <replaceable>builddir</replaceable> pg_test_timing-init-po
+</programlisting>
+    The result is <filename>src/bin/pg_test_timing/po/pg_test_timing.pot</filename>
+    in the build directory.
+   </para>
+
+   <para>
     As the underlying program or library changes, messages might be
     changed or added by the programmers.  In this case you do not need
     to start from scratch.  Instead, run the command:
