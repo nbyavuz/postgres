@@ -3724,28 +3724,78 @@ subdir('doc/src/sgml')
 # Declare maintenance targets after all components have registered their
 # catalogs. Enter each po directory to keep its outputs alongside its .mo files.
 po_templates = []
+po_updates_by_language = {}
 generate_pot = files('src/tools/generate_pot.py')
 foreach po_subdir, catalog : po_catalogs
   po_name = catalog['name']
-  po_template_command = [python, generate_pot,
-    '--srcdir', meson.project_source_root() / po_subdir,
-    '--catalog', po_name, '--version', pg_version_major.to_string(),
-    '--output', '@OUTPUT@']
-  foreach keyword : catalog.get('keywords', [])
-    po_template_command += ['--keyword', keyword]
-  endforeach
-  foreach flag : catalog.get('flags', [])
-    po_template_command += ['--flag', flag]
-  endforeach
-  po_template_kwargs = {
-    'input': catalog['sources'],
-    'output': po_name + '.pot',
-    'build_by_default': false,
-  }
+  if xgettext.found()
+    po_srcdir = meson.project_source_root() / po_subdir
+    po_template_command = [python, generate_pot, '--xgettext', xgettext,
+      '--srcdir', po_srcdir, '--catalog', po_name,
+      '--version', pg_version_major.to_string(), '--output', '@OUTPUT@']
+    foreach keyword : catalog.get('keywords', [])
+      po_template_command += ['--keyword', keyword]
+    endforeach
+    foreach flag : catalog.get('flags', [])
+      po_template_command += ['--flag', flag]
+    endforeach
+    po_template_kwargs = {
+      'input': catalog['sources'],
+      'output': po_name + '.pot',
+      'command': po_template_command + ['@INPUT@'],
+      'build_by_default': false,
+    }
+  endif
+
+  po_merge_kwargs = {}
+  if xgettext.found() and msgmerge.found()
+    po_dir = po_srcdir / 'po'
+    local_languages = fs.read(po_dir / 'LINGUAS').split()
+    foreach lang, catalogs : po_catalogs_by_language
+      # Start a new language from the template's header, even when a
+      # compendium supplies a translation (see src/nls-global.mk).
+      local_po = po_dir / (lang + '.po')
+      maintained = lang in local_languages
+      definition = maintained ? files(local_po) : '@INPUT@'
+      compendia = []
+      foreach po_file : catalogs
+        if not maintained or po_file != local_po
+          compendia += ['--compendium', files(po_file)]
+        endif
+      endforeach
+      po_merge_kwargs += {lang: {
+        'output': lang + '.po.new',
+        'command': [msgmerge, '--no-wrap', '--previous', '--sort-by-file',
+          '--lang=' + lang, definition, '@INPUT@', compendia, '-o', '@OUTPUT@'],
+        'build_by_default': false,
+      }}
+    endforeach
+  endif
+
   subdir(po_subdir / 'po')
+  if xgettext.found()
+    alias_target(po_name + '-init-po', po_template)
+    po_templates += po_template
+  endif
+  catalog_updates = []
+  foreach lang, target : po_merges
+    catalog_updates += target
+    po_updates_by_language += {lang: po_updates_by_language.get(lang, []) + [target]}
+  endforeach
+  if catalog_updates.length() > 0
+    alias_target(po_name + '-update-po', catalog_updates)
+  endif
 endforeach
 if po_templates.length() > 0
   alias_target('init-po', po_templates)
+endif
+po_updates = []
+foreach lang, targets : po_updates_by_language
+  alias_target('update-po-' + lang, targets)
+  po_updates += targets
+endforeach
+if po_updates.length() > 0
+  alias_target('update-po', po_updates)
 endif
 
 generated_sources_ac += {'': ['GNUmakefile']}
