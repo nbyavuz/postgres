@@ -1,7 +1,7 @@
 # Copyright (c) 2026, PostgreSQL Global Development Group
 
-# A feedback-only walsender can report the end of WAL in a keepalive, but
-# must not send WAL or release a commit waiting for a synchronous standby.
+# A feedback-only walsender can advance a physical slot to a valid replay
+# position, but must not send WAL or release a synchronous commit.
 # Act as the standby so we can choose which messages the walsender receives.
 
 use strict;
@@ -18,7 +18,7 @@ plan skip_all =>
   'raw replication connection requires local socket authentication'
   unless $PostgreSQL::Test::Utils::use_unix_sockets;
 
-# Enable logical decoding so we can check that feedback rejects a logical slot.
+# Enable logical decoding to check how it uses the physical slot's progress.
 my $primary = PostgreSQL::Test::Cluster->new('primary');
 $primary->init(allows_streaming => 'logical');
 
@@ -26,11 +26,13 @@ $primary->init(allows_streaming => 'logical');
 # a streaming standby with that name could release the writer.  Disable
 # timed keepalives (0) so we only see the one requested by the client.  Use
 # local commits for setup; only the writer below should wait for a standby.
+# Logical decoding on the failover slot must wait for feedback_slot.
 my $standby_name = 'feedback_standby';
 $primary->append_conf(
 	'postgresql.conf', qq(
 synchronous_standby_names = '$standby_name'
 synchronous_commit = local
+synchronized_standby_slots = 'feedback_slot'
 wal_sender_timeout = 0
 ));
 $primary->start;
@@ -38,10 +40,13 @@ plan skip_all => 'this test requires working raw_connect()'
   unless $primary->raw_connect_works();
 
 # Of the two physical slots, only feedback_slot reserves WAL at creation.
-# Use test_decoding to create a logical slot for the wrong-slot-type check.
+# Use test_decoding so we can recognize the inserted row in the decoded output.
+my $create_feedback_slot = q[
+	SELECT lsn FROM pg_create_physical_replication_slot('feedback_slot', immediately_reserve => true)];
+my $initial_lsn = $primary->safe_psql('postgres', $create_feedback_slot);
 $primary->safe_psql(
 	'postgres', q[
-	SELECT pg_create_physical_replication_slot('feedback_slot', immediately_reserve => true);
+	CREATE TABLE feedback_test (i integer);
 	SELECT pg_create_physical_replication_slot('unreserved');
 	SELECT pg_create_logical_replication_slot('decode_slot', 'test_decoding', failover => true);
 ]);
@@ -71,9 +76,8 @@ for my $case (
 }
 
 # Use a separate physical replication connection for START_FEEDBACK.
-my $socket = $primary->raw_connect();
-binmode $socket;
-send_startup_packet();
+my $socket;
+connect_replication($primary);
 # A Query ('Q') contains a NUL-terminated command.  CopyBothResponse ('W')
 # means the server accepted it and entered bidirectional COPY.
 my $start_feedback = "START_FEEDBACK SLOT feedback_slot TIMELINE 1\0";
@@ -84,30 +88,68 @@ my $slot_active =
 is($primary->safe_psql('postgres', $slot_active),
 	't', 'feedback acquired the physical slot');
 
-# CREATE TABLE generates WAL.  Wait for psql's marker rather than for the
-# command to finish: its commit must block until a synchronous standby replies.
+# Insert row 0 with a local commit.  The decoder will look for this row
+# while the next insert (row 1) is waiting for a synchronous standby.
+$primary->safe_psql('postgres', 'INSERT INTO feedback_test VALUES (0)');
+my $earlier_lsn = $primary->lsn('flush');
+
+# Wait for psql's marker rather than for the second insert to finish.
 my $writer = $primary->background_psql('postgres');
 $writer->query_safe('SET synchronous_commit = on');
 my $writer_pid = $writer->query_safe('SELECT pg_backend_pid()');
 my $writer_wait =
   "SELECT wait_event FROM pg_stat_activity WHERE pid = $writer_pid";
 $writer->query_until(qr/starting write/,
-	"\\echo starting write\nCREATE TABLE feedback_test (i integer);\n");
+	"\\echo starting write\nINSERT INTO feedback_test VALUES (1);\n");
 # SyncRep confirms this writer reached the synchronous replication wait.
 $primary->poll_query_until('postgres', $writer_wait, 'SyncRep')
   or die 'commit did not start waiting for a synchronous standby';
 
-# Report a position that covers the waiting commit.  Use a fixed, nonzero
-# send time: one microsecond after the PostgreSQL epoch, in two 32-bit words.
+# Use a fixed, nonzero send time: one microsecond after the PostgreSQL
+# epoch, in two 32-bit words.
 # A zero timestamp would show up as NULL in pg_stat_replication.reply_time.
 my $report_time = pack('NN', 0, 1);
 my $reported_lsn = $primary->lsn('flush');
-my $wal_end = report_progress($reported_lsn, $report_time);
+my $slot_restart =
+  "SELECT restart_lsn FROM pg_replication_slots WHERE slot_name = 'feedback_slot'";
+
+# The largest possible LSN is beyond everything flushed on this primary.
+my $future_lsn = 'FFFFFFFF/FFFFFFFF';
+report_progress($future_lsn, $future_lsn, $future_lsn);
+is($primary->safe_psql('postgres', $slot_restart),
+	$initial_lsn, 'ignored replay ahead of the primary');
+report_progress($reported_lsn, $earlier_lsn, $reported_lsn);
+is($primary->safe_psql('postgres', $slot_restart),
+	$initial_lsn, 'ignored replay ahead of standby flush');
+report_progress($reported_lsn, $reported_lsn, $earlier_lsn);
+is($primary->safe_psql('postgres', $slot_restart),
+	$earlier_lsn, 'advanced only to replay');
+report_progress($initial_lsn, $initial_lsn, $initial_lsn);
+is($primary->safe_psql('postgres', $slot_restart),
+	$earlier_lsn, 'stale report did not rewind the slot');
+
+# Wait for the decoder to block on the physical slot.  Reporting replay
+# through the waiting commit should release the decoder, but not the writer.
+my $decoder = $primary->background_psql('postgres');
+$decoder->query_until(
+	qr/starting decoding/, qq[\\echo starting decoding
+	SELECT 'decoded row' FROM pg_logical_slot_peek_changes('decode_slot', '$reported_lsn', NULL)
+	WHERE data LIKE '%i[integer]:0';
+]);
+$primary->wait_for_event('client backend', 'WaitForStandbyConfirmation');
+my $wal_end = report_progress($reported_lsn, $reported_lsn, $reported_lsn);
 # Compare the positions as pg_lsn values; psql prints true as 't'.
 is( $primary->safe_psql(
 		'postgres', "SELECT '$wal_end'::pg_lsn >= '$reported_lsn'::pg_lsn"),
 	't',
 	'keepalive covers the waiting commit');
+is($primary->safe_psql('postgres', $slot_restart),
+	$reported_lsn, 'advanced to the replayed commit');
+like(
+	$decoder->query_until(qr/^decoded row\r?$/m, ''),
+	qr/^decoded row\r?$/m,
+	'feedback released logical decoding waiting on the physical slot');
+$decoder->quit;
 is($primary->safe_psql('postgres', $writer_wait),
 	'SyncRep', 'feedback did not release the synchronous commit');
 
@@ -152,15 +194,58 @@ ok( $primary->poll_query_until(
 	'walsender closed the connection after a disallowed message');
 
 $socket->close;
+
+# On a cascading walsender the upper bound is local replay, even when its
+# walreceiver has already flushed newer WAL.  Keep this session open across
+# promotion so that the sender must recheck the bounds of the old timeline.
+$primary->backup('base');
+my $standby = PostgreSQL::Test::Cluster->new('standby');
+$standby->init_from_backup($primary, 'base', has_streaming => 1);
+$standby->start;
+my $before_promotion = $standby->safe_psql('postgres', $create_feedback_slot);
+connect_replication($standby);
+send_message('Q', $start_feedback);
+expect_message('W', 'started feedback on cascading sender');
+$standby->safe_psql('postgres', 'SELECT pg_wal_replay_pause()');
+# Row 2 generates WAL that can reach the paused standby but cannot be replayed.
+$primary->safe_psql('postgres', 'INSERT INTO feedback_test VALUES (2)');
+my $received = $primary->lsn('flush');
+$primary->wait_for_catchup($standby, 'flush', $received);
+report_progress($received, $received, $received);
+is($standby->safe_psql('postgres', $slot_restart),
+	$before_promotion,
+	'cascading sender ignored WAL it received but has not replayed');
+$standby->safe_psql('postgres', 'SELECT pg_wal_replay_resume()');
+$primary->wait_for_replay_catchup($standby);
+$standby->promote;
+
+# The history file for timeline 2 gives the end of timeline 1 in the second
+# column.  The last record on timeline 1 may end exactly at that position.
+my ($fork) = slurp_file($standby->data_dir . '/pg_wal/00000002.history') =~
+  /^1\s+(\S+)/m;
+my $after_promotion = $standby->lsn('flush');
+report_progress($after_promotion, $after_promotion, $after_promotion);
+is($standby->safe_psql('postgres', $slot_restart),
+	$before_promotion, 'ignored replay past the fork');
+report_progress($fork, $fork, $fork);
+is( $standby->safe_psql(
+		'postgres', "SELECT ($slot_restart) = '$fork'::pg_lsn"),
+	't',
+	'accepted replay exactly to the fork');
+$standby->stop;
+$socket->close;
 $primary->stop;
 done_testing();
 
 # The startup packet has no type byte.  Its body starts with the protocol
 # version (3.0, two network-order 16-bit integers), followed by NUL-terminated
 # parameter names and values.  An empty name ends the list.
-sub send_startup_packet
+sub connect_replication
 {
-	my $user = $primary->safe_psql('postgres', 'SELECT current_user');
+	my ($node) = @_;
+	my $user = $node->safe_psql('postgres', 'SELECT current_user');
+	$socket = $node->raw_connect();
+	binmode $socket;
 	my $version = pack('nn', 3, 0);
 	# replication=true selects physical replication; application_name must
 	# match the synchronous standby name configured above.
@@ -182,17 +267,20 @@ sub send_startup_packet
 sub report_progress
 {
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
-	my ($lsn, $send_time) = @_;
-	# An LSN is printed as high/low hexadecimal halves.  Send each half as
-	# a network-order 32-bit integer; this also works on 32-bit Perl.
-	my ($high, $low) = split(m{/}, $lsn);
-	my $position = pack('NN', hex($high), hex($low));
+	my ($write, $flush, $replay) = @_;
+	# Write, flush and replay are each printed as high/low hexadecimal halves.
+	# Send each half as a network-order integer; this also works on 32-bit Perl.
+	my $positions = '';
+	foreach my $lsn ($write, $flush, $replay)
+	{
+		my ($high, $low) = split(m{/}, $lsn);
+		$positions .= pack('NN', hex($high), hex($low));
+	}
 	# 'r' identifies a standby status update inside CopyData ('d').  The
 	# LSNs are write, flush, replay, in order.  A final byte of 1 asks for
 	# an immediate reply.
 	my $request_reply = pack('C', 1);
-	my $positions = $position x 3;
-	send_message('d', 'r' . $positions . $send_time . $request_reply);
+	send_message('d', 'r' . $positions . $report_time . $request_reply);
 
 	my $body =
 	  expect_message('d', 'received CopyData after the status update');

@@ -2669,6 +2669,33 @@ PhysicalConfirmReceivedLocation(XLogRecPtr lsn)
 	 */
 }
 
+/* Advance the slot to the reported end of replay, if it is in our history. */
+static void
+ConfirmFeedbackReplay(XLogRecPtr replay)
+{
+	TimeLineID	currentTLI;
+	XLogRecPtr	localEnd;
+
+	/* We own the slot; a delayed report must not move it backwards. */
+	if (replay <= MyReplicationSlot->data.restart_lsn)
+		return;
+
+	/* As in pg_replication_slot_advance(), use replay on a cascading sender. */
+	localEnd = RecoveryInProgress() ?
+		GetXLogReplayRecPtr(&currentTLI) : GetFlushRecPtr(&currentTLI);
+	if (replay > localEnd)
+		return;
+
+	/* Promotion or a timeline switch may have ended the client's timeline. */
+	if (currentTLI != feedbackHistoryTLI)
+		SetFeedbackTimeLine(feedbackTimeLine.tli, currentTLI);
+
+	/* replay is the end of the record, so test the timeline of replay - 1. */
+	if (replay > feedbackTimeLine.begin &&
+		(!XLogRecPtrIsValid(feedbackTimeLine.end) || replay <= feedbackTimeLine.end))
+		PhysicalConfirmReceivedLocation(replay);
+}
+
 /*
  * Regular reply from standby advising of WAL locations on standby server.
  */
@@ -2697,10 +2724,13 @@ ProcessStandbyReplyMessage(void)
 	replyTime = pq_getmsgint64(&reply_message);
 	replyRequested = pq_getmsgbyte(&reply_message);
 
-	/* Feedback-only sessions report liveness, not streaming acknowledgments. */
+	/* Feedback can advance a physical slot but cannot release sync commits. */
 	if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
 	{
 		pq_getmsgend(&reply_message);
+		if (applyPtr <= flushPtr && flushPtr <= writePtr)
+			ConfirmFeedbackReplay(applyPtr);
+
 		SpinLockAcquire(&MyWalSnd->mutex);
 		MyWalSnd->replyTime = replyTime;
 		SpinLockRelease(&MyWalSnd->mutex);
