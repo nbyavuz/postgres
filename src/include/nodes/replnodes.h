@@ -99,6 +99,13 @@ typedef struct StartReplicationCmd
 } StartReplicationCmd;
 
 
+/* START_FEEDBACK command */
+typedef struct StartFeedbackCmd
+{
+	NodeTag		type;
+} StartFeedbackCmd;
+
+
 /* ----------------------
  *		READ_REPLICATION_SLOT command
  * ----------------------

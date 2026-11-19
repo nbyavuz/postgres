@@ -3013,6 +3013,29 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
      </listitem>
     </varlistentry>
 
+    <varlistentry id="protocol-replication-start-feedback">
+     <term><literal>START_FEEDBACK</literal>
+      <indexterm><primary>START_FEEDBACK</primary></indexterm>
+     </term>
+     <listitem>
+      <para>
+       Starts a feedback-only session on a physical replication connection.
+       The server enters bidirectional COPY mode but sends no WAL data.
+       The client can send <link linkend="protocol-replication-standby-status-update">standby
+       status updates</link>; any other CopyData message type from the client
+       causes the server to close the connection.  A status update can request
+       a <link linkend="protocol-replication-primary-keepalive-message">keepalive</link>,
+       whose WAL location is the server's flush position.
+       The server records the reply time and ignores the reported WAL
+       locations.  The connection cannot act as a synchronous standby.
+      </para>
+      <para>
+       To end the session, send CopyDone.  The server replies with CopyDone
+       and CommandComplete and is then ready for another command.
+      </para>
+     </listitem>
+    </varlistentry>
+
     <varlistentry id="protocol-replication-start-replication-slot-logical">
      <term><literal>START_REPLICATION</literal> <literal>SLOT</literal> <replaceable class="parameter">slot_name</replaceable> <literal>LOGICAL</literal> <replaceable class="parameter">XXX/XXX</replaceable> [ ( <replaceable>option_name</replaceable> [ <replaceable>option_value</replaceable> ] [, ...] ) ]</term>
      <listitem>
