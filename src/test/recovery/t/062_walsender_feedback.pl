@@ -18,22 +18,57 @@ plan skip_all =>
   'raw replication connection requires local socket authentication'
   unless $PostgreSQL::Test::Utils::use_unix_sockets;
 
-# Enable replication connections on the primary; there is no streaming standby.
+# Enable logical decoding so we can check that feedback rejects a logical slot.
 my $primary = PostgreSQL::Test::Cluster->new('primary');
-$primary->init(allows_streaming => 1);
+$primary->init(allows_streaming => 'logical');
 
 # Use the same name for synchronous_standby_names and the feedback client:
 # a streaming standby with that name could release the writer.  Disable
-# timed keepalives (0) so we only see the one requested by the client.
+# timed keepalives (0) so we only see the one requested by the client.  Use
+# local commits for setup; only the writer below should wait for a standby.
 my $standby_name = 'feedback_standby';
 $primary->append_conf(
 	'postgresql.conf', qq(
 synchronous_standby_names = '$standby_name'
+synchronous_commit = local
 wal_sender_timeout = 0
 ));
 $primary->start;
 plan skip_all => 'this test requires working raw_connect()'
   unless $primary->raw_connect_works();
+
+# Of the two physical slots, only feedback_slot reserves WAL at creation.
+# Use test_decoding to create a logical slot for the wrong-slot-type check.
+$primary->safe_psql(
+	'postgres', q[
+	SELECT pg_create_physical_replication_slot('feedback_slot', immediately_reserve => true);
+	SELECT pg_create_physical_replication_slot('unreserved');
+	SELECT pg_create_logical_replication_slot('decode_slot', 'test_decoding', failover => true);
+]);
+
+# Feedback requires both a slot and a timeline.  This primary is on timeline
+# 1 and has never been promoted, so timeline 2 is not in its history.
+for my $case (
+	[ 'START_FEEDBACK', qr/syntax error/ ],
+	[ 'START_FEEDBACK SLOT feedback_slot', qr/syntax error/ ],
+	[
+		'START_FEEDBACK SLOT unreserved TIMELINE 1',
+		qr/has never previously reserved WAL/
+	],
+	[
+		'START_FEEDBACK SLOT decode_slot TIMELINE 1',
+		qr/cannot use a logical replication slot/
+	],
+	[
+		'START_FEEDBACK SLOT feedback_slot TIMELINE 2',
+		qr/timeline 2 is not in this server's history/
+	])
+{
+	my ($command, $expected) = @$case;
+	my (undef, undef, $stderr) =
+	  $primary->psql('postgres', $command, replication => 'true');
+	like($stderr, $expected, "rejected $command");
+}
 
 # Use a separate physical replication connection for START_FEEDBACK.
 my $socket = $primary->raw_connect();
@@ -41,9 +76,13 @@ binmode $socket;
 send_startup_packet();
 # A Query ('Q') contains a NUL-terminated command.  CopyBothResponse ('W')
 # means the server accepted it and entered bidirectional COPY.
-my $start_feedback = "START_FEEDBACK\0";
+my $start_feedback = "START_FEEDBACK SLOT feedback_slot TIMELINE 1\0";
 send_message('Q', $start_feedback);
 expect_message('W', 'START_FEEDBACK entered bidirectional COPY');
+my $slot_active =
+  "SELECT active FROM pg_replication_slots WHERE slot_name = 'feedback_slot'";
+is($primary->safe_psql('postgres', $slot_active),
+	't', 'feedback acquired the physical slot');
 
 # CREATE TABLE generates WAL.  Wait for psql's marker rather than for the
 # command to finish: its commit must block until a synchronous standby replies.
@@ -93,8 +132,12 @@ send_message('c', '');
 expect_message('c', 'server replied with CopyDone');
 expect_message('C', 'server sent CommandComplete for START_FEEDBACK');
 expect_message('Z', 'server sent ReadyForQuery');
+is($primary->safe_psql('postgres', $slot_active),
+	'f', 'CopyDone released the physical slot');
 send_message('Q', $start_feedback);
 expect_message('W', 'same connection accepted a second START_FEEDBACK');
+is($primary->safe_psql('postgres', $slot_active),
+	't', 'second START_FEEDBACK reacquired the same slot');
 
 # 'p' (PqReplMsg_PrimaryStatusRequest) asks the primary to send its status.
 # It is valid during streaming but not during feedback.  Keep the socket open

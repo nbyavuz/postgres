@@ -3014,7 +3014,7 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
     </varlistentry>
 
     <varlistentry id="protocol-replication-start-feedback">
-     <term><literal>START_FEEDBACK</literal>
+     <term><literal>START_FEEDBACK</literal> <literal>SLOT</literal> <replaceable>slot_name</replaceable> <literal>TIMELINE</literal> <replaceable>tli</replaceable>
       <indexterm><primary>START_FEEDBACK</primary></indexterm>
      </term>
      <listitem>
@@ -3028,6 +3028,11 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
        whose WAL location is the server's flush position.
        The server records the reply time and ignores the reported WAL
        locations.  The connection cannot act as a synchronous standby.
+      </para>
+      <para>
+       The named slot must be a physical slot that has already reserved
+       WAL.  The server acquires it for the duration of the command.
+       The client must specify a timeline in the server's history.
       </para>
       <para>
        To end the session, send CopyDone.  The server replies with CopyDone
