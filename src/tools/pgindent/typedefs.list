@@ -3433,7 +3433,7 @@ WalReceiverConn
 WalReceiverFunctionsType
 WalSnd
 WalSndCtlData
-WalSndSendDataCallback
+WalSndLoopMode
 WalSndState
 WalSummarizerData
 WalSummaryFile

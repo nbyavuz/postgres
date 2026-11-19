@@ -278,19 +278,25 @@ typedef struct
 
 static LagTracker *lag_tracker;
 
+/* What this COPY session does; unlike WalSndState, this does not change. */
+typedef enum
+{
+	WALSND_LOOP_PHYSICAL,
+	WALSND_LOOP_LOGICAL,
+} WalSndLoopMode;
+
 /* Signal handlers */
 static void WalSndLastCycleHandler(SIGNAL_ARGS);
 
 /* Prototypes for private functions */
-typedef void (*WalSndSendDataCallback) (void);
-static void WalSndLoop(WalSndSendDataCallback send_data);
+static void WalSndLoop(WalSndLoopMode mode);
 static void InitWalSenderSlot(void);
 static void WalSndKill(int code, Datum arg);
 pg_noreturn static void WalSndShutdown(void);
 static void XLogSendPhysical(void);
 static void XLogSendLogical(void);
 pg_noreturn static void WalSndDoneImmediate(void);
-static void WalSndDone(WalSndSendDataCallback send_data);
+static void WalSndDone(WalSndLoopMode mode);
 static void IdentifySystem(void);
 static void UploadManifest(void);
 static bool HandleUploadManifestPacket(StringInfo buf, off_t *offset,
@@ -1025,7 +1031,7 @@ StartReplication(StartReplicationCmd *cmd)
 		/* Main loop of walsender */
 		replication_active = true;
 
-		WalSndLoop(XLogSendPhysical);
+		WalSndLoop(WALSND_LOOP_PHYSICAL);
 
 		replication_active = false;
 		if (got_STOPPING)
@@ -1604,7 +1610,7 @@ StartLogicalReplication(StartReplicationCmd *cmd)
 	SyncRepInitConfig();
 
 	/* Main loop of walsender */
-	WalSndLoop(XLogSendLogical);
+	WalSndLoop(WALSND_LOOP_LOGICAL);
 
 	FreeDecodingContext(logical_decoding_ctx);
 	logical_decoding_ctx = NULL;
@@ -3076,9 +3082,20 @@ WalSndCheckShutdownTimeout(void)
 		WalSndDoneImmediate();
 }
 
+/* Try to send more WAL in a streaming session. */
+static inline void
+WalSndSendData(WalSndLoopMode mode)
+{
+	Assert(mode == WALSND_LOOP_PHYSICAL || mode == WALSND_LOOP_LOGICAL);
+	if (mode == WALSND_LOOP_PHYSICAL)
+		XLogSendPhysical();
+	else
+		XLogSendLogical();
+}
+
 /* Main loop of walsender process that streams the WAL over Copy messages. */
 static void
-WalSndLoop(WalSndSendDataCallback send_data)
+WalSndLoop(WalSndLoopMode mode)
 {
 	TimestampTz last_flush = 0;
 
@@ -3116,13 +3133,11 @@ WalSndLoop(WalSndSendDataCallback send_data)
 			break;
 
 		/*
-		 * If we don't have any pending data in the output buffer, try to send
-		 * some more.  If there is some, we don't bother to call send_data
-		 * again until we've flushed it ... but we'd better assume we are not
-		 * caught up.
+		 * Try to send more WAL once pending output has been flushed.  Until
+		 * then, assume that we are not caught up.
 		 */
 		if (!pq_is_send_pending())
-			send_data();
+			WalSndSendData(mode);
 		else
 			WalSndCaughtUp = false;
 
@@ -3157,7 +3172,7 @@ WalSndLoop(WalSndSendDataCallback send_data)
 			 * is not sure which.
 			 */
 			if (got_SIGUSR2)
-				WalSndDone(send_data);
+				WalSndDone(mode);
 		}
 
 		/* Check for replication timeout. */
@@ -3176,13 +3191,13 @@ WalSndLoop(WalSndSendDataCallback send_data)
 		/*
 		 * Block if we have unsent data.  XXX For logical replication, let
 		 * WalSndWaitForWal() handle any other blocking; idle receivers need
-		 * its additional actions.  For physical replication, also block if
-		 * caught up; its send_data does not block.
+		 * its additional actions.  Physical senders also block when caught
+		 * up.
 		 *
 		 * The IO statistics are reported in WalSndWaitForWal() for the
 		 * logical WAL senders.
 		 */
-		if ((WalSndCaughtUp && send_data != XLogSendLogical &&
+		if ((WalSndCaughtUp && mode == WALSND_LOOP_PHYSICAL &&
 			 !streamingDoneSending) ||
 			pq_is_send_pending())
 		{
@@ -3843,12 +3858,12 @@ WalSndDoneImmediate(void)
  * function will return control to the caller.
  */
 static void
-WalSndDone(WalSndSendDataCallback send_data)
+WalSndDone(WalSndLoopMode mode)
 {
 	XLogRecPtr	replicatedPtr;
 
 	/* ... let's just be real sure we're caught up ... */
-	send_data();
+	WalSndSendData(mode);
 
 	/*
 	 * To figure out whether all WAL has successfully been replicated, check
