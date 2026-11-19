@@ -1515,6 +1515,12 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         </listitem>
         <listitem>
          <para>
+          <literal>feedback</literal>: This WAL sender is receiving standby
+          status updates without sending WAL.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
           <literal>backup</literal>: This WAL sender is sending a backup.
          </para>
         </listitem>
