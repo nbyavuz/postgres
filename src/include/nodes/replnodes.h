@@ -103,6 +103,8 @@ typedef struct StartReplicationCmd
 typedef struct StartFeedbackCmd
 {
 	NodeTag		type;
+	char	   *slotname;
+	TimeLineID	timeline;
 } StartFeedbackCmd;
 
 

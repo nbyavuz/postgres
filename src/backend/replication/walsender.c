@@ -183,6 +183,10 @@ static TimeLineID sendTimeLineNextTLI = 0;
 static bool sendTimeLineIsHistoric = false;
 static XLogRecPtr sendTimeLineValidUpto = InvalidXLogRecPtr;
 
+/* Requested feedback timeline and the local timeline that supplied its bounds. */
+static TimeLineHistoryEntry feedbackTimeLine;
+static TimeLineID feedbackHistoryTLI;
+
 /*
  * How far have we sent WAL already? This is also advertised in
  * MyWalSnd->sentPtr.  (Actually, this is the next WAL location to send.)
@@ -873,9 +877,42 @@ SendCopyBothResponse(void)
 	pq_flush();
 }
 
+/* Acquire a slot for either physical streaming or feedback. */
+static void
+AcquirePhysicalSlot(const char *slotname)
+{
+	ReplicationSlotAcquire(slotname, true, true);
+	if (SlotIsLogical(MyReplicationSlot))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot use a logical replication slot for physical replication")));
+}
+
+/* Find the part of our history for which this client may report progress. */
+static void
+SetFeedbackTimeLine(TimeLineID tli, TimeLineID currentTLI)
+{
+	List	   *history = readTimeLineHistory(currentTLI);
+
+	foreach_ptr(TimeLineHistoryEntry, entry, history)
+	{
+		if (entry->tli == tli)
+		{
+			feedbackTimeLine = *entry;
+			feedbackHistoryTLI = currentTLI;
+			list_free_deep(history);
+			return;
+		}
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("requested timeline %u is not in this server's history", tli)));
+}
+
 /* Handle START_FEEDBACK on a physical replication connection. */
 static void
-StartFeedback(void)
+StartFeedback(StartFeedbackCmd *cmd)
 {
 	WalSnd	   *walsnd = MyWalSnd;
 
@@ -884,6 +921,26 @@ StartFeedback(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("START_FEEDBACK requires a physical replication connection")));
+
+	if (cmd->slotname)
+	{
+		TimeLineID	currentTLI;
+
+		AcquirePhysicalSlot(cmd->slotname);
+
+		/* Feedback can release retained WAL, but cannot reserve missing WAL. */
+		if (!XLogRecPtrIsValid(MyReplicationSlot->data.restart_lsn))
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("replication slot \"%s\" cannot be advanced", cmd->slotname),
+					 errdetail("This slot has never previously reserved WAL.")));
+
+		if (RecoveryInProgress())
+			(void) GetXLogReplayRecPtr(&currentTLI);
+		else
+			currentTLI = GetWALInsertionTimeLine();
+		SetFeedbackTimeLine(cmd->timeline, currentTLI);
+	}
 
 	/*
 	 * Don't carry over statistics from a previous stream on this connection.
@@ -909,6 +966,9 @@ StartFeedback(void)
 	 * this sender without waiting to send the shutdown checkpoint.
 	 */
 	WalSndLoop(WALSND_LOOP_FEEDBACK);
+
+	if (cmd->slotname)
+		ReplicationSlotRelease();
 
 	/* CopyDone ends the command; the connection can accept another one. */
 	WalSndSetState(WALSNDSTATE_STARTUP);
@@ -950,17 +1010,12 @@ StartReplication(StartReplicationCmd *cmd)
 
 	if (cmd->slotname)
 	{
-		ReplicationSlotAcquire(cmd->slotname, true, true);
-		if (SlotIsLogical(MyReplicationSlot))
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("cannot use a logical replication slot for physical replication")));
-
 		/*
 		 * We don't need to verify the slot's restart_lsn here; instead we
 		 * rely on the caller requesting the starting point to use.  If the
 		 * WAL segment doesn't exist, we'll fail later.
 		 */
+		AcquirePhysicalSlot(cmd->slotname);
 	}
 
 	/*
@@ -2362,7 +2417,7 @@ exec_replication_command(const char *cmd_string)
 			cmdtag = "START_FEEDBACK";
 			set_ps_display(cmdtag);
 			PreventInTransactionBlock(true, cmdtag);
-			StartFeedback();
+			StartFeedback((StartFeedbackCmd *) cmd_node);
 			EndReplicationCommand(cmdtag);
 			break;
 
@@ -2608,6 +2663,33 @@ PhysicalConfirmReceivedLocation(XLogRecPtr lsn)
 	 */
 }
 
+/* Advance the slot to the reported end of replay, if it is in our history. */
+static void
+ConfirmFeedbackReplay(XLogRecPtr replay)
+{
+	TimeLineID	currentTLI;
+	XLogRecPtr	localEnd;
+
+	/* We own the slot; a delayed report must not move it backwards. */
+	if (replay <= MyReplicationSlot->data.restart_lsn)
+		return;
+
+	/* As in pg_replication_slot_advance(), use replay on a cascading sender. */
+	localEnd = RecoveryInProgress() ?
+		GetXLogReplayRecPtr(&currentTLI) : GetFlushRecPtr(&currentTLI);
+	if (replay > localEnd)
+		return;
+
+	/* Promotion or a timeline switch may have ended the client's timeline. */
+	if (currentTLI != feedbackHistoryTLI)
+		SetFeedbackTimeLine(feedbackTimeLine.tli, currentTLI);
+
+	/* replay is the end of the record, so test the timeline of replay - 1. */
+	if (replay > feedbackTimeLine.begin &&
+		(!XLogRecPtrIsValid(feedbackTimeLine.end) || replay <= feedbackTimeLine.end))
+		PhysicalConfirmReceivedLocation(replay);
+}
+
 /*
  * Regular reply from standby advising of WAL locations on standby server.
  */
@@ -2636,10 +2718,13 @@ ProcessStandbyReplyMessage(void)
 	replyTime = pq_getmsgint64(&reply_message);
 	replyRequested = pq_getmsgbyte(&reply_message);
 
-	/* Feedback-only sessions report liveness, not streaming acknowledgments. */
+	/* Feedback can advance a physical slot but cannot release sync commits. */
 	if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
 	{
 		pq_getmsgend(&reply_message);
+		if (MyReplicationSlot && applyPtr <= flushPtr && flushPtr <= writePtr)
+			ConfirmFeedbackReplay(applyPtr);
+
 		SpinLockAcquire(&MyWalSnd->mutex);
 		MyWalSnd->replyTime = replyTime;
 		SpinLockRelease(&MyWalSnd->mutex);
