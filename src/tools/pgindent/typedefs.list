@@ -2989,6 +2989,7 @@ StackElem
 StakindFlags
 StartBufferIOResult
 StartDataPtrType
+StartFeedbackCmd
 StartLOPtrType
 StartLOsPtrType
 StartReplicationCmd
