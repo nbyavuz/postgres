@@ -64,6 +64,7 @@
 %token K_READ_REPLICATION_SLOT
 %token K_SHOW
 %token K_START_REPLICATION
+%token K_START_FEEDBACK
 %token K_CREATE_REPLICATION_SLOT
 %token K_DROP_REPLICATION_SLOT
 %token K_ALTER_REPLICATION_SLOT
@@ -85,7 +86,7 @@
 %type <node>	base_backup start_replication start_logical_replication
 				create_replication_slot drop_replication_slot
 				alter_replication_slot identify_system read_replication_slot
-				timeline_history show upload_manifest
+				timeline_history show upload_manifest start_feedback
 %type <list>	generic_option_list
 %type <defelt>	generic_option
 %type <uintval>	opt_timeline
@@ -116,6 +117,7 @@ command:
 			| base_backup
 			| start_replication
 			| start_logical_replication
+			| start_feedback
 			| create_replication_slot
 			| drop_replication_slot
 			| alter_replication_slot
@@ -295,6 +297,12 @@ start_replication:
 				}
 			;
 
+/* START_FEEDBACK */
+start_feedback:
+			K_START_FEEDBACK
+				{ $$ = (Node *) makeNode(StartFeedbackCmd); }
+			;
+
 /* START_REPLICATION SLOT slot LOGICAL %X/%08X options */
 start_logical_replication:
 			K_START_REPLICATION K_SLOT IDENT K_LOGICAL RECPTR plugin_options
@@ -427,6 +435,7 @@ ident_or_keyword:
 			| K_IDENTIFY_SYSTEM				{ $$ = "identify_system"; }
 			| K_SHOW						{ $$ = "show"; }
 			| K_START_REPLICATION			{ $$ = "start_replication"; }
+			| K_START_FEEDBACK				{ $$ = "start_feedback"; }
 			| K_CREATE_REPLICATION_SLOT	{ $$ = "create_replication_slot"; }
 			| K_DROP_REPLICATION_SLOT		{ $$ = "drop_replication_slot"; }
 			| K_ALTER_REPLICATION_SLOT		{ $$ = "alter_replication_slot"; }

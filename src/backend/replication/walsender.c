@@ -284,6 +284,7 @@ typedef enum
 {
 	WALSND_LOOP_PHYSICAL,
 	WALSND_LOOP_LOGICAL,
+	WALSND_LOOP_FEEDBACK,
 } WalSndLoopMode;
 
 /* Signal handlers */
@@ -872,6 +873,50 @@ SendCopyBothResponse(void)
 	pq_sendint16(&buf, 0);
 	pq_endmessage(&buf);
 	pq_flush();
+}
+
+/* Handle START_FEEDBACK on a physical replication connection. */
+static void
+StartFeedback(void)
+{
+	WalSnd	   *walsnd = MyWalSnd;
+
+	/*
+	 * Any previous stream must have cleared replication_active.  Leave it
+	 * false so HandleWalSndInitStopping() terminates this sender without
+	 * waiting to send the shutdown checkpoint.
+	 */
+	Assert(!replication_active);
+
+	/* Physical replication connections aren't bound to a database. */
+	if (MyDatabaseId != InvalidOid)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("START_FEEDBACK requires a physical replication connection")));
+
+	/*
+	 * Don't carry over statistics from a previous stream on this connection.
+	 * Publish the new state with invalid LSNs, -1 lags, and a zero reply
+	 * time, so pg_stat_replication shows NULL for each until there is
+	 * something to report.
+	 */
+	sentPtr = InvalidXLogRecPtr;
+	SpinLockAcquire(&walsnd->mutex);
+	walsnd->state = WALSNDSTATE_FEEDBACK;
+	walsnd->sentPtr = sentPtr;
+	walsnd->write = walsnd->flush = walsnd->apply = InvalidXLogRecPtr;
+	walsnd->writeLag = walsnd->flushLag = walsnd->applyLag = -1;
+	walsnd->replyTime = 0;
+	SpinLockRelease(&walsnd->mutex);
+
+	/* Both peers may have sent CopyDone to end the previous command. */
+	streamingDoneSending = streamingDoneReceiving = false;
+	SendCopyBothResponse();
+
+	WalSndLoop(WALSND_LOOP_FEEDBACK);
+
+	/* CopyDone ends the command; the connection can accept another one. */
+	WalSndSetState(WALSNDSTATE_STARTUP);
 }
 
 /*
@@ -2318,6 +2363,14 @@ exec_replication_command(const char *cmd_string)
 				break;
 			}
 
+		case T_StartFeedbackCmd:
+			cmdtag = "START_FEEDBACK";
+			set_ps_display(cmdtag);
+			PreventInTransactionBlock(true, cmdtag);
+			StartFeedback();
+			EndReplicationCommand(cmdtag);
+			break;
+
 		case T_TimeLineHistoryCmd:
 			cmdtag = "TIMELINE_HISTORY";
 			set_ps_display(cmdtag);
@@ -2506,22 +2559,27 @@ ProcessStandbyMessage(void)
 	{
 		case PqReplMsg_StandbyStatusUpdate:
 			ProcessStandbyReplyMessage();
-			break;
+			return;
 
 		case PqReplMsg_HotStandbyFeedback:
+			/* In feedback mode, only standby status updates are allowed. */
+			if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
+				break;
 			ProcessStandbyHSFeedbackMessage();
-			break;
+			return;
 
 		case PqReplMsg_PrimaryStatusRequest:
+			/* In feedback mode, only standby status updates are allowed. */
+			if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
+				break;
 			ProcessStandbyPSRequestMessage();
-			break;
-
-		default:
-			ereport(COMMERROR,
-					(errcode(ERRCODE_PROTOCOL_VIOLATION),
-					 errmsg("unexpected message type \"%c\"", msgtype)));
-			proc_exit(0);
+			return;
 	}
+
+	ereport(COMMERROR,
+			(errcode(ERRCODE_PROTOCOL_VIOLATION),
+			 errmsg("unexpected message type \"%c\"", msgtype)));
+	proc_exit(0);
 }
 
 /*
@@ -2584,6 +2642,18 @@ ProcessStandbyReplyMessage(void)
 	applyPtr = pq_getmsgint64(&reply_message);
 	replyTime = pq_getmsgint64(&reply_message);
 	replyRequested = pq_getmsgbyte(&reply_message);
+
+	/* Feedback-only sessions report liveness, not streaming acknowledgments. */
+	if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
+	{
+		pq_getmsgend(&reply_message);
+		SpinLockAcquire(&MyWalSnd->mutex);
+		MyWalSnd->replyTime = replyTime;
+		SpinLockRelease(&MyWalSnd->mutex);
+		if (replyRequested)
+			WalSndKeepalive(false, InvalidXLogRecPtr);
+		return;
+	}
 
 	if (message_level_is_interesting(DEBUG2))
 	{
@@ -3096,7 +3166,7 @@ WalSndSendData(WalSndLoopMode mode)
 		XLogSendLogical();
 }
 
-/* Main loop of walsender process that streams the WAL over Copy messages. */
+/* Main COPY loop for streaming WAL or exchanging feedback. */
 static void
 WalSndLoop(WalSndLoopMode mode)
 {
@@ -3140,8 +3210,11 @@ WalSndLoop(WalSndLoopMode mode)
 		 * some more.  If there is some, we don't bother to call related
 		 * function again until we've flushed it ... but we'd better assume we
 		 * are not caught up.
+		 *
+		 * A feedback-only sender never sends WAL, so leave WalSndCaughtUp false
+		 * even when its output buffer is empty.
 		 */
-		if (!pq_is_send_pending())
+		if (mode != WALSND_LOOP_FEEDBACK && !pq_is_send_pending())
 			WalSndSendData(mode);
 		else
 			WalSndCaughtUp = false;
@@ -3198,12 +3271,14 @@ WalSndLoop(WalSndLoopMode mode)
 		 * WalSndWaitForWal() handle any other blocking; idle receivers need
 		 * its additional actions.  For physical replication, also block if
 		 * caught up; its related function does not block.
+		 * Feedback-only senders can always wait for client input.
 		 *
 		 * The IO statistics are reported in WalSndWaitForWal() for the
 		 * logical WAL senders.
 		 */
-		if ((WalSndCaughtUp && mode == WALSND_LOOP_PHYSICAL &&
-			 !streamingDoneSending) ||
+		if ((!streamingDoneSending &&
+			 (mode == WALSND_LOOP_FEEDBACK ||
+			  (mode == WALSND_LOOP_PHYSICAL && WalSndCaughtUp))) ||
 			pq_is_send_pending())
 		{
 			long		sleeptime;
@@ -4157,6 +4232,7 @@ WalSndWait(uint32 socket_events, long timeout, uint32 wait_event,
 	 *
 	 * And, we use separate shared memory CVs for physical and logical
 	 * walsenders for selective wake ups, see WalSndWakeup() for more details.
+	 * A feedback-only sender need not wake up when WAL becomes available.
 	 *
 	 * If the wait event is WAIT_FOR_STANDBY_CONFIRMATION, wait on another CV
 	 * until awakened by physical walsenders after the walreceiver confirms
@@ -4164,7 +4240,8 @@ WalSndWait(uint32 socket_events, long timeout, uint32 wait_event,
 	 */
 	if (wait_event == WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION)
 		ConditionVariablePrepareToSleep(&WalSndCtl->wal_confirm_rcv_cv);
-	else if (MyWalSnd->kind == REPLICATION_KIND_PHYSICAL)
+	else if (MyWalSnd->kind == REPLICATION_KIND_PHYSICAL &&
+			 MyWalSnd->state != WALSNDSTATE_FEEDBACK)
 	{
 		ConditionVariablePrepareToSleep(&WalSndCtl->wal_flush_cv);
 
@@ -4346,6 +4423,8 @@ WalSndGetStateString(WalSndState state)
 			return "catchup";
 		case WALSNDSTATE_STREAMING:
 			return "streaming";
+		case WALSNDSTATE_FEEDBACK:
+			return "feedback";
 		case WALSNDSTATE_STOPPING:
 			return "stopping";
 	}
@@ -4544,10 +4623,21 @@ WalSndKeepalive(bool requestReply, XLogRecPtr writePtr)
 {
 	elog(DEBUG2, "sending replication keepalive");
 
+	/*
+	 * A feedback-only session sends no WAL, so sentPtr is invalid.  Report
+	 * the upstream's flush position as the end of WAL in the keepalive; it
+	 * says nothing about how far the standby has received or replayed.
+	 */
+	if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
+		writePtr = RecoveryInProgress() ?
+			GetStandbyFlushRecPtr(NULL) : GetFlushRecPtr(NULL);
+	else if (!XLogRecPtrIsValid(writePtr))
+		writePtr = sentPtr;
+
 	/* construct the message... */
 	resetStringInfo(&output_message);
 	pq_sendbyte(&output_message, PqReplMsg_Keepalive);
-	pq_sendint64(&output_message, XLogRecPtrIsValid(writePtr) ? writePtr : sentPtr);
+	pq_sendint64(&output_message, writePtr);
 	pq_sendint64(&output_message, GetCurrentTimestamp());
 	pq_sendbyte(&output_message, requestReply ? 1 : 0);
 
