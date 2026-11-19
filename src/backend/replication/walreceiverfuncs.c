@@ -71,9 +71,9 @@ WalRcvShmemInit(void *arg)
 	WalRcv->procno = INVALID_PROC_NUMBER;
 }
 
-/* Is walreceiver running (or starting up)? */
-bool
-WalRcvRunning(void)
+/* Return the receiver state after checking for a startup timeout. */
+static WalRcvState
+WalRcvGetStateWithTimeout(void)
 {
 	WalRcvData *walrcv = WalRcv;
 	WalRcvState state;
@@ -113,10 +113,14 @@ WalRcvRunning(void)
 		}
 	}
 
-	if (state != WALRCV_STOPPED)
-		return true;
-	else
-		return false;
+	return state;
+}
+
+/* Is walreceiver running (or starting up)? */
+bool
+WalRcvRunning(void)
+{
+	return WalRcvGetStateWithTimeout() != WALRCV_STOPPED;
 }
 
 /* Return the state of the walreceiver. */
@@ -140,49 +144,10 @@ WalRcvGetState(void)
 bool
 WalRcvStreaming(void)
 {
-	WalRcvData *walrcv = WalRcv;
-	WalRcvState state;
-	pg_time_t	startTime;
+	WalRcvState state = WalRcvGetStateWithTimeout();
 
-	SpinLockAcquire(&walrcv->mutex);
-
-	state = walrcv->walRcvState;
-	startTime = walrcv->startTime;
-
-	SpinLockRelease(&walrcv->mutex);
-
-	/*
-	 * If it has taken too long for walreceiver to start up, give up. Setting
-	 * the state to STOPPED ensures that if walreceiver later does start up
-	 * after all, it will see that it's not supposed to be running and die
-	 * without doing anything.
-	 */
-	if (state == WALRCV_STARTING)
-	{
-		pg_time_t	now = (pg_time_t) time(NULL);
-
-		if ((now - startTime) > WALRCV_STARTUP_TIMEOUT)
-		{
-			bool		stopped = false;
-
-			SpinLockAcquire(&walrcv->mutex);
-			if (walrcv->walRcvState == WALRCV_STARTING)
-			{
-				state = walrcv->walRcvState = WALRCV_STOPPED;
-				stopped = true;
-			}
-			SpinLockRelease(&walrcv->mutex);
-
-			if (stopped)
-				ConditionVariableBroadcast(&walrcv->walRcvStoppedCV);
-		}
-	}
-
-	if (state == WALRCV_STREAMING || state == WALRCV_STARTING ||
-		state == WALRCV_CONNECTING || state == WALRCV_RESTARTING)
-		return true;
-	else
-		return false;
+	return state == WALRCV_STREAMING || state == WALRCV_STARTING ||
+		state == WALRCV_CONNECTING || state == WALRCV_RESTARTING;
 }
 
 /*
