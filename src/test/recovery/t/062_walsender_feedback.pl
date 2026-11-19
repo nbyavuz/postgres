@@ -14,17 +14,41 @@ plan skip_all =>
   unless $PostgreSQL::Test::Utils::use_unix_sockets;
 
 my $primary = PostgreSQL::Test::Cluster->new('primary');
-$primary->init(allows_streaming => 1);
+$primary->init(allows_streaming => 'logical');
 # Match the client's application_name so the test would notice a synchronous
 # acknowledgment. Disable timer-driven keepalives so we see the requested one.
 $primary->append_conf(
 	'postgresql.conf', qq(
 synchronous_standby_names = 'feedback'
+synchronous_commit = local
 wal_sender_timeout = 0
 ));
 $primary->start;
 plan skip_all => 'this test requires working raw_connect()'
   unless $primary->raw_connect_works();
+
+$primary->safe_psql(
+	'postgres', q[
+  SELECT pg_create_physical_replication_slot('feedback_slot', true);
+  SELECT pg_create_physical_replication_slot('unreserved');
+  SELECT pg_create_logical_replication_slot('decode_slot', 'test_decoding', false, false, true);
+]);
+
+for my $case (
+	[ 'unreserved TIMELINE 1', qr/has never previously reserved WAL/ ],
+	[ 'decode_slot TIMELINE 1', qr/cannot use a logical replication slot/ ],
+	[
+		'feedback_slot TIMELINE 2',
+		qr/timeline 2 is not in this server's history/
+	])
+{
+	my ($spec, $expected) = @$case;
+	my (undef, undef, $stderr) = $primary->psql(
+		'postgres',
+		"START_FEEDBACK SLOT $spec",
+		replication => 'true');
+	like($stderr, $expected, "rejected $spec");
+}
 
 my $user = $primary->safe_psql('postgres', 'SELECT current_user');
 my $sock = $primary->raw_connect();
@@ -66,8 +90,14 @@ send_message('',
 1 while (receive_message())[0] ne 'Z';
 
 # Send a Query ('Q'); CopyBothResponse ('W') means feedback mode has started.
-send_message('Q', "START_FEEDBACK\0");
+send_message('Q', "START_FEEDBACK SLOT feedback_slot TIMELINE 1\0");
 is((receive_message())[0], 'W', 'entered bidirectional COPY');
+is( $primary->safe_psql(
+		'postgres',
+		"SELECT active FROM pg_replication_slots WHERE slot_name = 'feedback_slot'"
+	),
+	't',
+	'feedback acquired the physical slot');
 
 # Generate WAL and wait until the commit needs a synchronous standby.
 my $writer = $primary->background_psql('postgres');
@@ -106,6 +136,12 @@ is( $primary->safe_psql(
 send_message('c', '');
 is_deeply([ map { (receive_message())[0] } 1 .. 3 ],
 	[qw(c C Z)], 'CopyDone ends feedback and returns to command mode');
+is( $primary->safe_psql(
+		'postgres',
+		"SELECT active FROM pg_replication_slots WHERE slot_name = 'feedback_slot'"
+	),
+	'f',
+	'CopyDone released the physical slot');
 $primary->adjust_conf('postgresql.conf', 'synchronous_standby_names', "''");
 $primary->reload;
 $writer->quit;
