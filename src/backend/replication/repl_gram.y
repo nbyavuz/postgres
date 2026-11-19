@@ -89,7 +89,7 @@
 				timeline_history show upload_manifest start_feedback
 %type <list>	generic_option_list
 %type <defelt>	generic_option
-%type <uintval>	opt_timeline
+%type <uintval>	opt_timeline timeline
 %type <list>	plugin_options plugin_opt_list
 %type <defelt>	plugin_opt_elem
 %type <node>	plugin_opt_arg
@@ -297,10 +297,17 @@ start_replication:
 				}
 			;
 
-/* START_FEEDBACK */
+/* START_FEEDBACK [SLOT slot TIMELINE tli] */
 start_feedback:
 			K_START_FEEDBACK
 				{ $$ = (Node *) makeNode(StartFeedbackCmd); }
+			| K_START_FEEDBACK K_SLOT IDENT timeline
+				{
+					StartFeedbackCmd *cmd = makeNode(StartFeedbackCmd);
+					cmd->slotname = $3;
+					cmd->timeline = $4;
+					$$ = (Node *) cmd;
+				}
 			;
 
 /* START_REPLICATION SLOT slot LOGICAL %X/%08X options */
@@ -363,6 +370,11 @@ opt_slot:
 			;
 
 opt_timeline:
+				timeline				{ $$ = $1; }
+				| /* EMPTY */			{ $$ = 0; }
+			;
+
+timeline:
 			K_TIMELINE UCONST
 				{
 					if ($2 <= 0)
@@ -371,7 +383,6 @@ opt_timeline:
 								 errmsg("invalid timeline %u", $2)));
 					$$ = $2;
 				}
-				| /* EMPTY */			{ $$ = 0; }
 			;
 
 

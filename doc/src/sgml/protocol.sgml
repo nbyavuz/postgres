@@ -3014,7 +3014,7 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
     </varlistentry>
 
     <varlistentry id="protocol-replication-start-feedback">
-     <term><literal>START_FEEDBACK</literal>
+     <term><literal>START_FEEDBACK</literal> [ <literal>SLOT</literal> <replaceable>slot_name</replaceable> <literal>TIMELINE</literal> <replaceable>tli</replaceable> ]
       <indexterm><primary>START_FEEDBACK</primary></indexterm>
      </term>
      <listitem>
@@ -3026,8 +3026,26 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
        causes the server to close the connection.  A status update can request
        a <link linkend="protocol-replication-primary-keepalive-message">keepalive</link>,
        whose WAL location is the server's flush position.
-       The server records the reply time and ignores the reported WAL
-       locations.  The connection cannot act as a synchronous standby.
+       The server records the reply time.  The connection cannot act as a
+       synchronous standby.
+      </para>
+      <para>
+       Without a slot, reported WAL locations are ignored.  If a physical
+       slot is specified, it must have already reserved WAL.  The server
+       acquires it for the duration of the command and can advance its
+       <structfield>restart_lsn</structfield> to the client's reported replay
+       position.  The WAL through that position must be durable on the client.
+       The client must specify the timeline of the last replayed record and
+       start a new feedback session before reporting replay on another timeline.
+      </para>
+      <para>
+       The server ignores replay positions that would move the slot backwards, lie
+       outside the specified timeline in its history, or exceed its own flush
+       position (replay position on a cascading sender).  The reported replay,
+       flush, and write positions must be in ascending order or equal.
+       Advancing the slot also allows logical decoding waiting on
+       <xref linkend="guc-synchronized-standby-slots"/> to proceed up to the
+       confirmed position.
       </para>
       <para>
        To end the session, send CopyDone.  The server replies with CopyDone
