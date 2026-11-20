@@ -623,8 +623,8 @@ libpqrcv_startfeedback(WalReceiverConn *conn, const char *slotname,
 	{
 		appendStringInfoString(&cmd, " SLOT ");
 		appendQuotedIdentifier(&cmd, slotname);
-		appendStringInfo(&cmd, " TIMELINE %u", tli);
 	}
+	appendStringInfo(&cmd, " TIMELINE %u", tli);
 	res = libpqsrv_exec(conn->streamConn, cmd.data,
 						WAIT_EVENT_LIBPQWALRECEIVER_RECEIVE);
 	pfree(cmd.data);

@@ -3014,7 +3014,8 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
     </varlistentry>
 
     <varlistentry id="protocol-replication-start-feedback">
-     <term><literal>START_FEEDBACK</literal> [ <literal>SLOT</literal> <replaceable>slot_name</replaceable> <literal>TIMELINE</literal> <replaceable>tli</replaceable> ]
+     <term><literal>START_FEEDBACK</literal> [ <literal>TIMELINE</literal> <replaceable>tli</replaceable> ]</term>
+     <term><literal>START_FEEDBACK SLOT</literal> <replaceable>slot_name</replaceable> <literal>TIMELINE</literal> <replaceable>tli</replaceable>
       <indexterm><primary>START_FEEDBACK</primary></indexterm>
      </term>
      <listitem>
@@ -3022,7 +3023,7 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
        Starts a feedback-only session on a physical replication connection.
        The server enters bidirectional COPY mode but sends no WAL data.
        The client can send <link linkend="protocol-replication-standby-status-update">standby
-       status updates</link> and, when using a physical slot,
+       status updates</link> and
        <link linkend="protocol-replication-hot-standby-feedback-message">hot
        standby feedback</link>; any other CopyData message type from the client
        causes the server to close the connection.  A status update can request
@@ -3032,7 +3033,10 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
        synchronous standby.
       </para>
       <para>
-       Without a slot, reported WAL locations are ignored.  If a physical
+       Without a slot, reported WAL locations are ignored.  The timeline
+       defaults to the server's current timeline and must match it if specified.
+       A timeline change on the server ends the slotless feedback command.
+       If a physical
        slot is specified, it must have already reserved WAL.  The server
        acquires it for the duration of the command and can advance its
        <structfield>restart_lsn</structfield> to the client's reported replay
@@ -3051,9 +3055,11 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
       </para>
       <para>
        Hot standby feedback can hold back removal of dead rows on the server.
-       The reported <literal>xmin</literal> and <literal>catalog_xmin</literal>
-       belong to the slot, so a persistent slot retains them after
-       disconnection.  Report zero for both to clear those horizons.
+       Without a slot, its effect ends when the feedback command ends or the
+       connection closes.  With a slot, the reported <literal>xmin</literal>
+       and <literal>catalog_xmin</literal> belong to the slot, so a persistent
+       slot retains them after disconnection.  Report zero for both to clear
+       those horizons.
       </para>
       <para>
        To end the session, send CopyDone.  The server replies with CopyDone

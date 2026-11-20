@@ -399,6 +399,10 @@ WalSndErrorCleanup(void)
 	xlogreader = NULL;
 	logical_decoding_ctx = NULL;
 
+	/* Don't retain a slotless feedback command's horizon in command mode. */
+	if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
+		MyProc->xmin = InvalidTransactionId;
+
 	if (MyReplicationSlot != NULL)
 		ReplicationSlotRelease();
 
@@ -889,6 +893,27 @@ AcquirePhysicalSlot(const char *slotname)
 				 errmsg("cannot use a logical replication slot for physical replication")));
 }
 
+/* The timeline on which this server is replaying or generating WAL. */
+static TimeLineID
+GetFeedbackCurrentTLI(void)
+{
+	TimeLineID	tli;
+
+	if (!RecoveryInProgress())
+		return GetWALInsertionTimeLine();
+	(void) GetXLogReplayRecPtr(&tli);
+	return tli;
+}
+
+static void
+CheckSlotlessFeedbackTimeLine(void)
+{
+	if (GetFeedbackCurrentTLI() != feedbackHistoryTLI)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot continue slotless feedback after a timeline switch")));
+}
+
 /* Find the part of our history for which this client may report progress. */
 static void
 SetFeedbackTimeLine(TimeLineID tli, TimeLineID currentTLI)
@@ -925,8 +950,6 @@ StartFeedback(StartFeedbackCmd *cmd)
 
 	if (cmd->slotname)
 	{
-		TimeLineID	currentTLI;
-
 		AcquirePhysicalSlot(cmd->slotname);
 
 		/*
@@ -940,11 +963,16 @@ StartFeedback(StartFeedbackCmd *cmd)
 					 errmsg("replication slot \"%s\" cannot be advanced", cmd->slotname),
 					 errdetail("This slot has never previously reserved WAL.")));
 
-		if (RecoveryInProgress())
-			(void) GetXLogReplayRecPtr(&currentTLI);
-		else
-			currentTLI = GetWALInsertionTimeLine();
-		SetFeedbackTimeLine(cmd->timeline, currentTLI);
+		SetFeedbackTimeLine(cmd->timeline, GetFeedbackCurrentTLI());
+	}
+	else
+	{
+		feedbackHistoryTLI = GetFeedbackCurrentTLI();
+		if (cmd->timeline && cmd->timeline != feedbackHistoryTLI)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("requested timeline %u is not this server's current timeline %u",
+							cmd->timeline, feedbackHistoryTLI)));
 	}
 
 	/*
@@ -974,6 +1002,8 @@ StartFeedback(StartFeedbackCmd *cmd)
 
 	if (cmd->slotname)
 		ReplicationSlotRelease();
+	else
+		MyProc->xmin = InvalidTransactionId;
 
 	/* CopyDone ends the command; the connection can accept another one. */
 	WalSndSetState(WALSNDSTATE_STARTUP);
@@ -2617,8 +2647,6 @@ ProcessStandbyMessage(void)
 			return;
 
 		case PqReplMsg_HotStandbyFeedback:
-			if (MyWalSnd->state == WALSNDSTATE_FEEDBACK && !MyReplicationSlot)
-				break;
 			ProcessStandbyHSFeedbackMessage();
 			return;
 
@@ -2922,7 +2950,11 @@ ProcessStandbyHSFeedbackMessage(void)
 	feedbackCatalogXmin = pq_getmsgint(&reply_message, 4);
 	feedbackCatalogEpoch = pq_getmsgint(&reply_message, 4);
 	if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
+	{
 		pq_getmsgend(&reply_message);
+		if (!MyReplicationSlot && am_cascading_walsender)
+			CheckSlotlessFeedbackTimeLine();
+	}
 
 	if (message_level_is_interesting(DEBUG2))
 	{
@@ -3014,7 +3046,8 @@ ProcessStandbyHSFeedbackMessage(void)
 	else
 	{
 		if (TransactionIdIsNormal(feedbackCatalogXmin)
-			&& TransactionIdPrecedes(feedbackCatalogXmin, feedbackXmin))
+			&& (!TransactionIdIsNormal(feedbackXmin) ||
+				TransactionIdPrecedes(feedbackCatalogXmin, feedbackXmin)))
 			MyProc->xmin = feedbackCatalogXmin;
 		else
 			MyProc->xmin = feedbackXmin;
@@ -4240,6 +4273,14 @@ WalSndShmemInit(void *arg)
 	ConditionVariableInit(&WalSndCtl->wal_flush_cv);
 	ConditionVariableInit(&WalSndCtl->wal_replay_cv);
 	ConditionVariableInit(&WalSndCtl->wal_confirm_rcv_cv);
+	ConditionVariableInit(&WalSndCtl->timeline_cv);
+}
+
+/* Wake senders holding a horizon on the old timeline, even if idle. */
+void
+WalSndWakeupOnTimelineChange(void)
+{
+	ConditionVariableBroadcast(&WalSndCtl->timeline_cv);
 }
 
 /*
@@ -4320,6 +4361,13 @@ WalSndWait(uint32 socket_events, long timeout, uint32 wait_event,
 	 */
 	if (wait_event == WAIT_EVENT_WAIT_FOR_STANDBY_CONFIRMATION)
 		ConditionVariablePrepareToSleep(&WalSndCtl->wal_confirm_rcv_cv);
+	else if (MyWalSnd->state == WALSNDSTATE_FEEDBACK &&
+			 !MyReplicationSlot && am_cascading_walsender)
+	{
+		ConditionVariablePrepareToSleep(&WalSndCtl->timeline_cv);
+		/* Recheck after joining the waitlist so we can't miss a switch. */
+		CheckSlotlessFeedbackTimeLine();
+	}
 	else if (MyWalSnd->kind == REPLICATION_KIND_PHYSICAL &&
 			 MyWalSnd->state != WALSNDSTATE_FEEDBACK)
 	{

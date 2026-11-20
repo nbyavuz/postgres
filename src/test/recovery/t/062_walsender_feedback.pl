@@ -241,8 +241,23 @@ send_message('Q', "START_FEEDBACK\0");
 is((receive_message())[0],
 	'W', 'can start feedback again on the same connection');
 
+# A slotless horizon belongs to the command, not the reusable connection.
+report_xmins(0, $xmin, $epoch);
+my $sender = q{FROM pg_stat_replication WHERE application_name = 'feedback'};
+$primary->poll_query_until('postgres',
+	"SELECT backend_xmin = '$xmin' $sender")
+  or die 'slotless catalog xmin did not set the sender horizon';
+send_message('c', '');
+is_deeply([ map { (receive_message())[0] } 1 .. 3 ],
+	[qw(c C Z)], 'finished slotless feedback');
+is($primary->safe_psql('postgres', "SELECT backend_xmin IS NULL $sender"),
+	't', 'CopyDone cleared the horizon on the still-open connection');
+
 # A primary status request ('p' followed by a timestamp) is valid while
 # streaming, but not in feedback mode.
+send_message('Q', "START_FEEDBACK\0");
+is((receive_message())[0],
+	'W', 'entered COPY before testing disallowed message');
 my $log_offset = -s $primary->logfile;
 send_message('d', 'p' . $timestamp);
 $primary->wait_for_log(qr/unexpected message type "p"/, $log_offset);
@@ -274,7 +289,29 @@ is($standby->safe_psql('postgres', $restart),
 	$before, 'cascading sender ignored WAL it received but has not replayed');
 $standby->safe_psql('postgres', 'SELECT pg_wal_replay_resume()');
 $primary->wait_for_replay_catchup($standby);
+my $named_sock = $sock;
+connect_replication($standby);
+send_message('Q', "START_FEEDBACK\0");
+is((receive_message())[0], 'W', 'started slotless feedback before promotion');
+report_xmins($xmin, $xmin, $epoch);
+my $horizon = "SELECT count(*) $sender AND backend_xmin = '$xmin'";
+$standby->poll_query_until('postgres', $horizon, '1')
+  or die 'slotless feedback did not set xmin before promotion';
 $standby->promote;
+$standby->wait_for_log(
+	qr/cannot continue slotless feedback after a timeline switch/);
+$standby->poll_query_until('postgres', $horizon, '0')
+  or die 'slotless feedback kept xmin on the old timeline after promotion';
+$sock->close;
+$sock = $named_sock;
+my (undef, undef, $timeline_error) = $standby->psql(
+	'postgres',
+	'START_FEEDBACK TIMELINE 1',
+	replication => 'true');
+like(
+	$timeline_error,
+	qr/requested timeline 1 is not this server's current timeline 2/,
+	'slotless feedback cannot start on the old timeline');
 my ($fork) = slurp_file($standby->data_dir . '/pg_wal/00000002.history') =~
   /^1\s+(\S+)/m;
 my $after = $standby->lsn('flush');
