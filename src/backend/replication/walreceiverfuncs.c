@@ -262,9 +262,18 @@ RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
 					 const char *slotname, bool create_temp_slot)
 {
 	bool		feedbackOnly;
+	WalRcvState state;
 
-	/* Streaming takes precedence, even if feedback is still connecting. */
-	if (WalRcvGetStateWithTimeout(&feedbackOnly) != WALRCV_STOPPED && feedbackOnly)
+	/*
+	 * An established, slotted feedback receiver can end COPY and request WAL
+	 * on the same connection.  Disconnecting instead would race the old
+	 * walsender's release of the slot.  Don't wait for a feedback connection
+	 * that's still starting, or reuse a slotless connection (streaming might
+	 * need a temporary slot).
+	 */
+	state = WalRcvGetStateWithTimeout(&feedbackOnly);
+	if (feedbackOnly && state != WALRCV_STOPPED &&
+		(state != WALRCV_FEEDBACK || slotname == NULL || slotname[0] == '\0'))
 		ShutdownWalRcv();
 
 	/*
@@ -290,9 +299,11 @@ RequestWalReceiver(bool feedbackOnly, TimeLineID tli, XLogRecPtr recptr,
 
 	SpinLockAcquire(&walrcv->mutex);
 
-	/* It better be stopped if we try to restart it */
+	/* Startup owns transitions into a new job. */
 	Assert(walrcv->walRcvState == WALRCV_STOPPED ||
-		   walrcv->walRcvState == WALRCV_WAITING);
+		   walrcv->walRcvState == WALRCV_WAITING ||
+		   (walrcv->walRcvState == WALRCV_FEEDBACK && !feedbackOnly &&
+			slotname && strcmp(walrcv->slotname, slotname) == 0));
 
 	/*
 	 * Use configured replication slot if present, and ignore the value of
