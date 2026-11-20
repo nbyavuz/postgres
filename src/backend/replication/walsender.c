@@ -398,6 +398,10 @@ WalSndErrorCleanup(void)
 	xlogreader = NULL;
 	logical_decoding_ctx = NULL;
 
+	/* Don't retain a slotless feedback command's horizon in command mode. */
+	if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
+		MyProc->xmin = InvalidTransactionId;
+
 	if (MyReplicationSlot != NULL)
 		ReplicationSlotRelease();
 
@@ -969,6 +973,8 @@ StartFeedback(StartFeedbackCmd *cmd)
 
 	if (cmd->slotname)
 		ReplicationSlotRelease();
+	else
+		MyProc->xmin = InvalidTransactionId;
 
 	/* CopyDone ends the command; the connection can accept another one. */
 	WalSndSetState(WALSNDSTATE_STARTUP);
@@ -2612,8 +2618,6 @@ ProcessStandbyMessage(void)
 			return;
 
 		case PqReplMsg_HotStandbyFeedback:
-			if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
-				break;
 			ProcessStandbyHSFeedbackMessage();
 			return;
 
@@ -2915,6 +2919,8 @@ ProcessStandbyHSFeedbackMessage(void)
 	feedbackEpoch = pq_getmsgint(&reply_message, 4);
 	feedbackCatalogXmin = pq_getmsgint(&reply_message, 4);
 	feedbackCatalogEpoch = pq_getmsgint(&reply_message, 4);
+	if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
+		pq_getmsgend(&reply_message);
 
 	if (message_level_is_interesting(DEBUG2))
 	{
@@ -3006,7 +3012,8 @@ ProcessStandbyHSFeedbackMessage(void)
 	else
 	{
 		if (TransactionIdIsNormal(feedbackCatalogXmin)
-			&& TransactionIdPrecedes(feedbackCatalogXmin, feedbackXmin))
+			&& (!TransactionIdIsNormal(feedbackXmin) ||
+				TransactionIdPrecedes(feedbackCatalogXmin, feedbackXmin)))
 			MyProc->xmin = feedbackCatalogXmin;
 		else
 			MyProc->xmin = feedbackXmin;

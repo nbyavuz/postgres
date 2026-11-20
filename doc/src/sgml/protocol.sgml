@@ -3022,7 +3022,9 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
        Starts a feedback-only session on a physical replication connection.
        The server enters bidirectional COPY mode but sends no WAL data.
        The client can send <link linkend="protocol-replication-standby-status-update">standby
-       status updates</link>; any other CopyData message type from the client
+       status updates</link> and
+       <link linkend="protocol-replication-hot-standby-feedback-message">hot
+       standby feedback</link>; any other CopyData message type from the client
        causes the server to close the connection.  A status update can request
        a <link linkend="protocol-replication-primary-keepalive-message">keepalive</link>,
        whose WAL location is the server's flush position.
@@ -3046,6 +3048,14 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
        Advancing the slot also allows logical decoding waiting on
        <xref linkend="guc-synchronized-standby-slots"/> to proceed up to the
        confirmed position.
+      </para>
+      <para>
+       Hot standby feedback can hold back removal of dead rows on the server.
+       Without a slot, its effect ends when the feedback command ends or the
+       connection closes.  With a slot, the reported <literal>xmin</literal>
+       and <literal>catalog_xmin</literal> belong to the slot, so a persistent
+       slot retains them after disconnection.  Report zero for both to clear
+       those horizons.
       </para>
       <para>
        To end the session, send CopyDone.  The server replies with CopyDone

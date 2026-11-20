@@ -26,6 +26,7 @@
 #include "miscadmin.h"
 #include "postmaster/auxprocess.h"
 #include "postmaster/startup.h"
+#include "replication/walreceiver.h"
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
 #include "storage/procsignal.h"
@@ -127,26 +128,29 @@ StartupRereadConfig(void)
 	char	   *conninfo = pstrdup(PrimaryConnInfo);
 	char	   *slotname = pstrdup(PrimarySlotName);
 	bool		tempSlot = wal_receiver_create_temp_slot;
-	bool		conninfoChanged;
-	bool		slotnameChanged;
-	bool		tempSlotChanged = false;
+	bool		hsFeedback = hot_standby_feedback;
+	bool		connectionChanged;
+	bool		noSlot;
+	bool		restartStreaming;
+	bool		restartFeedback;
 
 	ProcessConfigFile(PGC_SIGHUP);
 
-	conninfoChanged = strcmp(conninfo, PrimaryConnInfo) != 0;
-	slotnameChanged = strcmp(slotname, PrimarySlotName) != 0;
-
-	/*
-	 * wal_receiver_create_temp_slot is used only when we have no slot
-	 * configured.  We do not need to track this change if it has no effect.
-	 */
-	if (!slotnameChanged && strcmp(PrimarySlotName, "") == 0)
-		tempSlotChanged = tempSlot != wal_receiver_create_temp_slot;
+	connectionChanged = strcmp(conninfo, PrimaryConnInfo) != 0 ||
+		strcmp(slotname, PrimarySlotName) != 0;
 	pfree(conninfo);
 	pfree(slotname);
 
-	if (conninfoChanged || slotnameChanged || tempSlotChanged)
-		StartupRequestWalReceiverRestart();
+	/*
+	 * With no named slot, only streaming uses wal_receiver_create_temp_slot,
+	 * and hot_standby_feedback determines whether to connect during archive
+	 * or local replay. Otherwise the receiver handles xmin changes in place.
+	 */
+	noSlot = PrimarySlotName[0] == '\0';
+	restartStreaming = connectionChanged || (noSlot && tempSlot != wal_receiver_create_temp_slot);
+	restartFeedback = connectionChanged || (noSlot && hsFeedback != hot_standby_feedback);
+	if (restartStreaming || restartFeedback)
+		StartupRequestWalReceiverRestart(restartStreaming, restartFeedback);
 }
 
 /* Process various signals that might be sent to the startup process */

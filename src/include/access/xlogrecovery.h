@@ -231,7 +231,7 @@ extern bool RecoverySubtransInitialized(void);
 extern void SetRecoverySubtransInitialized(void);
 extern void WakeupRecovery(void);
 
-extern void StartupRequestWalReceiverRestart(void);
+extern void StartupRequestWalReceiverRestart(bool streaming, bool feedback);
 extern void XLogRequestWalReceiverReply(void);
 
 extern void RecoveryRequiresIntParameter(const char *param_name, int currValue, int minValue);

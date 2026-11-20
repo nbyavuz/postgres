@@ -652,14 +652,17 @@ protocol to make nodes agree on a serializable transactional order.
    </para>
 
    <para>
-    If both <xref linkend="guc-primary-conninfo"/> and
-    <xref linkend="guc-primary-slot-name"/> are set, the standby also tries to
-    report its replay position to the primary while replaying WAL from the
-    archive or <filename>pg_wal</filename>.  This lets the primary release
-    WAL retained by the named physical slot, which must already have reserved
-    WAL.  This connection does not receive WAL or acknowledge synchronous
-    commits.  The standby continues replay if the primary is unreachable or
-    does not support <link linkend="protocol-replication-start-feedback"><literal>START_FEEDBACK</literal></link>.
+    While replaying WAL from the archive or <filename>pg_wal</filename>,
+    a standby with <xref linkend="guc-primary-conninfo"/> set also tries to
+    send feedback to the primary if <xref linkend="guc-primary-slot-name"/> is
+    set or <xref linkend="guc-hot-standby-feedback"/> is enabled.  If a slot is
+    named, it must already have reserved WAL on the primary.  The primary can
+    then release WAL through the reported replay position.  With or without
+    a slot, hot standby feedback tells the primary which row versions the
+    standby still needs.  This connection does not receive WAL or acknowledge
+    synchronous commits.  The standby continues replay if the primary is
+    unreachable or does not support
+    <link linkend="protocol-replication-start-feedback"><literal>START_FEEDBACK</literal></link>.
    </para>
 
    <para>

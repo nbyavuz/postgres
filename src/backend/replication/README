@@ -36,11 +36,14 @@ Walreceiver sends information about replication progress to the primary server
 whenever it either writes or flushes new WAL, or the specified interval elapses.
 This is used for reporting purpose.
 
-While replaying archive or local WAL with primary_conninfo and primary_slot_name
-set, startup requests a feedback-only receiver with RequestWalReceiverFeedback().
+While replaying archive or local WAL, startup requests a feedback-only receiver
+with RequestWalReceiverFeedback() if primary_conninfo is set and either a
+physical slot is named or hot_standby_feedback is enabled.
 During replay it retries on later segments, at most once per
 wal_retrieve_retry_interval. The receiver reports the end of the last replayed
 record in all three standby status positions, without fetching or writing WAL.
+It also sends the usual hot standby xmin feedback. Without a named slot only
+the sender process holds xmin; the receiver never creates a temporary slot.
 With a named slot the upstream validates the replay timeline against its
 history; without a slot the current timelines must match. Before each report
 the receiver checks that replay is still on the same timeline; otherwise it

@@ -133,6 +133,13 @@ is( $archive->safe_psql(
 		'postgres', 'SELECT pg_last_wal_receive_lsn() IS NULL'),
 	't',
 	'standby reached the archived commit with the primary down');
+
+# Keep a snapshot from before the delayed commit. Its xmin should be
+# reported until the reader disconnects, even after replay passes the commit.
+my $reader = $archive->background_psql('postgres');
+$reader->query_safe('BEGIN ISOLATION LEVEL REPEATABLE READ');
+my $xmin = $reader->query_safe(
+	'SELECT backend_xmin FROM pg_stat_activity WHERE pid = pg_backend_pid()');
 $primary->start;
 $archive->append_conf('postgresql.conf', 'recovery_min_apply_delay = 0');
 $archive->reload;
@@ -147,6 +154,57 @@ is( $archive->safe_psql(
 		'postgres', 'SELECT pg_last_wal_receive_lsn() IS NULL'),
 	't',
 	'no WAL was streamed to reach the restore point');
+
+# The named receiver can publish and withdraw xmin without giving up the slot.
+my $receiver_pid =
+  $archive->safe_psql('postgres', 'SELECT pid FROM pg_stat_wal_receiver');
+my $sender = q{FROM pg_stat_replication WHERE application_name = 'archive'};
+$archive->append_conf('postgresql.conf', 'hot_standby_feedback = on');
+$archive->reload;
+$primary->poll_query_until('postgres',
+	"SELECT active AND xmin = '$xmin' $slot")
+  or die 'named slot did not receive standby snapshot xmin';
+$archive->append_conf('postgresql.conf', 'hot_standby_feedback = off');
+$archive->reload;
+ok( $primary->poll_query_until(
+		'postgres',
+		"SELECT active AND xmin IS NULL AND catalog_xmin IS NULL $slot"),
+	'disabling xmin feedback cleared the named slot');
+is($archive->safe_psql('postgres', 'SELECT pid FROM pg_stat_wal_receiver'),
+	$receiver_pid, 'named feedback connection survived both reloads');
+
+# With neither a named slot nor xmin feedback, there is no receiver. Turn
+# on xmin feedback alone to start a slotless session from the same pause.
+$archive->append_conf('postgresql.conf',
+	"primary_slot_name = ''\nwal_receiver_create_temp_slot = on");
+$archive->reload;
+$primary->poll_query_until('postgres', "SELECT count(*) = 0 $sender")
+  or die 'feedback connection did not stop';
+$archive->append_conf('postgresql.conf', 'hot_standby_feedback = on');
+$archive->reload;
+ok( $primary->poll_query_until(
+		'postgres',
+		"SELECT state = 'feedback' AND backend_xmin = '$xmin' $sender"),
+	'slotless feedback protects the standby snapshot on the primary');
+is( $primary->safe_psql(
+		'postgres',
+		'SELECT count(*) FROM pg_replication_slots WHERE active OR temporary'
+	),
+	'0',
+	'slotless feedback did not acquire or create a slot');
+$reader->quit;
+ok( $primary->poll_query_until(
+		'postgres', "SELECT age(backend_xmin) < age('$xmin'::xid) $sender"),
+	'periodic feedback advanced xmin after the standby reader disconnected');
+$archive->append_conf('postgresql.conf', 'hot_standby_feedback = off');
+$archive->reload;
+ok( $primary->poll_query_until('postgres', "SELECT count(*) = 0 $sender"),
+	'disabling slotless feedback removed the sender holding xmin');
+
+$archive->append_conf('postgresql.conf', "primary_slot_name = 'feedback'");
+$archive->reload;
+$primary->poll_query_until('postgres', "SELECT active $slot")
+  or die 'named feedback did not resume before promotion';
 $archive->promote;
 ok($primary->poll_query_until('postgres', "SELECT NOT active $slot"),
 	'promotion released the feedback slot');

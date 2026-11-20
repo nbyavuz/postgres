@@ -4452,7 +4452,8 @@ MaybeStartWalReceiverFeedback(void)
 
 	Assert(StandbyMode && InRedo);
 	if (LocalPromoteIsTriggered || IsPromoteSignaled() ||
-		PrimaryConnInfo[0] == '\0' || PrimarySlotName[0] == '\0')
+		PrimaryConnInfo[0] == '\0' ||
+		(PrimarySlotName[0] == '\0' && !hot_standby_feedback))
 		return;
 
 	now = GetCurrentTimestamp();
@@ -4469,7 +4470,7 @@ static void
 RestartWalReceiverFeedback(void)
 {
 	Assert(currentSource != XLOG_FROM_STREAM);
-	if (WalRcvRunning())
+	if (lastWalRcvFeedbackRequest != 0 && WalRcvRunning())
 		ShutdownWalRcv();
 	lastWalRcvFeedbackRequest = 0;
 
@@ -4481,14 +4482,20 @@ RestartWalReceiverFeedback(void)
 
 /* A connection setting has changed in the startup process. */
 void
-StartupRequestWalReceiverRestart(void)
+StartupRequestWalReceiverRestart(bool streaming, bool feedback)
 {
 	if (!StandbyMode)
 		return;
 
 	if (currentSource != XLOG_FROM_STREAM)
-		RestartWalReceiverFeedback();
-	else if (WalRcvRunning())
+	{
+		/* An idle WAL stream still has its original connection settings. */
+		if (streaming && WalRcvGetState() == WALRCV_WAITING)
+			ShutdownWalRcv();
+		if (feedback)
+			RestartWalReceiverFeedback();
+	}
+	else if (streaming && WalRcvRunning())
 	{
 		ereport(LOG,
 				(errmsg("WAL receiver process shutdown requested")));

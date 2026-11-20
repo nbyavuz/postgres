@@ -5523,12 +5523,13 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
       </term>
       <listitem>
        <para>
-        Specifies whether the WAL receiver process should create a temporary replication
-        slot on the remote instance when no permanent replication slot to use
-        has been configured (using <xref linkend="guc-primary-slot-name"/>).
+        Specifies whether the WAL receiver should create a temporary replication
+        slot on the remote instance for streaming when no permanent slot has
+        been configured (using <xref linkend="guc-primary-slot-name"/>).
+        A feedback-only connection never creates a temporary slot.
         The default is off.  This parameter can only be set in the
         <filename>postgresql.conf</filename> file or on the server command line.
-        If this parameter is changed while the WAL receiver process is running,
+        If this parameter is changed while the WAL receiver is using it for streaming,
         that process is signaled to shut down and expected to restart with
         the new setting.
        </para>
@@ -5580,6 +5581,9 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         about queries currently executing on the standby. This parameter can
         be used to eliminate query cancels caused by cleanup records, but
         can cause database bloat on the primary for some workloads.
+        When <xref linkend="guc-primary-conninfo"/> is set, the standby can
+        also send this feedback during archive or local WAL replay, even
+        without a replication slot.
         Feedback messages will not be sent more frequently than once per
         <varname>wal_receiver_status_interval</varname>. The default value is
         <literal>off</literal>. This parameter can only be set in the
