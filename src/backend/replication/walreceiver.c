@@ -23,7 +23,7 @@
  *
  * A feedback-only receiver connects to report replay progress while startup
  * owns the WAL files. It accepts keepalives, but never installs a segment or
- * timeline history file. A streaming request starts a separate receiver.
+ * timeline history file. It must finish feedback before it can stream WAL.
  *
  * If the primary server ends streaming, but doesn't disconnect, walreceiver
  * goes into "waiting" mode, and waits for the startup process to give new
@@ -568,6 +568,10 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 				/* Process any requests or signals received recently */
 				CHECK_FOR_INTERRUPTS();
 
+				/* Leave feedback COPY for startup's streaming request. */
+				if (feedbackOnly && WalRcvGetState() == WALRCV_RESTARTING)
+					break;
+
 				if (ConfigReloadPending)
 				{
 					ConfigReloadPending = false;
@@ -732,6 +736,50 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 					XLogWalRcvSendReply(requestReply, requestReply, false);
 					XLogWalRcvSendHSFeedback(false);
 				}
+			}
+
+			/*
+			 * Startup needs WAL from the same named slot.  Finish the
+			 * feedback command before asking its walsender to acquire the
+			 * slot again. Don't let an unresponsive peer delay the normal
+			 * recovery retry.
+			 */
+			if (feedbackOnly)
+			{
+				int			timeout = wal_retrieve_retry_interval;
+
+				if (wal_receiver_timeout > 0)
+					timeout = Min(timeout, wal_receiver_timeout);
+				walrcv_endfeedback(wrconn, timeout);
+
+				SpinLockAcquire(&walrcv->mutex);
+				if (walrcv->walRcvState == WALRCV_STOPPING)
+				{
+					/* WalRcvDie() needs this lock to publish WALRCV_STOPPED. */
+					SpinLockRelease(&walrcv->mutex);
+					proc_exit(0);
+				}
+
+				/*
+				 * We left the feedback loop on RESTARTING.  While we waited
+				 * for COPY to end, only startup could change that state, by
+				 * requesting STOPPING.  We ruled that out under the lock.
+				 */
+				Assert(walrcv->walRcvState == WALRCV_RESTARTING);
+
+				/*
+				 * Take the start position and timeline requested by startup.
+				 * The connection is open, but streaming has not started yet.
+				 */
+				startpoint = walrcv->receiveStart;
+				startpointTLI = walrcv->receiveStartTLI;
+				walrcv->walRcvState = WALRCV_CONNECTING;
+				SpinLockRelease(&walrcv->mutex);
+
+				/* This connection has not streamed any WAL yet. */
+				feedbackOnly = false;
+				first_stream = true;
+				continue;
 			}
 
 			/*

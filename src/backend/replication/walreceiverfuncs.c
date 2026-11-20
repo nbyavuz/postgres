@@ -262,10 +262,20 @@ void
 RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
 					 const char *slotname, bool create_temp_slot)
 {
-	bool		feedbackOnly;
+	WalRcvData *walrcv = WalRcv;
+	bool		stopFeedback;
 
-	/* Streaming takes precedence, even if feedback is still connecting. */
-	if (WalRcvGetStateWithTimeout(&feedbackOnly) != WALRCV_STOPPED && feedbackOnly)
+	/*
+	 * Reuse an established feedback connection when streaming needs the same
+	 * slot.  Disconnecting instead would race the old walsender's release of
+	 * the slot.  Don't wait for a feedback connection that's still starting.
+	 */
+	SpinLockAcquire(&walrcv->mutex);
+	stopFeedback = walrcv->feedbackOnly && walrcv->walRcvState != WALRCV_STOPPED &&
+		(walrcv->walRcvState != WALRCV_FEEDBACK || slotname == NULL ||
+		 strcmp(walrcv->slotname, slotname) != 0);
+	SpinLockRelease(&walrcv->mutex);
+	if (stopFeedback)
 		ShutdownWalRcv();
 
 	/*
@@ -291,9 +301,11 @@ RequestWalReceiver(bool feedbackOnly, TimeLineID tli, XLogRecPtr recptr,
 
 	SpinLockAcquire(&walrcv->mutex);
 
-	/* It better be stopped if we try to restart it */
+	/* Startup owns transitions into a new job. */
 	Assert(walrcv->walRcvState == WALRCV_STOPPED ||
-		   walrcv->walRcvState == WALRCV_WAITING);
+		   walrcv->walRcvState == WALRCV_WAITING ||
+		   (walrcv->walRcvState == WALRCV_FEEDBACK && !feedbackOnly &&
+			slotname && strcmp(walrcv->slotname, slotname) == 0));
 
 	/*
 	 * Use configured replication slot if present, and ignore the value of

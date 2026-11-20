@@ -27,6 +27,7 @@
 #include "funcapi.h"
 #include "libpq-fe.h"
 #include "libpq/libpq-be-fe-helpers.h"
+#include "libpq/protocol.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -78,6 +79,7 @@ static bool libpqrcv_startstreaming(WalReceiverConn *conn,
 									const WalRcvStreamOptions *options);
 static bool libpqrcv_startfeedback(WalReceiverConn *conn, const char *slotname,
 								   TimeLineID tli);
+static void libpqrcv_endfeedback(WalReceiverConn *conn, int timeout_ms);
 static void libpqrcv_endstreaming(WalReceiverConn *conn,
 								  TimeLineID *next_tli);
 static int	libpqrcv_receive(WalReceiverConn *conn, char **buffer,
@@ -110,6 +112,7 @@ static WalReceiverFunctionsType PQWalReceiverFunctions = {
 	.walrcv_readtimelinehistoryfile = libpqrcv_readtimelinehistoryfile,
 	.walrcv_startstreaming = libpqrcv_startstreaming,
 	.walrcv_startfeedback = libpqrcv_startfeedback,
+	.walrcv_endfeedback = libpqrcv_endfeedback,
 	.walrcv_endstreaming = libpqrcv_endstreaming,
 	.walrcv_receive = libpqrcv_receive,
 	.walrcv_send = libpqrcv_send,
@@ -632,6 +635,116 @@ libpqrcv_startfeedback(WalReceiverConn *conn, const char *slotname,
 	}
 	PQclear(res);
 	return true;
+}
+
+/*
+ * Finish START_FEEDBACK before starting streaming on the same connection.
+ * There may still be keepalives in flight.  Wait interruptibly for CopyDone,
+ * CommandComplete (after slot release), and ReadyForQuery, with one deadline
+ * for the entire exchange.
+ */
+static void
+libpqrcv_endfeedback(WalReceiverConn *conn, int timeout_ms)
+{
+	PGconn	   *pgconn = conn->streamConn;
+	TimestampTz deadline = TimestampTzPlusMilliseconds(GetCurrentTimestamp(), timeout_ms);
+	bool		copy_done = false;
+	bool		command_done = false;
+
+	if (PQsetnonblocking(pgconn, 1) != 0 || PQputCopyEnd(pgconn, NULL) != 1)
+		goto conn_error;
+
+	for (;;)
+	{
+		long		remaining;
+		int			pending;
+		int			events;
+
+		CHECK_FOR_INTERRUPTS();
+		remaining = TimestampDifferenceMilliseconds(GetCurrentTimestamp(), deadline);
+		if (remaining == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_CONNECTION_FAILURE),
+					 errmsg("timed out waiting to reuse the WAL receiver connection for streaming"),
+					 errdetail("The START_FEEDBACK exchange did not finish within %d ms.",
+							   timeout_ms)));
+		pending = PQflush(pgconn);
+		if (pending < 0)
+			goto conn_error;
+
+		if (!copy_done)
+		{
+			char	   *buf;
+			int			len = PQgetCopyData(pgconn, &buf, 1);
+
+			if (len > 0)
+			{
+				/*
+				 * The only CopyData payload the upstream walsender can still
+				 * have in flight is a keepalive: a type byte, a 64-bit WAL
+				 * end LSN, a 64-bit send timestamp, and a one-byte reply
+				 * flag.
+				 */
+				bool		valid = (len == 1 + 2 * sizeof(int64) + 1 &&
+									 buf[0] == PqReplMsg_Keepalive);
+
+				PQfreemem(buf);
+				if (!valid)
+					ereport(ERROR,
+							(errcode(ERRCODE_PROTOCOL_VIOLATION),
+							 errmsg("unexpected message while ending WAL receiver feedback")));
+				continue;
+			}
+			if (len < -1)
+				goto conn_error;
+			copy_done = (len == -1);
+			/* If len is zero, wait for more input below. */
+		}
+		if (copy_done && !PQisBusy(pgconn))
+		{
+			PGresult   *res = PQgetResult(pgconn);
+
+			if (res == NULL && command_done && PQstatus(pgconn) == CONNECTION_OK)
+				break;
+			if (command_done || PQresultStatus(res) != PGRES_COMMAND_OK)
+			{
+				PQclear(res);
+				goto conn_error;
+			}
+			PQclear(res);
+
+			/*
+			 * CommandComplete for START_FEEDBACK means the upstream walsender
+			 * has released the slot.  The connection is ready for reuse once
+			 * libpq consumes ReadyForQuery and returns NULL.  Check for that
+			 * before waiting, since ReadyForQuery may already be buffered.
+			 */
+			command_done = true;
+			continue;
+		}
+
+		/*
+		 * Wait for input, or for room to flush CopyDone if it is still
+		 * buffered.  The latch lets a local interrupt wake the walreceiver;
+		 * reset it before checking interrupts again at the top of the loop.
+		 */
+		events = WaitLatchOrSocket(MyLatch,
+								   WL_LATCH_SET | WL_SOCKET_READABLE | WL_TIMEOUT |
+								   WL_EXIT_ON_PM_DEATH | (pending ? WL_SOCKET_WRITEABLE : 0),
+								   PQsocket(pgconn), remaining, WAIT_EVENT_LIBPQWALRECEIVER_RECEIVE);
+		if (events & WL_LATCH_SET)
+			ResetLatch(MyLatch);
+		if ((events & WL_SOCKET_READABLE) && !PQconsumeInput(pgconn))
+			goto conn_error;
+	}
+	if (PQsetnonblocking(pgconn, 0) == 0)
+		return;
+
+conn_error:
+	ereport(ERROR,
+			(errcode(ERRCODE_CONNECTION_FAILURE),
+			 errmsg("could not end WAL receiver feedback: %s",
+					pchomp(PQerrorMessage(pgconn)))));
 }
 
 /*

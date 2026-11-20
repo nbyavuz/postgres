@@ -331,6 +331,9 @@ typedef bool (*walrcv_startstreaming_fn) (WalReceiverConn *conn,
 typedef bool (*walrcv_startfeedback_fn) (WalReceiverConn *conn,
 										 const char *slotname, TimeLineID tli);
 
+/* Finish feedback and wait for the upstream to release the physical slot. */
+typedef void (*walrcv_endfeedback_fn) (WalReceiverConn *conn, int timeout_ms);
+
 /*
  * walrcv_endstreaming_fn
  *
@@ -431,6 +434,7 @@ typedef struct WalReceiverFunctionsType
 	walrcv_readtimelinehistoryfile_fn walrcv_readtimelinehistoryfile;
 	walrcv_startstreaming_fn walrcv_startstreaming;
 	walrcv_startfeedback_fn walrcv_startfeedback;
+	walrcv_endfeedback_fn walrcv_endfeedback;
 	walrcv_endstreaming_fn walrcv_endstreaming;
 	walrcv_receive_fn walrcv_receive;
 	walrcv_send_fn walrcv_send;
@@ -463,6 +467,8 @@ extern PGDLLIMPORT WalReceiverFunctionsType *WalReceiverFunctions;
 	WalReceiverFunctions->walrcv_startstreaming(conn, options)
 #define walrcv_startfeedback(conn, slotname, tli) \
 	WalReceiverFunctions->walrcv_startfeedback(conn, slotname, tli)
+#define walrcv_endfeedback(conn, timeout_ms) \
+	WalReceiverFunctions->walrcv_endfeedback(conn, timeout_ms)
 #define walrcv_endstreaming(conn, next_tli) \
 	WalReceiverFunctions->walrcv_endstreaming(conn, next_tli)
 #define walrcv_receive(conn, buffer, wait_fd) \
