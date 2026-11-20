@@ -5632,7 +5632,8 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         local <filename>pg_wal</filename> or WAL archive) before trying
         again to retrieve WAL data.
         This interval also limits how often the standby retries a failed
-        feedback connection while replaying archive or local WAL.
+        feedback connection while replaying archive or local WAL, including
+        while replay is paused or waiting for <xref linkend="guc-recovery-min-apply-delay"/>.
         If this value is specified without units, it is taken as milliseconds.
         The default value is 5 seconds.
         This parameter can only be set in
