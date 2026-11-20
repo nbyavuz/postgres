@@ -652,6 +652,19 @@ protocol to make nodes agree on a serializable transactional order.
    </para>
 
    <para>
+    After a streaming connection fails, a standby that resumes replay from
+    the archive or <filename>pg_wal</filename> also tries to report its replay
+    position to the primary if both <xref linkend="guc-primary-conninfo"/> and
+    <xref linkend="guc-primary-slot-name"/> are set.  Initial archive replay
+    and reaching the normal end of a timeline do not start feedback.
+    This lets the primary release
+    WAL retained by the named physical slot, which must already have reserved
+    WAL.  This connection does not receive WAL or acknowledge synchronous
+    commits.  The standby continues replay if the primary is unreachable or
+    does not support <link linkend="protocol-replication-start-feedback"><literal>START_FEEDBACK</literal></link>.
+   </para>
+
+   <para>
     Standby mode is exited and the server switches to normal operation
     when <command>pg_ctl promote</command> is run, or
     <function>pg_promote()</function> is called. Before failover,
