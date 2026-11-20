@@ -325,6 +325,10 @@ typedef void (*walrcv_readtimelinehistoryfile_fn) (WalReceiverConn *conn,
 typedef bool (*walrcv_startstreaming_fn) (WalReceiverConn *conn,
 										  const WalRcvStreamOptions *options);
 
+/* Enter feedback-only COPY mode; return false only for pre-20 servers. */
+typedef bool (*walrcv_startfeedback_fn) (WalReceiverConn *conn,
+										 const char *slotname, TimeLineID tli);
+
 /*
  * walrcv_endstreaming_fn
  *
@@ -424,6 +428,7 @@ typedef struct WalReceiverFunctionsType
 	walrcv_server_version_fn walrcv_server_version;
 	walrcv_readtimelinehistoryfile_fn walrcv_readtimelinehistoryfile;
 	walrcv_startstreaming_fn walrcv_startstreaming;
+	walrcv_startfeedback_fn walrcv_startfeedback;
 	walrcv_endstreaming_fn walrcv_endstreaming;
 	walrcv_receive_fn walrcv_receive;
 	walrcv_send_fn walrcv_send;
@@ -454,6 +459,8 @@ extern PGDLLIMPORT WalReceiverFunctionsType *WalReceiverFunctions;
 	WalReceiverFunctions->walrcv_readtimelinehistoryfile(conn, tli, filename, content, size)
 #define walrcv_startstreaming(conn, options) \
 	WalReceiverFunctions->walrcv_startstreaming(conn, options)
+#define walrcv_startfeedback(conn, slotname, tli) \
+	WalReceiverFunctions->walrcv_startfeedback(conn, slotname, tli)
 #define walrcv_endstreaming(conn, next_tli) \
 	WalReceiverFunctions->walrcv_endstreaming(conn, next_tli)
 #define walrcv_receive(conn, buffer, wait_fd) \

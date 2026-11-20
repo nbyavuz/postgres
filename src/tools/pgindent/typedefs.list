@@ -4445,6 +4445,7 @@ walrcv_readtimelinehistoryfile_fn
 walrcv_receive_fn
 walrcv_send_fn
 walrcv_server_version_fn
+walrcv_startfeedback_fn
 walrcv_startstreaming_fn
 wchar_t
 win32_deadchild_waitinfo
