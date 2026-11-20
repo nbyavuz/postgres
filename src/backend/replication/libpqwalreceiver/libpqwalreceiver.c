@@ -76,6 +76,8 @@ static void libpqrcv_readtimelinehistoryfile(WalReceiverConn *conn,
 											 char **content, size_t *len);
 static bool libpqrcv_startstreaming(WalReceiverConn *conn,
 									const WalRcvStreamOptions *options);
+static bool libpqrcv_startfeedback(WalReceiverConn *conn, const char *slotname,
+								   TimeLineID tli);
 static void libpqrcv_endstreaming(WalReceiverConn *conn,
 								  TimeLineID *next_tli);
 static int	libpqrcv_receive(WalReceiverConn *conn, char **buffer,
@@ -107,6 +109,7 @@ static WalReceiverFunctionsType PQWalReceiverFunctions = {
 	.walrcv_server_version = libpqrcv_server_version,
 	.walrcv_readtimelinehistoryfile = libpqrcv_readtimelinehistoryfile,
 	.walrcv_startstreaming = libpqrcv_startstreaming,
+	.walrcv_startfeedback = libpqrcv_startfeedback,
 	.walrcv_endstreaming = libpqrcv_endstreaming,
 	.walrcv_receive = libpqrcv_receive,
 	.walrcv_send = libpqrcv_send,
@@ -597,6 +600,53 @@ appendQuotedString(StringInfo buf, const char *str, char quote)
 
 #define appendQuotedIdentifier(b, s)	appendQuotedString(b, s, '"')
 #define appendQuotedLiteral(b, s)		appendQuotedString(b, s, '\'')
+
+static bool
+libpqrcv_startfeedback(WalReceiverConn *conn, const char *slotname,
+					   TimeLineID tli)
+{
+	StringInfoData cmd;
+	PGresult   *res;
+
+	Assert(!conn->logical);
+	if (PQserverVersion(conn->streamConn) < 200000)
+		return false;
+
+	initStringInfo(&cmd);
+	appendStringInfoString(&cmd, "START_FEEDBACK");
+	if (slotname)
+	{
+		appendStringInfoString(&cmd, " SLOT ");
+		appendQuotedIdentifier(&cmd, slotname);
+		appendStringInfo(&cmd, " TIMELINE %u", tli);
+	}
+	res = libpqsrv_exec(conn->streamConn, cmd.data,
+						WAIT_EVENT_LIBPQWALRECEIVER_RECEIVE);
+	pfree(cmd.data);
+	if (PQresultStatus(res) != PGRES_COPY_BOTH)
+	{
+		const char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+
+		/*
+		 * A physical connection rejects an unknown command as SQL.  A server
+		 * recognizing the command but not its arguments reports a syntax
+		 * error.
+		 */
+		if (sqlstate &&
+			(strcmp(sqlstate, unpack_sql_state(ERRCODE_FEATURE_NOT_SUPPORTED)) == 0 ||
+			 strcmp(sqlstate, unpack_sql_state(ERRCODE_SYNTAX_ERROR)) == 0))
+		{
+			PQclear(res);
+			return false;
+		}
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("could not start WAL receiver feedback: %s",
+						pchomp(PQerrorMessage(conn->streamConn)))));
+	}
+	PQclear(res);
+	return true;
+}
 
 /*
  * Start streaming WAL data from given streaming options.

@@ -49,6 +49,7 @@ typedef enum
 								 * initialized yet */
 	WALRCV_CONNECTING,			/* connecting to upstream server */
 	WALRCV_STREAMING,			/* walreceiver is streaming */
+	WALRCV_FEEDBACK,			/* reporting replay without receiving WAL */
 	WALRCV_WAITING,				/* stopped streaming, waiting for orders */
 	WALRCV_RESTARTING,			/* asked to restart streaming */
 	WALRCV_STOPPING,			/* requested to stop, but still running */
@@ -70,6 +71,7 @@ typedef struct
 
 	/* Its current state */
 	WalRcvState walRcvState;
+	bool		feedbackOnly;	/* requested job, including while connecting */
 	ConditionVariable walRcvStoppedCV;
 
 	/*
@@ -325,6 +327,10 @@ typedef void (*walrcv_readtimelinehistoryfile_fn) (WalReceiverConn *conn,
 typedef bool (*walrcv_startstreaming_fn) (WalReceiverConn *conn,
 										  const WalRcvStreamOptions *options);
 
+/* Enter feedback-only COPY mode; return false if the upstream lacks it. */
+typedef bool (*walrcv_startfeedback_fn) (WalReceiverConn *conn,
+										 const char *slotname, TimeLineID tli);
+
 /*
  * walrcv_endstreaming_fn
  *
@@ -424,6 +430,7 @@ typedef struct WalReceiverFunctionsType
 	walrcv_server_version_fn walrcv_server_version;
 	walrcv_readtimelinehistoryfile_fn walrcv_readtimelinehistoryfile;
 	walrcv_startstreaming_fn walrcv_startstreaming;
+	walrcv_startfeedback_fn walrcv_startfeedback;
 	walrcv_endstreaming_fn walrcv_endstreaming;
 	walrcv_receive_fn walrcv_receive;
 	walrcv_send_fn walrcv_send;
@@ -454,6 +461,8 @@ extern PGDLLIMPORT WalReceiverFunctionsType *WalReceiverFunctions;
 	WalReceiverFunctions->walrcv_readtimelinehistoryfile(conn, tli, filename, content, size)
 #define walrcv_startstreaming(conn, options) \
 	WalReceiverFunctions->walrcv_startstreaming(conn, options)
+#define walrcv_startfeedback(conn, slotname, tli) \
+	WalReceiverFunctions->walrcv_startfeedback(conn, slotname, tli)
 #define walrcv_endstreaming(conn, next_tli) \
 	WalReceiverFunctions->walrcv_endstreaming(conn, next_tli)
 #define walrcv_receive(conn, buffer, wait_fd) \
@@ -498,6 +507,7 @@ extern void ShutdownWalRcv(void);
 extern bool WalRcvStreaming(void);
 extern bool WalRcvRunning(void);
 extern WalRcvState WalRcvGetState(void);
+extern void RequestWalReceiverFeedback(const char *conninfo, const char *slotname);
 extern void RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr,
 								 const char *conninfo, const char *slotname,
 								 bool create_temp_slot);
