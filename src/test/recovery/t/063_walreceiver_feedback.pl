@@ -200,6 +200,7 @@ is($archive->lsn('receive'),
 # The named receiver can publish and withdraw xmin without giving up the slot.
 my $receiver_pid =
   $archive->safe_psql('postgres', 'SELECT pid FROM pg_stat_wal_receiver');
+my $sender = q{FROM pg_stat_replication WHERE application_name = 'archive'};
 $archive->append_conf('postgresql.conf', 'hot_standby_feedback = on');
 $archive->reload;
 $primary->poll_query_until('postgres',
@@ -213,7 +214,40 @@ ok( $primary->poll_query_until(
 	'disabling xmin feedback cleared the named slot');
 is($archive->safe_psql('postgres', 'SELECT pid FROM pg_stat_wal_receiver'),
 	$receiver_pid, 'named feedback connection survived both reloads');
+
+# With neither a named slot nor xmin feedback, there is no receiver. Turn
+# on xmin feedback alone to start a slotless session from the same pause.
+$archive->append_conf('postgresql.conf',
+	"primary_slot_name = ''\nwal_receiver_create_temp_slot = on");
+$archive->reload;
+$primary->poll_query_until('postgres', "SELECT count(*) = 0 $sender")
+  or die 'feedback connection did not stop';
+$archive->append_conf('postgresql.conf', 'hot_standby_feedback = on');
+$archive->reload;
+ok( $primary->poll_query_until(
+		'postgres',
+		"SELECT state = 'feedback' AND backend_xmin = '$xmin' $sender"),
+	'slotless feedback protects the standby snapshot on the primary');
+is( $primary->safe_psql(
+		'postgres',
+		'SELECT count(*) FROM pg_replication_slots WHERE active OR temporary'
+	),
+	'0',
+	'slotless feedback did not acquire or create a slot');
 $reader->quit;
+ok( $primary->poll_query_until(
+		'postgres', "SELECT age(backend_xmin) < age('$xmin'::xid) $sender"),
+	'periodic feedback advanced xmin after the standby reader disconnected');
+$archive->append_conf('postgresql.conf', 'hot_standby_feedback = off');
+$archive->reload;
+ok( $primary->poll_query_until('postgres', "SELECT count(*) = 0 $sender"),
+	'disabling slotless feedback removed the sender holding xmin');
+
+$archive->append_conf('postgresql.conf', "primary_slot_name = 'feedback'");
+$archive->reload;
+$archive->poll_query_until('postgres',
+	"SELECT status = 'feedback' FROM pg_stat_wal_receiver")
+  or die 'named feedback receiver was not ready for handoff';
 
 # Exhaust the archive and request a transaction that is only on the primary.
 my $handoff_pid =

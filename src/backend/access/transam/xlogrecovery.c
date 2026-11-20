@@ -4463,9 +4463,9 @@ XLogFileReadAnyTLI(XLogSegNo segno, XLogSource source)
 }
 
 /*
- * After a streaming failure, request feedback for the configured upstream
- * and slot unless promotion is pending.  Rate-limit startup's requests to
- * launch a walreceiver, not the status reports sent by a connected one.
+ * After a streaming failure, request feedback for a named slot or to send
+ * hot standby feedback.  Rate-limit startup's requests to launch a
+ * walreceiver, not the status reports sent by a connected one.
  */
 static void
 MaybeStartWalReceiverFeedback(void)
@@ -4474,7 +4474,8 @@ MaybeStartWalReceiverFeedback(void)
 
 	Assert(StandbyMode && InRedo);
 	if (!streamAttemptFailed || LocalPromoteIsTriggered || IsPromoteSignaled() ||
-		PrimaryConnInfo[0] == '\0' || PrimarySlotName[0] == '\0')
+		PrimaryConnInfo[0] == '\0' ||
+		(PrimarySlotName[0] == '\0' && (!EnableHotStandby || !hot_standby_feedback)))
 		return;
 
 	now = GetCurrentTimestamp();
@@ -4526,7 +4527,7 @@ static void
 RestartWalReceiverFeedback(void)
 {
 	Assert(currentSource != XLOG_FROM_STREAM);
-	if (WalRcvRunning())
+	if (lastWalRcvFeedbackRequest != 0 && WalRcvRunning())
 		ShutdownWalRcv();
 	lastWalRcvFeedbackRequest = 0;
 
@@ -4542,14 +4543,20 @@ RestartWalReceiverFeedback(void)
  * the WAL retrieval loop.
  */
 void
-StartupRequestWalReceiverRestart(void)
+StartupRequestWalReceiverRestart(bool streaming, bool feedback)
 {
 	if (!StandbyMode)
 		return;
 
 	if (currentSource != XLOG_FROM_STREAM)
-		RestartWalReceiverFeedback();
-	else if (WalRcvRunning())
+	{
+		/* An idle WAL stream still has its original connection settings. */
+		if (streaming && WalRcvGetState() == WALRCV_WAITING)
+			ShutdownWalRcv();
+		if (feedback)
+			RestartWalReceiverFeedback();
+	}
+	else if (streaming && WalRcvRunning())
 	{
 		ereport(LOG,
 				(errmsg("WAL receiver process shutdown requested")));

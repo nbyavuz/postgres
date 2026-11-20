@@ -38,14 +38,16 @@ This is used for reporting purpose.
 
 After a stream or streaming connection attempt fails, startup requests a
 feedback-only receiver with RequestWalReceiverFeedback() once it replays WAL
-from the archive or pg_wal, if primary_conninfo and primary_slot_name are set.
+from the archive or pg_wal, if primary_conninfo is set and either a physical
+slot is named or both hot_standby and hot_standby_feedback are enabled.
 Initial archive replay and a normal end of timeline do not start feedback.
 If the feedback connection fails, the standby continues replay. As replay
 crosses WAL segment boundaries, startup can request another feedback-only
 walreceiver, provided wal_retrieve_retry_interval has elapsed since its last
 request. The receiver reports the end of the last replayed record in all three
 standby status positions, without fetching or writing WAL.
-It also sends the usual hot standby xmin feedback to the named slot.
+It also sends the usual hot standby xmin feedback. Without a named slot only
+the sender process holds xmin; the receiver never creates a temporary slot.
 With a named slot the upstream validates the replay timeline against its
 history; without a slot the current timelines must match. Standby status
 updates carry LSNs but no timeline ID. Before each report the walreceiver
