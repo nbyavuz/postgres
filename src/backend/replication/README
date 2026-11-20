@@ -45,6 +45,7 @@ crosses WAL segment boundaries, startup can request another feedback-only
 walreceiver, provided wal_retrieve_retry_interval has elapsed since its last
 request. The receiver reports the end of the last replayed record in all three
 standby status positions, without fetching or writing WAL.
+It also sends the usual hot standby xmin feedback to the named slot.
 With a named slot the upstream validates the replay timeline against its
 history; without a slot the current timelines must match. Standby status
 updates carry LSNs but no timeline ID. Before each report the walreceiver

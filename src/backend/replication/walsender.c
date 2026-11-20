@@ -2617,14 +2617,13 @@ ProcessStandbyMessage(void)
 			return;
 
 		case PqReplMsg_HotStandbyFeedback:
-			/* In feedback mode, only standby status updates are allowed. */
-			if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
+			if (MyWalSnd->state == WALSNDSTATE_FEEDBACK && !MyReplicationSlot)
 				break;
 			ProcessStandbyHSFeedbackMessage();
 			return;
 
 		case PqReplMsg_PrimaryStatusRequest:
-			/* In feedback mode, only standby status updates are allowed. */
+			/* Primary status requests are only valid while streaming. */
 			if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
 				break;
 			ProcessStandbyPSRequestMessage();
@@ -2922,6 +2921,8 @@ ProcessStandbyHSFeedbackMessage(void)
 	feedbackEpoch = pq_getmsgint(&reply_message, 4);
 	feedbackCatalogXmin = pq_getmsgint(&reply_message, 4);
 	feedbackCatalogEpoch = pq_getmsgint(&reply_message, 4);
+	if (MyWalSnd->state == WALSNDSTATE_FEEDBACK)
+		pq_getmsgend(&reply_message);
 
 	if (message_level_is_interesting(DEBUG2))
 	{

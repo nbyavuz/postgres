@@ -121,6 +121,13 @@ $archive->wait_for_log(qr/could not connect to the primary server/,
 	$log_offset);
 is($archive->lsn('receive'),
 	$received, 'archive replay continued with the primary down');
+
+# Keep a snapshot from before the delayed commit. Its xmin should be
+# reported until the reader disconnects, even after replay passes the commit.
+my $reader = $archive->background_psql('postgres');
+$reader->query_safe('BEGIN ISOLATION LEVEL REPEATABLE READ');
+my $xmin = $reader->query_safe(
+	'SELECT backend_xmin FROM pg_stat_activity WHERE pid = pg_backend_pid()');
 $primary->start;
 my $delayed_lsn = $archive->lsn('replay');
 # A reconnected sender inherits the slot's position, but not its reply time.
@@ -189,6 +196,24 @@ ok( $primary->poll_query_until(
 	'feedback reconnected at the same paused replay position');
 is($archive->lsn('receive'),
 	$received, 'archive feedback did not advance the receive LSN');
+
+# The named receiver can publish and withdraw xmin without giving up the slot.
+my $receiver_pid =
+  $archive->safe_psql('postgres', 'SELECT pid FROM pg_stat_wal_receiver');
+$archive->append_conf('postgresql.conf', 'hot_standby_feedback = on');
+$archive->reload;
+$primary->poll_query_until('postgres',
+	"SELECT active AND xmin = '$xmin' $slot")
+  or die 'named slot did not receive standby snapshot xmin';
+$archive->append_conf('postgresql.conf', 'hot_standby_feedback = off');
+$archive->reload;
+ok( $primary->poll_query_until(
+		'postgres',
+		"SELECT active AND xmin IS NULL AND catalog_xmin IS NULL $slot"),
+	'disabling xmin feedback cleared the named slot');
+is($archive->safe_psql('postgres', 'SELECT pid FROM pg_stat_wal_receiver'),
+	$receiver_pid, 'named feedback connection survived both reloads');
+$reader->quit;
 
 # Exhaust the archive and request a transaction that is only on the primary.
 my $handoff_pid =

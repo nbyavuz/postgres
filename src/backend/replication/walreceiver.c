@@ -1310,6 +1310,23 @@ XLogWalRcvClose(XLogRecPtr recptr, TimeLineID tli)
 	recvFile = -1;
 }
 
+/* Return completed replay, or exit so startup can reconnect on a new timeline. */
+static XLogRecPtr
+GetFeedbackReplayRecPtr(void)
+{
+	TimeLineID	replayTLI;
+	XLogRecPtr	recptr = GetXLogReplayRecPtr(&replayTLI);
+
+	Assert(feedbackOnly);
+	if (replayTLI != feedbackTLI)
+	{
+		elog(DEBUG1, "ending WAL receiver feedback because replay switched from timeline %u to %u",
+			 feedbackTLI, replayTLI);
+		proc_exit(0);
+	}
+	return recptr;
+}
+
 /*
  * Send reply message to primary, indicating our current WAL locations and
  * time.
@@ -1384,20 +1401,8 @@ XLogWalRcvSendReply(bool force, bool requestReply, bool checkApply)
 	/* Construct a new message */
 	if (feedbackOnly)
 	{
-		TimeLineID	replayTLI;
-
-		/*
-		 * Replayed WAL is already durable.  Sample the end of replay and its
-		 * timeline together; never report WAL from a new branch on a session
-		 * bound to the old one.  Startup can request a new receiver.
-		 */
-		applyPtr = GetXLogReplayRecPtr(&replayTLI);
-		if (replayTLI != feedbackTLI)
-		{
-			elog(DEBUG1, "ending WAL receiver feedback because replay switched from timeline %u to %u",
-				 feedbackTLI, replayTLI);
-			proc_exit(0);
-		}
+		/* Replayed WAL is already durable. */
+		applyPtr = GetFeedbackReplayRecPtr();
 		writePtr = flushPtr = applyPtr;
 	}
 	else
@@ -1440,8 +1445,6 @@ static void
 XLogWalRcvSendHSFeedback(bool immed)
 {
 	TimestampTz now;
-	FullTransactionId nextFullXid;
-	TransactionId nextXid;
 	uint32		xmin_epoch,
 				catalog_xmin_epoch;
 	TransactionId xmin,
@@ -1449,10 +1452,6 @@ XLogWalRcvSendHSFeedback(bool immed)
 
 	/* initially true so we always send at least one feedback message */
 	static bool primary_has_standby_xmin = true;
-
-	/* START_FEEDBACK currently accepts only standby status updates. */
-	if (feedbackOnly)
-		return;
 
 	/*
 	 * If the user doesn't want status to be reported to the primary, be sure
@@ -1473,16 +1472,12 @@ XLogWalRcvSendHSFeedback(bool immed)
 	WalRcvComputeNextWakeup(WALRCV_WAKEUP_HSFEEDBACK, now);
 
 	/*
-	 * If Hot Standby is not yet accepting connections there is nothing to
-	 * send. Check this after the interval has expired to reduce number of
-	 * calls.
-	 *
-	 * Bailing out here also ensures that we don't send feedback until we've
-	 * read our own replication slot state, so we don't tell the primary to
-	 * discard needed xmin or catalog_xmin from any slots that may exist on
-	 * this replica.
+	 * Don't compute horizons until hot standby is active and we've read our
+	 * own replication slots' xmin and catalog_xmin.  If xmin feedback is
+	 * disabled, a feedback-only receiver can clear the upstream slot's old
+	 * horizons on connect without waiting for a standby snapshot.
 	 */
-	if (!HotStandbyActive())
+	if ((!feedbackOnly || hot_standby_feedback) && !HotStandbyActive())
 		return;
 
 	/*
@@ -1491,26 +1486,30 @@ XLogWalRcvSendHSFeedback(bool immed)
 	 */
 	if (hot_standby_feedback)
 	{
+		FullTransactionId nextFullXid;
+		TransactionId nextXid;
+
 		GetReplicationHorizons(&xmin, &catalog_xmin);
+
+		/* Account for horizons on the other side of the epoch boundary. */
+		nextFullXid = ReadNextFullTransactionId();
+		nextXid = XidFromFullTransactionId(nextFullXid);
+		xmin_epoch = EpochFromFullTransactionId(nextFullXid);
+		catalog_xmin_epoch = xmin_epoch;
+		if (nextXid < xmin)
+			xmin_epoch--;
+		if (nextXid < catalog_xmin)
+			catalog_xmin_epoch--;
 	}
 	else
 	{
-		xmin = InvalidTransactionId;
-		catalog_xmin = InvalidTransactionId;
+		xmin = catalog_xmin = InvalidTransactionId;
+		xmin_epoch = catalog_xmin_epoch = 0;
 	}
 
-	/*
-	 * Get epoch and adjust if nextXid and oldestXmin are different sides of
-	 * the epoch boundary.
-	 */
-	nextFullXid = ReadNextFullTransactionId();
-	nextXid = XidFromFullTransactionId(nextFullXid);
-	xmin_epoch = EpochFromFullTransactionId(nextFullXid);
-	catalog_xmin_epoch = xmin_epoch;
-	if (nextXid < xmin)
-		xmin_epoch--;
-	if (nextXid < catalog_xmin)
-		catalog_xmin_epoch--;
+	/* Replay may have switched timelines while we sampled the horizons. */
+	if (feedbackOnly)
+		(void) GetFeedbackReplayRecPtr();
 
 	elog(DEBUG2, "sending hot standby feedback xmin %u epoch %u catalog_xmin %u catalog_xmin_epoch %u",
 		 xmin, xmin_epoch, catalog_xmin, catalog_xmin_epoch);
@@ -1606,13 +1605,7 @@ WalRcvComputeNextWakeup(WalRcvWakeupReason reason, TimestampTz now)
 				wakeup[reason] = TimestampTzPlusMilliseconds(now, wal_receiver_timeout / 2);
 			break;
 		case WALRCV_WAKEUP_HSFEEDBACK:
-
-			/*
-			 * START_FEEDBACK accepts replay reports, not xmin feedback.
-			 * XLogWalRcvSendHSFeedback() won't rearm this timer in feedback
-			 * mode, so an expired deadline would keep waking the receiver.
-			 */
-			if (feedbackOnly || !hot_standby_feedback || wal_receiver_status_interval <= 0)
+			if (!hot_standby_feedback || wal_receiver_status_interval <= 0)
 				wakeup[reason] = TIMESTAMP_INFINITY;
 			else
 				wakeup[reason] = TimestampTzPlusSeconds(now, wal_receiver_status_interval);

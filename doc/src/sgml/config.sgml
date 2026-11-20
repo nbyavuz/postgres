@@ -5580,6 +5580,9 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         about queries currently executing on the standby. This parameter can
         be used to eliminate query cancels caused by cleanup records, but
         can cause database bloat on the primary for some workloads.
+        After a streaming failure the standby can also send this feedback
+        during archive or local WAL replay when <xref linkend="guc-primary-conninfo"/> and
+        <xref linkend="guc-primary-slot-name"/> are set.
         Feedback messages will not be sent more frequently than once per
         <varname>wal_receiver_status_interval</varname>. The default value is
         <literal>off</literal>. This parameter can only be set in the

@@ -659,7 +659,9 @@ protocol to make nodes agree on a serializable transactional order.
     and reaching the normal end of a timeline do not start feedback.
     This lets the primary release
     WAL retained by the named physical slot, which must already have reserved
-    WAL.  This connection does not receive WAL or acknowledge synchronous
+    WAL.  If <xref linkend="guc-hot-standby-feedback"/> is enabled, the
+    standby also reports which row versions it still needs.
+    This connection does not receive WAL or acknowledge synchronous
     commits.  The standby continues replay if the primary is unreachable or
     does not support <link linkend="protocol-replication-start-feedback"><literal>START_FEEDBACK</literal></link>.
    </para>

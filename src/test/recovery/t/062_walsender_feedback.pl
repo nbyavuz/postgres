@@ -122,6 +122,18 @@ sub report_progress
 	return substr($body, 1, 8);
 }
 
+sub report_xmins
+{
+	my ($xmin, $catalog_xmin, $epoch) = @_;
+	send_message('d',
+		'h' . pack('N6', 0, 1, $xmin, $epoch, $catalog_xmin, $epoch));
+}
+
+my ($xmin, $epoch) = split /\|/, $primary->safe_psql(
+	'postgres', q[
+  SELECT xid & 4294967295, xid >> 32
+  FROM (SELECT pg_current_xact_id()::text::bigint AS xid) s]);
+
 # Send a Query ('Q'); CopyBothResponse ('W') means feedback mode has started.
 connect_replication($primary);
 send_message('Q', "START_FEEDBACK SLOT feedback_slot TIMELINE 1\0");
@@ -132,6 +144,28 @@ is( $primary->safe_psql(
 	),
 	't',
 	'feedback acquired the physical slot');
+
+my $slot = q{FROM pg_replication_slots WHERE slot_name = 'feedback_slot'};
+report_xmins($xmin, $xmin, $epoch);
+$primary->poll_query_until('postgres',
+	"SELECT xmin = '$xmin' AND catalog_xmin = '$xmin' $slot")
+  or die 'named slot did not receive both horizons';
+send_message('c', '');
+is_deeply([ map { (receive_message())[0] } 1 .. 3 ],
+	[qw(c C Z)], 'finished named feedback');
+is( $primary->safe_psql(
+		'postgres',
+		"SELECT NOT active AND xmin = '$xmin' AND catalog_xmin = '$xmin' $slot"
+	),
+	't',
+	'inactive named slot retains both horizons');
+send_message('Q', "START_FEEDBACK SLOT feedback_slot TIMELINE 1\0");
+is((receive_message())[0], 'W', 'reacquired named slot');
+report_xmins(0, 0, 0);
+ok( $primary->poll_query_until(
+		'postgres',
+		"SELECT active AND xmin IS NULL AND catalog_xmin IS NULL $slot"),
+	'zero feedback cleared both named-slot horizons');
 
 $primary->safe_psql('postgres', 'INSERT INTO t VALUES (0)');
 my $earlier = $primary->lsn('flush');
