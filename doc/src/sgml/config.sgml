@@ -5417,6 +5417,9 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
           connecting to the sending server via streaming replication to control
           resource removal on the upstream node
           (see <xref linkend="streaming-replication-slots"/>).
+          The standby also uses this slot to report replay progress while
+          reading WAL from the archive or local <filename>pg_wal</filename>
+          (see <xref linkend="standby-server-operation"/>).
           This parameter can only be set in the <filename>postgresql.conf</filename>
           file or on the server command line.
           If this parameter is changed while the WAL receiver process is running,
@@ -5628,6 +5631,8 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         available from any sources (streaming physical replication,
         local <filename>pg_wal</filename> or WAL archive) before trying
         again to retrieve WAL data.
+        This interval also limits how often the standby retries a failed
+        feedback connection while replaying archive or local WAL.
         If this value is specified without units, it is taken as milliseconds.
         The default value is 5 seconds.
         This parameter can only be set in

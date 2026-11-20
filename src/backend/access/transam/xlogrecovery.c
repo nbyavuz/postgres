@@ -254,6 +254,13 @@ static bool lastSourceFailed = false;
 static bool pendingWalRcvRestart = false;
 
 /*
+ * Check for a feedback receiver when replay passes this LSN.  The first
+ * local segment arms the check at zero; a streaming request disarms it.
+ */
+static XLogRecPtr feedbackCheckAfter = PG_UINT64_MAX;
+static TimestampTz lastWalRcvFeedbackRequest = 0;
+
+/*
  * These variables track when we last obtained some WAL data to process,
  * and where we got it from.  (XLogReceiptSource is initially the same as
  * readSource, but readSource gets reset to zero when we don't have data
@@ -341,6 +348,8 @@ static bool recoveryStopAfter;
 static void ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *replayTLI);
 
 static void EnableStandbyMode(void);
+static void MaybeStartWalReceiverFeedback(void);
+static void RestartWalReceiverFeedback(void);
 static void readRecoverySignalFile(void);
 static void validateRecoveryParameters(void);
 static bool read_backup_label(XLogRecPtr *checkPointLoc,
@@ -1803,6 +1812,16 @@ PerformWalRecovery(void)
 			 */
 			ApplyWalRecord(xlogreader, record, &replayTLI);
 
+			if (unlikely(xlogreader->EndRecPtr > feedbackCheckAfter))
+			{
+				/*
+				 * Follow replay, not the prefetcher, across segment
+				 * boundaries.
+				 */
+				feedbackCheckAfter = TYPEALIGN64(wal_segment_size, xlogreader->EndRecPtr);
+				MaybeStartWalReceiverFeedback();
+			}
+
 			/*
 			 * Wake up processes waiting for standby replay, write, or flush
 			 * LSN to reach current replay position.  Replay implies that the
@@ -2058,6 +2077,10 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 
 		/* Reset the prefetcher. */
 		XLogPrefetchReconfigure();
+
+		/* A feedback session on the old timeline can't report this record. */
+		if (lastWalRcvFeedbackRequest != 0)
+			RestartWalReceiverFeedback();
 	}
 }
 
@@ -3655,6 +3678,8 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					 * walreceiver if necessary.
 					 */
 					currentSource = XLOG_FROM_STREAM;
+					feedbackCheckAfter = PG_UINT64_MAX;
+					lastWalRcvFeedbackRequest = 0;
 					startWalReceiver = true;
 					break;
 
@@ -3790,8 +3815,8 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 			case XLOG_FROM_PG_WAL:
 
 				/*
-				 * WAL receiver must not be running when reading WAL from
-				 * archive or pg_wal.
+				 * A feedback-only receiver may run here, but no receiver may
+				 * write WAL while startup is restoring it.
 				 */
 				Assert(!WalRcvStreaming());
 
@@ -3813,7 +3838,17 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 											  currentSource == XLOG_FROM_ARCHIVE ? XLOG_FROM_ANY :
 											  currentSource);
 				if (readFile >= 0)
-					return XLREAD_SUCCESS;	/* success! */
+				{
+					/*
+					 * Opening a file doesn't mean we can replay it.  In
+					 * particular, a recycled segment in pg_wal might contain
+					 * no usable WAL.  Wait for completed replay before asking
+					 * for feedback, including at the start of redo.
+					 */
+					if (StandbyMode && feedbackCheckAfter == PG_UINT64_MAX)
+						feedbackCheckAfter = InvalidXLogRecPtr;
+					return XLREAD_SUCCESS;
+				}
 
 				/*
 				 * Nope, not found in archive or pg_wal.
@@ -4407,13 +4442,53 @@ XLogFileReadAnyTLI(XLogSegNo segno, XLogSource source)
 }
 
 /*
- * Set flag to signal the walreceiver to restart.  (The startup process calls
- * this on noticing a relevant configuration change.)
+ * Report archive or local replay independently of WAL retrieval.  Retry on
+ * subsequent segments, but don't sleep or delay a request for streaming.
  */
+static void
+MaybeStartWalReceiverFeedback(void)
+{
+	TimestampTz now;
+
+	Assert(StandbyMode && InRedo);
+	if (LocalPromoteIsTriggered || IsPromoteSignaled() ||
+		PrimaryConnInfo[0] == '\0' || PrimarySlotName[0] == '\0')
+		return;
+
+	now = GetCurrentTimestamp();
+	if (TimestampDifferenceExceeds(lastWalRcvFeedbackRequest, now,
+								   wal_retrieve_retry_interval))
+	{
+		RequestWalReceiverFeedback(PrimaryConnInfo, PrimarySlotName);
+		lastWalRcvFeedbackRequest = now;
+	}
+}
+
+/* Rebind feedback to the new upstream, slot or replay timeline. */
+static void
+RestartWalReceiverFeedback(void)
+{
+	Assert(currentSource != XLOG_FROM_STREAM);
+	if (WalRcvRunning())
+		ShutdownWalRcv();
+	lastWalRcvFeedbackRequest = 0;
+
+	/* Restart even during a replay pause, if we've already applied WAL. */
+	if (InRedo && feedbackCheckAfter != PG_UINT64_MAX &&
+		XLogRecPtrIsValid(feedbackCheckAfter))
+		MaybeStartWalReceiverFeedback();
+}
+
+/* A connection setting has changed in the startup process. */
 void
 StartupRequestWalReceiverRestart(void)
 {
-	if (currentSource == XLOG_FROM_STREAM && WalRcvRunning())
+	if (!StandbyMode)
+		return;
+
+	if (currentSource != XLOG_FROM_STREAM)
+		RestartWalReceiverFeedback();
+	else if (WalRcvRunning())
 	{
 		ereport(LOG,
 				(errmsg("WAL receiver process shutdown requested")));

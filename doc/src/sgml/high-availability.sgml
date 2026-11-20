@@ -652,6 +652,17 @@ protocol to make nodes agree on a serializable transactional order.
    </para>
 
    <para>
+    If both <xref linkend="guc-primary-conninfo"/> and
+    <xref linkend="guc-primary-slot-name"/> are set, the standby also tries to
+    report its replay position to the primary while replaying WAL from the
+    archive or <filename>pg_wal</filename>.  This lets the primary release
+    WAL retained by the named physical slot, which must already have reserved
+    WAL.  This connection does not receive WAL or acknowledge synchronous
+    commits.  The standby continues replay if the primary is unreachable or
+    does not support <link linkend="protocol-replication-start-feedback"><literal>START_FEEDBACK</literal></link>.
+   </para>
+
+   <para>
     Standby mode is exited and the server switches to normal operation
     when <command>pg_ctl promote</command> is run, or
     <function>pg_promote()</function> is called. Before failover,
