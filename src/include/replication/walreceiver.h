@@ -49,6 +49,7 @@ typedef enum
 								 * initialized yet */
 	WALRCV_CONNECTING,			/* connecting to upstream server */
 	WALRCV_STREAMING,			/* walreceiver is streaming */
+	WALRCV_FEEDBACK,			/* reporting replay without receiving WAL */
 	WALRCV_WAITING,				/* stopped streaming, waiting for orders */
 	WALRCV_RESTARTING,			/* asked to restart streaming */
 	WALRCV_STOPPING,			/* requested to stop, but still running */
@@ -70,6 +71,7 @@ typedef struct
 
 	/* Its current state */
 	WalRcvState walRcvState;
+	bool		feedbackOnly;	/* requested job, including while connecting */
 	ConditionVariable walRcvStoppedCV;
 
 	/*
@@ -505,6 +507,7 @@ extern void ShutdownWalRcv(void);
 extern bool WalRcvStreaming(void);
 extern bool WalRcvRunning(void);
 extern WalRcvState WalRcvGetState(void);
+extern void RequestWalReceiverFeedback(const char *conninfo, const char *slotname);
 extern void RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr,
 								 const char *conninfo, const char *slotname,
 								 bool create_temp_slot);

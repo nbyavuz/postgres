@@ -21,6 +21,10 @@
  * This applies, for example, to the replication slot and the connection
  * string to be used for the connection with the primary.
  *
+ * A feedback-only receiver connects to report replay progress while startup
+ * owns the WAL files. It accepts keepalives, but never installs a segment or
+ * timeline history file. A streaming request starts a separate receiver.
+ *
  * If the primary server ends streaming, but doesn't disconnect, walreceiver
  * goes into "waiting" mode, and waits for the startup process to give new
  * instructions. The startup process will treat that the same as
@@ -95,6 +99,15 @@ bool		hot_standby_feedback;
 /* libpqwalreceiver connection */
 static WalReceiverConn *wrconn = NULL;
 WalReceiverFunctionsType *WalReceiverFunctions = NULL;
+
+/*
+ * This receiver's mode.  In feedback mode it must not write WAL files.
+ */
+static bool feedbackOnly;
+/*
+ * replay timeline at feedback session start.
+ */
+static TimeLineID feedbackTLI;
 
 /*
  * These variables are used similarly to openLogFile/SegNo,
@@ -212,6 +225,7 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 		case WALRCV_CONNECTING:
 		case WALRCV_WAITING:
 		case WALRCV_STREAMING:
+		case WALRCV_FEEDBACK:
 		case WALRCV_RESTARTING:
 		default:
 			/* Shouldn't happen */
@@ -227,6 +241,7 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 	strlcpy(conninfo, walrcv->conninfo, MAXCONNINFO);
 	strlcpy(slotname, walrcv->slotname, NAMEDATALEN);
 	is_temp_slot = walrcv->is_temp_slot;
+	feedbackOnly = walrcv->feedbackOnly;
 	startpoint = walrcv->receiveStart;
 	startpointTLI = walrcv->receiveStartTLI;
 
@@ -235,9 +250,11 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 	 * RequestXLogStreaming messed up.
 	 */
 	Assert(!is_temp_slot || (slotname[0] == '\0'));
+	/* Only streaming may create a temporary slot on the upstream. */
+	Assert(!feedbackOnly || !is_temp_slot);
 
-	/* Initialise to a sanish value */
-	now = GetCurrentTimestamp();
+	/* A feedback-only session has not yet heard from the sender. */
+	now = feedbackOnly ? 0 : GetCurrentTimestamp();
 	walrcv->lastMsgSendTime =
 		walrcv->lastMsgReceiptTime = walrcv->latestWalEndTime = now;
 
@@ -320,7 +337,7 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 		char	   *primary_sysid;
 		char		standby_sysid[32];
 		XLogRecPtr	primaryFlushPtr;
-		WalRcvStreamOptions options;
+		bool		started;
 
 		/*
 		 * Check that we're connected to a valid server using the
@@ -341,6 +358,16 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 		}
 		pfree(primary_sysid);
 
+		/* Bind feedback to the timeline of the last completed replay record. */
+		if (feedbackOnly)
+		{
+			if (!XLogRecPtrIsValid(GetXLogReplayRecPtr(&feedbackTLI)))
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("cannot start WAL receiver feedback without a valid replay position")));
+			startpointTLI = feedbackTLI;
+		}
+
 		/*
 		 * Confirm that the current timeline of the primary is the same or
 		 * ahead of ours.
@@ -350,6 +377,14 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("highest timeline %u of the primary is behind recovery timeline %u",
 							primaryTLI, startpointTLI)));
+
+		/* Only the slotted form of START_FEEDBACK negotiates an ancestor TLI. */
+		if (feedbackOnly && slotname[0] == '\0' && feedbackTLI != primaryTLI)
+		{
+			elog(DEBUG1, "skipping slotless WAL receiver feedback: replay timeline %u differs from upstream timeline %u",
+				 feedbackTLI, primaryTLI);
+			proc_exit(0);
+		}
 
 		/*
 		 * If our requested startpoint is ahead of the upstream server's
@@ -379,7 +414,7 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 		 * indefinitely: if the upstream hasn't caught up within the timeout,
 		 * exit and let the startup process retry normally.
 		 */
-		if (startpointTLI == primaryTLI &&
+		if (!feedbackOnly && startpointTLI == primaryTLI &&
 			startpoint > primaryFlushPtr &&
 			startpoint - primaryFlushPtr <= wal_segment_size)
 		{
@@ -417,16 +452,18 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 		}
 
 		/*
-		 * Get any missing history files. We do this always, even when we're
-		 * not interested in that timeline, so that if we're promoted to
-		 * become the primary later on, we don't select the same timeline that
-		 * was already used in the current primary. This isn't bullet-proof -
+		 * For streaming, get any missing history files, even when we're not
+		 * interested in that timeline, so that if we're promoted to become
+		 * the primary later on, we don't select the same timeline that was
+		 * already used in the current primary. This isn't bullet-proof -
 		 * you'll need some external software to manage your cluster if you
 		 * need to ensure that a unique timeline id is chosen in every case,
 		 * but let's avoid the confusion of timeline id collisions where we
-		 * can.
+		 * can. In feedback mode only startup may install files from the
+		 * archive.
 		 */
-		WalRcvFetchTimeLineHistoryFiles(startpointTLI, primaryTLI);
+		if (!feedbackOnly)
+			WalRcvFetchTimeLineHistoryFiles(startpointTLI, primaryTLI);
 
 		/*
 		 * Create a temporary replication slot if requested.  This only needs
@@ -455,7 +492,7 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 		}
 
 		/*
-		 * Start streaming.
+		 * Start feedback or streaming.
 		 *
 		 * We'll try to start at the requested starting point and timeline,
 		 * even if it's different from the server's latest timeline. In case
@@ -466,13 +503,24 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 		 * history file, bump recovery target timeline, and ask us to restart
 		 * on the new timeline.
 		 */
-		options.logical = false;
-		options.startpoint = startpoint;
-		options.slotname = slotname[0] != '\0' ? slotname : NULL;
-		options.proto.physical.startpointTLI = startpointTLI;
-		if (walrcv_startstreaming(wrconn, &options))
+		if (feedbackOnly)
+			started = walrcv_startfeedback(wrconn, slotname[0] != '\0' ? slotname : NULL,
+										   feedbackTLI);
+		else
 		{
-			if (first_stream)
+			WalRcvStreamOptions options;
+
+			options.logical = false;
+			options.startpoint = startpoint;
+			options.slotname = slotname[0] != '\0' ? slotname : NULL;
+			options.proto.physical.startpointTLI = startpointTLI;
+			started = walrcv_startstreaming(wrconn, &options);
+		}
+		if (started)
+		{
+			if (feedbackOnly)
+				set_ps_display("feedback");
+			else if (first_stream)
 				ereport(LOG,
 						errmsg("started streaming WAL from primary at %X/%08X on timeline %u",
 							   LSN_FORMAT_ARGS(startpoint), startpointTLI));
@@ -483,18 +531,19 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 			first_stream = false;
 
 			/*
-			 * Switch to STREAMING after a successful connection if current
-			 * state is CONNECTING.  This switch happens after an initial
+			 * Publish the active mode after a successful connection if the
+			 * state is still CONNECTING. This switch happens after an initial
 			 * startup, or after a restart as determined by
 			 * WalRcvWaitForStartPosition().
 			 */
 			SpinLockAcquire(&walrcv->mutex);
 			if (walrcv->walRcvState == WALRCV_CONNECTING)
-				walrcv->walRcvState = WALRCV_STREAMING;
+				walrcv->walRcvState = feedbackOnly ? WALRCV_FEEDBACK : WALRCV_STREAMING;
 			SpinLockRelease(&walrcv->mutex);
 
 			/* Initialize LogstreamResult for processing messages */
-			LogstreamResult.Write = LogstreamResult.Flush = GetXLogReplayRecPtr(NULL);
+			if (!feedbackOnly)
+				LogstreamResult.Write = LogstreamResult.Flush = GetXLogReplayRecPtr(NULL);
 
 			/* Initialize nap wakeup times. */
 			now = GetCurrentTimestamp();
@@ -502,7 +551,7 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 				WalRcvComputeNextWakeup(i, now);
 
 			/* Send initial reply/feedback messages. */
-			XLogWalRcvSendReply(true, false, false);
+			XLogWalRcvSendReply(true, feedbackOnly, false);
 			XLogWalRcvSendHSFeedback(true);
 
 			/* Loop until end-of-streaming or error */
@@ -568,6 +617,12 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 							break;
 						else if (len < 0)
 						{
+							/*
+							 * Only streaming has an end-of-timeline
+							 * handshake.
+							 */
+							if (feedbackOnly)
+								proc_exit(0);
 							ereport(LOG,
 									(errmsg("replication terminated by primary server"),
 									 errdetail("End of WAL reached on timeline %u at %X/%08X.",
@@ -583,11 +638,12 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 					XLogWalRcvSendReply(false, false, false);
 
 					/*
-					 * If we've written some records, flush them to disk and
-					 * let the startup process and primary server know about
-					 * them.
+					 * Flush received WAL and report progress to startup and
+					 * the upstream walsender.  Feedback mode writes nothing
+					 * to flush.
 					 */
-					XLogWalRcvFlush(false, startpointTLI);
+					if (!feedbackOnly)
+						XLogWalRcvFlush(false, startpointTLI);
 				}
 
 				/* Check if we need to exit the streaming loop. */
@@ -699,6 +755,12 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 			 * file now.
 			 */
 			WalRcvFetchTimeLineHistoryFiles(startpointTLI, primaryTLI);
+		}
+		else if (feedbackOnly)
+		{
+			/* An older upstream can still serve normal streaming requests. */
+			elog(DEBUG1, "upstream server does not support START_FEEDBACK");
+			proc_exit(0);
 		}
 		else
 			ereport(LOG,
@@ -883,14 +945,17 @@ WalRcvDie(int code, Datum arg)
 	WalRcvData *walrcv = WalRcv;
 	TimeLineID *startpointTLI_p = (TimeLineID *) DatumGetPointer(arg);
 
-	Assert(*startpointTLI_p != 0);
-
 	/* Ensure that all WAL records received are flushed to disk */
-	XLogWalRcvFlush(true, *startpointTLI_p);
+	if (!feedbackOnly)
+	{
+		Assert(*startpointTLI_p != 0);
+		XLogWalRcvFlush(true, *startpointTLI_p);
+	}
 
 	/* Mark ourselves inactive in shared memory */
 	SpinLockAcquire(&walrcv->mutex);
 	Assert(walrcv->walRcvState == WALRCV_STREAMING ||
+		   walrcv->walRcvState == WALRCV_FEEDBACK ||
 		   walrcv->walRcvState == WALRCV_CONNECTING ||
 		   walrcv->walRcvState == WALRCV_RESTARTING ||
 		   walrcv->walRcvState == WALRCV_STARTING ||
@@ -930,6 +995,15 @@ XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len, TimeLineID tli)
 		case PqReplMsg_WALData:
 			{
 				StringInfoData incoming_message;
+
+				/*
+				 * Startup may be restoring this very segment from the
+				 * archive.
+				 */
+				if (feedbackOnly)
+					ereport(ERROR,
+							(errcode(ERRCODE_PROTOCOL_VIOLATION),
+							 errmsg("received WAL data in a feedback-only session")));
 
 				hdrlen = sizeof(int64) + sizeof(int64) + sizeof(int64);
 				if (len < hdrlen)
@@ -1239,6 +1313,14 @@ XLogWalRcvSendReply(bool force, bool requestReply, bool checkApply)
 	 */
 	if (!force && now < wakeup[WALRCV_WAKEUP_REPLY])
 	{
+		/*
+		 * A feedback-only receiver has no writes or flushes to report, and
+		 * its apply position cannot release synchronous commits.  Wait for
+		 * the next periodic or forced reply.
+		 */
+		if (feedbackOnly)
+			return;
+
 		if (checkApply)
 			latestApplyPtr = GetXLogReplayRecPtr(NULL);
 
@@ -1252,10 +1334,31 @@ XLogWalRcvSendReply(bool force, bool requestReply, bool checkApply)
 	WalRcvComputeNextWakeup(WALRCV_WAKEUP_REPLY, now);
 
 	/* Construct a new message */
-	writePtr = LogstreamResult.Write;
-	flushPtr = LogstreamResult.Flush;
-	applyPtr = XLogRecPtrIsValid(latestApplyPtr) ?
-		latestApplyPtr : GetXLogReplayRecPtr(NULL);
+	if (feedbackOnly)
+	{
+		TimeLineID	replayTLI;
+
+		/*
+		 * Replayed WAL is already durable.  Sample the end of replay and its
+		 * timeline together; never report WAL from a new branch on a session
+		 * bound to the old one.  Startup can request a new receiver.
+		 */
+		applyPtr = GetXLogReplayRecPtr(&replayTLI);
+		if (replayTLI != feedbackTLI)
+		{
+			elog(DEBUG1, "ending WAL receiver feedback because replay switched from timeline %u to %u",
+				 feedbackTLI, replayTLI);
+			proc_exit(0);
+		}
+		writePtr = flushPtr = applyPtr;
+	}
+	else
+	{
+		writePtr = LogstreamResult.Write;
+		flushPtr = LogstreamResult.Flush;
+		applyPtr = XLogRecPtrIsValid(latestApplyPtr) ?
+			latestApplyPtr : GetXLogReplayRecPtr(NULL);
+	}
 
 	resetStringInfo(&reply_message);
 	pq_sendbyte(&reply_message, PqReplMsg_StandbyStatusUpdate);
@@ -1298,6 +1401,10 @@ XLogWalRcvSendHSFeedback(bool immed)
 
 	/* initially true so we always send at least one feedback message */
 	static bool primary_has_standby_xmin = true;
+
+	/* START_FEEDBACK currently accepts only standby status updates. */
+	if (feedbackOnly)
+		return;
 
 	/*
 	 * If the user doesn't want status to be reported to the primary, be sure
@@ -1451,7 +1558,13 @@ WalRcvComputeNextWakeup(WalRcvWakeupReason reason, TimestampTz now)
 				wakeup[reason] = TimestampTzPlusMilliseconds(now, wal_receiver_timeout / 2);
 			break;
 		case WALRCV_WAKEUP_HSFEEDBACK:
-			if (!hot_standby_feedback || wal_receiver_status_interval <= 0)
+
+			/*
+			 * START_FEEDBACK accepts replay reports, not xmin feedback.
+			 * XLogWalRcvSendHSFeedback() won't rearm this timer in feedback
+			 * mode, so an expired deadline would keep waking the receiver.
+			 */
+			if (feedbackOnly || !hot_standby_feedback || wal_receiver_status_interval <= 0)
 				wakeup[reason] = TIMESTAMP_INFINITY;
 			else
 				wakeup[reason] = TimestampTzPlusSeconds(now, wal_receiver_status_interval);
@@ -1505,6 +1618,8 @@ WalRcvGetStateString(WalRcvState state)
 			return "connecting";
 		case WALRCV_STREAMING:
 			return "streaming";
+		case WALRCV_FEEDBACK:
+			return "feedback";
 		case WALRCV_WAITING:
 			return "waiting";
 		case WALRCV_RESTARTING:
@@ -1527,6 +1642,7 @@ pg_stat_get_wal_receiver(PG_FUNCTION_ARGS)
 	bool	   *nulls;
 	int			pid;
 	bool		ready_to_display;
+	bool		feedback_only;
 	WalRcvState state;
 	XLogRecPtr	receive_start_lsn;
 	TimeLineID	receive_start_tli;
@@ -1547,6 +1663,7 @@ pg_stat_get_wal_receiver(PG_FUNCTION_ARGS)
 	pid = (int) WalRcv->pid;
 	ready_to_display = WalRcv->ready_to_display;
 	state = WalRcv->walRcvState;
+	feedback_only = WalRcv->feedbackOnly;
 	receive_start_lsn = WalRcv->receiveStart;
 	receive_start_tli = WalRcv->receiveStartTLI;
 	flushed_lsn = WalRcv->flushedUpto;
@@ -1613,6 +1730,7 @@ pg_stat_get_wal_receiver(PG_FUNCTION_ARGS)
 		else
 			values[5] = LSNGetDatum(flushed_lsn);
 		values[6] = Int32GetDatum(received_tli);
+
 		if (last_send_time == 0)
 			nulls[7] = true;
 		else
@@ -1645,6 +1763,15 @@ pg_stat_get_wal_receiver(PG_FUNCTION_ARGS)
 			nulls[14] = true;
 		else
 			values[14] = CStringGetTextDatum(conninfo);
+
+		/*
+		 * A feedback-only connection has no stream start, write or flush
+		 * positions or associated timelines; the shared values can be left
+		 * over from an earlier stream.  Keep latest_end_lsn, which the
+		 * upstream walsender reports in keepalives.
+		 */
+		if (feedback_only)
+			memset(&nulls[2], true, sizeof(bool) * 5);
 	}
 
 	/* Returns the record as Datum */

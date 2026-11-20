@@ -24,6 +24,7 @@
 
 #include "access/xlog_internal.h"
 #include "access/xlogrecovery.h"
+#include "miscadmin.h"
 #include "pgstat.h"
 #include "replication/walreceiver.h"
 #include "storage/pmsignal.h"
@@ -37,6 +38,9 @@ WalRcvData *WalRcv = NULL;
 
 static void WalRcvShmemRequest(void *arg);
 static void WalRcvShmemInit(void *arg);
+static void RequestWalReceiver(bool feedbackOnly, TimeLineID tli, XLogRecPtr recptr,
+							   const char *conninfo, const char *slotname,
+							   bool create_temp_slot);
 
 const ShmemCallbacks WalRcvShmemCallbacks = {
 	.request_fn = WalRcvShmemRequest,
@@ -73,7 +77,7 @@ WalRcvShmemInit(void *arg)
 
 /* Return the receiver state after checking for a startup timeout. */
 static WalRcvState
-WalRcvGetStateWithTimeout(void)
+WalRcvGetStateWithTimeout(bool *feedbackOnly)
 {
 	WalRcvData *walrcv = WalRcv;
 	WalRcvState state;
@@ -83,6 +87,8 @@ WalRcvGetStateWithTimeout(void)
 
 	state = walrcv->walRcvState;
 	startTime = walrcv->startTime;
+	if (feedbackOnly)
+		*feedbackOnly = walrcv->feedbackOnly;
 
 	SpinLockRelease(&walrcv->mutex);
 
@@ -120,7 +126,7 @@ WalRcvGetStateWithTimeout(void)
 bool
 WalRcvRunning(void)
 {
-	return WalRcvGetStateWithTimeout() != WALRCV_STOPPED;
+	return WalRcvGetStateWithTimeout(NULL) != WALRCV_STOPPED;
 }
 
 /* Return the state of the walreceiver. */
@@ -144,10 +150,12 @@ WalRcvGetState(void)
 bool
 WalRcvStreaming(void)
 {
-	WalRcvState state = WalRcvGetStateWithTimeout();
+	bool		feedbackOnly;
+	WalRcvState state = WalRcvGetStateWithTimeout(&feedbackOnly);
 
-	return state == WALRCV_STREAMING || state == WALRCV_STARTING ||
-		state == WALRCV_CONNECTING || state == WALRCV_RESTARTING;
+	return !feedbackOnly &&
+		(state == WALRCV_STREAMING || state == WALRCV_STARTING ||
+		 state == WALRCV_CONNECTING || state == WALRCV_RESTARTING);
 }
 
 /*
@@ -178,6 +186,7 @@ ShutdownWalRcv(void)
 
 		case WALRCV_CONNECTING:
 		case WALRCV_STREAMING:
+		case WALRCV_FEEDBACK:
 		case WALRCV_WAITING:
 		case WALRCV_RESTARTING:
 			walrcv->walRcvState = WALRCV_STOPPING;
@@ -210,6 +219,32 @@ ShutdownWalRcv(void)
 }
 
 /*
+ * Request a feedback-only receiver after startup has replayed a record and
+ * found more WAL in the archive or pg_wal.  Never interrupt an active or
+ * starting WAL stream.
+ */
+void
+RequestWalReceiverFeedback(const char *conninfo, const char *slotname)
+{
+	WalRcvState state;
+
+	Assert(AmStartupProcess() && StandbyMode);
+	state = WalRcvGetStateWithTimeout(NULL);
+
+	/*
+	 * Only startup can restart a receiver left waiting at the end of a
+	 * timeline.  Replace it so feedback uses the requested connection
+	 * settings.
+	 */
+	if (state == WALRCV_WAITING)
+		ShutdownWalRcv();
+	else if (state != WALRCV_STOPPED)
+		return;
+
+	RequestWalReceiver(true, 0, InvalidXLogRecPtr, conninfo, slotname, false);
+}
+
+/*
  * Request postmaster to start walreceiver.
  *
  * "recptr" indicates the position where streaming should begin.  "conninfo"
@@ -226,10 +261,11 @@ void
 RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
 					 const char *slotname, bool create_temp_slot)
 {
-	WalRcvData *walrcv = WalRcv;
-	bool		launch = false;
-	pg_time_t	now = (pg_time_t) time(NULL);
-	ProcNumber	walrcv_proc;
+	bool		feedbackOnly;
+
+	/* Streaming takes precedence, even if feedback is still connecting. */
+	if (WalRcvGetStateWithTimeout(&feedbackOnly) != WALRCV_STOPPED && feedbackOnly)
+		ShutdownWalRcv();
 
 	/*
 	 * We always start at the beginning of the segment. That prevents a broken
@@ -239,6 +275,18 @@ RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
 	 */
 	if (XLogSegmentOffset(recptr, wal_segment_size) != 0)
 		recptr -= XLogSegmentOffset(recptr, wal_segment_size);
+
+	RequestWalReceiver(false, tli, recptr, conninfo, slotname, create_temp_slot);
+}
+
+static void
+RequestWalReceiver(bool feedbackOnly, TimeLineID tli, XLogRecPtr recptr,
+				   const char *conninfo, const char *slotname, bool create_temp_slot)
+{
+	WalRcvData *walrcv = WalRcv;
+	bool		launch = false;
+	pg_time_t	now = (pg_time_t) time(NULL);
+	ProcNumber	walrcv_proc;
 
 	SpinLockAcquire(&walrcv->mutex);
 
@@ -279,13 +327,22 @@ RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
 	}
 	else
 		walrcv->walRcvState = WALRCV_RESTARTING;
+
+	/*
+	 * Clear the last reported upstream WAL end when starting or leaving
+	 * feedback mode.
+	 */
+	if (feedbackOnly || walrcv->feedbackOnly)
+		walrcv->latestWalEnd = InvalidXLogRecPtr;
+	walrcv->feedbackOnly = feedbackOnly;
 	walrcv->startTime = now;
 
 	/*
-	 * If this is the first startup of walreceiver (on this timeline),
-	 * initialize flushedUpto and latestChunkStart to the starting point.
+	 * Seed receipt positions on the first streaming request on a timeline. A
+	 * feedback-only request must preserve the last real stream's positions.
 	 */
-	if (!XLogRecPtrIsValid(walrcv->receiveStart) || walrcv->receivedTLI != tli)
+	if (!feedbackOnly &&
+		(!XLogRecPtrIsValid(walrcv->receiveStart) || walrcv->receivedTLI != tli))
 	{
 		walrcv->flushedUpto = recptr;
 		walrcv->receivedTLI = tli;
@@ -297,8 +354,11 @@ RequestXLogStreaming(TimeLineID tli, XLogRecPtr recptr, const char *conninfo,
 		 */
 		pg_atomic_write_membarrier_u64(&walrcv->writtenUpto, recptr);
 	}
-	walrcv->receiveStart = recptr;
-	walrcv->receiveStartTLI = tli;
+	if (!feedbackOnly)
+	{
+		walrcv->receiveStart = recptr;
+		walrcv->receiveStartTLI = tli;
+	}
 
 	walrcv_proc = walrcv->procno;
 
