@@ -113,8 +113,15 @@ $archive->reload;
 # The standby can replay the archived INSERT, but not yet its commit.
 $primary->safe_psql('postgres', 'INSERT INTO t VALUES (4)');
 finish_segment();
+my $log_offset = -s $archive->logfile;
+$primary->stop;
 $archive->safe_psql('postgres', 'SELECT pg_wal_replay_resume()');
 $archive->wait_for_event('startup', 'RecoveryApplyDelay');
+$archive->wait_for_log(qr/could not connect to the primary server/,
+	$log_offset);
+is($archive->lsn('receive'),
+	$received, 'archive replay continued with the primary down');
+$primary->start;
 my $delayed_lsn = $archive->lsn('replay');
 # A reconnected sender inherits the slot's position, but not its reply time.
 my $feedback_slot = q{FROM pg_replication_slots s
@@ -122,7 +129,7 @@ my $feedback_slot = q{FROM pg_replication_slots s
   WHERE s.slot_name = 'feedback' AND r.state = 'feedback' AND r.reply_time IS NOT NULL};
 $primary->poll_query_until('postgres',
 	"SELECT restart_lsn = '$delayed_lsn' $feedback_slot")
-  or die 'feedback did not report completed archive replay';
+  or die 'feedback did not reconnect while replay was delayed';
 
 # Clear and restore each connection setting without advancing replay.
 for my $setting (qw(primary_conninfo primary_slot_name))
@@ -167,13 +174,30 @@ is( $archive->safe_psql(
 	't',
 	'standby replayed the restore point without streaming');
 
-# This row is in the next, unarchived segment. Release replay so the
-# standby exhausts the archive and asks the same walsender for that WAL.
-$primary->safe_psql('postgres', 'INSERT INTO t VALUES (5)');
+# Pause before releasing the lock so the standby cannot exhaust the archive.
+$archive->safe_psql('postgres', 'SELECT pg_wal_replay_pause()');
 $blocker->quit;
+$archive->poll_query_until('postgres',
+	"SELECT pg_get_wal_replay_pause_state() = 'paused'")
+  or die 'standby did not pause during archive replay';
+my $replay = $archive->lsn('replay');
+$primary->safe_psql('postgres', "SELECT pg_terminate_backend($feedback_pid)");
+ok( $primary->poll_query_until(
+		'postgres',
+		"SELECT pid <> $feedback_pid AND restart_lsn = '$replay' $feedback_slot"
+	),
+	'feedback reconnected at the same paused replay position');
+is($archive->lsn('receive'),
+	$received, 'archive feedback did not advance the receive LSN');
+
+# Exhaust the archive and request a transaction that is only on the primary.
+my $handoff_pid =
+  $primary->safe_psql('postgres', "SELECT pid $feedback_slot");
+$primary->safe_psql('postgres', 'INSERT INTO t VALUES (5)');
+$archive->safe_psql('postgres', 'SELECT pg_wal_replay_resume()');
 $primary->wait_for_catchup('archive', 'replay');
 is($primary->safe_psql('postgres', "SELECT active_pid $slot"),
-	$feedback_pid,
+	$handoff_pid,
 	'the same walsender handed the named slot back to streaming');
 is($archive->safe_psql('postgres', 'SELECT max(i) FROM t'),
 	'5', 'streaming delivered new WAL');

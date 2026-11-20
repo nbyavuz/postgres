@@ -55,6 +55,8 @@ START_FEEDBACK.
 If startup finds WAL in the archive or pg_wal after a stream has ended,
 it can request feedback in place of the waiting receiver. This starts a
 fresh connection with the requested settings.
+Startup also retries lost feedback connections during a replay pause or apply
+delay, without first advancing to a new segment.
 When startup needs to stream from the same slot, an established feedback
 receiver ends COPY and waits for command completion before requesting WAL on
 the same connection. Otherwise startup replaces the receiver. Only startup
