@@ -142,6 +142,11 @@ $primary->safe_psql(
 ]);
 
 for my $case (
+	[ 'feedback_slot TIMELINE 4294967298', qr/integer out of range/ ],
+	[
+		'feedback_slot TIMELINE 18446744073709551616',
+		qr/integer out of range/
+	],
 	[ 'unreserved TIMELINE 1', qr/has never previously reserved WAL/ ],
 	[ 'decode_slot TIMELINE 1', qr/cannot use a logical replication slot/ ],
 	[

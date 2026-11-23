@@ -149,7 +149,15 @@ UPLOAD_MANIFEST		{ return K_UPLOAD_MANIFEST; }
 {space}+		{ /* do nothing */ }
 
 {digit}+		{
-					yylval->uintval = strtoul(yytext, NULL, 10);
+					unsigned long val;
+
+					errno = 0;
+					val = strtoul(yytext, NULL, 10);
+					if (errno == ERANGE || val != (uint32) val)
+						ereport(ERROR,
+								(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+								 errmsg("integer out of range")));
+					yylval->uintval = (uint32) val;
 					return UCONST;
 				}
 
