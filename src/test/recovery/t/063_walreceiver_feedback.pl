@@ -113,13 +113,10 @@ is($standby->safe_psql('postgres', 'SELECT sum(i) FROM t'),
 	'3', 'streaming resumed and delivered new WAL');
 $standby->stop;
 
-# Now exercise archive recovery with the primary initially unreachable. A
-# delayed commit lets us bring it back before replay enters the next segment.
+# Start archive recovery with the primary down. Hold replay at a commit until
+# feedback is connected and there is a backlog of archived WAL.
 $primary->backup('archive');
 $primary->safe_psql('postgres', 'INSERT INTO t VALUES (3)');
-finish_segment();
-$primary->safe_psql('postgres',
-	"SELECT pg_create_restore_point('archive_target')");
 finish_segment();
 my $archive = PostgreSQL::Test::Cluster->new('archive');
 $archive->init_from_backup(
@@ -131,6 +128,7 @@ $archive->append_conf(
 primary_slot_name = 'feedback'
 recovery_min_apply_delay = '1d'
 recovery_target_name = 'archive_target'
+max_standby_archive_delay = -1
 wal_retrieve_retry_interval = '100ms'
 wal_receiver_status_interval = 1
 ));
@@ -151,18 +149,55 @@ my $xmin = $reader->query_safe(
 	'SELECT backend_xmin FROM pg_stat_activity WHERE pid = pg_backend_pid()');
 $primary->start;
 my $delayed_lsn = $archive->lsn('replay');
+my $feedback_slot = q{FROM pg_replication_slots s
+  JOIN pg_stat_replication r ON r.pid = s.active_pid
+  WHERE s.slot_name = 'feedback' AND r.state = 'feedback'};
 $primary->poll_query_until('postgres',
-	"SELECT active AND restart_lsn = '$delayed_lsn' $slot")
+	"SELECT restart_lsn = '$delayed_lsn' $feedback_slot")
   or die 'feedback did not reconnect while replay was delayed';
+my $feedback_pid =
+  $primary->safe_psql('postgres', "SELECT pid $feedback_slot");
+my $same_sender = "$feedback_slot AND r.pid = $feedback_pid";
+
+# Keep the archive ahead of replay.  The standby's lock stops replay between
+# the markers, so one status update cannot account for both slot advances.
+my $blocker = $archive->background_psql('postgres');
+$blocker->query_safe('BEGIN; LOCK t IN ACCESS SHARE MODE');
+my $first_marker = $primary->safe_psql('postgres',
+	"SELECT pg_create_restore_point('backlog_first')");
+$primary->safe_psql('postgres',
+	'BEGIN; LOCK t IN ACCESS EXCLUSIVE MODE; COMMIT');
+finish_segment();
+my $second_marker = $primary->safe_psql('postgres',
+	"SELECT pg_create_restore_point('archive_target')");
+finish_segment();
+
 $archive->append_conf('postgresql.conf', 'recovery_min_apply_delay = 0');
 $archive->reload;
+ok( $primary->poll_query_until(
+		'postgres', qq[SELECT restart_lsn >= '$first_marker'
+			AND restart_lsn < '$second_marker' $same_sender]),
+	'feedback advanced the slot to the first archive marker');
+is( $archive->safe_psql(
+		'postgres', qq[SELECT pg_last_wal_receive_lsn() IS NULL
+			AND pg_last_wal_replay_lsn() >= '$first_marker'
+			AND pg_last_wal_replay_lsn() < '$second_marker']),
+	't',
+	'standby replayed the first marker without streaming');
+
+# Replenish the archive before letting replay reach the second marker.
+$primary->safe_psql('postgres',
+	"SELECT pg_create_restore_point('backlog_tail')");
+finish_segment();
+$blocker->quit;
 $archive->poll_query_until('postgres',
 	"SELECT pg_get_wal_replay_pause_state() = 'paused'")
   or die 'standby did not reach the archived restore point';
 $replay = $archive->lsn('replay');
 ok( $primary->poll_query_until(
-		'postgres', "SELECT active AND restart_lsn = '$replay' $slot"),
-	'retried feedback and reported the archived restore point');
+		'postgres', "SELECT restart_lsn = '$second_marker' $same_sender"),
+	'the same feedback sender reported the second archive marker');
+
 # Lose an established connection without resuming replay or reloading.
 my $old_sender = $primary->safe_psql('postgres', "SELECT active_pid $slot");
 $primary->safe_psql('postgres', "SELECT pg_terminate_backend($old_sender)");
