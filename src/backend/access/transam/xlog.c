@@ -6967,6 +6967,7 @@ StartupXLOG(void)
 	 * sender processes to notice that we've been promoted.
 	 */
 	WalSndWakeup(true, true);
+	WalSndWakeupOnTimelineChange();
 
 	/*
 	 * If this was a promotion, request an (online) checkpoint now. This isn't

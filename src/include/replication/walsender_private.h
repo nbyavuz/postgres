@@ -113,6 +113,8 @@ typedef struct
 	 * logical failover slots when a walreceiver confirms the receipt of LSN.
 	 */
 	ConditionVariable wal_confirm_rcv_cv;
+	/* Slotless cascading feedback is valid only until a timeline change. */
+	ConditionVariable timeline_cv;
 
 	WalSnd		walsnds[FLEXIBLE_ARRAY_MEMBER];
 } WalSndCtlData;

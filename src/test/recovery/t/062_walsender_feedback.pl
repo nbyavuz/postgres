@@ -271,7 +271,29 @@ is($standby->safe_psql('postgres', $restart),
 	$before, 'cascading sender ignored WAL it received but has not replayed');
 $standby->safe_psql('postgres', 'SELECT pg_wal_replay_resume()');
 $primary->wait_for_replay_catchup($standby);
+my $named_sock = $sock;
+connect_replication($standby);
+send_message('Q', "START_FEEDBACK\0");
+is((receive_message())[0], 'W', 'started slotless feedback before promotion');
+report_xmins($xmin, $xmin, $epoch);
+my $horizon = "SELECT count(*) $sender AND backend_xmin = '$xmin'";
+$standby->poll_query_until('postgres', $horizon, '1')
+  or die 'slotless feedback did not set xmin before promotion';
 $standby->promote;
+$standby->wait_for_log(
+	qr/cannot continue slotless feedback after a timeline switch/);
+$standby->poll_query_until('postgres', $horizon, '0')
+  or die 'slotless feedback kept xmin on the old timeline after promotion';
+$sock->close;
+$sock = $named_sock;
+my (undef, undef, $timeline_error) = $standby->psql(
+	'postgres',
+	'START_FEEDBACK TIMELINE 1',
+	replication => 'true');
+like(
+	$timeline_error,
+	qr/requested timeline 1 is not this server's current timeline 2/,
+	'slotless feedback cannot start on the old timeline');
 my ($fork) = slurp_file($standby->data_dir . '/pg_wal/00000002.history') =~
   /^1\s+(\S+)/m;
 my $after =

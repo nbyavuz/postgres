@@ -2070,6 +2070,8 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 	/* Is this a timeline switch? */
 	if (switchedTLI)
 	{
+		WalSndWakeupOnTimelineChange();
+
 		/*
 		 * Before we continue on the new timeline, clean up any (possibly
 		 * bogus) future WAL segments on the old timeline.

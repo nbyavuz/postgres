@@ -297,10 +297,14 @@ start_replication:
 				}
 			;
 
-/* START_FEEDBACK [SLOT slot TIMELINE tli] */
+/* START_FEEDBACK [TIMELINE tli] | START_FEEDBACK SLOT slot TIMELINE tli */
 start_feedback:
-			K_START_FEEDBACK
-				{ $$ = (Node *) makeNode(StartFeedbackCmd); }
+			K_START_FEEDBACK opt_timeline
+				{
+					StartFeedbackCmd *cmd = makeNode(StartFeedbackCmd);
+					cmd->timeline = $2;
+					$$ = (Node *) cmd;
+				}
 			| K_START_FEEDBACK K_SLOT IDENT timeline
 				{
 					StartFeedbackCmd *cmd = makeNode(StartFeedbackCmd);

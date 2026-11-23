@@ -3014,7 +3014,8 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
     </varlistentry>
 
     <varlistentry id="protocol-replication-start-feedback">
-     <term><literal>START_FEEDBACK</literal> [ <literal>SLOT</literal> <replaceable>slot_name</replaceable> <literal>TIMELINE</literal> <replaceable>tli</replaceable> ]
+     <term><literal>START_FEEDBACK</literal> [ <literal>TIMELINE</literal> <replaceable>tli</replaceable> ]</term>
+     <term><literal>START_FEEDBACK SLOT</literal> <replaceable>slot_name</replaceable> <literal>TIMELINE</literal> <replaceable>tli</replaceable>
       <indexterm><primary>START_FEEDBACK</primary></indexterm>
      </term>
      <listitem>
@@ -3032,7 +3033,10 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
        synchronous standby.
       </para>
       <para>
-       Without a slot, reported WAL locations are ignored.  If a physical
+       Without a slot, reported WAL locations are ignored.  The timeline
+       defaults to the server's current timeline and must match it if specified.
+       A timeline change on the server ends the slotless feedback command.
+       If a physical
        slot is specified, it must have already reserved WAL.  The server
        acquires it for the duration of the command and can advance its
        <structfield>restart_lsn</structfield> to the client's reported replay
