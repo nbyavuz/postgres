@@ -4434,6 +4434,7 @@ walrcv_check_conninfo_fn
 walrcv_connect_fn
 walrcv_create_slot_fn
 walrcv_disconnect_fn
+walrcv_endfeedback_fn
 walrcv_endstreaming_fn
 walrcv_exec_fn
 walrcv_get_backend_pid_fn

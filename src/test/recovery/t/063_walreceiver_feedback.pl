@@ -96,10 +96,19 @@ is($standby->lsn('receive'),
 	$received, 'feedback did not advance the receive position');
 
 # This transaction is not in the standby's local segments.
+# Slot acquisition precedes the COPY response; wait until the receiver, too,
+# knows it has an established feedback session before asking it to hand off.
+$standby->poll_query_until('postgres',
+	"SELECT status = 'feedback' FROM pg_stat_wal_receiver")
+  or die 'feedback receiver was not ready for handoff';
+my $handoff_pid = $primary->safe_psql('postgres', "SELECT active_pid $slot");
 $primary->safe_psql('postgres', 'INSERT INTO t VALUES (2)');
 $standby->append_conf('postgresql.conf', 'recovery_min_apply_delay = 0');
 $standby->reload;
 $primary->wait_for_replay_catchup($standby);
+is( $primary->safe_psql('postgres', "SELECT active_pid $slot"),
+	$handoff_pid,
+	'the same walsender handed the physical slot from feedback to streaming');
 is($standby->safe_psql('postgres', 'SELECT sum(i) FROM t'),
 	'3', 'streaming resumed and delivered new WAL');
 $standby->stop;

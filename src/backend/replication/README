@@ -53,8 +53,10 @@ it can request feedback in place of the waiting receiver. This starts a
 fresh connection with the requested settings.
 Startup also retries lost feedback connections during a replay pause or apply
 delay, without first advancing to a new segment.
-RequestXLogStreaming() stops a feedback-only receiver before launching a WAL
-writer; archive restoration and streaming must never both write the same file.
+When startup needs to stream, an established named-slot feedback receiver ends
+COPY and waits for command completion before requesting WAL on the same
+connection. Otherwise startup replaces the receiver. Only startup initiates
+this handoff; archive restoration and streaming must never write the same file.
 
 Walsender IPC
 -------------

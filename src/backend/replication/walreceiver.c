@@ -23,7 +23,7 @@
  *
  * A feedback-only receiver connects to report replay progress while startup
  * owns the WAL files. It accepts keepalives, but never installs a segment or
- * timeline history file. A streaming request starts a separate receiver.
+ * timeline history file. It must finish feedback before it can stream WAL.
  *
  * If the primary server ends streaming, but doesn't disconnect, walreceiver
  * goes into "waiting" mode, and waits for the startup process to give new
@@ -100,7 +100,7 @@ bool		hot_standby_feedback;
 static WalReceiverConn *wrconn = NULL;
 WalReceiverFunctionsType *WalReceiverFunctions = NULL;
 
-/* A feedback-only receiver never becomes a WAL writer in this process. */
+/* While in feedback COPY mode we must never write WAL. */
 static bool feedbackOnly;
 static TimeLineID feedbackTLI;
 
@@ -565,6 +565,9 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 				/* Process any requests or signals received recently */
 				CHECK_FOR_INTERRUPTS();
 
+				if (feedbackOnly && WalRcvGetState() == WALRCV_RESTARTING)
+					break;
+
 				if (ConfigReloadPending)
 				{
 					ConfigReloadPending = false;
@@ -729,6 +732,37 @@ WalReceiverMain(const void *startup_data, size_t startup_data_len)
 					XLogWalRcvSendReply(requestReply, requestReply, false);
 					XLogWalRcvSendHSFeedback(false);
 				}
+			}
+
+			/*
+			 * Startup needs WAL from the same named slot.  Finish the
+			 * feedback command before asking its walsender to acquire the
+			 * slot again. Don't let an unresponsive peer delay the normal
+			 * recovery retry.
+			 */
+			if (feedbackOnly)
+			{
+				int			timeout = wal_retrieve_retry_interval;
+
+				if (wal_receiver_timeout > 0)
+					timeout = Min(timeout, wal_receiver_timeout);
+				walrcv_endfeedback(wrconn, timeout);
+
+				SpinLockAcquire(&walrcv->mutex);
+				if (walrcv->walRcvState == WALRCV_STOPPING)
+				{
+					SpinLockRelease(&walrcv->mutex);
+					proc_exit(0);
+				}
+				Assert(walrcv->walRcvState == WALRCV_RESTARTING);
+				startpoint = walrcv->receiveStart;
+				startpointTLI = walrcv->receiveStartTLI;
+				walrcv->walRcvState = WALRCV_CONNECTING;
+				SpinLockRelease(&walrcv->mutex);
+
+				feedbackOnly = false;
+				first_stream = true;
+				continue;
 			}
 
 			/*
