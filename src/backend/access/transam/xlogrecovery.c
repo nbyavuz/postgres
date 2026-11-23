@@ -4457,7 +4457,7 @@ MaybeStartWalReceiverFeedback(void)
 	Assert(StandbyMode && InRedo);
 	if (LocalPromoteIsTriggered || IsPromoteSignaled() ||
 		PrimaryConnInfo[0] == '\0' ||
-		(PrimarySlotName[0] == '\0' && !hot_standby_feedback))
+		(PrimarySlotName[0] == '\0' && (!EnableHotStandby || !hot_standby_feedback)))
 		return;
 
 	now = GetCurrentTimestamp();

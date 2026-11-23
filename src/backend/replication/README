@@ -38,7 +38,7 @@ This is used for reporting purpose.
 
 While replaying archive or local WAL, startup requests a feedback-only receiver
 with RequestWalReceiverFeedback() if primary_conninfo is set and either a
-physical slot is named or hot_standby_feedback is enabled.
+physical slot is named or both hot_standby and hot_standby_feedback are enabled.
 During replay it retries on later segments, at most once per
 wal_retrieve_retry_interval. The receiver reports the end of the last replayed
 record in all three standby status positions, without fetching or writing WAL.

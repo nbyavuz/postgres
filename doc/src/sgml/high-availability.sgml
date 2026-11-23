@@ -655,7 +655,8 @@ protocol to make nodes agree on a serializable transactional order.
     While replaying WAL from the archive or <filename>pg_wal</filename>,
     a standby with <xref linkend="guc-primary-conninfo"/> set also tries to
     send feedback to the primary if <xref linkend="guc-primary-slot-name"/> is
-    set or <xref linkend="guc-hot-standby-feedback"/> is enabled.  If a slot is
+    set or both <xref linkend="guc-hot-standby"/> and
+    <xref linkend="guc-hot-standby-feedback"/> are enabled.  If a slot is
     named, it must already have reserved WAL on the primary.  The primary can
     then release WAL through the reported replay position.  With or without
     a slot, hot standby feedback tells the primary which row versions the
