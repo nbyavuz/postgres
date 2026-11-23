@@ -450,7 +450,6 @@ ident_or_keyword:
 			| K_IDENTIFY_SYSTEM				{ $$ = "identify_system"; }
 			| K_SHOW						{ $$ = "show"; }
 			| K_START_REPLICATION			{ $$ = "start_replication"; }
-			| K_START_FEEDBACK				{ $$ = "start_feedback"; }
 			| K_CREATE_REPLICATION_SLOT	{ $$ = "create_replication_slot"; }
 			| K_DROP_REPLICATION_SLOT		{ $$ = "drop_replication_slot"; }
 			| K_ALTER_REPLICATION_SLOT		{ $$ = "alter_replication_slot"; }

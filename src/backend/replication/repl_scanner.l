@@ -130,7 +130,6 @@ READ_REPLICATION_SLOT	{ return K_READ_REPLICATION_SLOT; }
 SHOW		{ return K_SHOW; }
 TIMELINE			{ return K_TIMELINE; }
 START_REPLICATION	{ return K_START_REPLICATION; }
-START_FEEDBACK		{ return K_START_FEEDBACK; }
 CREATE_REPLICATION_SLOT		{ return K_CREATE_REPLICATION_SLOT; }
 DROP_REPLICATION_SLOT		{ return K_DROP_REPLICATION_SLOT; }
 ALTER_REPLICATION_SLOT		{ return K_ALTER_REPLICATION_SLOT; }
@@ -303,6 +302,10 @@ replication_scanner_is_replication_command(yyscan_t yyscanner)
 {
 	YYSTYPE		dummy;
 	int			first_token = replication_yylex(&dummy, yyscanner);
+
+	/* Recognize START_FEEDBACK only as a command, not in identifier slots. */
+	if (first_token == IDENT && strcmp(yyget_text(yyscanner), "START_FEEDBACK") == 0)
+		first_token = K_START_FEEDBACK;
 
 	switch (first_token)
 	{

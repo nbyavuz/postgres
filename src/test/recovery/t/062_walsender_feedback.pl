@@ -28,6 +28,14 @@ plan skip_all => 'this test requires working raw_connect()'
 my $user = $primary->safe_psql('postgres', 'SELECT current_user');
 my $sock;
 
+# Adding a command must not reserve an existing unquoted slot name.
+my ($name_rc, undef, $name_err) = $primary->psql(
+	'postgres',
+	'CREATE_REPLICATION_SLOT START_FEEDBACK PHYSICAL',
+	replication => 'true');
+is($name_rc, 0, 'START_FEEDBACK remains usable as an unquoted slot name')
+  or diag $name_err;
+
 sub send_message
 {
 	my ($type, $body) = @_;
