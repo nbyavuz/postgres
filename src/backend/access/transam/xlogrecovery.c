@@ -349,6 +349,7 @@ static void ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, Time
 
 static void EnableStandbyMode(void);
 static void MaybeStartWalReceiverFeedback(void);
+static long RetryWalReceiverFeedback(long wait_ms);
 static void RestartWalReceiverFeedback(void);
 static void readRecoverySignalFile(void);
 static void validateRecoveryParameters(void);
@@ -2987,7 +2988,8 @@ recoveryPausesHere(bool endOfRecovery)
 		 * pause ends, but we use a timeout so we can check the above exit
 		 * condition periodically too.
 		 */
-		ConditionVariableTimedSleep(&XLogRecoveryCtl->recoveryNotPausedCV, 1000,
+		ConditionVariableTimedSleep(&XLogRecoveryCtl->recoveryNotPausedCV,
+									RetryWalReceiverFeedback(1000),
 									WAIT_EVENT_RECOVERY_PAUSE);
 	}
 	ConditionVariableCancelSleep();
@@ -3085,7 +3087,7 @@ recoveryApplyDelay(XLogReaderState *record)
 
 		(void) WaitLatch(&XLogRecoveryCtl->recoveryWakeupLatch,
 						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-						 msecs,
+						 RetryWalReceiverFeedback(msecs),
 						 WAIT_EVENT_RECOVERY_APPLY_DELAY);
 	}
 	return true;
@@ -4463,6 +4465,34 @@ MaybeStartWalReceiverFeedback(void)
 		RequestWalReceiverFeedback(PrimaryConnInfo, PrimarySlotName);
 		lastWalRcvFeedbackRequest = now;
 	}
+}
+
+/*
+ * A replay pause or apply delay can outlast the primary outage.  Retry even
+ * though we won't cross a segment boundary, and don't sleep past the next
+ * attempt.  A connected receiver wakes recovery on exit; the pause loop also
+ * rechecks on its own timeout.
+ */
+static long
+RetryWalReceiverFeedback(long wait_ms)
+{
+	WalRcvState state;
+	TimestampTz retry_at;
+	long		retry_ms;
+
+	if (lastWalRcvFeedbackRequest == 0 || LocalPromoteIsTriggered ||
+		IsPromoteSignaled())
+		return wait_ms;
+
+	state = WalRcvGetState();
+	if (state != WALRCV_STOPPED && state != WALRCV_STARTING)
+		return wait_ms;
+
+	MaybeStartWalReceiverFeedback();
+	retry_at = TimestampTzPlusMilliseconds(lastWalRcvFeedbackRequest,
+										   wal_retrieve_retry_interval);
+	retry_ms = TimestampDifferenceMilliseconds(GetCurrentTimestamp(), retry_at);
+	return Min(wait_ms, retry_ms);
 }
 
 /* Rebind feedback to the new upstream, slot or replay timeline. */

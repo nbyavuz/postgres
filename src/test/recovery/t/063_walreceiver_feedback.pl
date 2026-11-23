@@ -122,7 +122,7 @@ $archive->append_conf(
 primary_slot_name = 'feedback'
 recovery_min_apply_delay = '1d'
 recovery_target_name = 'archive_target'
-wal_retrieve_retry_interval = '1ms'
+wal_retrieve_retry_interval = '100ms'
 wal_receiver_status_interval = 1
 ));
 $primary->stop;
@@ -141,6 +141,10 @@ $reader->query_safe('BEGIN ISOLATION LEVEL REPEATABLE READ');
 my $xmin = $reader->query_safe(
 	'SELECT backend_xmin FROM pg_stat_activity WHERE pid = pg_backend_pid()');
 $primary->start;
+my $delayed_lsn = $archive->lsn('replay');
+$primary->poll_query_until('postgres',
+	"SELECT active AND restart_lsn = '$delayed_lsn' $slot")
+  or die 'feedback did not reconnect while replay was delayed';
 $archive->append_conf('postgresql.conf', 'recovery_min_apply_delay = 0');
 $archive->reload;
 $archive->poll_query_until('postgres',
@@ -150,6 +154,13 @@ $replay = $archive->lsn('replay');
 ok( $primary->poll_query_until(
 		'postgres', "SELECT active AND restart_lsn = '$replay' $slot"),
 	'retried feedback and reported the archived restore point');
+# Lose an established connection without resuming replay or reloading.
+my $old_sender = $primary->safe_psql('postgres', "SELECT active_pid $slot");
+$primary->safe_psql('postgres', "SELECT pg_terminate_backend($old_sender)");
+ok( $primary->poll_query_until(
+		'postgres',
+		"SELECT active_pid <> $old_sender AND restart_lsn = '$replay' $slot"),
+	'feedback reconnected at the same paused replay position');
 is( $archive->safe_psql(
 		'postgres', 'SELECT pg_last_wal_receive_lsn() IS NULL'),
 	't',

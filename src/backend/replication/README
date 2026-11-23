@@ -51,6 +51,8 @@ exits. It also exits if the upstream does not support START_FEEDBACK.
 If startup finds WAL in the archive or pg_wal after a stream has ended,
 it can request feedback in place of the waiting receiver. This starts a
 fresh connection with the requested settings.
+Startup also retries lost feedback connections during a replay pause or apply
+delay, without first advancing to a new segment.
 RequestXLogStreaming() stops a feedback-only receiver before launching a WAL
 writer; archive restoration and streaming must never both write the same file.
 
