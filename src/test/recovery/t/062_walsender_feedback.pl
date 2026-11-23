@@ -127,8 +127,13 @@ is((receive_message())[0],
 	'W', 'entered COPY before testing disallowed message');
 my $log_offset = -s $primary->logfile;
 send_message('d', 'p' . pack('NN', 0, 1));
-is(read($sock, my $byte, 1), 0, 'disallowed message closes the connection');
 $primary->wait_for_log(qr/unexpected message type "p"/, $log_offset);
+# Windows may report a socket error instead of EOF.  Keep the client socket
+# open and check that the server ended the session itself.
+ok( $primary->poll_query_until(
+		'postgres', q[SELECT count(*) = 0 FROM pg_stat_activity
+			WHERE backend_type = 'walsender' AND application_name = 'feedback']),
+	'disallowed message closes the connection');
 $sock->close;
 
 my $initial = $primary->safe_psql('postgres',
