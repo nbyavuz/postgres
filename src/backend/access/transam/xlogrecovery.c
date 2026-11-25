@@ -97,6 +97,7 @@ TimestampTz recoveryTargetTime;
 char	   *recoveryTargetName;
 XLogRecPtr	recoveryTargetLSN;
 int			recovery_min_apply_delay = 0;
+int			streaming_replication_retry_interval = -1;
 
 /* options formerly taken from recovery.conf for XLOG streaming */
 char	   *PrimaryConnInfo = NULL;
@@ -256,6 +257,12 @@ static bool pendingWalRcvRestart = false;
 /* Remember whether a failed stream or connection attempt led to this fallback. */
 static bool streamAttemptFailed = false;
 
+/* Start of this archive/local replay episode, independent of feedback. */
+static TimestampTz archiveReplaySince = 0;
+
+/* For an early streaming attempt only, until the first record is replayed. */
+static TimestampTz streamProbeDeadline = 0;
+
 /*
  * Check whether to start a feedback receiver when replay passes this LSN.
  * PG_UINT64_MAX disables the check; zero requests a check after the next
@@ -355,6 +362,7 @@ static void EnableStandbyMode(void);
 static void MaybeStartWalReceiverFeedback(void);
 static long RetryWalReceiverFeedback(long wait_ms);
 static void RestartWalReceiverFeedback(void);
+static bool StreamingRetryDue(XLogRecPtr tliRecPtr, TimeLineID replayTLI);
 static void readRecoverySignalFile(void);
 static void validateRecoveryParameters(void);
 static bool read_backup_label(XLogRecPtr *checkPointLoc,
@@ -1816,6 +1824,9 @@ PerformWalRecovery(void)
 			 * Apply the record
 			 */
 			ApplyWalRecord(xlogreader, record, &replayTLI);
+
+			if (unlikely(streamProbeDeadline != 0))
+				streamProbeDeadline = 0;
 
 			if (unlikely(xlogreader->EndRecPtr > feedbackCheckAfter))
 			{
@@ -3687,10 +3698,6 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					 * Move to XLOG_FROM_STREAM state, and set to start a
 					 * walreceiver if necessary.
 					 */
-					currentSource = XLOG_FROM_STREAM;
-					streamAttemptFailed = false;
-					feedbackCheckAfter = PG_UINT64_MAX;
-					lastWalRcvFeedbackRequest = 0;
 					startWalReceiver = true;
 					break;
 
@@ -3725,6 +3732,7 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					streamAttemptFailed = requestedStream &&
 						WalRcvGetState() != WALRCV_WAITING;
 					requestedStream = false;
+					archiveReplaySince = GetCurrentTimestamp();
 
 					/*
 					 * Before we leave XLOG_FROM_STREAM state, make sure that
@@ -3750,6 +3758,14 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 						 */
 						Assert(WalRcvGetState() != WALRCV_STOPPING);
 						ResetInstallXLogFileSegmentActive();
+					}
+
+					/* An early probe has not yet exhausted the local sources. */
+					if (streamProbeDeadline != 0)
+					{
+						streamProbeDeadline = 0;
+						currentSource = XLOG_FROM_ARCHIVE;
+						break;
 					}
 
 					/*
@@ -3818,6 +3834,36 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 				currentSource = XLOG_FROM_ARCHIVE;
 		}
 
+		/*
+		 * Try streaming before opening the next archive or local segment. Let
+		 * replay consume anything already prefetched before changing the
+		 * source. Do not switch while resolving a timeline change. A failed
+		 * probe must let local replay make progress before probing again.
+		 */
+		if (!lastSourceFailed &&
+			(currentSource == XLOG_FROM_ARCHIVE || currentSource == XLOG_FROM_PG_WAL) &&
+			!randAccess && !fetching_ckpt && readFile < 0 &&
+			StreamingRetryDue(tliRecPtr, replayTLI))
+		{
+			if (nonblocking)
+				return XLREAD_WOULDBLOCK;
+
+			elog(DEBUG1, "trying WAL streaming on timeline %u before exhausting local WAL sources",
+				 replayTLI);
+			streamProbeDeadline = TimestampTzPlusMilliseconds(GetCurrentTimestamp(),
+															  wal_retrieve_retry_interval);
+			startWalReceiver = true;
+		}
+
+		if (startWalReceiver)
+		{
+			currentSource = XLOG_FROM_STREAM;
+			streamAttemptFailed = false;
+			feedbackCheckAfter = PG_UINT64_MAX;
+			lastWalRcvFeedbackRequest = 0;
+			archiveReplaySince = 0;
+		}
+
 		if (currentSource != oldSource)
 			elog(DEBUG2, "switched WAL source from %s to %s after %s",
 				 xlogSourceNames[oldSource], xlogSourceNames[currentSource],
@@ -3866,7 +3912,11 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					 * feedback until startup has actually applied a record.
 					 */
 					if (StandbyMode && feedbackCheckAfter == PG_UINT64_MAX)
+					{
 						feedbackCheckAfter = InvalidXLogRecPtr;
+						if (archiveReplaySince == 0)
+							archiveReplaySince = GetCurrentTimestamp();
+					}
 					return XLREAD_SUCCESS;
 				}
 
@@ -3879,6 +3929,7 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 			case XLOG_FROM_STREAM:
 				{
 					bool		havedata;
+					long		wait_ms = -1;
 
 					/*
 					 * We should be able to move to XLOG_FROM_STREAM only in
@@ -3894,6 +3945,7 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					if (pendingWalRcvRestart && !startWalReceiver)
 					{
 						XLogShutdownWalRcv();
+						requestedStream = false;
 
 						/*
 						 * Re-scan for possible new timelines if we were
@@ -4033,6 +4085,23 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 						return XLREAD_WOULDBLOCK;
 
 					/*
+					 * Accepting START_REPLICATION does not prove the upstream
+					 * can supply the requested WAL (e.g., a lagging cascade).
+					 * Bound the wait while we still have a local alternative.
+					 */
+					if (streamProbeDeadline != 0)
+					{
+						wait_ms = TimestampDifferenceMilliseconds(GetCurrentTimestamp(),
+																  streamProbeDeadline);
+						if (wait_ms == 0)
+						{
+							elog(DEBUG1, "WAL streaming retry did not supply the requested WAL, returning to local sources");
+							lastSourceFailed = true;
+							break;
+						}
+					}
+
+					/*
 					 * Data not here yet. Check for trigger, then wait for
 					 * walreceiver to wake us up when new WAL arrives.
 					 */
@@ -4075,8 +4144,8 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					 * immediately by the WAL receiver.
 					 */
 					(void) WaitLatch(&XLogRecoveryCtl->recoveryWakeupLatch,
-									 WL_LATCH_SET | WL_EXIT_ON_PM_DEATH,
-									 -1L,
+									 WL_LATCH_SET | WL_EXIT_ON_PM_DEATH |
+									 (wait_ms < 0 ? 0 : WL_TIMEOUT), wait_ms,
 									 WAIT_EVENT_RECOVERY_WAL_STREAM);
 					ResetLatch(&XLogRecoveryCtl->recoveryWakeupLatch);
 					break;
@@ -4460,6 +4529,40 @@ XLogFileReadAnyTLI(XLogSegNo segno, XLogSource source)
 			(errcode_for_file_access(),
 			 errmsg("could not open file \"%s\": %m", path)));
 	return -1;
+}
+
+/*
+ * Is this a suitable place to try streaming before exhausting local WAL?
+ * The timer belongs to recovery, not to the feedback connection (which need
+ * not exist). Only probe while advancing through a known replay timeline.
+ */
+static bool
+StreamingRetryDue(XLogRecPtr tliRecPtr, TimeLineID replayTLI)
+{
+	TimeLineID	receiveTLI;
+	XLogRecPtr	received;
+
+	if (streaming_replication_retry_interval <= 0 || !StandbyMode || !InRedo ||
+		PrimaryConnInfo[0] == '\0' || LocalPromoteIsTriggered || IsPromoteSignaled())
+		return false;
+
+	/* The local source must have produced at least one completed record. */
+	if (feedbackCheckAfter == PG_UINT64_MAX || !XLogRecPtrIsValid(feedbackCheckAfter) ||
+		!TimestampDifferenceExceeds(archiveReplaySince, GetCurrentTimestamp(),
+									streaming_replication_retry_interval))
+		return false;
+
+	/*
+	 * The reader can have assembled part of a record from the preceding
+	 * segment. Its continuation can come from streaming on the same timeline,
+	 * just as when the archive is exhausted between segments.
+	 */
+	if (curFileTLI > replayTLI || tliOfPointInHistory(tliRecPtr, expectedTLEs) != replayTLI)
+		return false;
+
+	/* Don't request data that the previous real stream already delivered. */
+	received = GetWalRcvFlushRecPtr(NULL, &receiveTLI);
+	return receiveTLI != replayTLI || received <= tliRecPtr;
 }
 
 /*
@@ -5010,6 +5113,20 @@ DetermineRecoveryTargetType(void)
 	pfree(buf.data);
 
 	return target;
+}
+
+/*
+ * GUC check_hook for streaming_replication_retry_interval
+ */
+bool
+check_streaming_replication_retry_interval(int *newval, void **extra, GucSource source)
+{
+	if (*newval == 0)
+	{
+		GUC_check_errdetail("Use -1 to disable early streaming attempts or specify a positive interval.");
+		return false;
+	}
+	return true;
 }
 
 /*

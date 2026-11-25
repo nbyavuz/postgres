@@ -135,6 +135,7 @@ extern PGDLLIMPORT XLogRecoveryCtlData *XLogRecoveryCtl;
 extern PGDLLIMPORT bool recoveryTargetInclusive;
 extern PGDLLIMPORT int recoveryTargetAction;
 extern PGDLLIMPORT int recovery_min_apply_delay;
+extern PGDLLIMPORT int streaming_replication_retry_interval;
 extern PGDLLIMPORT char *PrimaryConnInfo;
 extern PGDLLIMPORT char *PrimarySlotName;
 extern PGDLLIMPORT char *recoveryRestoreCommand;

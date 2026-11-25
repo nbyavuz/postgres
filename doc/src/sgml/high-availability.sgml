@@ -652,6 +652,12 @@ protocol to make nodes agree on a serializable transactional order.
    </para>
 
    <para>
+    To retry streaming without waiting for the archive to run out, set
+    <xref linkend="guc-streaming-replication-retry-interval"/> to a positive
+    interval. Recovery can return to local sources if the attempt fails.
+   </para>
+
+   <para>
     After a streaming failure, while replaying WAL from the archive or <filename>pg_wal</filename>,
     a standby with <xref linkend="guc-primary-conninfo"/> set also tries to
     send feedback to the primary if <xref linkend="guc-primary-slot-name"/> is

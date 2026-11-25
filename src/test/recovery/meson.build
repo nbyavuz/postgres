@@ -72,6 +72,7 @@ tests += {
       't/061_recovery_target_prefetch.pl',
       't/062_walsender_feedback.pl',
       't/063_walreceiver_feedback.pl',
+      't/064_streaming_retry.pl',
     ],
   },
 }

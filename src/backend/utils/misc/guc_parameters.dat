@@ -2932,6 +2932,17 @@
   assign_hook => 'assign_stats_fetch_consistency',
 },
 
+{ name => 'streaming_replication_retry_interval', type => 'int', context => 'PGC_SIGHUP', group => 'REPLICATION_STANDBY',
+  short_desc => 'Sets the interval between attempts to stream WAL during archive or local replay.',
+  long_desc => '-1 disables early streaming attempts.',
+  flags => 'GUC_UNIT_MS',
+  variable => 'streaming_replication_retry_interval',
+  boot_val => '-1',
+  min => '-1',
+  max => 'INT_MAX',
+  check_hook => 'check_streaming_replication_retry_interval',
+},
+
 { name => 'subtransaction_buffers', type => 'int', context => 'PGC_POSTMASTER', group => 'RESOURCES_MEM',
   short_desc => 'Sets the size of the dedicated buffer pool used for the subtransaction cache.',
   long_desc => '0 means use a fraction of "shared_buffers".',

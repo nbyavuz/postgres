@@ -5663,6 +5663,33 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-streaming-replication-retry-interval" xreflabel="streaming_replication_retry_interval">
+      <term><varname>streaming_replication_retry_interval</varname> (<type>integer</type>)
+       <indexterm><primary><varname>streaming_replication_retry_interval</varname> configuration parameter</primary></indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets how long a standby replays archive or local WAL before trying
+        streaming replication again, even if more WAL is available locally.
+        The default, <literal>-1</literal>, disables these early attempts.
+        When local WAL sources are exhausted, the standby still tries streaming
+        immediately.  Otherwise the interval must be positive; values without
+        units are in milliseconds.  This setting requires
+        <xref linkend="guc-primary-conninfo"/>, but does not require a slot or
+        a feedback connection. It can be changed by reloading the configuration.
+       </para>
+       <para>
+        The standby checks between segments during replay, after consuming WAL
+        already received by a previous stream, not while replay is paused.
+        If the upstream fails to supply the requested WAL, the standby
+        returns to archive or local WAL and starts the interval again. An early
+        attempt waits up to <xref linkend="guc-wal-retrieve-retry-interval"/>
+        for WAL needed to resume replay. This does not limit a healthy stream
+        that has already supplied WAL.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-recovery-min-apply-delay" xreflabel="recovery_min_apply_delay">
       <term><varname>recovery_min_apply_delay</varname> (<type>integer</type>)
       <indexterm>

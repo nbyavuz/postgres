@@ -77,6 +77,7 @@ $standby->stop;
 
 # Establish a real stream. Hold the startup process at a replay pause while
 # interrupting that stream and building a backlog of archived WAL.
+$primary->safe_psql('postgres', 'CREATE TABLE stream_barrier (i integer)');
 $primary->backup('archive');
 my $archive = PostgreSQL::Test::Cluster->new('archive');
 $archive->init_from_backup(
@@ -249,11 +250,42 @@ $archive->poll_query_until('postgres',
 	"SELECT status = 'feedback' FROM pg_stat_wal_receiver")
   or die 'named feedback receiver was not ready for handoff';
 
-# Exhaust the archive and request a transaction that is only on the primary.
+# Enable early streaming while still in feedback. Use a separate table:
+# paused replay can still hold the earlier exclusive lock on t. The new
+# conflict keeps replay inside the archive backlog while streaming starts.
 my $handoff_pid =
   $primary->safe_psql('postgres', "SELECT pid $feedback_slot");
+my $stream_blocker = $archive->background_psql('postgres');
+$stream_blocker->query_safe(
+	'BEGIN; LOCK stream_barrier IN ACCESS SHARE MODE');
+$archive->append_conf('postgresql.conf',
+	"streaming_replication_retry_interval = '1ms'\nwal_retrieve_retry_interval = '5s'"
+);
+$archive->reload;
+for (1 .. 3)
+{
+	$primary->safe_psql('postgres',
+		"SELECT pg_create_restore_point('before_probe_$_')");
+	finish_segment();
+}
+my $probe_marker = $primary->safe_psql('postgres',
+	"SELECT pg_create_restore_point('probe_marker')");
+$primary->safe_psql('postgres',
+	'BEGIN; LOCK stream_barrier IN ACCESS EXCLUSIVE MODE; COMMIT');
+finish_segment();
 $primary->safe_psql('postgres', 'INSERT INTO t VALUES (5)');
+my $tail = $primary->lsn('flush');
+finish_segment();
 $archive->safe_psql('postgres', 'SELECT pg_wal_replay_resume()');
+$archive->poll_query_until('postgres',
+	"SELECT pg_last_wal_replay_lsn() >= '$probe_marker'")
+  or die 'standby did not reach archived marker';
+ok( $archive->poll_query_until(
+		'postgres',
+		"SELECT pg_last_wal_receive_lsn() >= '$tail' AND pg_last_wal_replay_lsn() < '$tail'"
+	),
+	'new WAL streamed while replay was still within the archive backlog');
+$stream_blocker->quit;
 $primary->wait_for_catchup('archive', 'replay');
 is($primary->safe_psql('postgres', "SELECT active_pid $slot"),
 	$handoff_pid,
