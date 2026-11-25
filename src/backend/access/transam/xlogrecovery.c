@@ -97,6 +97,7 @@ TimestampTz recoveryTargetTime;
 char	   *recoveryTargetName;
 XLogRecPtr	recoveryTargetLSN;
 int			recovery_min_apply_delay = 0;
+bool		archive_replay_feedback = false;
 int			streaming_replication_retry_interval = -1;
 
 /* options formerly taken from recovery.conf for XLOG streaming */
@@ -4566,9 +4567,9 @@ StreamingRetryDue(XLogRecPtr tliRecPtr, TimeLineID replayTLI)
 }
 
 /*
- * After a streaming failure, request feedback for a named slot or to send
- * hot standby feedback.  Rate-limit startup's requests to launch a
- * walreceiver, not the status reports sent by a connected one.
+ * Request feedback for a named slot or to send hot standby feedback.  Unless
+ * archive_replay_feedback is enabled, this requires a prior streaming failure.
+ * Rate-limit startup's launch requests, not a connected walreceiver's reports.
  */
 static void
 MaybeStartWalReceiverFeedback(void)
@@ -4576,7 +4577,8 @@ MaybeStartWalReceiverFeedback(void)
 	TimestampTz now;
 
 	Assert(StandbyMode && InRedo);
-	if (!streamAttemptFailed || LocalPromoteIsTriggered || IsPromoteSignaled() ||
+	if ((!streamAttemptFailed && !archive_replay_feedback) ||
+		LocalPromoteIsTriggered || IsPromoteSignaled() ||
 		PrimaryConnInfo[0] == '\0' ||
 		(PrimarySlotName[0] == '\0' && (!EnableHotStandby || !hot_standby_feedback)))
 		return;
@@ -4603,9 +4605,10 @@ RetryWalReceiverFeedback(long wait_ms)
 	long		retry_ms;
 
 	/*
-	 * Only retry if streaming failed and startup requested feedback. That
-	 * request sets lastWalRcvFeedbackRequest; switching back to streaming
-	 * clears it.  Don't retry during promotion either.
+	 * Only retry if startup requested feedback after a streaming failure or
+	 * because archive_replay_feedback is enabled.  That request sets
+	 * lastWalRcvFeedbackRequest; switching back to streaming clears it. Don't
+	 * retry during promotion either.
 	 */
 	if (lastWalRcvFeedbackRequest == 0 || LocalPromoteIsTriggered ||
 		IsPromoteSignaled())
@@ -4646,7 +4649,7 @@ RestartWalReceiverFeedback(void)
  * the WAL retrieval loop.
  */
 void
-StartupRequestWalReceiverRestart(bool streaming, bool feedback)
+StartupRequestWalReceiverRestart(bool streaming, bool feedback, bool policyChanged)
 {
 	if (!StandbyMode)
 		return;
@@ -4656,7 +4659,8 @@ StartupRequestWalReceiverRestart(bool streaming, bool feedback)
 		/* An idle WAL stream still has its original connection settings. */
 		if (streaming && WalRcvGetState() == WALRCV_WAITING)
 			ShutdownWalRcv();
-		if (feedback)
+		/* During fallback the policy change does not affect eligibility. */
+		if (feedback || (policyChanged && !streamAttemptFailed))
 			RestartWalReceiverFeedback();
 	}
 	else if (streaming && WalRcvRunning())

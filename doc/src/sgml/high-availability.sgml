@@ -658,15 +658,16 @@ protocol to make nodes agree on a serializable transactional order.
    </para>
 
    <para>
-    After a streaming failure, while replaying WAL from the archive or <filename>pg_wal</filename>,
+    While replaying WAL from the archive or <filename>pg_wal</filename>,
     a standby with <xref linkend="guc-primary-conninfo"/> set also tries to
     send feedback to the primary if <xref linkend="guc-primary-slot-name"/> is
     set or both <xref linkend="guc-hot-standby"/> and
     <xref linkend="guc-hot-standby-feedback"/> are enabled.  If a slot is
-    named, it must already have reserved WAL on the primary.  Initial archive
-    replay and reaching the normal end of a timeline do not start feedback.
-    The primary can
-    then release WAL through the reported replay position.  With or without
+    named, it must already have reserved WAL on the primary. By default, this
+    happens only after a streaming failure. Set <xref linkend="guc-archive-replay-feedback"/>
+    to also report replay during initial archive catch-up or after the normal
+    end of a streaming timeline. The primary can then release WAL retained by
+    a named slot through the reported replay position. With or without
     a slot, hot standby feedback tells the primary which row versions the
     standby still needs.  This connection does not receive WAL or acknowledge
     synchronous commits.  The standby continues replay if the primary is

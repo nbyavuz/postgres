@@ -400,6 +400,8 @@
                                         # 0 disables
 #hot_standby_feedback = off             # send info from standby to prevent
                                         # query conflicts
+#archive_replay_feedback = off          # send feedback during archive/local replay
+                                        # even without a streaming failure
 #wal_receiver_timeout = 60s             # time that receiver waits for
                                         # communication from primary
                                         # in milliseconds; 0 disables

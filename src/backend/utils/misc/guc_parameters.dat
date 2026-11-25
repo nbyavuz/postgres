@@ -95,6 +95,12 @@
   options => 'archive_mode_options',
 },
 
+{ name => 'archive_replay_feedback', type => 'bool', context => 'PGC_SIGHUP', group => 'REPLICATION_STANDBY',
+  short_desc => 'Allows a standby to send feedback during archive or local replay without a preceding streaming failure.',
+  variable => 'archive_replay_feedback',
+  boot_val => 'false',
+},
+
 { name => 'archive_timeout', type => 'int', context => 'PGC_SIGHUP', group => 'WAL_ARCHIVING',
   short_desc => 'Sets the amount of time to wait before forcing a switch to the next WAL file.',
   long_desc => '0 disables the timeout.',

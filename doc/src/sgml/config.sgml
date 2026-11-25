@@ -5417,8 +5417,9 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
           connecting to the sending server via streaming replication to control
           resource removal on the upstream node
           (see <xref linkend="streaming-replication-slots"/>).
-          After a streaming failure, the standby also uses this slot to
-          report replay progress from the archive or local <filename>pg_wal</filename>
+          After a streaming failure, or when <xref linkend="guc-archive-replay-feedback"/>
+          is enabled, the standby also uses this slot to report replay progress
+          from the archive or local <filename>pg_wal</filename>
           (see <xref linkend="standby-server-operation"/>).
           This parameter can only be set in the <filename>postgresql.conf</filename>
           file or on the server command line.
@@ -5582,8 +5583,9 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         be used to eliminate query cancels caused by cleanup records, but
         can cause database bloat on the primary for some workloads.
         When <xref linkend="guc-primary-conninfo"/> is set, the standby can
-        also send this feedback during archive or local WAL replay after a streaming failure, even
-        without a replication slot.
+        also send this feedback during archive or local WAL replay, even without
+        a replication slot, after a streaming failure or when
+        <xref linkend="guc-archive-replay-feedback"/> is enabled.
         Feedback messages will not be sent more frequently than once per
         <varname>wal_receiver_status_interval</varname>. The default value is
         <literal>off</literal>. This parameter can only be set in the
@@ -5659,6 +5661,25 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         In logical replication, this parameter also limits how often a failing
         replication apply worker or table/sequence synchronization worker will
         be respawned.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-archive-replay-feedback" xreflabel="archive_replay_feedback">
+      <term><varname>archive_replay_feedback</varname> (<type>boolean</type>)
+       <indexterm><primary><varname>archive_replay_feedback</varname> configuration parameter</primary></indexterm>
+      </term>
+      <listitem>
+       <para>
+        Allows a standby to send feedback while replaying archived or local WAL
+        even if streaming has not failed, for example during initial archive
+        catch-up. The default is off: the standby sends such feedback only
+        after a failed stream or connection attempt. In either case the standby
+        needs <xref linkend="guc-primary-conninfo"/> and either a named physical
+        slot or both <xref linkend="guc-hot-standby"/> and
+        <xref linkend="guc-hot-standby-feedback"/>. This parameter can be changed
+        by reloading the configuration. It does not change the choice of WAL
+        source or the streaming retry interval.
        </para>
       </listitem>
      </varlistentry>

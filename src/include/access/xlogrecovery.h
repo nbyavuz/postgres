@@ -135,6 +135,7 @@ extern PGDLLIMPORT XLogRecoveryCtlData *XLogRecoveryCtl;
 extern PGDLLIMPORT bool recoveryTargetInclusive;
 extern PGDLLIMPORT int recoveryTargetAction;
 extern PGDLLIMPORT int recovery_min_apply_delay;
+extern PGDLLIMPORT bool archive_replay_feedback;
 extern PGDLLIMPORT int streaming_replication_retry_interval;
 extern PGDLLIMPORT char *PrimaryConnInfo;
 extern PGDLLIMPORT char *PrimarySlotName;
@@ -232,7 +233,7 @@ extern bool RecoverySubtransInitialized(void);
 extern void SetRecoverySubtransInitialized(void);
 extern void WakeupRecovery(void);
 
-extern void StartupRequestWalReceiverRestart(bool streaming, bool feedback);
+extern void StartupRequestWalReceiverRestart(bool streaming, bool feedback, bool policyChanged);
 extern void XLogRequestWalReceiverReply(void);
 
 extern void RecoveryRequiresIntParameter(const char *param_name, int currValue, int minValue);

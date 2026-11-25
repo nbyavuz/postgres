@@ -293,4 +293,70 @@ is($primary->safe_psql('postgres', "SELECT active_pid $slot"),
 is($archive->safe_psql('postgres', 'SELECT max(i) FROM t'),
 	'5', 'streaming delivered new WAL');
 
+$archive->stop;
+
+# Initial archive catch-up has not attempted streaming. Hold replay on an
+# archived commit so a reload cannot be mistaken for a source failure.
+$primary->safe_psql('postgres',
+	"SELECT pg_create_physical_replication_slot('initial_feedback', true)");
+$primary->backup('initial_archive');
+$primary->safe_psql('postgres',
+	"SELECT pg_create_restore_point('initial_archive_start')");
+$primary->safe_psql('postgres', 'INSERT INTO t VALUES (6)');
+finish_segment();
+my $initial = PostgreSQL::Test::Cluster->new('initial');
+$initial->init_from_backup(
+	$primary, 'initial_archive',
+	has_restoring => 1,
+	has_streaming => 1);
+$initial->append_conf(
+	'postgresql.conf', qq(
+primary_slot_name = 'initial_feedback'
+recovery_min_apply_delay = '1d'
+));
+$initial->start;
+$initial->wait_for_event('startup', 'RecoveryApplyDelay');
+is($initial->safe_psql('postgres', 'SHOW archive_replay_feedback'),
+	'off', 'automatic archive feedback is disabled by default');
+is( $initial->safe_psql(
+		'postgres', 'SELECT count(*) FROM pg_stat_wal_receiver'),
+	'0',
+	'initial replay did not open a receiver');
+$replay = $initial->lsn('replay');
+$initial->append_conf('postgresql.conf', 'archive_replay_feedback = on');
+$initial->reload;
+my $initial_slot =
+  q{FROM pg_replication_slots WHERE slot_name = 'initial_feedback'};
+ok( $primary->poll_query_until(
+		'postgres', "SELECT active AND restart_lsn = '$replay' $initial_slot"
+	),
+	'opt-in reports initial archive replay to the named slot');
+is( $initial->safe_psql(
+		'postgres', 'SELECT status FROM pg_stat_wal_receiver'),
+	'feedback',
+	'opt-in did not switch WAL sources');
+$initial->append_conf('postgresql.conf', 'archive_replay_feedback = off');
+$initial->reload;
+ok( $primary->poll_query_until('postgres', "SELECT NOT active $initial_slot"),
+	'disabling opt-in releases the slot without resuming replay');
+is( $initial->safe_psql(
+		'postgres', 'SELECT pg_last_wal_receive_lsn() IS NULL'),
+	't',
+	'no WAL was streamed during initial archive replay');
+
+# Exercise the post-replay trigger as well as reload: boot with feedback
+# enabled, still without any prior streaming failure.
+$initial->stop;
+$initial->append_conf('postgresql.conf', 'archive_replay_feedback = on');
+$initial->start;
+$initial->wait_for_event('startup', 'RecoveryApplyDelay');
+ok( $initial->poll_query_until(
+		'postgres',
+		"SELECT status = 'feedback' AND pg_last_wal_receive_lsn() IS NULL FROM pg_stat_wal_receiver"
+	),
+	'opt-in starts feedback during initial archive replay without a reload');
+$initial->promote;
+ok( $primary->poll_query_until('postgres', "SELECT NOT active $initial_slot"),
+	'promotion released the feedback slot');
+
 done_testing();

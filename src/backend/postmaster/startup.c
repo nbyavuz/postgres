@@ -129,6 +129,7 @@ StartupRereadConfig(void)
 	char	   *slotname = pstrdup(PrimarySlotName);
 	bool		tempSlot = wal_receiver_create_temp_slot;
 	bool		hsFeedback = hot_standby_feedback;
+	bool		archiveFeedback = archive_replay_feedback;
 	bool		connectionChanged;
 	bool		noSlot;
 	bool		restartStreaming;
@@ -149,8 +150,9 @@ StartupRereadConfig(void)
 	noSlot = PrimarySlotName[0] == '\0';
 	restartStreaming = connectionChanged || (noSlot && tempSlot != wal_receiver_create_temp_slot);
 	restartFeedback = connectionChanged || (noSlot && hsFeedback != hot_standby_feedback);
-	if (restartStreaming || restartFeedback)
-		StartupRequestWalReceiverRestart(restartStreaming, restartFeedback);
+	if (restartStreaming || restartFeedback || archiveFeedback != archive_replay_feedback)
+		StartupRequestWalReceiverRestart(restartStreaming, restartFeedback,
+										 archiveFeedback != archive_replay_feedback);
 }
 
 /* Process various signals that might be sent to the startup process */
