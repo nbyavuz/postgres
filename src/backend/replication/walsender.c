@@ -855,6 +855,19 @@ HandleUploadManifestPacket(StringInfo buf, off_t *offset,
 	return false;
 }
 
+/* Enter bidirectional COPY mode with no column metadata. */
+static void
+SendCopyBothResponse(void)
+{
+	StringInfoData buf;
+
+	pq_beginmessage(&buf, PqMsg_CopyBothResponse);
+	pq_sendbyte(&buf, 0);
+	pq_sendint16(&buf, 0);
+	pq_endmessage(&buf);
+	pq_flush();
+}
+
 /*
  * Handle START_REPLICATION command.
  *
@@ -864,7 +877,6 @@ HandleUploadManifestPacket(StringInfo buf, off_t *offset,
 static void
 StartReplication(StartReplicationCmd *cmd)
 {
-	StringInfoData buf;
 	XLogRecPtr	FlushPtr;
 	TimeLineID	FlushTLI;
 
@@ -995,12 +1007,7 @@ StartReplication(StartReplicationCmd *cmd)
 		 */
 		WalSndSetState(WALSNDSTATE_CATCHUP);
 
-		/* Send a CopyBothResponse message, and start streaming */
-		pq_beginmessage(&buf, PqMsg_CopyBothResponse);
-		pq_sendbyte(&buf, 0);
-		pq_sendint16(&buf, 0);
-		pq_endmessage(&buf);
-		pq_flush();
+		SendCopyBothResponse();
 
 		/*
 		 * Don't allow a request to stream from a future point in WAL that
@@ -1539,7 +1546,6 @@ AlterReplicationSlot(AlterReplicationSlotCmd *cmd)
 static void
 StartLogicalReplication(StartReplicationCmd *cmd)
 {
-	StringInfoData buf;
 	QueryCompletion qc;
 
 	/* make sure that our requirements are still fulfilled */
@@ -1579,12 +1585,7 @@ StartLogicalReplication(StartReplicationCmd *cmd)
 
 	WalSndSetState(WALSNDSTATE_CATCHUP);
 
-	/* Send a CopyBothResponse message, and start streaming */
-	pq_beginmessage(&buf, PqMsg_CopyBothResponse);
-	pq_sendbyte(&buf, 0);
-	pq_sendint16(&buf, 0);
-	pq_endmessage(&buf);
-	pq_flush();
+	SendCopyBothResponse();
 
 	/* Start reading WAL from the oldest required WAL. */
 	XLogBeginRead(logical_decoding_ctx->reader,
